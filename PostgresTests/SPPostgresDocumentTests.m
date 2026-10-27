@@ -566,6 +566,75 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	XCTAssertEqualObjects([self.document.parentTabViewItem label], @"pg18 test");
 }
 
+/// Answers the tab's confirmations with `answer`, collecting the alerts asked.
+- (NSMutableArray<NSAlert *> *)answerConfirmationsWith:(BOOL)answer
+{
+	NSMutableArray<NSAlert *> *asked = [NSMutableArray array];
+	self.document.confirmationPresenter = ^(NSAlert *alert, void (^completion)(BOOL)) {
+		[asked addObject:alert];
+		completion(answer);
+	};
+	return asked;
+}
+
+/// Picks database in the toolbar's database pop-up, as the user does.
+- (void)chooseInDatabasePopup:(NSString *)database
+{
+	NSPopUpButton *popup = [self databasePopup];
+	XCTAssertNotEqual([popup indexOfItemWithTitle:database], -1, @"%@ not listed", database);
+	[popup selectItemWithTitle:database];
+	[popup sendAction:[popup action] to:[popup target]];
+}
+
+- (void)testDatabaseSwitchWhenIdleIsNotConfirmed
+{
+	NSMutableArray<NSAlert *> *asked = [self answerConfirmationsWith:NO];
+	[self chooseInDatabasePopup:@"pgkit_nopublic"];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [[self.document windowTitleString] hasSuffix:@"/pgkit_nopublic"] && !self.document.isProcessing; } timeout:20]);
+	XCTAssertEqual(asked.count, 0u);
+}
+
+- (void)testDatabaseSwitchWithOpenTransactionCancelKeepsIt
+{
+	NSMutableArray<NSAlert *> *asked = [self answerConfirmationsWith:NO];
+	XCTAssertNotNil([self.connection execute:@"BEGIN"]);
+	XCTAssertNotNil([self.connection execute:@"CREATE TEMP TABLE sp_switch_tx (a int)"]);
+
+	[self chooseInDatabasePopup:@"pgkit_nopublic"];
+	XCTAssertEqual(asked.count, 1u, @"the user is asked before the transaction is rolled back");
+	XCTAssertTrue([asked[0].messageText containsString:@"transaction"], @"%@", asked[0].messageText);
+	XCTAssertEqualObjects(asked[0].buttons[0].title, @"Switch");
+	XCTAssertEqualObjects(asked[0].buttons[1].title, @"Cancel");
+
+	// Cancelled: same session, transaction still open, pop-up back on the current database
+	XCTAssertFalse(self.document.isProcessing);
+	XCTAssertEqual(self.document.connection, self.connection);
+	XCTAssertTrue(self.connection.isConnected);
+	XCTAssertEqual([self.connection transactionStatus], PGPostgresTransactionInTransaction);
+	XCTAssertEqualObjects([[self databasePopup] titleOfSelectedItem], @"pgkit_test");
+	XCTAssertTrue([[self.document windowTitleString] hasSuffix:@"/pgkit_test"]);
+
+	// An aborted transaction is asked about too
+	XCTAssertNil([self.connection execute:@"SELECT 1/0"]);
+	[self.document switchToDatabase:@"pgkit_nopublic"];
+	XCTAssertEqual(asked.count, 2u);
+	XCTAssertEqual(self.document.connection, self.connection);
+	XCTAssertNotNil([self.connection execute:@"ROLLBACK"]);
+}
+
+- (void)testDatabaseSwitchWithOpenTransactionConfirmedSwitches
+{
+	NSMutableArray<NSAlert *> *asked = [self answerConfirmationsWith:YES];
+	PGPostgresConnection *oldConnection = self.connection;
+	XCTAssertNotNil([oldConnection execute:@"BEGIN"]);
+
+	[self chooseInDatabasePopup:@"pgkit_nopublic"];
+	XCTAssertEqual(asked.count, 1u);
+	XCTAssertTrue([self spinUntil:^BOOL{ return [[self.document windowTitleString] hasSuffix:@"/pgkit_nopublic"] && !self.document.isProcessing; } timeout:20]);
+	XCTAssertNotEqual(self.document.connection, oldConnection);
+	XCTAssertFalse(oldConnection.isConnected);
+}
+
 - (void)testFailedDatabaseSwitchKeepsConnectionAndShowsSheet
 {
 	[self.controller showWindow:nil];

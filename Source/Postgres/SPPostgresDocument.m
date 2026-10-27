@@ -59,6 +59,8 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 - (void)_goBackInHistory:(BOOL)back;
 - (void)_applyHistoryEntry:(NSDictionary *)entry;
 - (void)_abandonHistoryRestore;
+- (BOOL)_endContentEditing;
+- (void)_confirmLeavingSession:(void (^)(BOOL proceed))completion;
 - (void)_showDuplicateTableSheetForTable:(NSString *)table;
 - (void)_duplicateTable:(NSString *)table inSchema:(NSString *)schema toName:(NSString *)newName withContent:(BOOL)withContent;
 
@@ -90,6 +92,8 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	BOOL pendingHistoryWentBack;
 	/// Showing a history entry: the changes it makes aren't recorded
 	BOOL restoringHistory;
+	/// Waiting for the user to confirm a database switch that rolls back their transaction
+	BOOL confirmingSwitch;
 
 	/// The Duplicate Table sheet while it is shown, and its controls
 	NSWindow *duplicateSheet;
@@ -116,6 +120,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 @synthesize connection;
 @synthesize favorite;
 @synthesize alertPresenter;
+@synthesize confirmationPresenter;
 @synthesize isProcessing;
 @synthesize parentWindowController;
 @synthesize parentWindow;
@@ -178,6 +183,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	[historyControl release];
 	[pendingAlert release];
 	[alertPresenter release];
+	[confirmationPresenter release];
 
 	[super dealloc];
 }
@@ -565,6 +571,34 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	[alert release];
 }
 
+/// Asks alert's question (first button: proceed); completion runs exactly once.
+- (void)_confirm:(NSAlert *)alert completion:(void (^)(BOOL confirmed))completion
+{
+	// A heap copy, so a presenter may keep it (even without copying it) until the answer comes. It runs once
+	// and then balances its own Block_copy (deferred to the autorelease pool, as it is still running).
+	void (^original)(BOOL) = completion;
+	__block BOOL done = NO;
+	__block void (^once)(BOOL) = nil;
+	once = Block_copy(^(BOOL confirmed) {
+		if (done) return;
+		done = YES;
+		original(confirmed);
+		[(id)once autorelease];
+	});
+
+	if (confirmationPresenter) {
+		confirmationPresenter(alert, once);
+		return;
+	}
+	if (!parentWindow) {
+		once([alert runModal] == NSAlertFirstButtonReturn);
+		return;
+	}
+	[alert beginSheetModalForWindow:parentWindow completionHandler:^(NSModalResponse response) {
+		once(response == NSAlertFirstButtonReturn);
+	}];
+}
+
 /**
  * A catalog query failed (the lists keep what they showed). Shown once per failed reload; when the
  * connection is gone, says so (reconnecting is not offered in this version).
@@ -629,6 +663,8 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	// A presenter block may capture this document
 	[alertPresenter release];
 	alertPresenter = nil;
+	[confirmationPresenter release];
+	confirmationPresenter = nil;
 	[pendingAlert release];
 	pendingAlert = nil;
 
@@ -696,9 +732,76 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	[self switchToDatabase:database];
 }
 
+/// The pop-up shows the database the tab is in (after a switch that didn't start).
+- (void)_selectCurrentDatabaseInPopup
+{
+	if ([currentDatabase length] && [databasePopup indexOfItemWithTitle:currentDatabase] >= 0) [databasePopup selectItemWithTitle:currentDatabase];
+}
+
 - (void)switchToDatabase:(NSString *)database
 {
-	[self _switchToDatabase:database forHistory:NO];
+	if (tornDown || confirmingSwitch || ![database length]) {
+		[self _selectCurrentDatabaseInPopup];
+		return;
+	}
+
+	// As MySQL's (couldCommitCurrentViewActions): an edit in progress in the Content grid is saved first
+	if (![self _endContentEditing]) {
+		[self _selectCurrentDatabaseInPopup];
+		return;
+	}
+
+	[self _confirmLeavingSession:^(BOOL proceed) {
+		if (proceed) [self _switchToDatabase:database forHistory:NO];
+		else [self _selectCurrentDatabaseInPopup];
+	}];
+}
+
+/// Ends an edit in progress in the Content grid (saving it); NO if it couldn't end (e.g. the value was refused).
+- (BOOL)_endContentEditing
+{
+	NSResponder *responder = [parentWindow firstResponder];
+	if ([responder isKindOfClass:[NSView class]] && [(NSView *)responder isDescendantOf:[contentController view]]) {
+		return [parentWindow makeFirstResponder:nil];
+	}
+	return YES;
+}
+
+/**
+ * Closing this session (a database switch) rolls back a transaction the user opened in the Query view:
+ * when one is open (or aborted) they are asked first. completion(YES) when the switch may go ahead.
+ */
+- (void)_confirmLeavingSession:(void (^)(BOOL proceed))completion
+{
+	PGPostgresTransactionStatus status = [connection transactionStatus];
+	if (status != PGPostgresTransactionInTransaction && status != PGPostgresTransactionInError) {
+		completion(YES);
+		return;
+	}
+
+	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+	[alert addButtonWithTitle:NSLocalizedString(@"Switch", @"PostgreSQL database switch with open transaction: switch button")];
+	[alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"cancel button")];
+	[[[alert buttons] objectAtIndex:0] setKeyEquivalent:@"\r"];
+	[[[alert buttons] objectAtIndex:1] setKeyEquivalent:@"\033"];
+	[alert setAlertStyle:NSAlertStyleWarning];
+	[alert setMessageText:NSLocalizedString(@"You have an open transaction.", @"PostgreSQL database switch with open transaction: title")];
+	[alert setInformativeText:NSLocalizedString(@"Switching database will roll it back. Are you sure you want to continue?", @"PostgreSQL database switch with open transaction: message")];
+
+	confirmingSwitch = YES;
+	[self _updateHistoryControl];
+
+	// The document stays alive until the answer comes (a sheet's or a presenter's)
+	[self retain];
+	void (^after)(BOOL) = [[completion copy] autorelease];
+	[after retain];
+	[self _confirm:alert completion:^(BOOL confirmed) {
+		confirmingSwitch = NO;
+		[self _updateHistoryControl];
+		after(confirmed && !tornDown);
+		[after release];
+		[self release];
+	}];
 }
 
 /// forHistory: to show pendingHistoryEntry; else (the user's choice) a history move waiting for a switch is given up.
@@ -807,7 +910,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 /// The History control's segments follow canGoBack/canGoForward (both off while a database switch connects).
 - (void)_updateHistoryControl
 {
-	BOOL enabled = !tornDown && !isProcessing;
+	BOOL enabled = !tornDown && !isProcessing && !confirmingSwitch;
 	[historyControl setEnabled:enabled && [history canGoBack] forSegment:0];
 	[historyControl setEnabled:enabled && [history canGoForward] forSegment:1];
 }
@@ -833,26 +936,28 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 /// Shows the previous (back) or next history entry, switching database first if it is in another one.
 - (void)_goBackInHistory:(BOOL)back
 {
-	if (tornDown || isProcessing) return;
+	if (tornDown || isProcessing || confirmingSwitch) return;
 
 	// As MySQL's (couldCommitCurrentViewActions): an edit in progress in the Content grid is ended (saved) first
-	NSResponder *responder = [parentWindow firstResponder];
-	if ([responder isKindOfClass:[NSView class]] && [(NSView *)responder isDescendantOf:[contentController view]]
-		&& ![parentWindow makeFirstResponder:nil]) return;
+	if (![self _endContentEditing]) return;
 
 	NSDictionary *entry = back ? [history goBack] : [history goForward];
 	if (!entry) return;
 
 	NSString *database = [entry objectForKey:@"database"];
 	if ([database length] && ![database isEqualToString:currentDatabase]) {
-		// Shown once the switch is done (see -_databaseSwitchBy:…), or undone if it fails
+		// Shown once the switch is done (see -_databaseSwitchBy:…), or undone if it fails or isn't confirmed
 		[pendingHistoryEntry release];
 		pendingHistoryEntry = [entry retain];
 		pendingHistoryWentBack = back;
-		[self _switchToDatabase:database forHistory:YES];
+		[self _confirmLeavingSession:^(BOOL proceed) {
+			if (proceed) [self _switchToDatabase:database forHistory:YES];
 
-		// No switch was started (e.g. torn down): the entry mustn't stay pending, which would stop recording for good
-		if (!pendingConnector) [self _abandonHistoryRestore];
+			// No switch was started (cancelled, or torn down): the entry mustn't stay pending, which would stop
+			// recording for good
+			if (!pendingConnector) [self _abandonHistoryRestore];
+			[self _updateHistoryControl];
+		}];
 	}
 	else {
 		[self _applyHistoryEntry:entry];

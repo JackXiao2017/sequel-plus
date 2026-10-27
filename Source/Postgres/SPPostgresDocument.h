@@ -37,6 +37,9 @@ __attribute__((visibility("default")))
  * Postgres can't change database within a session: connects a new connector (same favorite and
  * passwords, `database` changed) and, on success, switches the tab to it and closes the old
  * connection. On failure the current connection is kept and the error is shown (see alertPresenter).
+ * An edit in progress in the Content grid is saved first (if it can't be, nothing happens). If the user
+ * has a transaction open (or aborted) in this session, closing it would roll it back, so they are asked
+ * first (see confirmationPresenter); Cancel leaves everything as it was.
  */
 - (void)switchToDatabase:(NSString *)database;
 
@@ -64,6 +67,14 @@ __attribute__((visibility("default")))
  * until it is. Replaceable, e.g. by tests.
  */
 @property (copy) void (^alertPresenter)(NSAlert *alert);
+
+/**
+ * Asks to confirm a database switch that would roll back the user's open transaction: call completion
+ * exactly once with YES to switch (later calls are ignored). The completion is a heap block that stays valid
+ * until it is called, so a presenter may store it. nil (the default) shows a sheet on the parent window.
+ * Replaceable, e.g. by tests.
+ */
+@property (copy) void (^confirmationPresenter)(NSAlert *alert, void (^completion)(BOOL confirmed));
 
 @property (readonly) SPPostgresSidebarController *sidebar;
 /// The right pane: the Content view of the table or view selected in the sidebar.

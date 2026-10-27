@@ -313,6 +313,45 @@ static NSDictionary *SPHistoryEntry(NSString *db, NSString *schema, NSString *ta
 	[admin disconnect];
 }
 
+- (void)testHistoryMoveToAnotherDatabaseConfirmsOpenTransaction
+{
+	SPPostgresDocument *document = self.document;
+	XCTAssertTrue([document.sidebar selectTableNamed:@"customers"]);
+	[document switchToDatabase:@"pgkit_nopublic"];
+	XCTAssertTrue([self waitForTitleSuffix:@"/pgkit_nopublic"], @"%@", self.alerts);
+
+	__block BOOL answer = NO;
+	NSMutableArray<NSAlert *> *asked = [NSMutableArray array];
+	document.confirmationPresenter = ^(NSAlert *alert, void (^completion)(BOOL)) {
+		[asked addObject:alert];
+		completion(answer);
+	};
+	PGPostgresConnection *kept = document.connection;
+	XCTAssertNotNil([kept execute:@"BEGIN"]);
+
+	// Cancelled: nothing moves, and the history (and its recording) carries on from where it was
+	[document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	XCTAssertEqual(asked.count, 1u);
+	XCTAssertFalse(document.isProcessing);
+	XCTAssertEqual(document.connection, kept);
+	XCTAssertEqual([kept transactionStatus], PGPostgresTransactionInTransaction);
+	XCTAssertTrue([[document windowTitleString] hasSuffix:@"/pgkit_nopublic"]);
+	XCTAssertTrue(document.history.canGoBack);
+	XCTAssertFalse(document.history.canGoForward, @"the history index is unchanged");
+	XCTAssertTrue([[self historyControl] isEnabledForSegment:0]);
+	XCTAssertTrue([document.sidebar selectTableNamed:@"items"]);
+	XCTAssertTrue([[document windowTitleString] hasSuffix:@"/pgkit_nopublic/app.items"]);
+
+	// Confirmed: back to the other database (two steps: app.items was recorded after the cancel)
+	answer = YES;
+	[document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	XCTAssertEqual(asked.count, 1u, @"same database: no switch, no question");
+	[document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	XCTAssertEqual(asked.count, 2u);
+	XCTAssertTrue([self waitForTitleSuffix:@"/pgkit_test/public.customers"], @"%@ %@", [document windowTitleString], self.alerts);
+	XCTAssertNotEqual(document.connection, kept);
+}
+
 - (void)testHistoryControlStateSurvivesTabSwitches
 {
 	SPPostgresDocument *document = self.document;
