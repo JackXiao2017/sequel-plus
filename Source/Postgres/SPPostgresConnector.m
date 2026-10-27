@@ -138,7 +138,22 @@ static char SPPostgresConnectorProxyKey;
 	[self _closeTunnel];
 	[self _closeConnectionWaiting:NO];
 
-	[completion release];
+	// Released while an attempt was pending: the completion is still owed exactly one call. Deliver it
+	// from a later main-queue turn (never from inside dealloc, nor re-entrantly). The block takes over
+	// our reference to the completion.
+	if (started && !finished && completion) {
+		void (^theCompletion)(PGPostgresConnection *, NSError *) = completion;
+		NSError *error = [[self class] _errorWithCode:SPPostgresErrorCancelled message:nil];
+		dispatch_async(dispatch_get_main_queue(), ^{
+			theCompletion(nil, error);
+			[theCompletion release];
+		});
+	}
+	else {
+		[completion release];
+	}
+	completion = nil;
+
 	[proxy release];
 	dispatch_release(connectQueue);
 	[favorite release];
@@ -188,6 +203,12 @@ static char SPPostgresConnectorProxyKey;
 
 	started = YES;
 	completion = [theCompletion copy];
+
+	// -disconnect (or -cancel) before connecting: the connector is already shut down
+	if ([proxy isAbandoned]) {
+		[self _finishLaterWithError:[[self class] _errorWithCode:SPPostgresErrorCancelled message:nil]];
+		return;
+	}
 
 	NSUInteger port = [favorite port] ? [favorite port] : SPPostgresDefaultPort;
 
@@ -429,7 +450,11 @@ static char SPPostgresConnectorProxyKey;
 
 - (void)cancel
 {
-	if (!started) return;
+	if (!started) {
+		// Shut down before connecting: a later -connectWithCompletion: completes with Cancelled
+		[proxy abandon];
+		return;
+	}
 
 	if (finished) {
 		[self disconnect];

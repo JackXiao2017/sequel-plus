@@ -26,6 +26,11 @@ __attribute__((visibility("default")))
  * from within this call. On success `connection` is connected and `error` is nil; otherwise
  * `connection` is nil and `error` is in SPPostgresErrorDomain. The connector only starts once;
  * a second call completes with SPPostgresErrorConnectionFailed.
+ *
+ * Nothing keeps the connector alive during an attempt: the caller owns it. If it is released while
+ * the attempt is pending, the attempt is torn down and the completion is still called (once, on the
+ * main thread, from a later run loop turn) with SPPostgresErrorCancelled. If -disconnect or -cancel
+ * was called before this method, the completion is called with SPPostgresErrorCancelled.
  */
 - (void)connectWithCompletion:(void (^)(PGPostgresConnection *connection, NSError *error))completion;
 
