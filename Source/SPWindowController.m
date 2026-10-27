@@ -175,6 +175,24 @@
 	// Adding the first tab selects it, which activates the document via -tabView:didSelectTabViewItem:
 	[tabView insertTabViewItem:newItem atIndex:index];
 
+	// The tab bar always appends the new item's cell; move it to the item's index so that
+	// cells and tab view items stay in the same order (as PSMTabDragAssistant does on a drop)
+	NSMutableArray *cells = [tabBar cells];
+	NSUInteger cellIndex = NSNotFound;
+	for (NSUInteger i = 0; i < [cells count]; i++) {
+		if ([[cells objectAtIndex:i] representedObject] == newItem) {
+			cellIndex = i;
+			break;
+		}
+	}
+	if (cellIndex != NSNotFound && cellIndex != (NSUInteger)index && (NSUInteger)index < [cells count]) {
+		PSMTabBarCell *newCell = [[cells objectAtIndex:cellIndex] retain];
+		[cells removeObjectAtIndex:cellIndex];
+		[cells insertObject:newCell atIndex:index];
+		[newCell release];
+		[tabBar update:NO];
+	}
+
 	// Bind the tab bar's progress display to the document
 	[self _updateProgressIndicatorForItem:newItem];
 
@@ -815,13 +833,17 @@
 {
 	id draggedDocument = [tabViewItem identifier];
 
-	// Grab a reference to the old window (a non-MySQL document may not expose it: fall back to its controller's)
+	// Grab a reference to the old window. A non-MySQL document may not expose it: fall back to its
+	// controller's, then to the source tab view's (this delegate call is passed the source tab view).
 	NSWindow *draggedFromWindow = nil;
 	if ([draggedDocument isKindOfClass:[SPDatabaseDocument class]] || [draggedDocument respondsToSelector:@selector(parentWindow)]) {
 		draggedFromWindow = [draggedDocument parentWindow];
 	}
 	else if ([draggedDocument respondsToSelector:@selector(parentWindowController)]) {
 		draggedFromWindow = [[draggedDocument parentWindowController] window];
+	}
+	else {
+		draggedFromWindow = [aTabView window];
 	}
 
 	// If the window changed, perform additional processing.
@@ -839,7 +861,10 @@
 
 		// Update window controller's active tab, and update the document's isProcessing observation
 		[[[tabBarControl window] windowController] updateSelectedTableDocument];
-		[draggedDocument removeObserver:[draggedFromWindow windowController] forKeyPath:@"isProcessing"];
+		// With no known source window there is no observer to remove (removeObserver:nil would throw)
+		if ([draggedFromWindow windowController]) {
+			[draggedDocument removeObserver:[draggedFromWindow windowController] forKeyPath:@"isProcessing"];
+		}
 		[[[tabBarControl window] windowController] _updateProgressIndicatorForItem:tabViewItem];
 	}
 

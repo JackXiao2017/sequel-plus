@@ -53,7 +53,48 @@
 
 @end
 
+/**
+ * A tab document exposing only the protocol: no -parentWindow or -parentWindowController getters.
+ */
+@interface SPBareTabDocument : NSObject <SPWindowTabDocument>
+@property (readwrite) BOOL isProcessing;
+@property NSUInteger didCloseCount;
+@end
+
+@implementation SPBareTabDocument
+{
+	NSView *_view;
+}
+
+- (instancetype)init
+{
+	if ((self = [super init])) _view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 100, 100)];
+	return self;
+}
+
+- (NSView *)databaseView { return _view; }
+- (void)setParentWindowController:(SPWindowController *)controller {}
+- (void)setParentWindow:(NSWindow *)window {}
+- (void)setParentTabViewItem:(NSTabViewItem *)item {}
+- (void)didBecomeActiveTabInWindow {}
+- (void)willResignActiveTabInWindow {}
+- (void)updateWindowTitle:(id)sender {}
+- (BOOL)parentTabShouldClose { return YES; }
+- (void)parentTabDidClose { self.didCloseCount++; }
+
+@end
+
 #pragma mark - Tests
+
+@interface NSObject (SPWindowTabsTestsPSM)
+- (void)removeTabForCell:(id)cell;
+@end
+
+// Tab bar delegate method and a MySQL action implemented by the app (not in the public headers)
+@interface SPWindowController (SPWindowTabsTests)
+- (void)tabView:(NSTabView *)aTabView didDropTabViewItem:(NSTabViewItem *)tabViewItem inTabBar:(id)tabBarControl;
+- (IBAction)showServerVariables:(id)sender;
+@end
 
 @interface SPWindowTabsTests : XCTestCase
 @property (strong) SPWindowController *controller;
@@ -64,6 +105,43 @@
 - (NSTabView *)tabView
 {
 	return [self.controller valueForKey:@"tabView"];
+}
+
+- (id)tabBar
+{
+	return [self.controller valueForKey:@"tabBar"];
+}
+
+/**
+ * Tab bar cells must be in tab view item order, and each cell's progress indicator must be bound
+ * to its own item's document.
+ */
+- (void)assertCellsMatchItems
+{
+	NSArray *cells = [[self tabBar] valueForKey:@"cells"];
+	NSArray *items = [[self tabView] tabViewItems];
+
+	XCTAssertEqual([cells count], [items count]);
+	for (NSUInteger i = 0; i < [items count]; i++) {
+		id cell = [cells objectAtIndex:i];
+		XCTAssertEqual([cell valueForKey:@"representedObject"], [items objectAtIndex:i], @"cell %lu", (unsigned long)i);
+		NSDictionary *binding = [[cell valueForKey:@"indicator"] infoForBinding:@"animate"];
+		XCTAssertEqual([binding objectForKey:NSObservedObjectKey], [[items objectAtIndex:i] identifier], @"indicator %lu", (unsigned long)i);
+	}
+}
+
+/**
+ * Three tabs: MySQL, fake, fake.
+ */
+- (NSArray *)addThreeTabs
+{
+	id mysql = [self.controller addNewConnection];
+	SPFakeTabDocument *b = [[SPFakeTabDocument alloc] init];
+	SPFakeTabDocument *c = [[SPFakeTabDocument alloc] init];
+	[self.controller addTabDocument:b atIndex:1 select:NO];
+	[self.controller addTabDocument:c atIndex:2 select:NO];
+	[self assertCellsMatchItems];
+	return @[mysql, b, c];
 }
 
 - (void)setUp
@@ -195,6 +273,122 @@
 	XCTAssertNil([self.controller selectedTableDocument]);
 	// Every KVO observer (the window controller's and the tab bar's) was removed
 	XCTAssertTrue([fake observationInfo] == NULL);
+}
+
+- (void)testInsertInMiddleKeepsCellOrder
+{
+	NSArray *docs = [self addThreeTabs];
+	SPFakeTabDocument *fake = [[SPFakeTabDocument alloc] init];
+
+	[self.controller addTabDocument:fake atIndex:1 select:YES];
+
+	NSArray *expected = @[docs[0], fake, docs[1], docs[2]];
+	XCTAssertEqualObjects([self.controller tabDocuments], expected);
+	[self assertCellsMatchItems];
+}
+
+- (void)testReplaceFirstKeepsCellOrder
+{
+	NSArray *docs = [self addThreeTabs];
+	SPFakeTabDocument *fake = [[SPFakeTabDocument alloc] init];
+
+	[self.controller replaceTabDocument:docs[0] withDocument:fake];
+
+	NSArray *expected = @[fake, docs[1], docs[2]];
+	XCTAssertEqualObjects([self.controller tabDocuments], expected);
+	XCTAssertEqual((id)[self.controller selectedDocument], fake);
+	[self assertCellsMatchItems];
+}
+
+- (void)testReplaceMiddleKeepsCellOrder
+{
+	NSArray *docs = [self addThreeTabs];
+	SPFakeTabDocument *fake = [[SPFakeTabDocument alloc] init];
+
+	[self.controller replaceTabDocument:docs[1] withDocument:fake];
+
+	NSArray *expected = @[docs[0], fake, docs[2]];
+	XCTAssertEqualObjects([self.controller tabDocuments], expected);
+	XCTAssertEqual([docs[1] didCloseCount], 1u);
+	[self assertCellsMatchItems];
+}
+
+- (void)testReplaceLastKeepsCellOrder
+{
+	NSArray *docs = [self addThreeTabs];
+	SPFakeTabDocument *fake = [[SPFakeTabDocument alloc] init];
+
+	[self.controller replaceTabDocument:docs[2] withDocument:fake];
+
+	NSArray *expected = @[docs[0], docs[1], fake];
+	XCTAssertEqualObjects([self.controller tabDocuments], expected);
+	[self assertCellsMatchItems];
+}
+
+/**
+ * Moves a tab view item from this test's controller to target the way PSMTabDragAssistant does
+ * before it sends the drop delegate call: the source cell is removed first (so the source gets no
+ * didClose), then the item moves between the tab views.
+ */
+- (void)moveItem:(NSTabViewItem *)item toController:(SPWindowController *)target
+{
+	for (id cell in [[[self tabBar] valueForKey:@"cells"] copy]) {
+		if ([cell valueForKey:@"representedObject"] == item) {
+			[[self tabBar] performSelector:@selector(removeTabForCell:) withObject:cell];
+		}
+	}
+	[[self tabView] removeTabViewItem:item];
+	[(NSTabView *)[target valueForKey:@"tabView"] insertTabViewItem:item atIndex:0];
+}
+
+// The drop delegate call goes to the source window's controller with the source tab view. A
+// document without parentWindow/parentWindowController is found through that tab view's window.
+- (void)testDropOfDocumentWithoutWindowAccessorsUsesSourceTabView
+{
+	SPBareTabDocument *bare = [[SPBareTabDocument alloc] init];
+	[self.controller addTabDocument:bare atIndex:0 select:YES];
+	NSTabViewItem *item = [[self tabView] tabViewItemAtIndex:0];
+
+	SPWindowController *target = [[SPWindowController alloc] initWithWindowNibName:@"MainWindow"];
+	XCTAssertNotNil([target window]);
+	[self moveItem:item toController:target];
+
+	XCTAssertNoThrow([self.controller tabView:[self tabView] didDropTabViewItem:item inTabBar:[target valueForKey:@"tabBar"]]);
+
+	XCTAssertNil([self.controller selectedDocument]);
+	XCTAssertEqual((id)[target selectedDocument], bare);
+
+	// The source's observer was swapped for the target's: closing the tab leaves none behind
+	XCTAssertNoThrow([(NSTabView *)[target valueForKey:@"tabView"] removeTabViewItem:item]);
+	XCTAssertEqual(bare.didCloseCount, 1u);
+	XCTAssertTrue([bare observationInfo] == NULL);
+	[[target window] orderOut:nil];
+}
+
+// With no source window at all, the drop must not throw (removeObserver:nil).
+- (void)testDropWithNoSourceWindowDoesNotThrow
+{
+	SPBareTabDocument *bare = [[SPBareTabDocument alloc] init];
+	[self.controller addTabDocument:bare atIndex:0 select:YES];
+	NSTabViewItem *item = [[self tabView] tabViewItemAtIndex:0];
+
+	SPWindowController *target = [[SPWindowController alloc] initWithWindowNibName:@"MainWindow"];
+	XCTAssertNotNil([target window]);
+	[self moveItem:item toController:target];
+
+	NSTabView *detachedTabView = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 10, 10)];
+	XCTAssertNoThrow([self.controller tabView:detachedTabView didDropTabViewItem:item inTabBar:[target valueForKey:@"tabBar"]]);
+	XCTAssertEqual((id)[target selectedDocument], bare);
+
+	// The target observes the document and removes its observer when the tab closes
+	XCTAssertNoThrow([(NSTabView *)[target valueForKey:@"tabView"] removeTabViewItem:item]);
+	XCTAssertEqual(bare.didCloseCount, 1u);
+
+	// The unknown source keeps its observation (nothing could identify it); clean it up here
+	[bare removeObserver:self.controller forKeyPath:@"isProcessing"];
+	XCTAssertTrue([bare observationInfo] == NULL);
+	[self.controller updateSelectedTableDocument];
+	[[target window] orderOut:nil];
 }
 
 - (void)testMenuValidationWithFakeTabSelected
