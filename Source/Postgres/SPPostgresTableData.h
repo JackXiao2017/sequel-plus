@@ -86,6 +86,11 @@ __attribute__((visibility("default")))
  * identify the row by its full primary key, so an UPDATE or DELETE can never match more than one row.
  * The column list is read once and cached.
  *
+ * The connection may be shared with the Query view. Inside a transaction the user opened there, each load and
+ * edit runs in a savepoint, so a failed one (a bad value, a bad filter) leaves the user's transaction open and its
+ * earlier work intact; when idle, statements are sent as is. Inside an aborted transaction edits are refused and
+ * loads fail with a message saying to roll it back.
+ *
  * Errors use SPPostgresErrorDomain: SPPostgresErrorQueryFailed (the server's message), SPPostgresErrorNotEditable
  * (refused before any SQL is sent) and SPPostgresErrorRowChanged (an edit matched no row).
  */
