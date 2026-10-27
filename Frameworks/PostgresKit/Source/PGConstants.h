@@ -50,5 +50,4 @@ extern const char *PGPostgresSSLModeParam;
 extern const char *PGPostgresSSLRootCertParam;
 extern const char *PGPostgresSSLCertParam;
 extern const char *PGPostgresSSLKeyParam;
-extern const char *PGPostgresOptionsParam;
-extern const char *PGPostgresOptionsValue;
+extern const char *PGPostgresSessionSettingsQuery;

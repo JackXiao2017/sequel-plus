@@ -40,6 +40,7 @@
 - (void)_createConnectionParameters;
 - (void)_pollConnection:(NSNumber *)isReset;
 - (void)_setConnectionError:(NSString *)error;
+- (NSString *)_applySessionSettings;
 
 // libpq callback
 static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message);
@@ -161,6 +162,12 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
  */
 - (BOOL)isConnected 
 {
+	// Not connected until the background poll has applied the session settings, so callers never
+	// query the PGconn concurrently with the poller.
+	@synchronized (self) {
+		if (_sessionPending) return NO;
+	}
+	
 	if (!_connection) return NO;
 	
 	return PQstatus(_connection) == CONNECTION_OK;
@@ -221,6 +228,7 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 		if ([self isConnected]) return YES;
 		
 		_connecting = YES;
+		_sessionPending = YES;
 	}
 	
 	// Discard the remains of any previous failed attempt (safe: no poller is running)
@@ -249,6 +257,7 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 		
 		@synchronized (self) {
 			_connecting = NO;
+			_sessionPending = NO;
 		}
 		
 		return NO;
@@ -275,11 +284,13 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 		if (_connecting || ![self isConnected]) return NO;
 		
 		_connecting = YES;
+		_sessionPending = YES;
 	}
 	
 	if (!PQresetStart(_connection)) {
 		@synchronized (self) {
 			_connecting = NO;
+			_sessionPending = NO;
 		}
 		
 		return NO;
@@ -429,6 +440,7 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 		if (cancelled) {
 			@synchronized (self) {
 				_connecting = NO;
+				_sessionPending = NO;
 			}
 			
 			return;
@@ -443,6 +455,7 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 
 			@synchronized (self) {
 				_connecting = NO;
+				_sessionPending = NO;
 			}
 
 			if (_delegate && [_delegate respondsToSelector:@selector(connectionFailed:)]) {
@@ -452,13 +465,41 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 			return;
 		}
 
-		if (status == PGRES_POLLING_OK && [self isConnected]) {
+		if (status == PGRES_POLLING_OK && _connection && PQstatus(_connection) == CONNECTION_OK) {
 
 			// Increase error verbosity
 			PQsetErrorVerbosity(_connection, PQERRORS_VERBOSE);
 
 			// Set notice processor
 			PQsetNoticeProcessor(_connection, _PGPostgresConnectionNoticeProcessor, self);
+
+			// Apply the session settings (also after a reset, which starts a new backend). If the server
+			// refuses them the connection is unusable for the type handlers, so report it as failed.
+			NSString *settingsError = [self _applySessionSettings];
+
+			if (settingsError) {
+				[self _setConnectionError:settingsError];
+
+				// Still owned by this thread: -disconnect waits for _connecting to clear before touching it
+				PQfinish(_connection);
+
+				_connection = nil;
+
+				@synchronized (self) {
+					_connecting = NO;
+					_sessionPending = NO;
+				}
+
+				if (_delegate && [_delegate respondsToSelector:@selector(connectionFailed:)]) {
+					[_delegate performSelectorOnMainThread:@selector(connectionFailed:) withObject:self waitUntilDone:NO];
+				}
+
+				return;
+			}
+
+			@synchronized (self) {
+				_sessionPending = NO;
+			}
 
 			[self _loadDatabaseParameters];
 
@@ -480,9 +521,33 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 		else {
 			@synchronized (self) {
 				_connecting = NO;
+				_sessionPending = NO;
 			}
 		}
 	}
+}
+
+/**
+ * Applies the session settings the type handlers rely on (see PGPostgresSessionSettingsQuery). Called on
+ * the polling thread, which owns the PGconn until _connecting is cleared.
+ *
+ * @return nil on success, otherwise the server's error message.
+ */
+- (NSString *)_applySessionSettings
+{
+	PGresult *result = PQexec(_connection, PGPostgresSessionSettingsQuery);
+	
+	NSString *error = nil;
+	
+	if (!result || PQresultStatus(result) != PGRES_COMMAND_OK) {
+		const char *message = result ? PQresultErrorMessage(result) : PQerrorMessage(_connection);
+		
+		error = [NSString stringWithFormat:@"Failed to apply the session settings: %@", (message && *message) ? [NSString stringWithUTF8String:message] : @"unknown error"];
+	}
+	
+	if (result) PQclear(result);
+	
+	return error;
 }
 
 /**
@@ -530,8 +595,8 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 	if (_connectionParamNames) free(_connectionParamNames);
 	if (_connectionParamValues) free(_connectionParamValues);
 	
-	// Application name, port, client encoding, keep alive, keep alive interval and options are always set
-	int paramCount = 6;
+	// Application name, port, client encoding, keep alive and keep alive interval are always set
+	int paramCount = 5;
 	
 	if (_user && [_user length]) paramCount++, hasUser = YES;
 	if (_host && [_host length]) paramCount++, hasHost = YES;
@@ -570,11 +635,8 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 	_connectionParamNames[4] = PGPostgresKeepAliveIntervalParam;
 	_connectionParamValues[4] = [[[NSNumber numberWithUnsignedInteger:_keepAliveInterval] stringValue] UTF8String];
 	
-	// The type handlers parse PostgreSQL's ISO date and 'postgres' interval text formats
-	_connectionParamNames[5] = PGPostgresOptionsParam;
-	_connectionParamValues[5] = PGPostgresOptionsValue;
-	
-	NSUInteger i = 6;
+	// The session settings the type handlers need are applied after connecting (see -_applySessionSettings)
+	NSUInteger i = 5;
 	
 	if (hasUser) {
 		_connectionParamNames[i] = PGPostgresUserParam;

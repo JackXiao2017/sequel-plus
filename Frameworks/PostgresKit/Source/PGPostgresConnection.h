@@ -59,6 +59,7 @@
 	BOOL _delegateSupportsWillExecute;
 	BOOL _connecting;
 	BOOL _disconnectRequested;
+	BOOL _sessionPending;
 	
 	NSMutableDictionary *_typeMap;
 	

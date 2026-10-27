@@ -21,6 +21,8 @@
 
 - (PGPostgresConnection *)_connectionForHost:(NSString *)host port:(NSUInteger)port;
 - (BOOL)_waitForConnectionToSettle:(PGPostgresConnection *)connection timeout:(NSTimeInterval)timeout;
+- (NSUInteger)_testPort;
+- (void)_assertSessionSettingsOnConnection:(PGPostgresConnection *)connection;
 
 @end
 
@@ -76,6 +78,64 @@
 }
 
 #pragma mark -
+#pragma mark Session settings
+
+/**
+ * The type handlers need datestyle=ISO, intervalstyle=postgres and extra_float_digits=1. They must be
+ * applied with SET after connecting (source "session"), not through the startup "options" parameter
+ * (source "client"), which connection poolers such as PgBouncer reject. A temporary role whose default
+ * datestyle is non-ISO proves the settings override role defaults.
+ */
+- (void)testSessionSettingsAreAppliedWithSetAfterConnectNotStartupOptions
+{
+	PGPostgresConnection *admin = [self _connectionForHost:@"localhost" port:[self _testPort]];
+	
+	XCTAssertTrue([admin connect]);
+	XCTAssertTrue([self _waitForConnectionToSettle:admin timeout:10.0]);
+	XCTAssertTrue([admin isConnected], @"%@", [admin connectionError]);
+	
+	[admin execute:@"DROP ROLE IF EXISTS \"pgkit_test_datestyle\""];
+	XCTAssertNotNil([admin execute:@"CREATE ROLE \"pgkit_test_datestyle\" LOGIN PASSWORD 'pgkit'"], @"%@", [admin lastError]);
+	[admin execute:@"ALTER ROLE \"pgkit_test_datestyle\" SET datestyle = 'SQL, DMY'"];
+	[admin execute:@"ALTER ROLE \"pgkit_test_datestyle\" SET intervalstyle = 'sql_standard'"];
+	[admin execute:@"ALTER ROLE \"pgkit_test_datestyle\" SET extra_float_digits = 0"];
+	
+	PGPostgresConnection *connection = [self _connectionForHost:@"localhost" port:[self _testPort]];
+	
+	[connection setUser:@"pgkit_test_datestyle"];
+	
+	XCTAssertTrue([connection connect]);
+	XCTAssertTrue([self _waitForConnectionToSettle:connection timeout:10.0]);
+	XCTAssertTrue([connection isConnected], @"%@", [connection connectionError]);
+	
+	[self _assertSessionSettingsOnConnection:connection];
+	
+	// The settings must be re-applied after a reset, which starts a new backend
+	NSUInteger pid = [connection serverProcessId];
+	
+	XCTAssertTrue([connection reset]);
+	
+	NSDate *start = [NSDate date];
+	
+	while ((![connection isConnected] || [connection serverProcessId] == pid) && [[NSDate date] timeIntervalSinceDate:start] < 10.0)
+	{
+		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+	}
+	
+	XCTAssertTrue([connection isConnected]);
+	XCTAssertNotEqual([connection serverProcessId], pid);
+	
+	[self _assertSessionSettingsOnConnection:connection];
+	
+	[connection disconnect];
+	[connection release];
+	
+	[admin execute:@"DROP ROLE IF EXISTS \"pgkit_test_datestyle\""];
+	[admin disconnect];
+	[admin release];
+}
+
+#pragma mark -
 #pragma mark Private API
 
 - (PGPostgresConnection *)_connectionForHost:(NSString *)host port:(NSUInteger)port
@@ -103,6 +163,47 @@
 	}
 	
 	return NO;
+}
+
+- (NSUInteger)_testPort
+{
+	const char *portString = getenv("PGKIT_TEST_PORT");
+	
+	return (portString && *portString) ? (NSUInteger)strtoul(portString, NULL, 10) : 55418;
+}
+
+- (void)_assertSessionSettingsOnConnection:(PGPostgresConnection *)connection
+{
+	PGPostgresResult *result = [connection execute:@"SELECT \"name\", \"setting\", \"source\" FROM \"pg_catalog\".\"pg_settings\" WHERE \"name\" IN ('DateStyle', 'IntervalStyle', 'extra_float_digits') ORDER BY \"name\""];
+	
+	XCTAssertNotNil(result, @"%@", [connection lastError]);
+	XCTAssertEqual([result numberOfRows], 3ULL);
+	
+	NSMutableDictionary *settings = [NSMutableDictionary dictionary];
+	NSMutableDictionary *sources = [NSMutableDictionary dictionary];
+	
+	for (unsigned long long i = 0; i < [result numberOfRows]; i++)
+	{
+		NSArray *row = [result rowAsArray];
+		
+		[settings setObject:[row objectAtIndex:1] forKey:[row objectAtIndex:0]];
+		[sources setObject:[row objectAtIndex:2] forKey:[row objectAtIndex:0]];
+	}
+	
+	XCTAssertTrue([[settings objectForKey:@"DateStyle"] hasPrefix:@"ISO"], @"%@", settings);
+	XCTAssertEqualObjects([settings objectForKey:@"IntervalStyle"], @"postgres");
+	XCTAssertEqualObjects([settings objectForKey:@"extra_float_digits"], @"1");
+	
+	for (NSString *name in sources)
+	{
+		XCTAssertEqualObjects([sources objectForKey:name], @"session", @"%@ must be applied with SET after connecting, not as a startup option", name);
+	}
+	
+	// Decoding relies on the ISO date style
+	PGPostgresResult *dateResult = [connection execute:@"SELECT '2013-05-21'::date, '1 day 02:03:04'::interval"];
+	NSArray *dateRow = [dateResult rowAsArray];
+	
+	XCTAssertTrue([[dateRow objectAtIndex:0] isKindOfClass:[NSDate class]], @"%@", dateRow);
 }
 
 @end

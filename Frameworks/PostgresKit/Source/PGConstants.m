@@ -50,5 +50,8 @@ const char *PGPostgresSSLModeParam           = "sslmode";
 const char *PGPostgresSSLRootCertParam       = "sslrootcert";
 const char *PGPostgresSSLCertParam           = "sslcert";
 const char *PGPostgresSSLKeyParam            = "sslkey";
-const char *PGPostgresOptionsParam           = "options";
-const char *PGPostgresOptionsValue           = "-c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=1";
+
+// Session settings the type handlers rely on (ISO dates, 'postgres' intervals). Applied with SET once the
+// connection is established rather than through the startup "options" parameter, which connection poolers
+// such as PgBouncer reject unless configured to ignore it.
+const char *PGPostgresSessionSettingsQuery   = "SET datestyle TO 'ISO'; SET intervalstyle TO 'postgres'; SET extra_float_digits TO 1";
