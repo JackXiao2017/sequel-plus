@@ -9,56 +9,10 @@
 
 @implementation SPPostgresCatalogTests
 
-#pragma mark - Fixture
-
-// The fixture is read from PostgresTests/Fixtures/catalog.sql next to this source file (located via __FILE__),
-// not bundled as a test resource.
-+ (void)loadFixtureOnPort:(NSUInteger)port
-{
-	NSString *path = [[[[NSString stringWithUTF8String:__FILE__] stringByDeletingLastPathComponent]
-					   stringByAppendingPathComponent:@"Fixtures"] stringByAppendingPathComponent:@"catalog.sql"];
-	NSError *readError = nil;
-	NSString *sql = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&readError];
-	if (!sql) { XCTFail(@"Cannot read fixture: %@", readError); return; }
-
-	PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port];
-	if (!connection) return;
-
-	for (NSString *chunk in [sql componentsSeparatedByString:@"\n-- @@"]) {
-		NSMutableArray *lines = [[chunk componentsSeparatedByString:@"\n"] mutableCopy];
-		NSString *directive = [lines.firstObject stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-		if ([chunk hasPrefix:@"-- @@"]) { // very first chunk starts with the marker itself
-			directive = [[chunk substringFromIndex:5] componentsSeparatedByString:@"\n"].firstObject;
-		}
-		[lines removeObjectAtIndex:0];
-		NSString *statement = [[lines componentsJoinedByString:@"\n"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-		directive = [directive stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-
-		if ([directive hasPrefix:@"db "]) {
-			[connection disconnect];
-			connection = [SPPostgresTestServers connectedConnectionOnPort:port database:[directive substringFromIndex:3]];
-			if (!connection) return;
-		} else if ([directive hasPrefix:@"createdb "]) {
-			NSString *name = [directive substringFromIndex:9];
-			PGPostgresResult *exists = [connection execute:@"SELECT 1 FROM pg_database WHERE datname = $1::text" values:@[name]];
-			if (exists.numberOfRows == 0) {
-				// Name comes from the fixture file, quoted as an identifier.
-				NSString *quoted = [name stringByReplacingOccurrencesOfString:@"\"" withString:@"\"\""];
-				NSString *create = [NSString stringWithFormat:@"CREATE DATABASE \"%@\"", quoted];
-				XCTAssertNotNil([connection execute:create], @"CREATE DATABASE: %@", connection.lastError.errorPrimaryMessage);
-			}
-		}
-		if (statement.length) {
-			XCTAssertNotNil([connection execute:statement], @"%@ failed: %@", statement, connection.lastError.errorPrimaryMessage);
-		}
-	}
-	[connection disconnect];
-}
-
 - (void)setUp
 {
 	self.continueAfterFailure = NO;
-	for (NSNumber *port in [SPPostgresTestServers ports]) [[self class] loadFixtureOnPort:port.unsignedIntegerValue];
+	for (NSNumber *port in [SPPostgresTestServers ports]) [SPPostgresTestServers loadFixtureNamed:@"catalog" onPort:port.unsignedIntegerValue];
 }
 
 - (SPPostgresCatalog *)catalogOnPort:(NSUInteger)port database:(NSString *)database

@@ -8,11 +8,6 @@
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
 
-// The catalog fixture loader lives in SPPostgresCatalogTests (same test bundle)
-@interface SPPostgresCatalogTests : XCTestCase
-+ (void)loadFixtureOnPort:(NSUInteger)port;
-@end
-
 static const NSUInteger SPPostgresToolbarTestPort = 55418;
 
 // The app's constants aren't exported to the test bundle: their values, spelled out
@@ -94,7 +89,7 @@ static NSString * const SPTestUsers = @"SwitchToUserManagerToolbarItemIdentifier
 + (void)setUp
 {
 	[super setUp];
-	[SPPostgresCatalogTests loadFixtureOnPort:SPPostgresToolbarTestPort];
+	[SPPostgresTestServers loadFixtureNamed:@"catalog" onPort:SPPostgresToolbarTestPort];
 }
 
 - (void)setUp

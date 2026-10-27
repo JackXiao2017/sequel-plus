@@ -15,5 +15,11 @@ typedef NS_ENUM(NSInteger, SPPostgresErrorCode) {
 	/// A catalog or other query failed on the server (the server's message is the localized description).
 	SPPostgresErrorQueryFailed = 5,
 	/// The connection form is missing required details (e.g. a TCP/IP favorite without a host).
-	SPPostgresErrorInvalidSettings = 6
+	SPPostgresErrorInvalidSettings = 6,
+	/// An edit affected no rows: the row was changed or deleted by someone else since it was read.
+	/// (The stage-2 plan named this code 6, which was already taken by SPPostgresErrorInvalidSettings.)
+	SPPostgresErrorRowChanged = 7,
+	/// An edit was refused before any SQL was sent: the relation is read-only (a view, or a table without
+	/// a primary key). The read-only reason is the localized description.
+	SPPostgresErrorNotEditable = 8
 };
