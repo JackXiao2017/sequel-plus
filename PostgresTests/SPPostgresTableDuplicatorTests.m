@@ -25,6 +25,11 @@ static NSArray<NSString *> *SPDuplicatorSetupStatements(void)
 		@"INSERT INTO dup_test.src (code, qty, note) SELECT 'c' || g, g, CASE WHEN g = 2 THEN NULL ELSE 'note ' || g END FROM generate_series(1, 7) g",
 		@"DELETE FROM dup_test.src WHERE id > 5",
 		@"CREATE TABLE dup_test.taken (id integer)",
+		@"COMMENT ON TABLE dup_test.src IS 'it''s the \\ source'",
+		@"CREATE TABLE dup_test.parent (id integer PRIMARY KEY, v text UNIQUE)",
+		@"CREATE TABLE dup_test.child (extra text) INHERITS (dup_test.parent)",
+		@"INSERT INTO dup_test.parent (id, v) VALUES (1, 'own')",
+		@"INSERT INTO dup_test.child (id, v, extra) VALUES (1, 'own', 'dup key'), (2, 'kid', 'x')",
 		@"CREATE VIEW dup_test.src_view AS SELECT id FROM dup_test.src",
 		@"CREATE TABLE dup_test.parted (id integer NOT NULL, v text) PARTITION BY RANGE (id)",
 		@"CREATE TABLE dup_test.parted_1 PARTITION OF dup_test.parted FOR VALUES FROM (0) TO (100)",
@@ -299,6 +304,59 @@ static NSArray<NSString *> *SPDuplicatorSetupStatements(void)
 		XCTAssertTrue([error.localizedDescription containsString:@"aborted"], @"%@", error.localizedDescription);
 		XCTAssertEqual([connection transactionStatus], PGPostgresTransactionInError);
 		XCTAssertNotNil([connection execute:@"ROLLBACK"]);
+		[connection disconnect];
+	}
+}
+
+- (void)testInheritanceParentCopiesOnlyItsOwnRows
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *connection = [self connectOn:port];
+		NSError *error = nil;
+		XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM dup_test.parent" on:connection], @"3", @"the parent's scan includes its child's rows");
+		XCTAssertTrue([SPPostgresTableDuplicator duplicateTable:@"parent" inSchema:@"dup_test" toName:@"parent_copy" withContent:YES connection:connection error:&error], @"%@: %@", port, error);
+		XCTAssertEqualObjects([self rowsOf:@"dup_test.parent_copy" on:connection], (@[@"(1,own)"]), @"%@: only the parent's own row", port);
+		[connection disconnect];
+	}
+}
+
+- (void)testOverLongNameRefused
+{
+	NSString *ascii64 = [@"" stringByPaddingToLength:64 withString:@"n" startingAtIndex:0];
+	NSString *utf8Of64Bytes = [@"" stringByPaddingToLength:32 withString:@"\u00e9" startingAtIndex:0]; // 32 x 2 bytes
+	NSString *ascii63 = [@"" stringByPaddingToLength:63 withString:@"m" startingAtIndex:0];
+	XCTAssertFalse([SPPostgresTableDuplicator isValidTableName:ascii64]);
+	XCTAssertFalse([SPPostgresTableDuplicator isValidTableName:utf8Of64Bytes]);
+	XCTAssertFalse([SPPostgresTableDuplicator isValidTableName:@""]);
+	XCTAssertTrue([SPPostgresTableDuplicator isValidTableName:ascii63]);
+
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *connection = [self connectOn:port];
+		for (NSString *name in @[ascii64, utf8Of64Bytes]) {
+			NSError *error = nil;
+			XCTAssertFalse([SPPostgresTableDuplicator duplicateTable:@"src" inSchema:@"dup_test" toName:name withContent:YES connection:connection error:&error]);
+			XCTAssertTrue([error.localizedDescription containsString:@"63"], @"%@", error.localizedDescription);
+		}
+		XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'dup_test' AND c.relname NOT IN ('src', 'src_id_seq', 'src_ident_seq', 'src_pkey', 'src_code_key', 'src_note_idx', 'taken', 'src_view', 'parted', 'parted_1', 'parent', 'child', 'parent_pkey', 'parent_v_key', 'parted_1_pkey') AND c.relkind IN ('r', 'S')" on:connection], @"0", @"nothing created");
+
+		// 63 bytes is fine, and the copy's identity sequence still continues
+		NSError *error = nil;
+		XCTAssertTrue([SPPostgresTableDuplicator duplicateTable:@"src" inSchema:@"dup_test" toName:ascii63 withContent:YES connection:connection error:&error], @"%@", error);
+		NSString *insert = [NSString stringWithFormat:@"INSERT INTO dup_test.%@ (code) VALUES ('new')", ascii63];
+		XCTAssertNotNil([connection execute:insert], @"%@", connection.lastError.errorPrimaryMessage);
+		[connection disconnect];
+	}
+}
+
+- (void)testTableCommentCopied
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *connection = [self connectOn:port];
+		NSError *error = nil;
+		XCTAssertTrue([SPPostgresTableDuplicator duplicateTable:@"src" inSchema:@"dup_test" toName:@"src_copy" withContent:NO connection:connection error:&error], @"%@", error);
+		XCTAssertEqualObjects([self value:@"SELECT obj_description('dup_test.src_copy'::regclass, 'pg_class')::text" on:connection], @"it's the \\ source");
+		XCTAssertTrue([SPPostgresTableDuplicator duplicateTable:@"taken" inSchema:@"dup_test" toName:@"taken_copy" withContent:NO connection:connection error:&error], @"%@", error);
+		XCTAssertEqualObjects([self value:@"SELECT obj_description('dup_test.taken_copy'::regclass, 'pg_class')::text" on:connection], [NSNull null], @"no comment, none added");
 		[connection disconnect];
 	}
 }

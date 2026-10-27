@@ -95,11 +95,20 @@ static BOOL SPPostgresIsInteger(id value)
 
 #pragma mark - Duplicating
 
++ (BOOL)isValidTableName:(NSString *)name
+{
+	return [name length] > 0 && [name lengthOfBytesUsingEncoding:NSUTF8StringEncoding] <= SPPostgresMaximumIdentifierLength;
+}
+
 + (BOOL)duplicateTable:(NSString *)table inSchema:(NSString *)schema toName:(NSString *)newName withContent:(BOOL)withContent
 			connection:(PGPostgresConnection *)connection error:(NSError **)error
 {
 	if (![table length] || ![schema length] || ![newName length]) {
 		if (error) *error = SPPostgresDuplicatorError(NSLocalizedString(@"The table and the new name must not be empty.", @"Postgres duplicate table: empty name"));
+		return NO;
+	}
+	if (![self isValidTableName:newName]) {
+		if (error) *error = SPPostgresDuplicatorError([NSString stringWithFormat:NSLocalizedString(@"The name “%@” is too long: PostgreSQL names can be at most 63 bytes.", @"Postgres duplicate table: name too long"), newName]);
 		return NO;
 	}
 
@@ -172,6 +181,24 @@ static BOOL SPPostgresIsInteger(id value)
 
 	if (!SPPostgresExecute(connection, [NSString stringWithFormat:@"CREATE TABLE %@ (LIKE %@ INCLUDING ALL)", targetName, sourceName], nil, error)) return NO;
 
+	// The copy, by its quoted name (never looked up by a relname the server might have truncated)
+	NSArray *targetRows = [self rowsOf:@"SELECT $1::regclass::oid::text" values:@[targetName] connection:connection error:error];
+	if (!targetRows) return NO;
+	NSString *targetOid = [[targetRows firstObject] firstObject];
+	if (![targetOid isKindOfClass:[NSString class]] || ![targetOid length]) {
+		if (error) *error = SPPostgresDuplicatorError([NSString stringWithFormat:NSLocalizedString(@"The new table “%@” could not be found after it was created.", @"Postgres duplicate table: copy not found"), newName]);
+		return NO;
+	}
+
+	// The table's own comment (LIKE copies only those of columns, constraints and indexes)
+	NSArray *comment = [self rowsOf:@"SELECT obj_description($1::oid, 'pg_class')::text" values:@[sourceOid] connection:connection error:error];
+	if (!comment) return NO;
+	NSString *commentText = [[comment firstObject] firstObject];
+	if ([commentText isKindOfClass:[NSString class]]) {
+		NSString *commentSQL = [NSString stringWithFormat:@"COMMENT ON TABLE %@ IS %@", targetName, SPPostgresQuoteLiteral(commentText)];
+		if (!SPPostgresExecute(connection, commentSQL, nil, error)) return NO;
+	}
+
 	// Each serial column gets a sequence of its own, with the original's settings, owned by the copy's column
 	for (NSArray *serial in serials) {
 		NSString *column = [serial objectAtIndex:0];
@@ -206,7 +233,7 @@ static BOOL SPPostgresIsInteger(id value)
 
 	if (!withContent) return YES;
 
-	// Rows, keeping identity ALWAYS values
+	// Rows, keeping identity ALWAYS values; ONLY: not the rows of tables inheriting from it
 	if ([insertable count]) {
 		NSMutableArray *columns = [NSMutableArray arrayWithCapacity:[insertable count]];
 		for (NSArray *row in insertable) [columns addObject:SPPostgresQuoteIdentifier([row firstObject])];
@@ -217,16 +244,14 @@ static BOOL SPPostgresIsInteger(id value)
 			if ([[identity objectAtIndex:1] isEqual:@"a"]) hasAlwaysIdentity = YES;
 		}
 
-		NSString *insert = [NSString stringWithFormat:@"INSERT INTO %@ (%@)%@ SELECT %@ FROM %@",
+		NSString *insert = [NSString stringWithFormat:@"INSERT INTO %@ (%@)%@ SELECT %@ FROM ONLY %@",
 							targetName, list, hasAlwaysIdentity ? @" OVERRIDING SYSTEM VALUE" : @"", list, sourceName];
 		if (!SPPostgresExecute(connection, insert, nil, error)) return NO;
 	}
 
 	// The copy's identity sequences continue from the original's
 	if ([identities count]) {
-		NSArray *target = [self relation:newName inSchema:schema connection:connection error:error];
-		if (!target) return NO;
-		NSArray *targetIdentities = [self rowsOf:identitySQL values:@[[target firstObject] ?: @"0"] connection:connection error:error];
+		NSArray *targetIdentities = [self rowsOf:identitySQL values:@[targetOid] connection:connection error:error];
 		if (!targetIdentities) return NO;
 
 		for (NSArray *identity in identities) {
