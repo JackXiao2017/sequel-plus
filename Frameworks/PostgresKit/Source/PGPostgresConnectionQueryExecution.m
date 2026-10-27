@@ -50,7 +50,7 @@ PGQueryParamData;
 
 - (PGPostgresResult *)_execute:(NSObject *)query values:(NSArray *)values;
 - (BOOL)_queryDidError:(PGresult *)result;
-- (PGresult *)_finishCopyIfNeeded:(PGresult *)result;
+- (PGresult *)_finishCopyIfNeeded:(PGresult *)result discardedOutput:(BOOL *)discardedOutput;
 - (PGQueryParamData *)_createParameterDataStructureWithCount:(int)paramNum;
 - (void)_destroyParamDataStructure:(PGQueryParamData *)paramData;
 
@@ -251,11 +251,15 @@ PGQueryParamData;
 	
 	[self _destroyParamDataStructure:paramData];
 	
-	if (pgResult) pgResult = [self _finishCopyIfNeeded:pgResult];
+	BOOL discardedCopyOutput = NO;
+	
+	if (pgResult) pgResult = [self _finishCopyIfNeeded:pgResult discardedOutput:&discardedCopyOutput];
 	
 	if (!pgResult || [self _queryDidError:pgResult]) return nil;
 	
 	PGPostgresResult *result = [[[PGPostgresResult alloc] initWithResult:pgResult connection:self] autorelease];
+	
+	if (discardedCopyOutput) [result _setCopyOutputDiscarded:YES];
 	
 	_lastQueryAffectedRowCount = [result numberOfRows];
 	
@@ -267,12 +271,13 @@ PGQueryParamData;
  * ("another command is already in progress"). Copy data isn't supported: a COPY FROM STDIN is ended with
  * an error (the server rolls the COPY back and reports it), the rows of a COPY TO STDOUT are discarded.
  *
- * @param result The result PQexecParams/PQexecPrepared returned (taken over: cleared if replaced).
+ * @param result          The result PQexecParams/PQexecPrepared returned (taken over: cleared if replaced).
+ * @param discardedOutput Set to YES when COPY TO STDOUT rows were discarded.
  *
  * @return The result to use: the COPY command's final result (an error, or its "COPY n" status), the
  *         given result if it wasn't a COPY, or NULL if the connection failed.
  */
-- (PGresult *)_finishCopyIfNeeded:(PGresult *)result
+- (PGresult *)_finishCopyIfNeeded:(PGresult *)result discardedOutput:(BOOL *)discardedOutput
 {
 	ExecStatusType status = PQresultStatus(result);
 	
@@ -285,6 +290,8 @@ PGQueryParamData;
 	}
 	
 	if (status == PGRES_COPY_OUT || status == PGRES_COPY_BOTH) {
+		if (discardedOutput) *discardedOutput = YES;
+		
 		char *buffer = NULL;
 		
 		// > 0: a row (discarded); -1: done; -2: failed

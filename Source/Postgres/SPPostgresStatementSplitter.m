@@ -32,6 +32,44 @@ static BOOL SPIsIdentifierCharacter(unichar c)
 	return SPIsTagCharacter(c) || c == '$';
 }
 
+/// YES if the word chars[0..<length] is keyword (lowercase ASCII), ignoring case.
+static BOOL SPWordIs(const unichar *chars, NSUInteger length, const char *keyword)
+{
+	if (length != strlen(keyword)) return NO;
+	for (NSUInteger k = 0; k < length; k++) {
+		unichar c = chars[k];
+		if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+		if (c != (unichar)keyword[k]) return NO;
+	}
+	return YES;
+}
+
+/// The first position at or after i that isn't whitespace or in a comment.
+static NSUInteger SPSkipWhitespaceAndComments(const unichar *chars, NSUInteger length, NSUInteger i)
+{
+	while (i < length) {
+		if (SPIsWhitespace(chars[i])) {
+			i++;
+		}
+		else if (chars[i] == '-' && i + 1 < length && chars[i + 1] == '-') {
+			while (i < length && chars[i] != '\n' && chars[i] != '\r') i++;
+		}
+		else if (chars[i] == '/' && i + 1 < length && chars[i + 1] == '*') {
+			NSUInteger depth = 1;
+			i += 2;
+			while (i < length && depth > 0) {
+				if (chars[i] == '/' && i + 1 < length && chars[i + 1] == '*') { depth++; i += 2; }
+				else if (chars[i] == '*' && i + 1 < length && chars[i + 1] == '/') { depth--; i += 2; }
+				else i++;
+			}
+		}
+		else {
+			break;
+		}
+	}
+	return MIN(i, length);
+}
+
 @implementation SPPostgresStatementSplitter
 
 /// Every segment of sql, in order, covering it without gaps (at least one).
@@ -46,6 +84,11 @@ static BOOL SPIsIdentifierCharacter(unichar c)
 
 	SPPostgresSegment segment = {0, 0, NSNotFound, 0, NO};
 
+	// Inside a SQL-standard function body (BEGIN ATOMIC … END, PostgreSQL 14+), semicolons end its statements,
+	// not this one. CASE … END nests inside it. Counted only there, so a column named begin or end elsewhere
+	// changes nothing, and neither do transactions (BEGIN; … COMMIT; END;).
+	NSUInteger atomicDepth = 0;
+
 	// Notes the token [from, to) of the current segment
 	#define SP_NOTE_TOKEN(from, to, code) do { \
 		if (segment.trimStart == NSNotFound) segment.trimStart = (from); \
@@ -58,7 +101,7 @@ static BOOL SPIsIdentifierCharacter(unichar c)
 		unichar c = chars[i];
 		unichar next = (i + 1 < length) ? chars[i + 1] : 0;
 
-		if (c == ';') {
+		if (c == ';' && atomicDepth == 0) {
 			segment.end = i + 1;
 			[segments appendBytes:&segment length:sizeof(segment)];
 			segment = (SPPostgresSegment){i + 1, i + 1, NSNotFound, 0, NO};
@@ -164,6 +207,29 @@ static BOOL SPIsIdentifierCharacter(unichar c)
 				i = end;
 				continue;
 			}
+		}
+
+		// A word: BEGIN ATOMIC, and CASE / END inside it, nest
+		if (SPIsIdentifierStart(c) && !(i > 0 && SPIsIdentifierCharacter(chars[i - 1]))) {
+			j = i + 1;
+			while (j < length && SPIsIdentifierCharacter(chars[j])) j++;
+
+			if (SPWordIs(chars + i, j - i, "begin")) {
+				NSUInteger wordStart = SPSkipWhitespaceAndComments(chars, length, j);
+				NSUInteger wordEnd = wordStart;
+				while (wordEnd < length && SPIsIdentifierCharacter(chars[wordEnd])) wordEnd++;
+				if (SPWordIs(chars + wordStart, wordEnd - wordStart, "atomic")) atomicDepth++;
+			}
+			else if (atomicDepth > 0 && SPWordIs(chars + i, j - i, "case")) {
+				atomicDepth++;
+			}
+			else if (atomicDepth > 0 && SPWordIs(chars + i, j - i, "end")) {
+				atomicDepth--;
+			}
+
+			SP_NOTE_TOKEN(i, j, YES);
+			i = j;
+			continue;
 		}
 
 		SP_NOTE_TOKEN(i, i + 1, YES);

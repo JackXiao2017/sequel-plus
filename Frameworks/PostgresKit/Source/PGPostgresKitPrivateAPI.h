@@ -20,6 +20,7 @@
 
 #import "PGPostgresConnection.h"
 #import "PGPostgresTimeInterval.h"
+#import "PGPostgresResult.h"
 
 @interface PGPostgresConnection ()
 
@@ -30,6 +31,12 @@
 @interface PGPostgresConnection (PGPostgresConnectionQueryPreparationPrivateAPI)
 
 - (BOOL)_prepare:(PGPostgresStatement *)statement num:(NSInteger)paramNum types:(PGPostgresOid *)paramTypes;
+
+@end
+
+@interface PGPostgresResult (PGPostgresResultPrivateAPI)
+
+- (void)_setCopyOutputDiscarded:(BOOL)discarded;
 
 @end
 

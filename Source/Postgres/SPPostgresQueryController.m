@@ -18,8 +18,10 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 #pragma mark - View
 
 /**
- * The Query view's root: runs ⌘R (Run All) and ⇧⌘R (Run Current) while it is in a window, before the
- * editor or anything else sees them (as MySQL's run buttons' key equivalents).
+ * The Query view's root: handles MySQL's run keys while it is in a window, before the editor or anything else
+ * sees them: ⌘R runs the primary action and ⌥⌘R the secondary one (as DBView.xib's run popup). By default
+ * the primary action is Run Current; MySQL's "QueryPrimaryControlRunsAll" preference makes it Run All
+ * (read at each key press, so a change applies at once). Other keys (e.g. ⇧⌘R, Refresh Databases) pass on.
  */
 @interface SPPostgresQueryView : NSView
 @property (assign) SPPostgresQueryController *controller;
@@ -34,12 +36,14 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	if (controller && [event type] == NSEventTypeKeyDown && [self window] && ![self isHiddenOrHasHiddenAncestor]) {
 		NSEventModifierFlags flags = [event modifierFlags] & (NSEventModifierFlagCommand | NSEventModifierFlagShift | NSEventModifierFlagOption | NSEventModifierFlagControl);
 		if ([[[event charactersIgnoringModifiers] lowercaseString] isEqualToString:@"r"]) {
-			if (flags == NSEventModifierFlagCommand) {
-				if (![event isARepeat]) [controller runAllQueries:self];
-				return YES;
-			}
-			if (flags == (NSEventModifierFlagCommand | NSEventModifierFlagShift)) {
-				if (![event isARepeat]) [controller runCurrentQuery:self];
+			BOOL primary = (flags == NSEventModifierFlagCommand);
+			BOOL secondary = (flags == (NSEventModifierFlagCommand | NSEventModifierFlagOption));
+			if (primary || secondary) {
+				BOOL primaryRunsAll = [[NSUserDefaults standardUserDefaults] boolForKey:SPQueryPrimaryControlRunsAll];
+				if (![event isARepeat]) {
+					if (primary == primaryRunsAll) [controller runAllQueries:self];
+					else [controller runCurrentQuery:self];
+				}
 				return YES;
 			}
 		}
@@ -76,6 +80,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 	BOOL running;
 	BOOL invalidated;
+
+	/// Test seam: called before each statement runs (see the tests' SPPostgresQueryController (Testing))
+	void (^statementWillRunHook)(NSString *statement);
 }
 
 @synthesize editor;
@@ -110,6 +117,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[runAllButton release];
 	[runCurrentButton release];
 	[statusField release];
+	[statementWillRunHook release];
 
 	[super dealloc];
 }
@@ -124,6 +132,33 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[resultsView setDelegate:nil];
 	[runAllButton setTarget:nil];
 	[runCurrentButton setTarget:nil];
+	// Tooltip owners aren't retained
+	[runAllButton removeAllToolTips];
+	[runCurrentButton removeAllToolTips];
+}
+
+/// Test seam (see statementWillRunHook).
+- (void)setStatementWillRunHook:(void (^)(NSString *statement))hook
+{
+	if (hook == statementWillRunHook) return;
+	[statementWillRunHook release];
+	statementWillRunHook = [hook copy];
+}
+
+#pragma mark - Tooltips
+
+/// The run buttons' tooltips, with the key that runs each as MySQL's run preference has it.
+- (NSString *)view:(NSView *)theView stringForToolTip:(NSToolTipTag)tag point:(NSPoint)point userData:(void *)data
+{
+	BOOL primaryRunsAll = [[NSUserDefaults standardUserDefaults] boolForKey:SPQueryPrimaryControlRunsAll];
+
+	if (theView == runAllButton) {
+		return [NSString stringWithFormat:NSLocalizedString(@"Run all queries (%@)", @"Postgres query: run all tooltip (key)"), primaryRunsAll ? @"⌘R" : @"⌥⌘R"];
+	}
+	if (theView == runCurrentButton) {
+		return [NSString stringWithFormat:NSLocalizedString(@"Run the query at the cursor, or the selected queries (%@)", @"Postgres query: run current tooltip (key)"), primaryRunsAll ? @"⌥⌘R" : @"⌘R"];
+	}
+	return @"";
 }
 
 + (NSFont *)editorFontFromPreferenceData:(NSData *)data
@@ -176,15 +211,16 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	return [[NSUserDefaults standardUserDefaults] stringForKey:SPNullValue] ?: @"NULL";
 }
 
-- (NSButton *)_newRunButtonWithTitle:(NSString *)title toolTip:(NSString *)toolTip action:(SEL)action frame:(NSRect)frame
+- (NSButton *)_newRunButtonWithTitle:(NSString *)title action:(SEL)action frame:(NSRect)frame
 {
 	NSButton *button = [[NSButton alloc] initWithFrame:frame];
 	[button setBezelStyle:NSBezelStyleRounded];
 	[[button cell] setControlSize:NSControlSizeSmall];
 	[button setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
 	[button setTitle:title];
-	[button setToolTip:toolTip];
 	[button setAutoresizingMask:NSViewMinXMargin];
+	// Asked when shown (see -view:stringForToolTip:point:userData:): the keys follow MySQL's run preference
+	[button addToolTipRect:[button bounds] owner:self userData:NULL];
 	[button setTarget:self];
 	[button setAction:action];
 	return button;
@@ -251,20 +287,15 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	NSView *runBar = [[[NSView alloc] initWithFrame:NSMakeRect(0, lowerHeight - SPPostgresQueryRunBarHeight, width, SPPostgresQueryRunBarHeight)] autorelease];
 	[runBar setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
 
-	// As MySQL's: ⌘R and ⇧⌘R (handled by the view, see SPPostgresQueryView; shown on the buttons)
+	// MySQL's keys, ⌘R (primary) and ⌥⌘R (secondary), are handled by the view (see SPPostgresQueryView), the
+	// single place that follows MySQL's run preference; the buttons have no key equivalents of their own
 	runAllButton = [self _newRunButtonWithTitle:NSLocalizedString(@"Run All", @"run all button")
-										toolTip:NSLocalizedString(@"Run all queries (⌘R)", @"Postgres query: run all tooltip")
 										 action:@selector(runAllQueries:)
 										  frame:NSMakeRect(width - 98, 4, 90, 22)];
-	[runAllButton setKeyEquivalent:@"r"];
-	[runAllButton setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
 
 	runCurrentButton = [self _newRunButtonWithTitle:NSLocalizedString(@"Run Current", @"Postgres query: run current button")
-											toolTip:NSLocalizedString(@"Run the query at the cursor, or the selected queries (⇧⌘R)", @"Postgres query: run current tooltip")
 											 action:@selector(runCurrentQuery:)
 											  frame:NSMakeRect(width - 98 - 100, 4, 100, 22)];
-	[runCurrentButton setKeyEquivalent:@"r"];
-	[runCurrentButton setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagShift];
 
 	[runBar addSubview:runCurrentButton];
 	[runBar addSubview:runAllButton];
@@ -357,80 +388,116 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 }
 
 /**
- * Runs the statements in order. The grid shows the last row set; the first error stops the run.
+ * The status line text for a failed statement: the server's message, then its DETAIL and HINT lines (as psql).
+ * Notes an aborted transaction after the message.
+ */
+- (NSString *)_errorTextForStatement:(NSUInteger)number error:(PGPostgresError *)error fallback:(NSString *)fallback
+{
+	NSCharacterSet *whitespace = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+	NSString *message = [[error errorPrimaryMessage] stringByTrimmingCharactersInSet:whitespace];
+	if (![message length]) message = [fallback stringByTrimmingCharactersInSet:whitespace];
+	if (![message length]) message = NSLocalizedString(@"An unknown error occurred.", @"Postgres query: unknown error");
+
+	NSMutableString *text = [NSMutableString stringWithFormat:NSLocalizedString(@"Error in statement %lu: %@", @"Postgres query: error in statement (number, server message)"), (unsigned long)number, message];
+
+	// The user's own BEGIN … : nothing more runs in it until they roll back
+	if ([connection transactionStatus] == PGPostgresTransactionInError) {
+		[text appendString:NSLocalizedString(@" – the current transaction is aborted; ROLLBACK to continue", @"Postgres query: aborted transaction note")];
+	}
+
+	NSString *detail = [[error errorDetailMessage] stringByTrimmingCharactersInSet:whitespace];
+	NSString *hint = [[error errorMessageHint] stringByTrimmingCharactersInSet:whitespace];
+	if ([detail length]) [text appendFormat:@"\n%@ %@", NSLocalizedString(@"DETAIL:", @"Postgres query: error detail label"), detail];
+	if ([hint length]) [text appendFormat:@"\n%@ %@", NSLocalizedString(@"HINT:", @"Postgres query: error hint label"), hint];
+
+	return text;
+}
+
+/**
+ * Runs the statements in order. The grid shows the last row set; the first error stops the run. The status
+ * line describes the last statement run, and says which statement the grid's rows come from when it isn't
+ * that one.
  */
 - (void)_runStatements:(NSArray *)statements
 {
 	if (invalidated || running || ![statements count]) return;
-	running = YES;
 
 	// Hold on: an action may arrive from a view whose tab closes while the run's alerts or callbacks spin
 	[[self retain] autorelease];
 
-	[self _showResult:nil];
-
 	SPPostgresConsoleLogger *logger = [SPPostgresConsoleLogger loggerForConnection:connection];
 	BOOL wasLoggingCustomQueries = [logger loggingCustomQueries];
-	[logger setLoggingCustomQueries:YES];
 
 	NSString *status = @"";
 	NSUInteger number = 0;
+	NSUInteger shownStatement = 0; // the statement whose rows the grid shows (0: none)
 
-	for (NSString *statement in statements) {
-		number++;
+	running = YES;
+	[logger setLoggingCustomQueries:YES];
 
-		// A new error object is made for each failed query: compare with the previous one to know if this
-		// statement left one (a lost connection may leave none)
-		PGPostgresError *previousError = [[connection lastError] retain];
-		PGPostgresResult *statementResult = nil;
-		NSString *exceptionReason = nil;
+	// Whatever happens (an exception from AppKit or a hook), the next run must be possible and the
+	// interface's own queries logged as such again
+	@try {
+		[self _showResult:nil];
 
-		@try {
-			statementResult = [connection execute:statement];
-		}
-		@catch (NSException *exception) {
-			statementResult = nil;
-			exceptionReason = [exception reason];
-		}
+		for (NSString *statement in statements) {
+			number++;
 
-		if (!statementResult) {
-			PGPostgresError *error = [connection lastError];
-			NSString *message = (error && error != previousError) ? [error errorPrimaryMessage] : nil;
-			if (![message length]) message = exceptionReason;
-			if (![message length] && ![connection isConnected]) message = NSLocalizedString(@"The connection to the PostgreSQL server was lost.", @"Postgres query: connection lost");
-			if (![message length]) message = [connection libpqErrorMessage];
-			message = [message stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-			if (![message length]) message = NSLocalizedString(@"An unknown error occurred.", @"Postgres query: unknown error");
-			[previousError release];
+			if (statementWillRunHook) statementWillRunHook(statement);
 
-			status = [NSString stringWithFormat:NSLocalizedString(@"Error in statement %lu: %@", @"Postgres query: error in statement (number, server message)"), (unsigned long)number, message];
+			// A new error object is made for each failed query: compare with the previous one to know if this
+			// statement left one (a lost connection may leave none)
+			PGPostgresError *previousError = [[[connection lastError] retain] autorelease];
+			PGPostgresResult *statementResult = nil;
+			NSString *exceptionReason = nil;
 
-			// The user's own BEGIN … : nothing more runs in it until they roll back
-			if ([connection transactionStatus] == PGPostgresTransactionInError) {
-				status = [status stringByAppendingString:NSLocalizedString(@" – the current transaction is aborted; ROLLBACK to continue", @"Postgres query: aborted transaction note")];
+			@try {
+				statementResult = [connection execute:statement];
+			}
+			@catch (NSException *exception) {
+				statementResult = nil;
+				exceptionReason = [exception reason];
 			}
 
-			[logger logError:message];
-			break;
-		}
-		[previousError release];
+			if (!statementResult) {
+				PGPostgresError *error = [connection lastError];
+				if (error == previousError) error = nil;
 
-		if ([statementResult returnsRows]) {
-			[self _showResult:statementResult];
-			status = [self _rowCountText:[statementResult numberOfRows] affected:NO];
-		}
-		else {
-			status = [self _rowCountText:[statementResult numberOfRows] affected:YES];
+				NSString *fallback = exceptionReason;
+				if (![fallback length] && ![connection isConnected]) fallback = NSLocalizedString(@"The connection to the PostgreSQL server was lost.", @"Postgres query: connection lost");
+				if (![fallback length]) fallback = [connection libpqErrorMessage];
+
+				status = [self _errorTextForStatement:number error:error fallback:fallback];
+				[logger logError:status];
+				break;
+			}
+
+			if ([statementResult returnsRows]) {
+				[self _showResult:statementResult];
+				shownStatement = number;
+				status = [self _rowCountText:[statementResult numberOfRows] affected:NO];
+			}
+			else if ([statementResult copyOutputDiscarded]) {
+				status = [NSString stringWithFormat:NSLocalizedString(@"%@ – output not shown", @"Postgres query: COPY TO STDOUT status (command status)"), [statementResult commandStatus]];
+			}
+			else {
+				status = [self _rowCountText:[statementResult numberOfRows] affected:YES];
+			}
+
+			// After a SELECT, a command: the rows are the earlier statement's
+			if (shownStatement && shownStatement != number) {
+				status = [status stringByAppendingFormat:NSLocalizedString(@" – results shown from statement %lu", @"Postgres query: rows are from an earlier statement (number)"), (unsigned long)shownStatement];
+			}
 		}
 	}
+	@finally {
+		[logger setLoggingCustomQueries:wasLoggingCustomQueries];
+		running = NO;
 
-	[logger setLoggingCustomQueries:wasLoggingCustomQueries];
-
-	[self setStatusText:status];
-	[statusField setStringValue:status];
-	[statusField setToolTip:status];
-
-	running = NO;
+		[self setStatusText:status];
+		[statusField setStringValue:status];
+		[statusField setToolTip:status];
+	}
 }
 
 #pragma mark - Results

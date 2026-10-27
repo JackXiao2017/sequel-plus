@@ -8,6 +8,12 @@
 #import "../Source/Postgres/SPPostgresFavorite.h"
 #import "../Source/Postgres/SPPostgresContentController.h"
 #import "../Source/Postgres/SPPostgresQueryController.h"
+#import "../Source/Postgres/SPPostgresConsoleLogger.h"
+
+/// The controller's test seam: called before each statement runs.
+@interface SPPostgresQueryController (Testing)
+- (void)setStatementWillRunHook:(void (^)(NSString *statement))hook;
+@end
 
 static const NSUInteger SPQueryTestPort = 55418;
 // MySQL's preference keys (Source/SPConstants.m; the header is not ARC-clean)
@@ -333,6 +339,78 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	XCTAssertEqualObjects(self.query.statusText, @"");
 }
 
+- (void)testStatusSaysWhichStatementTheRowsAreFrom
+{
+	[self setSQL:@"SELECT a FROM content_test.composite_pk WHERE a = 1; UPDATE content_test.composite_pk SET v = v; SELECT 9 AS nine; DELETE FROM content_test.no_pk WHERE false"];
+	[self.query runAllQueries:nil];
+	XCTAssertEqualObjects(self.query.statusText, @"0 rows affected – results shown from statement 3");
+	XCTAssertEqualObjects([self columnTitles], @[@"nine"]);
+
+	[self setSQL:@"SELECT 1 AS one; UPDATE content_test.composite_pk SET v = v"];
+	[self.query runAllQueries:nil];
+	XCTAssertEqualObjects(self.query.statusText, @"3 rows affected – results shown from statement 1");
+
+	// Last statement is the one shown: no note
+	[self setSQL:@"UPDATE content_test.composite_pk SET v = v; SELECT 1 AS one"];
+	[self.query runAllQueries:nil];
+	XCTAssertEqualObjects(self.query.statusText, @"1 row");
+}
+
+- (void)testCopyToStdoutSaysOutputNotShown
+{
+	[self setSQL:@"COPY (SELECT a FROM content_test.composite_pk) TO STDOUT"];
+	[self.query runAllQueries:nil];
+	XCTAssertEqualObjects(self.query.statusText, @"COPY 3 – output not shown");
+
+	// Only that statement's status says so
+	[self setSQL:@"COPY (SELECT 1) TO STDOUT; UPDATE content_test.composite_pk SET v = v"];
+	[self.query runAllQueries:nil];
+	XCTAssertEqualObjects(self.query.statusText, @"3 rows affected");
+}
+
+- (void)testErrorShowsDetailAndHint
+{
+	[self setSQL:@"INSERT INTO content_test.composite_pk (a, b, v) VALUES (1, 'a', 'dup')"];
+	[self.query runAllQueries:nil];
+	XCTAssertEqualObjects(self.query.statusText,
+						  @"Error in statement 1: duplicate key value violates unique constraint \"composite_pk_pkey\"\nDETAIL: Key (a, b)=(1, a) already exists.");
+
+	[self setSQL:@"SELECT 1; SELECT content_test.no_such_function(1)"];
+	[self.query runAllQueries:nil];
+	NSArray *lines = [self.query.statusText componentsSeparatedByString:@"\n"];
+	XCTAssertEqual(lines.count, 2u, @"%@", self.query.statusText);
+	XCTAssertTrue([lines[0] hasPrefix:@"Error in statement 2: function content_test.no_such_function(integer) does not exist"], @"%@", lines[0]);
+	XCTAssertTrue([lines[1] hasPrefix:@"HINT: No function matches the given name and argument types."], @"%@", lines[1]);
+
+	// In a transaction, the note follows the message, before DETAIL
+	[self setSQL:@"BEGIN; INSERT INTO content_test.composite_pk (a, b, v) VALUES (1, 'a', 'dup')"];
+	[self.query runAllQueries:nil];
+	XCTAssertEqualObjects(self.query.statusText,
+						  @"Error in statement 2: duplicate key value violates unique constraint \"composite_pk_pkey\" – the current transaction is aborted; ROLLBACK to continue\nDETAIL: Key (a, b)=(1, a) already exists.");
+	XCTAssertNotNil([self.document.connection execute:@"ROLLBACK"]);
+}
+
+- (void)testExceptionDuringRunRestoresState
+{
+	SPPostgresConsoleLogger *logger = [SPPostgresConsoleLogger loggerForConnection:self.document.connection];
+	XCTAssertNotNil(logger);
+	XCTAssertFalse(logger.loggingCustomQueries);
+
+	__block NSUInteger calls = 0;
+	[self.query setStatementWillRunHook:^(NSString *statement) {
+		if (++calls == 2) [NSException raise:NSInternalInconsistencyException format:@"forced"];
+	}];
+	[self setSQL:@"SELECT 1 AS one; SELECT 2 AS two"];
+	XCTAssertThrows([self.query runAllQueries:nil]);
+	XCTAssertFalse(logger.loggingCustomQueries, @"interface queries are logged as such again");
+	XCTAssertEqualObjects(self.query.statusText, @"1 row", @"the status of what ran");
+
+	// Not stuck "running": the next run runs
+	[self.query setStatementWillRunHook:nil];
+	[self.query runAllQueries:nil];
+	XCTAssertEqualObjects([self columnTitles], @[@"two"]);
+}
+
 - (void)testStatementsLoggedToConsole
 {
 	[self overridePrefs:@{@"ConsoleEnableLogging": @YES, @"ConsoleEnableInterfaceLogging": @NO, @"ConsoleEnableCustomQueryLogging": @YES, @"ConsoleEnableErrorLogging": @YES}];
@@ -384,29 +462,71 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	XCTAssertTrue([editor allowsUndo]);
 	XCTAssertFalse([editor isRichText]);
 
-	// Run All / Run Current with MySQL's key equivalents
-	NSButton *runAll = [self buttonTitled:@"Run All" inView:[self.query view]];
-	NSButton *runCurrent = [self buttonTitled:@"Run Current" inView:[self.query view]];
-	XCTAssertNotNil(runAll);
-	XCTAssertNotNil(runCurrent);
-	XCTAssertEqualObjects([runAll keyEquivalent], @"r");
-	XCTAssertEqual([runAll keyEquivalentModifierMask], NSEventModifierFlagCommand);
-	XCTAssertEqualObjects([runCurrent keyEquivalent], @"r");
-	XCTAssertEqual([runCurrent keyEquivalentModifierMask], NSEventModifierFlagCommand | NSEventModifierFlagShift);
+	XCTAssertNotNil([self buttonTitled:@"Run All" inView:[self.query view]]);
+	XCTAssertNotNil([self buttonTitled:@"Run Current" inView:[self.query view]]);
+}
 
-	// The keys reach the view while it is in the window
+- (NSEvent *)keyDown:(NSString *)characters flags:(NSEventModifierFlags)flags
+{
+	return [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:flags timestamp:0
+						windowNumber:[[self.controller window] windowNumber] context:nil characters:characters
+		 charactersIgnoringModifiers:characters isARepeat:NO keyCode:15];
+}
+
+/// Sends a key equivalent to the window's views, as AppKit does before trying the main menu.
+- (BOOL)pressKey:(NSString *)characters flags:(NSEventModifierFlags)flags
+{
+	return [[[self.controller window] contentView] performKeyEquivalent:[self keyDown:characters flags:flags]];
+}
+
+- (NSString *)toolTipOf:(NSButton *)button
+{
+	return [(id<NSViewToolTipOwner>)self.query view:button stringForToolTip:0 point:NSZeroPoint userData:NULL];
+}
+
+- (void)testRunKeysFollowMySQLsPrimaryAction
+{
+	[self overridePrefs:@{@"QueryPrimaryControlRunsAll": @NO}];
 	[self.document viewQuery:nil];
 	[self setSQL:@"SELECT 1 AS one; SELECT 2 AS two"];
-	NSEvent *(^key)(NSString *, NSEventModifierFlags) = ^NSEvent *(NSString *characters, NSEventModifierFlags flags) {
-		return [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:flags timestamp:0
-							windowNumber:[[self.controller window] windowNumber] context:nil characters:characters
-			 charactersIgnoringModifiers:characters isARepeat:NO keyCode:15];
-	};
-	XCTAssertTrue([[[self.controller window] contentView] performKeyEquivalent:key(@"R", NSEventModifierFlagCommand | NSEventModifierFlagShift)]);
-	XCTAssertEqualObjects([self columnTitles], @[@"one"], @"Run Current");
-	XCTAssertTrue([[[self.controller window] contentView] performKeyEquivalent:key(@"r", NSEventModifierFlagCommand)]);
-	XCTAssertEqualObjects([self columnTitles], @[@"two"], @"Run All");
-	XCTAssertFalse([[self.query view] performKeyEquivalent:key(@"r", NSEventModifierFlagCommand | NSEventModifierFlagOption)], @"not ours");
+
+	// The buttons have no key equivalents of their own: the view handles MySQL's keys
+	NSButton *runAll = [self buttonTitled:@"Run All" inView:[self.query view]];
+	NSButton *runCurrent = [self buttonTitled:@"Run Current" inView:[self.query view]];
+	XCTAssertEqualObjects([runAll keyEquivalent], @"");
+	XCTAssertEqualObjects([runCurrent keyEquivalent], @"");
+
+	// MySQL's default (DBView.xib's run popup): ⌘R runs Current, ⌥⌘R runs All
+	XCTAssertTrue([self pressKey:@"r" flags:NSEventModifierFlagCommand]);
+	XCTAssertEqualObjects([self columnTitles], @[@"one"], @"⌘R: Run Current");
+	XCTAssertTrue([self pressKey:@"r" flags:NSEventModifierFlagCommand | NSEventModifierFlagOption]);
+	XCTAssertEqualObjects([self columnTitles], @[@"two"], @"⌥⌘R: Run All");
+	XCTAssertTrue([[self toolTipOf:runCurrent] hasSuffix:@"(⌘R)"], @"%@", [self toolTipOf:runCurrent]);
+	XCTAssertTrue([[self toolTipOf:runAll] hasSuffix:@"(⌥⌘R)"], @"%@", [self toolTipOf:runAll]);
+
+	// ⇧⌘R is MySQL's Refresh Databases menu item: not swallowed, it goes on to the main menu
+	[self.query.editor setSelectedRange:NSMakeRange(0, 0)];
+	[self.query runCurrentQuery:nil];
+	XCTAssertFalse([self pressKey:@"R" flags:NSEventModifierFlagCommand | NSEventModifierFlagShift]);
+	XCTAssertEqualObjects([self columnTitles], @[@"one"], @"nothing ran");
+	XCTAssertFalse([self pressKey:@"r" flags:NSEventModifierFlagCommand | NSEventModifierFlagControl], @"⌃⌘R (Refresh Tables) passes on too");
+
+	// The preference swaps them, read at the key press
+	[self overridePrefs:@{@"QueryPrimaryControlRunsAll": @YES}];
+	XCTAssertTrue([self pressKey:@"r" flags:NSEventModifierFlagCommand]);
+	XCTAssertEqualObjects([self columnTitles], @[@"two"], @"⌘R: Run All");
+	XCTAssertTrue([self pressKey:@"r" flags:NSEventModifierFlagCommand | NSEventModifierFlagOption]);
+	XCTAssertEqualObjects([self columnTitles], @[@"one"], @"⌥⌘R: Run Current");
+	XCTAssertTrue([[self toolTipOf:runAll] hasSuffix:@"(⌘R)"]);
+	XCTAssertTrue([[self toolTipOf:runCurrent] hasSuffix:@"(⌥⌘R)"]);
+
+	// Not in the window (Content showing): the keys aren't the Query view's
+	[self.document.sidebar reloadSchema:@"content_test"];
+	XCTAssertTrue([self.document.sidebar selectTableNamed:@"items"]);
+	[self.document viewContent:nil];
+	[self setSQL:@"SELECT 3 AS three"];
+	[self pressKey:@"r" flags:NSEventModifierFlagCommand];
+	XCTAssertEqualObjects([self columnTitles], @[@"one"]);
 }
 
 - (void)testEditorFontFallsBackToMonospaced

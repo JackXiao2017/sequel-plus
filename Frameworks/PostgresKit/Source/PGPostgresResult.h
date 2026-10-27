@@ -44,6 +44,8 @@ PGPostgresResultRowType;
 	PGPostgresResultRowType _defaultRowType;
 		
 	PGPostgresConnection *_connection;
+	
+	BOOL _copyOutputDiscarded;
 }
 
 /**
@@ -85,6 +87,17 @@ PGPostgresResultRowType;
  * NO for a command (numberOfRows is then the number of rows it affected).
  */
 - (BOOL)returnsRows;
+
+/**
+ * The server's command status, e.g. @"SELECT 3", @"UPDATE 2", @"COPY 5" (PQcmdStatus).
+ */
+- (NSString *)commandStatus;
+
+/**
+ * YES for a COPY ... TO STDOUT, whose rows were sent but discarded (copy data isn't supported); the result is
+ * then its "COPY n" status.
+ */
+- (BOOL)copyOutputDiscarded;
 
 /**
  * The value at row, column as the server sent it (PostgreSQL's own text format for every type), as an
