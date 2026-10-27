@@ -80,4 +80,17 @@ PGPostgresResultRowType;
 - (NSDictionary *)rowAsDictionary;
 - (id)rowAsType:(PGPostgresResultRowType)type;
 
+/**
+ * YES when the statement returned a row set (SELECT, SHOW, EXPLAIN, ... RETURNING), even an empty one;
+ * NO for a command (numberOfRows is then the number of rows it affected).
+ */
+- (BOOL)returnsRows;
+
+/**
+ * The value at row, column as the server sent it (PostgreSQL's own text format for every type), as an
+ * NSString, or NSNull for NULL. nil when row or column is out of range or the result has no rows.
+ * Does not move the current row.
+ */
+- (id)textValueAtRow:(unsigned long long)row column:(NSUInteger)column;
+
 @end

@@ -50,6 +50,7 @@ PGQueryParamData;
 
 - (PGPostgresResult *)_execute:(NSObject *)query values:(NSArray *)values;
 - (BOOL)_queryDidError:(PGresult *)result;
+- (PGresult *)_finishCopyIfNeeded:(PGresult *)result;
 - (PGQueryParamData *)_createParameterDataStructureWithCount:(int)paramNum;
 - (void)_destroyParamDataStructure:(PGQueryParamData *)paramData;
 
@@ -250,6 +251,8 @@ PGQueryParamData;
 	
 	[self _destroyParamDataStructure:paramData];
 	
+	if (pgResult) pgResult = [self _finishCopyIfNeeded:pgResult];
+	
 	if (!pgResult || [self _queryDidError:pgResult]) return nil;
 	
 	PGPostgresResult *result = [[[PGPostgresResult alloc] initWithResult:pgResult connection:self] autorelease];
@@ -257,6 +260,53 @@ PGQueryParamData;
 	_lastQueryAffectedRowCount = [result numberOfRows];
 	
 	return result;
+}
+
+/**
+ * COPY ... FROM STDIN / TO STDOUT leave the connection in copy mode, where libpq refuses every other query
+ * ("another command is already in progress"). Copy data isn't supported: a COPY FROM STDIN is ended with
+ * an error (the server rolls the COPY back and reports it), the rows of a COPY TO STDOUT are discarded.
+ *
+ * @param result The result PQexecParams/PQexecPrepared returned (taken over: cleared if replaced).
+ *
+ * @return The result to use: the COPY command's final result (an error, or its "COPY n" status), the
+ *         given result if it wasn't a COPY, or NULL if the connection failed.
+ */
+- (PGresult *)_finishCopyIfNeeded:(PGresult *)result
+{
+	ExecStatusType status = PQresultStatus(result);
+	
+	if (status != PGRES_COPY_IN && status != PGRES_COPY_OUT && status != PGRES_COPY_BOTH) return result;
+	
+	PQclear(result);
+	
+	if (status == PGRES_COPY_IN || status == PGRES_COPY_BOTH) {
+		PQputCopyEnd(_connection, "COPY FROM STDIN is not supported by this client");
+	}
+	
+	if (status == PGRES_COPY_OUT || status == PGRES_COPY_BOTH) {
+		char *buffer = NULL;
+		
+		// > 0: a row (discarded); -1: done; -2: failed
+		while (PQgetCopyData(_connection, &buffer, 0) > 0) 
+		{
+			PQfreemem(buffer);
+			buffer = NULL;
+		}
+	}
+	
+	// The command's final result is the last one
+	PGresult *final = NULL;
+	PGresult *next = NULL;
+	
+	while ((next = PQgetResult(_connection))) 
+	{
+		if (final) PQclear(final);
+		
+		final = next;
+	}
+	
+	return final;
 }
 
 /**
