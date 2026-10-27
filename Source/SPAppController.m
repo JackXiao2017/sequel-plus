@@ -176,8 +176,8 @@
 	[self reloadBundles:self];
     [self _copyDefaultThemes];
 
-	// If no documents are open, open one
-	if (![self frontDocument]) {
+	// If no documents are open, open one (skipped when hosting XCTest: the default connection reads the Keychain, which can block on a prompt)
+	if (![self frontDocument] && ![[[NSProcessInfo processInfo] environment] objectForKey:@"XCTestConfigurationFilePath"]) {
 		SPDatabaseDocument *newConnection = [self makeNewConnectionTabOrWindow];
 		
 		if (spfDict) {
