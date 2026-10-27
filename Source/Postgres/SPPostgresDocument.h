@@ -3,14 +3,15 @@
 
 @class PGPostgresConnection;
 @class SPPostgresConnector;
+@class SPPostgresContentController;
 @class SPPostgresFavorite;
 @class SPPostgresSidebarController;
 @class SPWindowController;
 
 /**
  * A PostgreSQL connection hosted as a tab of an SPWindowController window: the left panel (schema
- * picker, tables, views, extensions), an empty content pane, the database picker and the console
- * logger. Built in code. Use on the main thread.
+ * picker, tables, views, extensions), the Content view of the selected table or view (see
+ * SPPostgresContentController), the database picker and the console logger. Built in code. Use on the main thread.
  *
  * Takes over `connector` (it keeps it, and disconnects it when the tab closes) and `connection`,
  * which must be the connector's connected connection. Host it with
@@ -55,6 +56,8 @@ __attribute__((visibility("default")))
 @property (copy) void (^alertPresenter)(NSAlert *alert);
 
 @property (readonly) SPPostgresSidebarController *sidebar;
+/// The right pane: the Content view of the table or view selected in the sidebar.
+@property (readonly) SPPostgresContentController *contentController;
 @property (readonly) PGPostgresConnection *connection;
 @property (readonly) SPPostgresFavorite *favorite;
 

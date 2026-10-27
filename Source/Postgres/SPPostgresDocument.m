@@ -1,5 +1,6 @@
 #import "SPPostgresDocument.h"
 #import "SPPostgresSidebarController.h"
+#import "SPPostgresContentController.h"
 #import "SPPostgresConsoleLogger.h"
 #import "SPPostgresCatalog.h"
 #import "SPPostgresConnector.h"
@@ -33,6 +34,8 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 
 - (void)_attachCurrentConnection;
 - (void)_buildContent;
+- (void)_installContentController;
+- (void)_showSelectedTable;
 - (void)_buildToolbar;
 - (void)_reloadDatabasePopup;
 - (void)_applyWindowTitle;
@@ -55,6 +58,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	SPPostgresCatalog *catalog;
 	SPPostgresConsoleLogger *logger;
 	SPPostgresSidebarController *sidebar;
+	SPPostgresContentController *contentController;
 
 	NSString *serverVersion;
 	NSString *currentDatabase;
@@ -75,6 +79,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 }
 
 @synthesize sidebar;
+@synthesize contentController;
 @synthesize connection;
 @synthesize favorite;
 @synthesize alertPresenter;
@@ -120,6 +125,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	[catalog release];
 	[logger release];
 	[sidebar release];
+	[contentController release];
 	[serverVersion release];
 	[currentDatabase release];
 	[splitView release];
@@ -189,17 +195,64 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	[sidebarView setAutoresizingMask:NSViewHeightSizable]; // keeps its width as the window resizes
 	[splitView addSubview:sidebarView];
 
-	// Stage 1 has no table views yet: an empty content pane
+	// The right pane: the Content view of the selected table
 	CGFloat contentX = SPPostgresSidebarDefaultWidth + [splitView dividerThickness];
 	NSView *mainView = [[[NSView alloc] initWithFrame:NSMakeRect(contentX, 0, NSWidth(splitFrame) - contentX, NSHeight(splitFrame))] autorelease];
 	[mainView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 	[splitView addSubview:mainView];
+	[self _installContentController];
 
 	// Constrained, and resized with the window, as MySQL's left pane (see -[SPDatabaseDocument splitView:constrain...])
 	[splitView setCollapsibleSubviewIndex:0];
 	[splitView setDelegate:self];
 	[splitView adjustSubviews];
 	[splitView setAutosaveName:SPPostgresSplitterName];
+}
+
+/**
+ * A Content controller on the current connection, in the right pane (replacing the previous one, which is
+ * on the previous connection), showing the selected table.
+ */
+- (void)_installContentController
+{
+	NSView *pane = [[splitView subviews] lastObject];
+	if (!pane || [[splitView subviews] count] < 2) return;
+
+	if (contentController) {
+		[[contentController view] removeFromSuperview];
+		[contentController invalidate];
+		[contentController release];
+	}
+
+	contentController = [[SPPostgresContentController alloc] initWithConnection:connection];
+
+	// Through the tab's own presenter (a test's, or a sheet once the tab is visible). Unretained: the
+	// controller is this document's, and -_tearDown drops the block.
+	__block SPPostgresDocument *document = self;
+	[contentController setAlertPresenter:^(NSAlert *alert) {
+		[document _presentAlert:alert];
+	}];
+
+	NSView *contentView = [contentController view];
+	[contentView setFrame:[pane bounds]];
+	[contentView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+	[pane addSubview:contentView];
+
+	[self _showSelectedTable];
+}
+
+/// The Content view shows the table or view selected in the sidebar (or nothing), and the Content toolbar item is selected with it.
+- (void)_showSelectedTable
+{
+	NSString *table = [sidebar selectedTableName];
+	NSString *schema = [sidebar selectedSchema];
+
+	if (![table isEqualToString:[contentController table]] || ![schema isEqualToString:[contentController schema]] || !table) {
+		[contentController showTable:table inSchema:schema];
+	}
+
+	[toolbar setSelectedItemIdentifier:[table length] ? SPMainToolbarTableContent : nil];
+	[toolbar validateVisibleItems];
 }
 
 - (void)_buildToolbar
@@ -441,6 +494,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 
 	[sidebar invalidate];
 	[sidebar setDelegate:nil];
+	[contentController invalidate];
 	[splitView setDelegate:nil];
 	[databasePopup setTarget:nil];
 
@@ -465,6 +519,8 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 
 - (void)sidebarSelectionDidChange:(SPPostgresSidebarController *)theSidebar
 {
+	if (tornDown) return;
+	[self _showSelectedTable];
 	[self updateWindowTitle:self];
 }
 
@@ -575,6 +631,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 
 	[self _attachCurrentConnection];
 	[sidebar reloadWithCatalog:catalog];
+	[self _installContentController];
 	[self _reloadDatabasePopup];
 	[self updateWindowTitle:self];
 
@@ -639,6 +696,9 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 
 	if (tornDown) return NO;
 
+	// As the Content toolbar item
+	if (action == @selector(viewContent:)) return [[sidebar selectedTableName] length] > 0;
+
 	return [self respondsToSelector:action];
 }
 
@@ -665,10 +725,10 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	return SPMainToolbarSelectableItemIdentifiers();
 }
 
-/// Only the database picker and the console work on Postgres tabs so far
+/// The database picker, the console and Content work on Postgres tabs so far
 - (NSArray *)_availableToolbarItemIdentifiers
 {
-	return @[SPMainToolbarDatabaseSelection, SPMainToolbarShowConsole];
+	return @[SPMainToolbarDatabaseSelection, SPMainToolbarShowConsole, SPMainToolbarTableContent];
 }
 
 - (NSToolbarItem *)toolbar:(NSToolbar *)theToolbar itemForItemIdentifier:(NSString *)identifier willBeInsertedIntoToolbar:(BOOL)flag
@@ -704,6 +764,9 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 		[item setToolTip:NSLocalizedString(@"Show the console which shows all PostgreSQL commands performed by Sequel Pro", @"PostgreSQL toolbar: console tooltip")];
 		action = @selector(toggleConsole:);
 	}
+	else if ([identifier isEqualToString:SPMainToolbarTableContent]) {
+		action = @selector(viewContent:);
+	}
 	else if ([identifier isEqualToString:SPMainToolbarClearConsole]) {
 		[item setToolTip:NSLocalizedString(@"Clear the console which shows all PostgreSQL commands performed by Sequel Pro", @"PostgreSQL toolbar: clear console tooltip")];
 	}
@@ -733,7 +796,20 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 		return ![consoleWindow isKeyWindow];
 	}
 
+	// As MySQL's: Content needs a table (or view)
+	if ([identifier isEqualToString:SPMainToolbarTableContent]) {
+		return !tornDown && [[sidebar selectedTableName] length] > 0;
+	}
+
 	return !tornDown;
+}
+
+/// Shows the Content view of the selected table (the only view of the right pane so far).
+- (void)viewContent:(id)sender
+{
+	if (tornDown || ![[sidebar selectedTableName] length]) return;
+	[self _showSelectedTable];
+	[[[contentController view] window] makeFirstResponder:[contentController tableView]];
 }
 
 - (void)unavailableInThisVersion:(id)sender
