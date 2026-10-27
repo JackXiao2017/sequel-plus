@@ -7,3 +7,8 @@ extern NSString * const SPTestTransferAddedKey;
 /// The value last passed to -setAutosavesConfiguration: (which, in tests, always stores NO).
 - (BOOL)sp_requestedAutosave;
 @end
+
+@interface NSSplitView (SPTestPrefsGuard)
+/// The name last passed to -setAutosaveName: (which, in tests, always stores nil).
+- (NSString *)sp_requestedAutosaveName;
+@end

@@ -6,6 +6,9 @@
 #import "../Source/Postgres/SPPostgresDocument.h"
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
+#import <objc/runtime.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #pragma mark - Test-only tab document
 
@@ -101,7 +104,32 @@
 - (BOOL)windowShouldClose:(id)sender;
 @end
 
+/// PSMTabDragAssistant / PSMTabBarCell (PSMTabBar framework), driven directly by the drag tests.
+@interface NSObject (SPWindowTabsTestsDrag)
++ (id)sharedDragAssistant;
+- (void)setSourceTabBar:(id)tabBar;
+- (void)setDestinationTabBar:(id)tabBar;
+- (void)setDraggedCell:(id)cell;
+- (void)setDraggedCellIndex:(NSInteger)value;
+- (void)setIsDragging:(BOOL)value;
+- (void)setTargetCell:(id)cell;
+- (void)performDragOperation;
+- (void)draggedImageEndedAt:(NSPoint)aPoint operation:(NSDragOperation)operation;
+- (id)initPlaceholderWithFrame:(NSRect)frame expanded:(BOOL)value inControlView:(id)controlView;
+- (NSInteger)closeButtonTrackingTag;
+- (NSInteger)cellTrackingTag;
+@end
+
+/// SPAppController (the app delegate) and SPQueryController (the console).
+@interface NSObject (SPWindowTabsTestsApp)
+- (SPWindowController *)frontController;
++ (id)sharedQueryController;
+@end
+
 @interface NSObject (SPWindowTabsTestsMySQL)
+- (void)postgresReplaceConnectionTabWithDocument:(id)document;
+- (BOOL)isBeingReplacedInTab;
+- (void)toggleConsole:(id)sender;
 - (id)connectionController;
 - (void)_enableWindowToolbarItemsAfterConnecting;
 @end
@@ -128,8 +156,13 @@
  */
 - (void)assertCellsMatchItems
 {
-	NSArray *cells = [[self tabBar] valueForKey:@"cells"];
-	NSArray *items = [[self tabView] tabViewItems];
+	[self assertCellsMatchItemsOfController:self.controller];
+}
+
+- (void)assertCellsMatchItemsOfController:(SPWindowController *)controller
+{
+	NSArray *cells = [[controller valueForKey:@"tabBar"] valueForKey:@"cells"];
+	NSArray *items = [(NSTabView *)[controller valueForKey:@"tabView"] tabViewItems];
 
 	XCTAssertEqual([cells count], [items count]);
 	for (NSUInteger i = 0; i < [items count]; i++) {
@@ -686,6 +719,332 @@
 	[[background connectionController] _enableWindowToolbarItemsAfterConnecting];
 
 	[self assertEnabledAfterConnecting:toolbar];
+}
+
+
+#pragma mark - Real tab drags (PSMTabDragAssistant)
+
+/// document's cell in controller's tab bar.
+- (id)cellOfDocument:(id)document inController:(SPWindowController *)controller
+{
+	for (id cell in [[controller valueForKey:@"tabBar"] valueForKey:@"cells"]) {
+		if ([[cell valueForKey:@"representedObject"] identifier] == document) return cell;
+	}
+	return nil;
+}
+
+/**
+ * Puts the shared drag assistant in the state -startDraggingCell:fromTabBar:withMouseDownEvent: leaves
+ * it in (without a real mouse drag): the dragged cell's place in the source bar is a placeholder.
+ */
+- (id)beginFakeDragOfDocument:(id)document
+{
+	[self.controller showWindow:nil];
+	[self spinUntil:^BOOL{ return NO; } timeout:0.4]; // tracking rects; see -tearDown
+	id cell = [self cellOfDocument:document inController:self.controller];
+	XCTAssertNotNil(cell);
+	// The bug needs live tracking rects: without them there is nothing to remove twice
+	XCTAssertNotEqual([cell closeButtonTrackingTag], 0);
+	XCTAssertNotEqual([cell cellTrackingTag], 0);
+
+	id tabBar = [self tabBar];
+	NSMutableArray *sourceCells = [tabBar valueForKey:@"cells"];
+	NSUInteger index = [sourceCells indexOfObject:cell];
+
+	id assistant = [NSClassFromString(@"PSMTabDragAssistant") sharedDragAssistant];
+	XCTAssertNotNil(assistant);
+	[assistant setIsDragging:YES];
+	[assistant setSourceTabBar:tabBar];
+	[assistant setDestinationTabBar:tabBar];
+	[assistant setDraggedCell:cell];
+	[assistant setDraggedCellIndex:(NSInteger)index];
+	id placeholder = [[NSClassFromString(@"PSMTabBarCell") alloc] initPlaceholderWithFrame:[cell frame] expanded:YES inControlView:tabBar];
+	[sourceCells replaceObjectAtIndex:index withObject:placeholder];
+	return assistant;
+}
+
+/// A drag that ends in another window's tab bar (-performDragOperation).
+- (void)assertDropOfDocument:(id)document inWindowWithRemaining:(id)remaining
+{
+	SPWindowController *target = [[SPWindowController alloc] initWithWindowNibName:@"MainWindow"];
+	XCTAssertNotNil([target window]);
+	SPFakeTabDocument *resident = [[SPFakeTabDocument alloc] init];
+	[target addTabDocument:resident atIndex:0 select:YES];
+	// Real documents set their item's colour (nil without a favourite colour); NSTabViewItem's default,
+	// a catalog colour, can't be drawn by the tab style once the cell is in the background
+	[[(NSTabView *)[target valueForKey:@"tabView"] tabViewItemAtIndex:0] setValue:nil forKey:@"color"];
+	[target showWindow:nil];
+	[self addTeardownBlock:^{
+		SPWindowController *t = target; // kept alive until here
+		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.4]];
+		for (NSTabViewItem *item in [[(NSTabView *)[t valueForKey:@"tabView"] tabViewItems] copy]) {
+			[(NSTabView *)[t valueForKey:@"tabView"] removeTabViewItem:item];
+		}
+		[[t window] orderOut:nil];
+	}];
+
+	id assistant = [self beginFakeDragOfDocument:document];
+
+	// -draggingEnteredTabBar:atPoint: adds a placeholder to the destination bar, the drop's target
+	id targetBar = [target valueForKey:@"tabBar"];
+	id placeholder = [[NSClassFromString(@"PSMTabBarCell") alloc] initPlaceholderWithFrame:NSMakeRect(0, 0, 100, 22) expanded:YES inControlView:targetBar];
+	[[targetBar valueForKey:@"cells"] addObject:placeholder];
+	[assistant setDestinationTabBar:targetBar];
+	[assistant setTargetCell:placeholder];
+
+	XCTAssertNoThrow([assistant performDragOperation]);
+
+	XCTAssertEqualObjects([self.controller tabDocuments], @[remaining]);
+	NSArray *expected = @[resident, document];
+	XCTAssertEqualObjects([target tabDocuments], expected);
+	XCTAssertEqual((id)[target selectedDocument], document);
+	XCTAssertEqual([document parentWindow], [target window]);
+	XCTAssertEqual([document parentWindowController], target);
+	[self assertCellsMatchItems];
+	[self assertCellsMatchItemsOfController:target];
+}
+
+/// A drag that ends outside every tab bar: the tab tears off into a new window (-draggedImageEndedAt:operation:).
+- (void)assertTearOffOfDocument:(id)document withRemaining:(id)remaining
+{
+	id assistant = [self beginFakeDragOfDocument:document];
+	[assistant setDestinationTabBar:nil];
+
+	XCTAssertNoThrow([assistant draggedImageEndedAt:NSMakePoint(300, 300) operation:NSDragOperationNone]);
+
+	SPWindowController *newController = [document parentWindowController];
+	XCTAssertNotNil(newController);
+	XCTAssertNotEqual(newController, self.controller);
+	// The new window's controller is its delegate and frees itself when the window closes
+	[self addTeardownBlock:^{
+		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.4]];
+		[[newController window] close];
+	}];
+	XCTAssertEqualObjects([newController tabDocuments], @[document]);
+	XCTAssertEqual((id)[newController selectedDocument], document);
+	XCTAssertEqual([document parentWindow], [newController window]);
+	XCTAssertEqualObjects([self.controller tabDocuments], @[remaining]);
+	XCTAssertEqual((id)[self.controller selectedDocument], remaining);
+	[self assertCellsMatchItems];
+	[self assertCellsMatchItemsOfController:newController];
+}
+
+- (void)testDragMySQLTabToAnotherWindow
+{
+	id first = [self addMySQLTab];
+	id second = [self addMySQLTab];
+	[self assertDropOfDocument:second inWindowWithRemaining:first];
+}
+
+- (void)testDragPostgresTabToAnotherWindow
+{
+	id mysql = [self addMySQLTab];
+	SPPostgresDocument *postgres = [self connectedPostgresDocument];
+	[self.controller addTabDocument:postgres atIndex:1 select:YES];
+	[self assertDropOfDocument:postgres inWindowWithRemaining:mysql];
+	XCTAssertTrue(postgres.connection.isConnected);
+}
+
+- (void)testTearOffMySQLTabIntoNewWindow
+{
+	id first = [self addMySQLTab];
+	id second = [self addMySQLTab];
+	[self assertTearOffOfDocument:second withRemaining:first];
+}
+
+- (void)testTearOffPostgresTabIntoNewWindow
+{
+	id mysql = [self addMySQLTab];
+	SPPostgresDocument *postgres = [self connectedPostgresDocument];
+	[self.controller addTabDocument:postgres atIndex:1 select:YES];
+	[self assertTearOffOfDocument:postgres withRemaining:mysql];
+	XCTAssertTrue(postgres.connection.isConnected);
+}
+
+#pragma mark - Dock icon click (reopen)
+
+- (NSArray *)visibleMainWindows
+{
+	NSMutableArray *windows = [NSMutableArray array];
+	for (NSWindow *window in [NSApp windows]) {
+		if ([window isVisible] && [[window windowController] isMemberOfClass:[SPWindowController class]]) [windows addObject:window];
+	}
+	return windows;
+}
+
+/// Asks the app delegate to handle a reopen with this test's window in front; returns its answer.
+- (BOOL)reopenWithControllerInFrontCreatedWindows:(NSArray **)created
+{
+	[self.controller showWindow:nil];
+	[[self.controller window] orderFront:nil];
+	id app = [NSApp delegate];
+	XCTAssertEqual([app frontController], self.controller);
+
+	NSArray *before = [self visibleMainWindows];
+	BOOL result = [(id <NSApplicationDelegate>)app applicationShouldHandleReopen:NSApp hasVisibleWindows:YES];
+	NSMutableArray *added = [[self visibleMainWindows] mutableCopy];
+	[added removeObjectsInArray:before];
+	if ([added count]) {
+		// Close what a failing run opened (its MySQL tab's filter editor needs its 0.2 s first, see -tearDown)
+		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.4]];
+		for (NSWindow *window in added) [window close];
+	}
+	*created = added;
+	return result;
+}
+
+- (void)testDockReopenWithPostgresTabInFrontOpensNoWindow
+{
+	SPFakeTabDocument *fake = [[SPFakeTabDocument alloc] init];
+	[self.controller addTabDocument:fake atIndex:0 select:YES];
+	XCTAssertNil([self.controller selectedTableDocument]);
+
+	NSArray *created = nil;
+	XCTAssertTrue([self reopenWithControllerInFrontCreatedWindows:&created]);
+	XCTAssertEqual([created count], 0u);
+}
+
+- (void)testDockReopenWithMySQLTabInFrontOpensNoWindow
+{
+	[self addMySQLTab];
+
+	NSArray *created = nil;
+	XCTAssertTrue([self reopenWithControllerInFrontCreatedWindows:&created]);
+	XCTAssertEqual([created count], 0u);
+}
+
+#pragma mark - Undo manager
+
+- (void)testUndoManagerWithNonMySQLTabSelected
+{
+	SPFakeTabDocument *fake = [[SPFakeTabDocument alloc] init];
+	[self.controller addTabDocument:fake atIndex:0 select:YES];
+	NSWindow *window = [self.controller window];
+	XCTAssertTrue([window isKindOfClass:NSClassFromString(@"SPWindow")]);
+
+	NSUndoManager *undoManager = [window undoManager];
+	XCTAssertNotNil(undoManager);
+
+	// A MySQL tab selected: its document's own undo manager, as before
+	id mysql = [self addMySQLTab];
+	XCTAssertEqual([self.controller selectedTableDocument], mysql);
+	XCTAssertNotNil([mysql undoManager]);
+	XCTAssertEqual([window undoManager], [mysql undoManager]);
+	XCTAssertNotEqual([window undoManager], undoManager);
+}
+
+#pragma mark - Console on replace (connection screen -> PostgreSQL tab)
+
+static NSUInteger SPToggleConsoleCount = 0;
+
+/**
+ * Counts -[SPDatabaseDocument toggleConsole:] instead of running it, with the console reporting itself
+ * visible (a plain stand-in window, so the real console never shows or saves its frame). Restored by
+ * a teardown block.
+ */
+- (NSWindow *)installVisibleConsoleAndToggleCounter
+{
+	Method toggle = class_getInstanceMethod(NSClassFromString(@"SPDatabaseDocument"), @selector(toggleConsole:));
+	XCTAssertTrue(toggle != NULL);
+	IMP originalToggle = method_setImplementation(toggle, imp_implementationWithBlock(^(id doc, id sender) { SPToggleConsoleCount++; }));
+	SPToggleConsoleCount = 0;
+
+	NSWindowController *console = [NSClassFromString(@"SPQueryController") sharedQueryController];
+	NSWindow *originalWindow = [console window];
+	NSWindow *standIn = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 100, 100) styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:YES];
+	[standIn setReleasedWhenClosed:NO];
+	[console setWindow:standIn];
+	[standIn orderBack:nil];
+	XCTAssertTrue([[console window] isVisible]);
+
+	[self addTeardownBlock:^{
+		method_setImplementation(toggle, originalToggle);
+		[standIn orderOut:nil];
+		[console setWindow:originalWindow];
+	}];
+	return standIn;
+}
+
+/// Replacing a connection screen with a PostgreSQL tab leaves a visible console where it is; closing a
+/// MySQL tab the normal way still toggles it, as before.
+- (void)testReplacingMySQLTabDoesNotToggleConsole
+{
+	id mysql = [self addMySQLTab];
+	NSWindow *console = [self installVisibleConsoleAndToggleCounter];
+	XCTAssertFalse([mysql isBeingReplacedInTab]);
+
+	SPFakeTabDocument *fake = [[SPFakeTabDocument alloc] init];
+	[self.controller replaceTabDocument:mysql withDocument:fake];
+
+	XCTAssertEqualObjects([self.controller tabDocuments], @[fake]);
+	XCTAssertNil([mysql valueForKey:@"parentWindow"], @"the replaced document got -parentTabDidClose");
+	XCTAssertEqual(SPToggleConsoleCount, 0u);
+	XCTAssertTrue([console isVisible]);
+
+	// A normal close of a MySQL tab runs the original line
+	id other = [self addMySQLTab];
+	XCTAssertFalse([other isBeingReplacedInTab]);
+	[[self tabView] removeTabViewItem:[other parentTabViewItem]];
+	XCTAssertEqual(SPToggleConsoleCount, 1u);
+}
+
+#pragma mark - Replace failures are logged
+
+/// Runs block with stderr captured; returns what was written.
+- (NSString *)stderrOutputOf:(void (^)(void))block
+{
+	NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
+	int fd = open([path fileSystemRepresentation], O_RDWR | O_CREAT | O_TRUNC, 0600);
+	XCTAssertGreaterThanOrEqual(fd, 0);
+	fflush(stderr);
+	int saved = dup(STDERR_FILENO);
+	dup2(fd, STDERR_FILENO);
+	block();
+	fflush(stderr);
+	dup2(saved, STDERR_FILENO);
+	close(saved);
+	close(fd);
+	NSString *output = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:NULL];
+	[[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
+	return output ?: @"";
+}
+
+- (void)testReplaceWithDocumentNotInWindowLogsAndChangesNothing
+{
+	NSArray *docs = [self addThreeTabs];
+	SPFakeTabDocument *stranger = [[SPFakeTabDocument alloc] init];
+	SPFakeTabDocument *replacement = [[SPFakeTabDocument alloc] init];
+
+	NSString *log = [self stderrOutputOf:^{
+		[self.controller replaceTabDocument:stranger withDocument:replacement];
+	}];
+	XCTAssertTrue([log containsString:@"replaceTabDocument:withDocument:"], @"%@", log);
+	XCTAssertEqualObjects([self.controller tabDocuments], docs);
+	XCTAssertNil(replacement.parentWindow);
+	[self assertCellsMatchItems];
+
+	log = [self stderrOutputOf:^{
+		[self.controller replaceTabDocument:docs[1] withDocument:nil];
+	}];
+	XCTAssertTrue([log containsString:@"replaceTabDocument:withDocument:"], @"%@", log);
+	XCTAssertEqualObjects([self.controller tabDocuments], docs);
+}
+
+/// The connection screen's document has no window controller: the PostgreSQL tab can't be placed (logged).
+- (void)testPostgresReplaceWithoutWindowControllerLogs
+{
+	id mysql = [self addMySQLTab];
+	SPFakeTabDocument *replacement = [[SPFakeTabDocument alloc] init];
+	[mysql setParentWindowController:nil];
+
+	NSString *log = [self stderrOutputOf:^{
+		[[mysql connectionController] postgresReplaceConnectionTabWithDocument:replacement];
+	}];
+	[mysql setParentWindowController:self.controller];
+
+	XCTAssertTrue([log containsString:@"postgresReplaceConnectionTabWithDocument:"], @"%@", log);
+	XCTAssertEqualObjects([self.controller tabDocuments], @[mysql]);
+	XCTAssertNil(replacement.parentWindow);
 }
 
 @end

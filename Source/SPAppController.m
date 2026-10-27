@@ -2186,8 +2186,9 @@
  */
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)flag
 {
-	// Only create a new document (without auto-connect) when there are already no documents open.
-	if (![self frontDocument]) {
+	// Only create a new document (without auto-connect) when there are already no windows open
+	// (a window whose selected tab is not a MySQL document still counts).
+	if (![self frontController]) {
 		[self newWindow:self];
 		return NO;
 	}
