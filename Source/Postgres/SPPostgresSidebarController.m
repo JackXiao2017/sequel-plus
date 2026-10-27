@@ -1,0 +1,481 @@
+#import "SPPostgresSidebarController.h"
+#import "SPPostgresCatalog.h"
+
+static NSString * const SPPostgresSidebarTables = @"TABLES";
+static NSString * const SPPostgresSidebarViews = @"VIEWS";
+static NSString * const SPPostgresSidebarExtensions = @"EXTENSIONS";
+
+static NSString * const SPPostgresSidebarGroupCell = @"SPPostgresSidebarGroupCell";
+static NSString * const SPPostgresSidebarItemCell = @"SPPostgresSidebarItemCell";
+
+static const CGFloat SPPostgresSidebarSchemaBarHeight = 32;
+static const NSInteger SPPostgresSidebarDetailTag = 1;
+
+typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
+	SPPostgresSidebarSection,
+	SPPostgresSidebarTable,
+	SPPostgresSidebarView,
+	SPPostgresSidebarExtension
+};
+
+/// One outline row: a section header, or a table, view or extension. Rows are distinct objects, so a
+/// table called "TABLES" is still a table.
+@interface SPPostgresSidebarItem : NSObject
+@property (copy) NSString *title;
+@property (copy) NSString *detail;
+@property (assign) SPPostgresSidebarItemKind kind;
+@property (retain) NSMutableArray *children;
++ (instancetype)itemWithTitle:(NSString *)title detail:(NSString *)detail kind:(SPPostgresSidebarItemKind)kind;
+@end
+
+@implementation SPPostgresSidebarItem
+
+@synthesize title, detail, kind, children;
+
++ (instancetype)itemWithTitle:(NSString *)theTitle detail:(NSString *)theDetail kind:(SPPostgresSidebarItemKind)theKind
+{
+	SPPostgresSidebarItem *item = [[[self alloc] init] autorelease];
+	[item setTitle:theTitle];
+	[item setDetail:theDetail];
+	[item setKind:theKind];
+	if (theKind == SPPostgresSidebarSection) [item setChildren:[NSMutableArray array]];
+	return item;
+}
+
+- (void)dealloc
+{
+	[title release];
+	[detail release];
+	[children release];
+	[super dealloc];
+}
+
+@end
+
+#pragma mark -
+
+@interface SPPostgresSidebarController ()
+
+- (void)_buildView;
+- (void)_reloadSchemaPopup;
+- (void)_reloadExtensions;
+- (void)_reloadOutline;
+- (void)_updateSelectionFromOutline;
+- (void)_rememberError:(NSError *)error;
+- (SPPostgresSidebarItem *)_sectionNamed:(NSString *)title;
+
+@end
+
+@implementation SPPostgresSidebarController
+{
+	SPPostgresCatalog *catalog;
+	NSArray *schemas;
+	NSArray *sections; // TABLES, VIEWS, EXTENSIONS
+
+	NSView *view;
+	NSPopUpButton *schemaPopup;
+	NSOutlineView *outlineView;
+
+	BOOL reloading;
+}
+
+@synthesize selectedSchema;
+@synthesize selectedTableName;
+@synthesize lastError;
+@synthesize delegate;
+
+- (instancetype)initWithCatalog:(SPPostgresCatalog *)theCatalog
+{
+	if ((self = [super init])) {
+		sections = [@[[SPPostgresSidebarItem itemWithTitle:SPPostgresSidebarTables detail:nil kind:SPPostgresSidebarSection],
+		              [SPPostgresSidebarItem itemWithTitle:SPPostgresSidebarViews detail:nil kind:SPPostgresSidebarSection],
+		              [SPPostgresSidebarItem itemWithTitle:SPPostgresSidebarExtensions detail:nil kind:SPPostgresSidebarSection]] retain];
+		schemas = [@[] retain];
+
+		[self _buildView];
+		[self reloadWithCatalog:theCatalog];
+	}
+	return self;
+}
+
+- (void)dealloc
+{
+	[self invalidate];
+
+	[catalog release];
+	[schemas release];
+	[sections release];
+	[view release];
+	[schemaPopup release];
+	[outlineView release];
+	[selectedSchema release];
+	[selectedTableName release];
+	[lastError release];
+
+	[super dealloc];
+}
+
+- (void)invalidate
+{
+	delegate = nil;
+	[outlineView setDelegate:nil];
+	[outlineView setDataSource:nil];
+	[schemaPopup setTarget:nil];
+}
+
+#pragma mark - View
+
+- (NSView *)view
+{
+	return view;
+}
+
+- (void)_buildView
+{
+	NSRect frame = NSMakeRect(0, 0, 250, 500);
+
+	// Same backdrop as a source list, so the schema bar and the outline read as one panel
+	NSVisualEffectView *container = [[NSVisualEffectView alloc] initWithFrame:frame];
+	[container setMaterial:NSVisualEffectMaterialSidebar];
+	[container setBlendingMode:NSVisualEffectBlendingModeBehindWindow];
+	[container setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+	view = container;
+
+	// Schema bar on top
+	NSTextField *schemaLabel = [NSTextField labelWithString:NSLocalizedString(@"SCHEMA", @"PostgreSQL sidebar: schema picker label")];
+	[schemaLabel setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize] weight:NSFontWeightSemibold]];
+	[schemaLabel setTextColor:[NSColor secondaryLabelColor]];
+	[schemaLabel sizeToFit];
+	CGFloat barY = NSMaxY(frame) - SPPostgresSidebarSchemaBarHeight;
+	[schemaLabel setFrameOrigin:NSMakePoint(10, barY + round((SPPostgresSidebarSchemaBarHeight - NSHeight([schemaLabel frame])) / 2))];
+	[schemaLabel setAutoresizingMask:NSViewMinYMargin];
+	[container addSubview:schemaLabel];
+
+	CGFloat popupX = NSMaxX([schemaLabel frame]) + 6;
+	schemaPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(popupX, barY + 5, NSWidth(frame) - popupX - 8, 22) pullsDown:NO];
+	[schemaPopup setControlSize:NSControlSizeSmall];
+	[schemaPopup setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+	[schemaPopup setBezelStyle:NSBezelStyleRounded];
+	[[schemaPopup cell] setLineBreakMode:NSLineBreakByTruncatingTail];
+	[schemaPopup setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+	[schemaPopup setTarget:self];
+	[schemaPopup setAction:@selector(chooseSchema:)];
+	[schemaPopup setToolTip:NSLocalizedString(@"Choose the schema whose tables and views are listed", @"PostgreSQL sidebar: schema picker tooltip")];
+	[container addSubview:schemaPopup];
+
+	// Outline below
+	NSScrollView *scrollView = [[[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, NSWidth(frame), barY)] autorelease];
+	[scrollView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+	[scrollView setHasVerticalScroller:YES];
+	[scrollView setHasHorizontalScroller:NO];
+	[scrollView setAutohidesScrollers:YES];
+	[scrollView setBorderType:NSNoBorder];
+	[scrollView setDrawsBackground:NO];
+
+	outlineView = [[NSOutlineView alloc] initWithFrame:[[scrollView contentView] bounds]];
+	NSTableColumn *column = [[[NSTableColumn alloc] initWithIdentifier:@"name"] autorelease];
+	[column setResizingMask:NSTableColumnAutoresizingMask];
+	[outlineView addTableColumn:column];
+	[outlineView setOutlineTableColumn:column];
+	[outlineView setHeaderView:nil];
+	[outlineView setStyle:NSTableViewStyleSourceList];
+	[outlineView setRowSizeStyle:NSTableViewRowSizeStyleSmall];
+	[outlineView setFloatsGroupRows:NO];
+	[outlineView setIndentationPerLevel:0];
+	[outlineView setAllowsMultipleSelection:NO];
+	[outlineView setAllowsEmptySelection:YES];
+	[outlineView setColumnAutoresizingStyle:NSTableViewUniformColumnAutoresizingStyle];
+	[outlineView setFocusRingType:NSFocusRingTypeNone];
+	[outlineView setAutosaveExpandedItems:NO];
+	[outlineView setDataSource:self];
+	[outlineView setDelegate:self];
+	[scrollView setDocumentView:outlineView];
+	[outlineView sizeLastColumnToFit];
+
+	[container addSubview:scrollView];
+}
+
+#pragma mark - Loading
+
+- (void)reloadWithCatalog:(SPPostgresCatalog *)theCatalog
+{
+	if (theCatalog != catalog) {
+		[catalog release];
+		catalog = [theCatalog retain];
+	}
+
+	[lastError release], lastError = nil;
+
+	NSError *error = nil;
+	NSArray *names = [catalog schemaNames:&error];
+	if (!names) [self _rememberError:error];
+	[schemas release];
+	schemas = [(names ?: @[]) copy];
+
+	[self _reloadExtensions];
+
+	// The default schema of this database (the previous database's schema doesn't carry over)
+	[self reloadSchema:[catalog defaultSchemaFromSchemas:schemas]];
+}
+
+- (void)reloadSchema:(NSString *)schema
+{
+	if (selectedSchema != schema) {
+		[selectedSchema release];
+		selectedSchema = [schema copy];
+	}
+	[selectedTableName release], selectedTableName = nil;
+
+	SPPostgresSidebarItem *tables = [self _sectionNamed:SPPostgresSidebarTables];
+	SPPostgresSidebarItem *views = [self _sectionNamed:SPPostgresSidebarViews];
+	[[tables children] removeAllObjects];
+	[[views children] removeAllObjects];
+
+	if (selectedSchema) {
+		NSError *error = nil;
+		NSArray *tableNames = [catalog tableNamesInSchema:selectedSchema error:&error];
+		if (!tableNames) [self _rememberError:error];
+		for (NSString *name in tableNames) {
+			[[tables children] addObject:[SPPostgresSidebarItem itemWithTitle:name detail:nil kind:SPPostgresSidebarTable]];
+		}
+
+		error = nil;
+		NSArray *viewNames = [catalog viewNamesInSchema:selectedSchema error:&error];
+		if (!viewNames) [self _rememberError:error];
+		for (NSString *name in viewNames) {
+			[[views children] addObject:[SPPostgresSidebarItem itemWithTitle:name detail:nil kind:SPPostgresSidebarView]];
+		}
+	}
+
+	[self _reloadSchemaPopup];
+	[self _reloadOutline];
+
+	[delegate sidebarSelectionDidChange:self];
+}
+
+- (void)_reloadExtensions
+{
+	SPPostgresSidebarItem *extensions = [self _sectionNamed:SPPostgresSidebarExtensions];
+	[[extensions children] removeAllObjects];
+
+	NSError *error = nil;
+	NSArray *installed = [catalog installedExtensions:&error];
+	if (!installed) [self _rememberError:error];
+	for (NSDictionary *extension in installed) {
+		[[extensions children] addObject:[SPPostgresSidebarItem itemWithTitle:[extension objectForKey:@"name"] detail:[extension objectForKey:@"version"] kind:SPPostgresSidebarExtension]];
+	}
+}
+
+- (void)_reloadSchemaPopup
+{
+	[schemaPopup removeAllItems];
+	[schemaPopup addItemsWithTitles:schemas];
+
+	// A schema that isn't listed (e.g. hidden from the catalog query) is still shown as selected
+	if (selectedSchema && ![schemas containsObject:selectedSchema]) [schemaPopup addItemWithTitle:selectedSchema];
+	if (selectedSchema) [schemaPopup selectItemWithTitle:selectedSchema];
+
+	[schemaPopup setEnabled:([schemaPopup numberOfItems] > 0)];
+}
+
+- (void)_reloadOutline
+{
+	reloading = YES;
+	[outlineView deselectAll:nil];
+	[outlineView reloadData];
+	for (SPPostgresSidebarItem *section in sections) [outlineView expandItem:section];
+	reloading = NO;
+}
+
+- (void)_rememberError:(NSError *)error
+{
+	if (!error) return;
+	[lastError release];
+	lastError = [error retain];
+}
+
+- (SPPostgresSidebarItem *)_sectionNamed:(NSString *)title
+{
+	for (SPPostgresSidebarItem *section in sections) {
+		if ([[section title] isEqualToString:title]) return section;
+	}
+	return nil;
+}
+
+#pragma mark - Queries
+
+- (NSArray *)sectionTitles
+{
+	return [sections valueForKey:@"title"];
+}
+
+- (NSArray *)itemTitlesInSection:(NSString *)sectionTitle
+{
+	SPPostgresSidebarItem *section = [self _sectionNamed:sectionTitle];
+	return section ? [[section children] valueForKey:@"title"] : nil;
+}
+
+#pragma mark - Selection
+
+- (BOOL)selectTableNamed:(NSString *)name
+{
+	for (NSString *sectionTitle in @[SPPostgresSidebarTables, SPPostgresSidebarViews]) {
+		for (SPPostgresSidebarItem *item in [[self _sectionNamed:sectionTitle] children]) {
+			if (![[item title] isEqualToString:name]) continue;
+
+			NSInteger row = [outlineView rowForItem:item];
+			if (row < 0) return NO;
+			[outlineView selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
+			[outlineView scrollRowToVisible:row];
+			[self _updateSelectionFromOutline];
+			return YES;
+		}
+	}
+	return NO;
+}
+
+- (void)_updateSelectionFromOutline
+{
+	SPPostgresSidebarItem *item = [outlineView selectedRow] >= 0 ? [outlineView itemAtRow:[outlineView selectedRow]] : nil;
+	NSString *name = ([item kind] == SPPostgresSidebarTable || [item kind] == SPPostgresSidebarView) ? [item title] : nil;
+
+	if (name == selectedTableName || [name isEqualToString:selectedTableName]) return;
+
+	[selectedTableName release];
+	selectedTableName = [name copy];
+
+	[delegate sidebarSelectionDidChange:self];
+}
+
+- (void)chooseSchema:(id)sender
+{
+	NSString *schema = [schemaPopup titleOfSelectedItem];
+	if (!schema || [schema isEqualToString:selectedSchema]) return;
+	[self reloadSchema:schema];
+}
+
+#pragma mark - NSOutlineViewDataSource
+
+- (NSInteger)outlineView:(NSOutlineView *)theOutlineView numberOfChildrenOfItem:(id)item
+{
+	return item ? (NSInteger)[[(SPPostgresSidebarItem *)item children] count] : (NSInteger)[sections count];
+}
+
+- (id)outlineView:(NSOutlineView *)theOutlineView child:(NSInteger)index ofItem:(id)item
+{
+	NSArray *children = item ? [(SPPostgresSidebarItem *)item children] : sections;
+	return [children objectAtIndex:(NSUInteger)index];
+}
+
+- (BOOL)outlineView:(NSOutlineView *)theOutlineView isItemExpandable:(id)item
+{
+	return [(SPPostgresSidebarItem *)item kind] == SPPostgresSidebarSection;
+}
+
+- (id)outlineView:(NSOutlineView *)theOutlineView objectValueForTableColumn:(NSTableColumn *)tableColumn byItem:(id)item
+{
+	return [(SPPostgresSidebarItem *)item title];
+}
+
+#pragma mark - NSOutlineViewDelegate
+
+- (BOOL)outlineView:(NSOutlineView *)theOutlineView isGroupItem:(id)item
+{
+	return [(SPPostgresSidebarItem *)item kind] == SPPostgresSidebarSection;
+}
+
+- (BOOL)outlineView:(NSOutlineView *)theOutlineView shouldSelectItem:(id)item
+{
+	return [(SPPostgresSidebarItem *)item kind] != SPPostgresSidebarSection;
+}
+
+- (BOOL)outlineView:(NSOutlineView *)theOutlineView shouldShowOutlineCellForItem:(id)item
+{
+	// Sections are always expanded, as in the MySQL table list
+	return NO;
+}
+
+- (BOOL)outlineView:(NSOutlineView *)theOutlineView shouldCollapseItem:(id)item
+{
+	return NO;
+}
+
+- (NSView *)outlineView:(NSOutlineView *)theOutlineView viewForTableColumn:(NSTableColumn *)tableColumn item:(id)theItem
+{
+	SPPostgresSidebarItem *item = theItem;
+	BOOL isSection = ([item kind] == SPPostgresSidebarSection);
+	NSString *identifier = isSection ? SPPostgresSidebarGroupCell : SPPostgresSidebarItemCell;
+
+	NSTableCellView *cell = [theOutlineView makeViewWithIdentifier:identifier owner:self];
+	if (!cell) {
+		CGFloat width = [tableColumn width];
+		cell = [[[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, width, 18)] autorelease];
+		[cell setIdentifier:identifier];
+
+		NSTextField *textField = [NSTextField labelWithString:@""];
+		[textField setLineBreakMode:NSLineBreakByTruncatingTail];
+		[textField setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin | NSViewMaxYMargin];
+		[cell addSubview:textField];
+		[cell setTextField:textField];
+
+		if (isSection) {
+			[textField setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize] weight:NSFontWeightSemibold]];
+			[textField setTextColor:[NSColor secondaryLabelColor]];
+			[textField setFrame:NSMakeRect(2, 1, width - 4, 16)];
+		}
+		else {
+			NSImageView *imageView = [[[NSImageView alloc] initWithFrame:NSMakeRect(4, 1, 16, 16)] autorelease];
+			[imageView setImageScaling:NSImageScaleProportionallyDown];
+			[imageView setAutoresizingMask:NSViewMinYMargin | NSViewMaxYMargin];
+			[cell addSubview:imageView];
+			[cell setImageView:imageView];
+
+			[textField setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+			[textField setFrame:NSMakeRect(24, 1, width - 28, 16)];
+
+			// Extension version, right-aligned
+			NSTextField *detailField = [NSTextField labelWithString:@""];
+			[detailField setTag:SPPostgresSidebarDetailTag];
+			[detailField setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+			[detailField setTextColor:[NSColor secondaryLabelColor]];
+			[detailField setAlignment:NSTextAlignmentRight];
+			[detailField setFrame:NSMakeRect(width - 64, 1, 60, 16)];
+			[detailField setAutoresizingMask:NSViewMinXMargin | NSViewMinYMargin | NSViewMaxYMargin];
+			[cell addSubview:detailField];
+		}
+	}
+
+	[[cell textField] setStringValue:[item title] ?: @""];
+
+	if (!isSection) {
+		NSImage *image = nil;
+		switch ([item kind]) {
+			case SPPostgresSidebarTable: image = [NSImage imageNamed:@"table-small"]; break;
+			case SPPostgresSidebarView: image = [NSImage imageNamed:@"table-view-small"]; break;
+			default: image = [NSImage imageWithSystemSymbolName:@"puzzlepiece.extension" accessibilityDescription:NSLocalizedString(@"Extension", @"PostgreSQL sidebar: extension icon description")]; break;
+		}
+		[[cell imageView] setImage:image];
+		[[cell imageView] setContentTintColor:([item kind] == SPPostgresSidebarExtension) ? [NSColor secondaryLabelColor] : nil];
+
+		NSTextField *detailField = [cell viewWithTag:SPPostgresSidebarDetailTag];
+		NSString *detail = [item detail] ?: @"";
+		[detailField setStringValue:detail];
+		[detailField setHidden:![detail length]];
+
+		// Leave room for the version so long extension names truncate before it
+		NSRect textFrame = [[cell textField] frame];
+		CGFloat detailWidth = [detail length] ? ceil([detailField fittingSize].width) + 6 : 0;
+		textFrame.size.width = MAX(20, NSWidth([cell bounds]) - NSMinX(textFrame) - 4 - detailWidth);
+		[[cell textField] setFrame:textFrame];
+	}
+
+	return cell;
+}
+
+- (void)outlineViewSelectionDidChange:(NSNotification *)notification
+{
+	if (reloading) return;
+	[self _updateSelectionFromOutline];
+}
+
+@end
