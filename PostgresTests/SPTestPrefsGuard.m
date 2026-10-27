@@ -2,6 +2,8 @@
 #import <objc/runtime.h>
 
 NSString * const SPTestTransferAddedKey = @"SPToolbarTransferItemAdded";
+NSString * const SPTestSelectLastFavoriteUsedKey = @"SelectLastFavoriteUsed";
+NSString * const SPTestDefaultFavoriteKey = @"DefaultFavorite";
 
 static const void *SPRequestedAutosaveKey = &SPRequestedAutosaveKey;
 static const void *SPRequestedAutosaveNameKey = &SPRequestedAutosaveNameKey;
@@ -22,6 +24,11 @@ static const void *SPRequestedAutosaveNameKey = &SPRequestedAutosaveNameKey;
  *   <name>") saves or restores divider positions, so split views in tests use their built layout.
  * - SPToolbarTransferItemAdded reads YES from the volatile argument domain, so documents created by
  *   tests never try the one-time Transfer insertion, which records itself in the given defaults.
+ * - MySQL connection tabs preselect no saved favorite: SelectLastFavoriteUsed reads NO and
+ *   DefaultFavorite 0 (Quick Connect) from the volatile argument domain. Otherwise a new MySQL tab
+ *   selects the owner's favorite and reads its password from the login keychain
+ *   (-[SPConnectionController updateFavoriteSelection:]), which can block the run on a keychain
+ *   access prompt (e.g. after a rebuild changes the app's signature).
  *
  * All are in place before any test runs (+load runs when the bundle is loaded).
  *
@@ -77,6 +84,8 @@ static const void *SPRequestedAutosaveNameKey = &SPRequestedAutosaveNameKey;
 	NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
 	NSMutableDictionary *domain = [([prefs volatileDomainForName:NSArgumentDomain] ?: @{}) mutableCopy];
 	domain[SPTestTransferAddedKey] = @YES;
+	domain[SPTestSelectLastFavoriteUsedKey] = @NO;
+	domain[SPTestDefaultFavoriteKey] = @0;
 	[prefs removeVolatileDomainForName:NSArgumentDomain];
 	[prefs setVolatileDomain:domain forName:NSArgumentDomain];
 }
