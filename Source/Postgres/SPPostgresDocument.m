@@ -2,6 +2,8 @@
 #import "SPPostgresSidebarController.h"
 #import "SPPostgresContentController.h"
 #import "SPPostgresQueryController.h"
+#import "SPPostgresHistory.h"
+#import "SPPostgresTableDuplicator.h"
 #import "SPPostgresConsoleLogger.h"
 #import "SPPostgresCatalog.h"
 #import "SPPostgresConnector.h"
@@ -51,6 +53,14 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 - (void)_presentAlert:(NSAlert *)alert;
 - (void)_presentPendingAlert;
 - (void)_databaseSwitchBy:(SPPostgresConnector *)theConnector favorite:(SPPostgresFavorite *)theFavorite finishedWithConnection:(PGPostgresConnection *)newConnection error:(NSError *)error;
+- (void)_switchToDatabase:(NSString *)database forHistory:(BOOL)forHistory;
+- (void)_recordHistory;
+- (void)_updateHistoryControl;
+- (void)_goBackInHistory:(BOOL)back;
+- (void)_applyHistoryEntry:(NSDictionary *)entry;
+- (void)_abandonHistoryRestore;
+- (void)_showDuplicateTableSheetForTable:(NSString *)table;
+- (void)_duplicateTable:(NSString *)table inSchema:(NSString *)schema toName:(NSString *)newName withContent:(BOOL)withContent;
 
 @end
 
@@ -64,6 +74,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	SPPostgresSidebarController *sidebar;
 	SPPostgresContentController *contentController;
 	SPPostgresQueryController *queryController;
+	SPPostgresHistory *history;
 	/// The right pane shows the Query view (else the Content view)
 	BOOL showingQuery;
 
@@ -72,6 +83,19 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 
 	/// A database switch in progress (see -switchToDatabase:)
 	SPPostgresConnector *pendingConnector;
+
+	/// The history entry to show once the database switch in progress is done (a back/forward to another database)
+	NSDictionary *pendingHistoryEntry;
+	/// That move was back (else forward): undone if the switch fails
+	BOOL pendingHistoryWentBack;
+	/// Showing a history entry: the changes it makes aren't recorded
+	BOOL restoringHistory;
+
+	/// The Duplicate Table sheet while it is shown, and its controls
+	NSWindow *duplicateSheet;
+	NSTextField *duplicateNameField;
+	NSButton *duplicateContentSwitch;
+	NSButton *duplicateButton;
 
 	SPSplitView *splitView;
 	NSToolbar *toolbar;
@@ -88,6 +112,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 @synthesize sidebar;
 @synthesize contentController;
 @synthesize queryController;
+@synthesize history;
 @synthesize connection;
 @synthesize favorite;
 @synthesize alertPresenter;
@@ -104,6 +129,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 		connection = [theConnection retain];
 		connector = [theConnector retain];
 		favorite = [theFavorite copy];
+		history = [[SPPostgresHistory alloc] init];
 
 		[self _attachCurrentConnection];
 
@@ -113,6 +139,9 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 
 		[self _buildContent];
 		[self _buildToolbar];
+
+		// Where the tab starts is the first history entry
+		[self _recordHistory];
 	}
 
 	return self;
@@ -135,6 +164,12 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	[sidebar release];
 	[contentController release];
 	[queryController release];
+	[history release];
+	[pendingHistoryEntry release];
+	[duplicateSheet release];
+	[duplicateNameField release];
+	[duplicateContentSwitch release];
+	[duplicateButton release];
 	[serverVersion release];
 	[currentDatabase release];
 	[splitView release];
@@ -313,6 +348,8 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 
 	[toolbar setSelectedItemIdentifier:query ? SPMainToolbarCustomQuery : ([[sidebar selectedTableName] length] ? SPMainToolbarTableContent : nil)];
 	[toolbar validateVisibleItems];
+
+	[self _recordHistory];
 }
 
 /// The Content view shows the table or view selected in the sidebar (or nothing), and the Content toolbar item is selected with it.
@@ -339,8 +376,10 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	[databasePopup setAction:@selector(chooseDatabase:)];
 	[self _reloadDatabasePopup];
 
-	// Stage 1 has no history yet: both segments stay disabled, as on a MySQL connection screen
+	// Back and forward through the tab's history, as MySQL's control (SPHistoryController)
 	historyControl = [SPCreateHistoryToolbarControl() retain];
+	[historyControl setTarget:self];
+	[historyControl setAction:@selector(historyControlClicked:)];
 
 	// Installed in the window while this tab is active (see -didBecomeActiveTabInWindow). Set up as
 	// MySQL's toolbar, so the user's saved layout and customizing it apply to both engines.
@@ -392,6 +431,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 
 	[self _applyWindowTitle];
 	[self _updateDatabaseToolbarItemWidth];
+	[self _updateHistoryControl];
 
 	[self _presentPendingAlert];
 }
@@ -564,6 +604,11 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	[pending cancel];
 	[pending release];
 	if (isProcessing) [self setIsProcessing:NO];
+	[pendingHistoryEntry release];
+	pendingHistoryEntry = nil;
+
+	// A Duplicate Table sheet still up (its completion sees tornDown)
+	if (duplicateSheet) [[duplicateSheet sheetParent] endSheet:duplicateSheet returnCode:NSModalResponseCancel];
 
 	[connector disconnect];
 
@@ -573,6 +618,8 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	[queryController invalidate];
 	[splitView setDelegate:nil];
 	[databasePopup setTarget:nil];
+	[historyControl setTarget:nil];
+	[self _updateHistoryControl];
 
 	for (NSToolbarItem *item in [toolbar items]) [item setTarget:nil];
 	[toolbar setDelegate:nil];
@@ -598,11 +645,17 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	if (tornDown) return;
 	[self _showSelectedTable];
 	[self updateWindowTitle:self];
+	[self _recordHistory];
 }
 
 - (void)sidebar:(SPPostgresSidebarController *)theSidebar didFailToLoadWithError:(NSError *)error
 {
 	[self _reportCatalogError:error];
+}
+
+- (void)sidebar:(SPPostgresSidebarController *)theSidebar duplicateTableNamed:(NSString *)table
+{
+	[self _showDuplicateTableSheetForTable:table];
 }
 
 #pragma mark - Databases
@@ -645,7 +698,14 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 
 - (void)switchToDatabase:(NSString *)database
 {
+	[self _switchToDatabase:database forHistory:NO];
+}
+
+/// forHistory: to show pendingHistoryEntry; else (the user's choice) a history move waiting for a switch is given up.
+- (void)_switchToDatabase:(NSString *)database forHistory:(BOOL)forHistory
+{
 	if (tornDown || ![database length]) return;
+	if (!forHistory && pendingHistoryEntry) [self _abandonHistoryRestore];
 	if ([database isEqualToString:currentDatabase] && !pendingConnector) return;
 
 	SPPostgresFavorite *target = [[favorite copy] autorelease];
@@ -664,6 +724,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 
 	[databasePopup setEnabled:NO];
 	if (!isProcessing) [self setIsProcessing:YES];
+	[self _updateHistoryControl];
 
 	// The connector keeps the completion until it is called (always exactly once), which also keeps self
 	// alive meanwhile; the connector itself is captured unretained to avoid a connector -> block -> connector cycle.
@@ -687,6 +748,10 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 		[newConnector release];
 		if ([databasePopup indexOfItemWithTitle:currentDatabase] >= 0) [databasePopup selectItemWithTitle:currentDatabase];
 
+		// A history move to that database didn't happen: back where it was, so it can be tried again
+		if (pendingHistoryEntry) [self _abandonHistoryRestore];
+		[self _updateHistoryControl];
+
 		if ([error code] != SPPostgresErrorCancelled || ![[error domain] isEqualToString:SPPostgresErrorDomain]) {
 			NSAlert *alert = [[[NSAlert alloc] init] autorelease];
 			[alert setAlertStyle:NSAlertStyleWarning];
@@ -706,15 +771,247 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	favorite = [theFavorite retain];
 
 	[self _attachCurrentConnection];
+
+	// A history move: the reload's default schema is not a place the user went to
+	NSDictionary *historyEntry = [[pendingHistoryEntry retain] autorelease];
+	[pendingHistoryEntry release];
+	pendingHistoryEntry = nil;
+	if (historyEntry) restoringHistory = YES;
+
 	[sidebar reloadWithCatalog:catalog];
 	[self _installQueryController];
 	[self _installContentController];
 	[self _reloadDatabasePopup];
+
+	if (historyEntry) [self _applyHistoryEntry:historyEntry];
+	restoringHistory = NO;
+
 	[self updateWindowTitle:self];
+	[self _updateHistoryControl];
 
 	// Only now let the previous session go
 	[oldConnector disconnect];
 	[oldConnector release];
+}
+
+#pragma mark - History
+
+/// Records where the tab is now (database, schema, table, Content or Query view), unless a history entry is being shown.
+- (void)_recordHistory
+{
+	if (tornDown || restoringHistory || pendingHistoryEntry || ![currentDatabase length]) return;
+	[history recordDatabase:currentDatabase schema:[sidebar selectedSchema] table:[sidebar selectedTableName] pane:showingQuery ? @"query" : @"content"];
+	[self _updateHistoryControl];
+}
+
+/// The History control's segments follow canGoBack/canGoForward (both off while a database switch connects).
+- (void)_updateHistoryControl
+{
+	BOOL enabled = !tornDown && !isProcessing;
+	[historyControl setEnabled:enabled && [history canGoBack] forSegment:0];
+	[historyControl setEnabled:enabled && [history canGoForward] forSegment:1];
+}
+
+/// The History toolbar control: segment 0 goes back, 1 forward.
+- (IBAction)historyControlClicked:(NSSegmentedControl *)sender
+{
+	switch ([sender selectedSegment]) {
+		case 0: [self _goBackInHistory:YES]; break;
+		case 1: [self _goBackInHistory:NO]; break;
+	}
+}
+
+/// View > Back In History (tag 0) and Forward In History (tag 1), as on MySQL tabs.
+- (IBAction)backForwardInHistory:(id)sender
+{
+	switch ([sender tag]) {
+		case 0: [self _goBackInHistory:YES]; break;
+		case 1: [self _goBackInHistory:NO]; break;
+	}
+}
+
+/// Shows the previous (back) or next history entry, switching database first if it is in another one.
+- (void)_goBackInHistory:(BOOL)back
+{
+	if (tornDown || isProcessing) return;
+
+	// As MySQL's (couldCommitCurrentViewActions): an edit in progress in the Content grid is ended (saved) first
+	NSResponder *responder = [parentWindow firstResponder];
+	if ([responder isKindOfClass:[NSView class]] && [(NSView *)responder isDescendantOf:[contentController view]]
+		&& ![parentWindow makeFirstResponder:nil]) return;
+
+	NSDictionary *entry = back ? [history goBack] : [history goForward];
+	if (!entry) return;
+
+	NSString *database = [entry objectForKey:@"database"];
+	if ([database length] && ![database isEqualToString:currentDatabase]) {
+		// Shown once the switch is done (see -_databaseSwitchBy:…), or undone if it fails
+		[pendingHistoryEntry release];
+		pendingHistoryEntry = [entry retain];
+		pendingHistoryWentBack = back;
+		[self _switchToDatabase:database forHistory:YES];
+	}
+	else {
+		[self _applyHistoryEntry:entry];
+	}
+	[self _updateHistoryControl];
+}
+
+/// Selects the entry's schema, table (none if it had none) and view, without recording that as a new entry.
+- (void)_applyHistoryEntry:(NSDictionary *)entry
+{
+	restoringHistory = YES;
+
+	NSString *schema = [entry objectForKey:@"schema"];
+	if ([schema length] && ![schema isEqualToString:[sidebar selectedSchema]]) [sidebar reloadSchema:schema];
+
+	// A table of the entry's schema only (a schema that can't be loaded any more leaves the table unselected)
+	NSString *table = [entry objectForKey:@"table"];
+	if (![table length] || ([schema length] && ![schema isEqualToString:[sidebar selectedSchema]]) || ![sidebar selectTableNamed:table]) {
+		[sidebar selectTableNamed:nil];
+	}
+
+	[self _showQueryPane:[[entry objectForKey:@"pane"] isEqualToString:@"query"]];
+
+	restoringHistory = NO;
+}
+
+/// A history move waiting for a database switch is given up: the history goes back to where it was.
+- (void)_abandonHistoryRestore
+{
+	if (!pendingHistoryEntry) return;
+	[pendingHistoryEntry release];
+	pendingHistoryEntry = nil;
+	if (pendingHistoryWentBack) [history goForward];
+	else [history goBack];
+	[self _updateHistoryControl];
+}
+
+#pragma mark - Duplicate Table
+
+/// A sheet as MySQL's Duplicate Table sheet (DBView.xib): the new name (<table>_copy), "Duplicate table content", Cancel/Duplicate.
+- (void)_showDuplicateTableSheetForTable:(NSString *)table
+{
+	if (tornDown || duplicateSheet || ![table length] || !parentWindow || isProcessing) return;
+
+	// An edit in progress in the Content grid is ended (saved) first, as MySQL's
+	if (![parentWindow makeFirstResponder:nil]) return;
+
+	NSString *schema = [[[sidebar selectedSchema] copy] autorelease];
+	if (![schema length]) return;
+
+	NSRect frame = NSMakeRect(0, 0, 260, 127);
+	duplicateSheet = [[NSWindow alloc] initWithContentRect:frame styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:YES];
+	[duplicateSheet setReleasedWhenClosed:NO];
+	[duplicateSheet setTitle:NSLocalizedString(@"Duplicate Table", @"PostgreSQL duplicate table sheet title")];
+	[duplicateSheet setContentMinSize:NSMakeSize(260, 127)];
+	[duplicateSheet setContentMaxSize:NSMakeSize(600, 127)];
+	NSView *content = [duplicateSheet contentView];
+	NSFont *smallFont = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
+
+	NSTextField *message = [NSTextField labelWithString:[NSString stringWithFormat:NSLocalizedString(@"Duplicate %@ '%@' to:", @"duplicate object message"), NSLocalizedString(@"table", @"table"), table]];
+	[message setFrame:NSMakeRect(17, 93, 226, 14)];
+	[message setFont:smallFont];
+	[message setLineBreakMode:NSLineBreakByTruncatingMiddle];
+	[message setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+	[content addSubview:message];
+
+	duplicateNameField = [[NSTextField alloc] initWithFrame:NSMakeRect(20, 66, 222, 19)];
+	[duplicateNameField setIdentifier:@"duplicateTableName"];
+	[[duplicateNameField cell] setControlSize:NSControlSizeSmall];
+	[duplicateNameField setFont:smallFont];
+	[[duplicateNameField cell] setUsesSingleLineMode:YES];
+	[[duplicateNameField cell] setScrollable:YES];
+	[duplicateNameField setStringValue:[table stringByAppendingString:@"_copy"]];
+	[duplicateNameField setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+	[duplicateNameField setDelegate:(id<NSTextFieldDelegate>)self];
+	[content addSubview:duplicateNameField];
+
+	duplicateContentSwitch = [[NSButton checkboxWithTitle:NSLocalizedString(@"Duplicate table content", @"PostgreSQL duplicate table sheet: copy content checkbox") target:nil action:NULL] retain];
+	[duplicateContentSwitch setIdentifier:@"duplicateTableContent"];
+	[duplicateContentSwitch setFrame:NSMakeRect(17, 43, 227, 18)];
+	[duplicateContentSwitch setControlSize:NSControlSizeSmall];
+	[duplicateContentSwitch setFont:smallFont];
+	// MySQL's preference for this checkbox (read only: the sheet doesn't change it)
+	[duplicateContentSwitch setState:[[NSUserDefaults standardUserDefaults] boolForKey:SPCopyContentOnTableCopy] ? NSControlStateValueOn : NSControlStateValueOff];
+	[duplicateContentSwitch setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
+	[content addSubview:duplicateContentSwitch];
+
+	NSButton *cancel = [NSButton buttonWithTitle:NSLocalizedString(@"Cancel", @"cancel button") target:self action:@selector(closeDuplicateTableSheet:)];
+	[cancel setFrame:NSMakeRect(61, 13, 91, 28)];
+	[cancel setControlSize:NSControlSizeSmall];
+	[cancel setFont:smallFont];
+	[cancel setTag:NSModalResponseCancel];
+	[cancel setKeyEquivalent:@"\e"];
+	[cancel setAutoresizingMask:NSViewMinXMargin | NSViewMaxYMargin];
+	[content addSubview:cancel];
+
+	duplicateButton = [[NSButton buttonWithTitle:NSLocalizedString(@"Duplicate", @"PostgreSQL duplicate table sheet: duplicate button") target:self action:@selector(closeDuplicateTableSheet:)] retain];
+	[duplicateButton setIdentifier:@"duplicateTableButton"];
+	[duplicateButton setFrame:NSMakeRect(150, 13, 97, 28)];
+	[duplicateButton setControlSize:NSControlSizeSmall];
+	[duplicateButton setFont:smallFont];
+	[duplicateButton setTag:NSModalResponseOK];
+	[duplicateButton setKeyEquivalent:@"\r"];
+	[duplicateButton setAutoresizingMask:NSViewMinXMargin | NSViewMaxYMargin];
+	[content addSubview:duplicateButton];
+
+	[duplicateSheet setInitialFirstResponder:duplicateNameField];
+	[self controlTextDidChange:nil];
+
+	[parentWindow beginSheet:duplicateSheet completionHandler:^(NSModalResponse returnCode) {
+		NSString *newName = [[[duplicateNameField stringValue] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] copy];
+		BOOL withContent = ([duplicateContentSwitch state] == NSControlStateValueOn);
+
+		[duplicateNameField setDelegate:nil];
+		[duplicateSheet orderOut:nil];
+		[duplicateSheet release], duplicateSheet = nil;
+		[duplicateNameField release], duplicateNameField = nil;
+		[duplicateContentSwitch release], duplicateContentSwitch = nil;
+		[duplicateButton release], duplicateButton = nil;
+
+		if (returnCode == NSModalResponseOK && !tornDown && [newName length]) {
+			[self _duplicateTable:table inSchema:schema toName:newName withContent:withContent];
+		}
+		[newName release];
+	}];
+}
+
+/// Duplicate is enabled while the name isn't empty.
+- (void)controlTextDidChange:(NSNotification *)notification
+{
+	NSString *name = [[duplicateNameField stringValue] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	[duplicateButton setEnabled:[name length] > 0];
+}
+
+- (void)closeDuplicateTableSheet:(id)sender
+{
+	if (!duplicateSheet) return;
+	if ([sender tag] == NSModalResponseOK && ![duplicateButton isEnabled]) return;
+	[parentWindow endSheet:duplicateSheet returnCode:[sender tag]];
+}
+
+/// Duplicates the table; on success lists and selects the copy, else shows the server's message.
+- (void)_duplicateTable:(NSString *)table inSchema:(NSString *)schema toName:(NSString *)newName withContent:(BOOL)withContent
+{
+	NSError *error = nil;
+	if (![SPPostgresTableDuplicator duplicateTable:table inSchema:schema toName:newName withContent:withContent connection:connection error:&error]) {
+		NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+		[alert setAlertStyle:NSAlertStyleWarning];
+		[alert setMessageText:NSLocalizedString(@"Error", @"error")];
+		[alert setInformativeText:[NSString stringWithFormat:NSLocalizedString(@"Couldn't duplicate '%@'.\nPostgreSQL said: %@", @"PostgreSQL duplicate table failed"), table, [error localizedDescription] ?: @""]];
+		[self _presentAlert:alert];
+		return;
+	}
+
+	// The copy is in the schema the sidebar shows (the sheet was modal)
+	if (![schema isEqualToString:[sidebar selectedSchema]]) return;
+
+	// The reload's empty selection on the way is not a place the user went to (history)
+	restoringHistory = YES;
+	[sidebar reloadSchema:schema];
+	restoringHistory = NO;
+	[sidebar selectTableNamed:newName];
 }
 
 #pragma mark - Split view
@@ -776,6 +1073,12 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	// As the Content toolbar item
 	if (action == @selector(viewContent:)) return [[sidebar selectedTableName] length] > 0;
 
+	// View > Back/Forward In History (tags 0 and 1), as MySQL's
+	if (action == @selector(backForwardInHistory:)) {
+		if (isProcessing) return NO;
+		return ([item tag] == 0) ? [history canGoBack] : [history canGoForward];
+	}
+
 	return [self respondsToSelector:action];
 }
 
@@ -802,10 +1105,10 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	return SPMainToolbarSelectableItemIdentifiers();
 }
 
-/// The database picker, the console, Content and Query work on Postgres tabs so far
+/// The database picker, Table History, the console, Content and Query work on Postgres tabs so far
 - (NSArray *)_availableToolbarItemIdentifiers
 {
-	return @[SPMainToolbarDatabaseSelection, SPMainToolbarShowConsole, SPMainToolbarTableContent, SPMainToolbarCustomQuery];
+	return @[SPMainToolbarDatabaseSelection, SPMainToolbarHistoryNavigation, SPMainToolbarShowConsole, SPMainToolbarTableContent, SPMainToolbarCustomQuery];
 }
 
 - (NSToolbarItem *)toolbar:(NSToolbar *)theToolbar itemForItemIdentifier:(NSString *)identifier willBeInsertedIntoToolbar:(BOOL)flag

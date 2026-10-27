@@ -12,6 +12,56 @@ static NSError *SPPostgresTableDataError(NSInteger code, NSString *message)
 	return [NSError errorWithDomain:SPPostgresErrorDomain code:code userInfo:@{NSLocalizedDescriptionKey: message}];
 }
 
+PGPostgresResult *SPPostgresExecute(PGPostgresConnection *connection, NSString *sql, NSArray *values, NSError **error)
+{
+	PGPostgresResult *result = [connection execute:sql values:values ?: @[]];
+	if (!result && error) {
+		NSString *message = nil;
+		if ([connection isConnected]) {
+			message = [[connection lastError] errorPrimaryMessage];
+			if (![message length]) message = NSLocalizedString(@"The query failed.", @"Postgres content query failure");
+		}
+		else {
+			// The connection is gone: libpq's message says why. The last query error may be older than that.
+			message = [connection libpqErrorMessage];
+			if (![message length]) message = NSLocalizedString(@"There is no connection to the server.", @"Postgres content query without a connection");
+		}
+		*error = SPPostgresTableDataError(SPPostgresErrorQueryFailed, message);
+	}
+	return result;
+}
+
+BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoint, NSString *abortedMessage,
+							 BOOL (^body)(NSError **error), NSError **error)
+{
+	NSString *begin, *finish;
+	NSArray *undo;
+	switch ([connection transactionStatus]) {
+		case PGPostgresTransactionInError:
+			if (error) *error = SPPostgresTableDataError(SPPostgresErrorQueryFailed, abortedMessage);
+			return NO;
+		case PGPostgresTransactionInTransaction:
+			begin = [NSString stringWithFormat:@"SAVEPOINT %@", savepoint];
+			finish = [NSString stringWithFormat:@"RELEASE SAVEPOINT %@", savepoint];
+			undo = @[[NSString stringWithFormat:@"ROLLBACK TO SAVEPOINT %@", savepoint], finish];
+			break;
+		default: // idle (or no connection, which the first statement reports)
+			begin = @"BEGIN";
+			finish = @"COMMIT";
+			undo = @[@"ROLLBACK"];
+			break;
+	}
+
+	if (!SPPostgresExecute(connection, begin, nil, error)) return NO;
+
+	if (!body(error) || !SPPostgresExecute(connection, finish, nil, error)) {
+		// Quietly: a failure here must not replace the error being reported
+		for (NSString *sql in undo) [connection execute:sql values:@[]];
+		return NO;
+	}
+	return YES;
+}
+
 #pragma mark - SPPostgresColumn
 
 @interface SPPostgresColumn ()
@@ -125,27 +175,7 @@ static NSError *SPPostgresTableDataError(NSInteger code, NSString *message)
 
 - (PGPostgresResult *)run:(NSString *)sql values:(NSArray *)values error:(NSError **)error
 {
-	PGPostgresResult *result = [_connection execute:sql values:values ?: @[]];
-	if (!result && error) {
-		NSString *message = nil;
-		if ([_connection isConnected]) {
-			message = [[_connection lastError] errorPrimaryMessage];
-			if (![message length]) message = NSLocalizedString(@"The query failed.", @"Postgres content query failure");
-		}
-		else {
-			// The connection is gone: libpq's message says why. The last query error may be older than that.
-			message = [_connection libpqErrorMessage];
-			if (![message length]) message = NSLocalizedString(@"There is no connection to the server.", @"Postgres content query without a connection");
-		}
-		*error = SPPostgresTableDataError(SPPostgresErrorQueryFailed, message);
-	}
-	return result;
-}
-
-/// Runs a statement whose failure must not leave an error behind (e.g. ROLLBACK after an earlier error).
-- (void)runQuietly:(NSString *)sql
-{
-	[_connection execute:sql values:@[]];
+	return SPPostgresExecute(_connection, sql, values, error);
 }
 
 - (NSString *)qualifiedName
@@ -511,45 +541,17 @@ static NSError *SPPostgresTableDataError(NSInteger code, NSString *message)
 
 	// All or nothing. Outside a transaction, use one of our own; inside the user's (shared connection), use a
 	// savepoint so the user's transaction is neither committed nor rolled back.
-	NSArray *begin, *finish, *undo;
-	switch ([_connection transactionStatus]) {
-		case PGPostgresTransactionInError:
-			if (error) {
-				*error = SPPostgresTableDataError(SPPostgresErrorQueryFailed,
-					NSLocalizedString(@"The current transaction is aborted, so no rows were deleted. Roll it back first.", @"Postgres content: delete inside an aborted transaction"));
+	NSString *aborted = NSLocalizedString(@"The current transaction is aborted, so no rows were deleted. Roll it back first.", @"Postgres content: delete inside an aborted transaction");
+	return SPPostgresRunAtomically(_connection, @"sp_content_delete", aborted, ^BOOL(NSError **bodyError) {
+		for (NSUInteger i = 0; i < [statements count]; i++) {
+			if (![self run:[statements objectAtIndex:i] values:[parameters objectAtIndex:i] error:bodyError]) return NO;
+			if ([_connection lastQueryAffectedRowCount] == 0) {
+				if (bodyError) *bodyError = [self rowChangedError];
+				return NO;
 			}
-			return NO;
-		case PGPostgresTransactionInTransaction:
-			begin = @[@"SAVEPOINT sp_content_delete"];
-			finish = @[@"RELEASE SAVEPOINT sp_content_delete"];
-			undo = @[@"ROLLBACK TO SAVEPOINT sp_content_delete", @"RELEASE SAVEPOINT sp_content_delete"];
-			break;
-		default: // idle (or no connection, which the first statement reports)
-			begin = @[@"BEGIN"];
-			finish = @[@"COMMIT"];
-			undo = @[@"ROLLBACK"];
-			break;
-	}
-
-	if (![self run:[begin firstObject] values:nil error:error]) return NO;
-
-	for (NSUInteger i = 0; i < [statements count]; i++) {
-		if (![self run:[statements objectAtIndex:i] values:[parameters objectAtIndex:i] error:error]) {
-			for (NSString *sql in undo) [self runQuietly:sql];
-			return NO;
 		}
-		if ([_connection lastQueryAffectedRowCount] == 0) {
-			for (NSString *sql in undo) [self runQuietly:sql];
-			if (error) *error = [self rowChangedError];
-			return NO;
-		}
-	}
-
-	if (![self run:[finish firstObject] values:nil error:error]) {
-		for (NSString *sql in undo) [self runQuietly:sql];
-		return NO;
-	}
-	return YES;
+		return YES;
+	}, error);
 }
 
 @end

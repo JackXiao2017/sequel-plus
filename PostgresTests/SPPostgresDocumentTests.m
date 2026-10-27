@@ -422,6 +422,84 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	XCTAssertEqualObjects([self window].title, [self.document windowTitleString]);
 }
 
+#pragma mark - Duplicate Table
+
+- (id)viewWithIdentifier:(NSString *)identifier in:(NSView *)root
+{
+	NSMutableArray *queue = [NSMutableArray arrayWithObject:root];
+	while (queue.count) {
+		NSView *v = queue.firstObject; [queue removeObjectAtIndex:0];
+		if ([v.identifier isEqualToString:identifier]) return v;
+		[queue addObjectsFromArray:v.subviews];
+	}
+	return nil;
+}
+
+- (void)testDuplicateTableFromSidebarMenuSelectsCopy
+{
+	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPPostgresDocumentTestPort];
+	[admin execute:@"DROP TABLE IF EXISTS public.customers_copy, public.\"cust copy\""];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self.controller showWindow:nil];
+
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	NSMenu *menu = sidebar.tableMenu;
+	XCTAssertEqualObjects([menu.itemArray valueForKey:@"title"], (@[@"Duplicate Table…"]));
+	NSMenuItem *duplicate = menu.itemArray.firstObject;
+
+	// Only for a table: not a view, not without a selection
+	XCTAssertFalse([(id<NSMenuItemValidation>)duplicate.target validateMenuItem:duplicate]);
+	XCTAssertTrue([sidebar selectTableNamed:@"v_customers"]);
+	XCTAssertFalse([(id<NSMenuItemValidation>)duplicate.target validateMenuItem:duplicate]);
+	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
+	XCTAssertTrue([(id<NSMenuItemValidation>)duplicate.target validateMenuItem:duplicate]);
+
+	// The sheet: <table>_copy, the content checkbox, Duplicate/Cancel
+	[menu performActionForItemAtIndex:0];
+	NSWindow *sheet = [self window].attachedSheet;
+	XCTAssertNotNil(sheet);
+	NSTextField *name = [self viewWithIdentifier:@"duplicateTableName" in:sheet.contentView];
+	NSButton *content = [self viewWithIdentifier:@"duplicateTableContent" in:sheet.contentView];
+	NSButton *button = [self viewWithIdentifier:@"duplicateTableButton" in:sheet.contentView];
+	XCTAssertEqualObjects(name.stringValue, @"customers_copy");
+	XCTAssertNotNil(content);
+	XCTAssertTrue(button.isEnabled);
+
+	// Cancel does nothing
+	[[self window] endSheet:sheet returnCode:NSModalResponseCancel];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+	XCTAssertFalse([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"customers_copy"]);
+
+	// Duplicate, with an odd name and the content
+	[menu performActionForItemAtIndex:0];
+	sheet = [self window].attachedSheet;
+	name = [self viewWithIdentifier:@"duplicateTableName" in:sheet.contentView];
+	content = [self viewWithIdentifier:@"duplicateTableContent" in:sheet.contentView];
+	button = [self viewWithIdentifier:@"duplicateTableButton" in:sheet.contentView];
+	name.stringValue = @"cust copy";
+	content.state = NSControlStateValueOn;
+	[button performClick:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [sidebar.selectedTableName isEqualToString:@"cust copy"]; } timeout:5], @"%@ %@", sidebar.selectedTableName, alerts);
+	XCTAssertTrue([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"cust copy"]);
+	XCTAssertTrue([[self.document windowTitleString] hasSuffix:@"/pgkit_test/public.cust copy"]);
+	XCTAssertEqualObjects([[admin execute:@"SELECT ((SELECT count(*) FROM public.\"cust copy\") = (SELECT count(*) FROM public.customers))::text"] rowAsArray].firstObject, @"true");
+	XCTAssertEqual(alerts.count, 0u);
+
+	// A name that is taken: the server's message, as MySQL's "Couldn't duplicate" alert
+	[menu performActionForItemAtIndex:0];
+	sheet = [self window].attachedSheet;
+	name = [self viewWithIdentifier:@"duplicateTableName" in:sheet.contentView];
+	button = [self viewWithIdentifier:@"duplicateTableButton" in:sheet.contentView];
+	XCTAssertEqualObjects(name.stringValue, @"cust copy_copy");
+	name.stringValue = @"customers";
+	[button performClick:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return alerts.count == 1; } timeout:5]);
+	XCTAssertTrue([alerts.firstObject.informativeText containsString:@"already exists"], @"%@", alerts.firstObject.informativeText);
+
+	[admin execute:@"DROP TABLE IF EXISTS public.customers_copy, public.\"cust copy\""];
+	[admin disconnect];
+}
+
 #pragma mark - Console
 
 - (void)testConsoleLoggerForwardsQueries
