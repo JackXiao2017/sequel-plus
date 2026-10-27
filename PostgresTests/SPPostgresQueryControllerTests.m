@@ -611,4 +611,157 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	XCTAssertEqualObjects([self valueAtRow:0 column:@"current_database"], @"pgkit_nopublic", @"runs on the new connection");
 }
 
+#pragma mark - Refreshing the tab after a run
+
+/// The Content grid's ids, in grid order.
+- (NSArray *)contentIds
+{
+	NSTableView *grid = self.document.contentController.tableView;
+	NSTableColumn *idColumn = nil;
+	for (NSTableColumn *column in [grid tableColumns]) {
+		if ([[[column headerCell] stringValue] isEqualToString:@"id"]) idColumn = column;
+	}
+	XCTAssertNotNil(idColumn);
+	NSMutableArray *ids = [NSMutableArray array];
+	for (NSInteger row = 0; row < [grid numberOfRows]; row++) {
+		[ids addObject:[[grid dataSource] tableView:grid objectValueForTableColumn:idColumn row:row]];
+	}
+	return ids;
+}
+
+- (NSArray *)contentColumnTitles
+{
+	NSMutableArray *titles = [NSMutableArray array];
+	for (NSTableColumn *column in [self.document.contentController.tableView tableColumns]) [titles addObject:[[column headerCell] stringValue]];
+	return titles;
+}
+
+/// content_test.<table> selected in the sidebar, then the Query view.
+- (void)selectTableThenQuery:(NSString *)table
+{
+	[self.document.sidebar reloadSchema:@"content_test"];
+	XCTAssertTrue([self.document.sidebar selectTableNamed:table], @"%@", table);
+	[self.document viewQuery:nil];
+}
+
+- (void)run:(NSString *)sql
+{
+	[self setSQL:sql];
+	[self.query runAllQueries:nil];
+	XCTAssertFalse([self.query.statusText hasPrefix:@"Error"], @"%@", self.query.statusText);
+}
+
+- (void)testStatementKinds
+{
+	Class query = [SPPostgresQueryController class];
+	for (NSString *sql in @[@"CREATE TABLE t (a int)", @"  alter table t add b int", @"DROP VIEW v", @"rename x",
+							@"-- note\nCREATE SCHEMA s", @"/* a /* nested */ b */ drop table t", @"ROLLBACK", @"rollback to savepoint a",
+							@"ABORT", @"IMPORT FOREIGN SCHEMA s FROM SERVER f INTO public"]) {
+		XCTAssertTrue([query statementMayChangeSchema:sql], @"%@", sql);
+	}
+	for (NSString *sql in @[@"SELECT 1", @"INSERT INTO t VALUES (1)", @"COMMENT ON TABLE t IS 'x'", @"createx", @"-- CREATE", @"/* unterminated CREATE"]) {
+		XCTAssertFalse([query statementMayChangeSchema:sql], @"%@", sql);
+	}
+	for (NSString *sql in @[@"UPDATE t SET a = 1", @"WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d", @"TRUNCATE t", @"rollback", @"/* x */ insert into t default values"]) {
+		XCTAssertTrue([query statementMayChangeData:sql], @"%@", sql);
+	}
+	for (NSString *sql in @[@"SELECT * FROM t", @" -- c\n select 1", @"SHOW search_path", @"EXPLAIN SELECT 1", @"VALUES (1)", @"TABLE t", @""]) {
+		XCTAssertFalse([query statementMayChangeData:sql], @"%@", sql);
+	}
+}
+
+- (void)testCreateTableInQueryAppearsInSidebar
+{
+	[self selectTableThenQuery:@"items"];
+	[self run:@"CREATE TABLE content_test.made_in_query (id int PRIMARY KEY)"];
+
+	XCTAssertTrue([[self.document.sidebar itemTitlesInSection:@"TABLES"] containsObject:@"made_in_query"], @"%@", [self.document.sidebar itemTitlesInSection:@"TABLES"]);
+	XCTAssertEqualObjects(self.document.sidebar.selectedSchema, @"content_test");
+	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"items", @"the selection is kept");
+	XCTAssertEqualObjects([self.document toolbar].selectedItemIdentifier, SPQueryTestToolbarQuery, @"the Query view stays");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
+
+	// A schema made in the Query view is listed too (leading comments don't hide the statement)
+	[self run:@"-- a new schema\n/* block */ create schema content_test_made"];
+	PGPostgresConnection *cleanup = [SPPostgresTestServers connectedConnectionOnPort:SPQueryTestPort];
+	[self addTeardownBlock:^{
+		[cleanup execute:@"DROP SCHEMA IF EXISTS content_test_made CASCADE"];
+		[cleanup disconnect];
+	}];
+	NSPopUpButton *schemaPopup = nil;
+	NSMutableArray *views = [NSMutableArray arrayWithObject:[self.document.sidebar view]];
+	while (views.count && !schemaPopup) {
+		NSView *view = views.lastObject; [views removeLastObject];
+		if ([view isKindOfClass:[NSPopUpButton class]]) schemaPopup = (NSPopUpButton *)view;
+		[views addObjectsFromArray:view.subviews];
+	}
+	XCTAssertTrue([[schemaPopup itemTitles] containsObject:@"content_test_made"], @"%@", [schemaPopup itemTitles]);
+	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"items");
+}
+
+- (void)testDropOfSelectedTableClearsContent
+{
+	XCTAssertNotNil([self.other execute:@"CREATE TABLE content_test.doomed (id int PRIMARY KEY)"]);
+	XCTAssertNotNil([self.other execute:@"INSERT INTO content_test.doomed VALUES (1)"]);
+	[self selectTableThenQuery:@"doomed"];
+	XCTAssertEqualObjects(self.document.contentController.table, @"doomed");
+
+	[self run:@"DROP TABLE content_test.doomed"];
+	XCTAssertFalse([[self.document.sidebar itemTitlesInSection:@"TABLES"] containsObject:@"doomed"]);
+	XCTAssertNil(self.document.sidebar.selectedTableName);
+	XCTAssertNil(self.document.contentController.table, @"the Content view no longer shows the dropped table");
+	XCTAssertEqual([self.document.contentController.tableView numberOfRows], 0);
+
+	[self.document viewContent:nil];
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
+}
+
+- (void)testDataChangedInQueryIsReloadedInContent
+{
+	[self selectTableThenQuery:@"items"];
+	XCTAssertTrue([[self contentIds] containsObject:@"5"]);
+
+	// The key itself changes: an edit through the old row would match nothing ("changed by someone else")
+	[self run:@"UPDATE content_test.items SET id = 105 WHERE id = 5"];
+	[self.document viewContent:nil];
+	NSArray *ids = [self contentIds];
+	XCTAssertFalse([ids containsObject:@"5"], @"Content shows the rows as they are now");
+	NSUInteger row = [ids indexOfObject:@"105"];
+	XCTAssertNotEqual(row, NSNotFound);
+
+	NSTableView *grid = self.document.contentController.tableView;
+	NSTableColumn *nameColumn = nil;
+	for (NSTableColumn *column in [grid tableColumns]) {
+		if ([[[column headerCell] stringValue] isEqualToString:@"name"]) nameColumn = column;
+	}
+	[(id<NSTableViewDataSource>)[grid dataSource] tableView:grid setObjectValue:@"edited after query" forTableColumn:nameColumn row:(NSInteger)row];
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
+	XCTAssertEqualObjects([self serverValue:@"SELECT name FROM content_test.items WHERE id = 105"], @"edited after query");
+}
+
+- (void)testAlteredTableShowsNewColumnsInContent
+{
+	[self selectTableThenQuery:@"items"];
+	[self run:@"ALTER TABLE content_test.items ADD COLUMN added_in_query text"];
+	[self.document viewContent:nil];
+	XCTAssertTrue([[self contentColumnTitles] containsObject:@"added_in_query"], @"%@", [self contentColumnTitles]);
+	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"items");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
+}
+
+- (void)testDDLInAbortedTransactionWaitsForItsEnd
+{
+	[self selectTableThenQuery:@"items"];
+	[self setSQL:@"BEGIN; CREATE TABLE content_test.in_aborted (a int); SELECT 1/0"];
+	[self.query runAllQueries:nil];
+	XCTAssertTrue([self.query.statusText hasPrefix:@"Error"], @"%@", self.query.statusText);
+	XCTAssertEqual(self.alerts.count, 0u, @"no catalog reload inside the aborted transaction: %@", [self.alerts.firstObject informativeText]);
+	XCTAssertEqual([self.document.connection transactionStatus], PGPostgresTransactionInError);
+
+	[self run:@"ROLLBACK"];
+	XCTAssertFalse([[self.document.sidebar itemTitlesInSection:@"TABLES"] containsObject:@"in_aborted"]);
+	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"items");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
+}
+
 @end
