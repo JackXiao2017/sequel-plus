@@ -57,6 +57,8 @@
 	BOOL _useKeepAlive;
 	BOOL _lastQueryWasCancelled;
 	BOOL _delegateSupportsWillExecute;
+	BOOL _connecting;
+	BOOL _disconnectRequested;
 	
 	NSMutableDictionary *_typeMap;
 	

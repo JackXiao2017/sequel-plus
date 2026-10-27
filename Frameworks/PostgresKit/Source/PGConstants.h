@@ -45,6 +45,7 @@ extern const char *PGPostgresDatabaseParam;
 extern const char *PGPostgresClientEncodingParam;
 extern const char *PGPostgresKeepAliveParam;
 extern const char *PGPostgresKeepAliveIntervalParam;
+extern const char *PGPostgresConnectTimeoutParam;
 extern const char *PGPostgresSSLModeParam;
 extern const char *PGPostgresSSLRootCertParam;
 extern const char *PGPostgresSSLCertParam;
