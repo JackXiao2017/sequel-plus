@@ -339,6 +339,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 	[helpButton setHidden:YES];
 	[connectButton setEnabled:NO];
 	[testConnectButton setEnabled:NO];
+	[postgresAdapter setEngineChoiceEnabled:NO]; // no engine switch (and favorite reselection) mid-connect
 	[progressIndicator startAnimation:self];
 	[progressIndicatorText setHidden:NO];
 #endif
@@ -1826,6 +1827,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 	[connectButton setEnabled:YES];
 	[connectButton display];
 	[testConnectButton setEnabled:YES];
+	[postgresAdapter setEngineChoiceEnabled:YES];
 	[progressIndicator stopAnimation:self];
 	[progressIndicator display];
 	[progressIndicatorText setHidden:YES];
@@ -3887,6 +3889,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 	[helpButton setHidden:YES];
 	[connectButton setEnabled:NO];
 	[testConnectButton setEnabled:NO];
+	[postgresAdapter setEngineChoiceEnabled:NO];
 	[progressIndicator startAnimation:self];
 	[progressIndicatorText setStringValue:NSLocalizedString(@"Connecting...", @"Generic connecting very short status message")];
 	[progressIndicatorText setHidden:NO];
