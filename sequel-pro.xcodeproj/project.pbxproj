@@ -135,6 +135,7 @@
 		17F90E481210B42700274C98 /* SPExportFile.m in Sources */ = {isa = PBXBuildFile; fileRef = 17F90E471210B42700274C98 /* SPExportFile.m */; };
 		17FDB04C1280778B00DBBBC2 /* SPFontPreviewTextField.m in Sources */ = {isa = PBXBuildFile; fileRef = 17FDB04B1280778B00DBBBC2 /* SPFontPreviewTextField.m */; };
 		1A564F74237E2E4958CA593A /* SPPillAttachmentCell.m in Sources */ = {isa = PBXBuildFile; fileRef = 1A56463D14569A0B56EE8BAC /* SPPillAttachmentCell.m */; };
+		2232AC163B05C92BAAD56950 /* PostgresKit.framework in Copy Frameworks */ = {isa = PBXBuildFile; fileRef = 193F5270C4E3870116661D28 /* PostgresKit.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		296DC89F0F8FD336002A3258 /* WebKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 296DC89E0F8FD336002A3258 /* WebKit.framework */; };
 		296DC8B60F909194002A3258 /* MGTemplateEngine.m in Sources */ = {isa = PBXBuildFile; fileRef = 296DC8A70F909194002A3258 /* MGTemplateEngine.m */; };
 		296DC8B70F909194002A3258 /* RegexKitLite.m in Sources */ = {isa = PBXBuildFile; fileRef = 296DC8AB0F909194002A3258 /* RegexKitLite.m */; };
@@ -157,6 +158,7 @@
 		3E10740420FC25B7006DBDFD /* SPButtonBar.m in Sources */ = {isa = PBXBuildFile; fileRef = 3E10740320FC25B7006DBDFD /* SPButtonBar.m */; };
 		3E242D4F20FEB44D0015470D /* button_bar_spacer_dark.png in Resources */ = {isa = PBXBuildFile; fileRef = 3E242D4B20FEB44D0015470D /* button_bar_spacer_dark.png */; };
 		3E242D5020FEB44D0015470D /* button_bar_spacer_dark@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = 3E242D4E20FEB44D0015470D /* button_bar_spacer_dark@2x.png */; };
+		46DC8C5CFFA9FCD31248BB07 /* PostgresKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 193F5270C4E3870116661D28 /* PostgresKit.framework */; };
 		4D90B79A101E0CDF00D116A1 /* SPUserManager.m in Sources */ = {isa = PBXBuildFile; fileRef = 4D90B799101E0CDF00D116A1 /* SPUserManager.m */; };
 		4D90B79E101E0CF200D116A1 /* SPUserManager.xcdatamodel in Sources */ = {isa = PBXBuildFile; fileRef = 4D90B79B101E0CF200D116A1 /* SPUserManager.xcdatamodel */; };
 		4D90B79F101E0CF200D116A1 /* SPUserMO.m in Sources */ = {isa = PBXBuildFile; fileRef = 4D90B79D101E0CF200D116A1 /* SPUserMO.m */; };
@@ -394,6 +396,7 @@
 		58FEF16D0F23D66600518E8E /* SPSQLParser.m in Sources */ = {isa = PBXBuildFile; fileRef = 58FEF16C0F23D66600518E8E /* SPSQLParser.m */; };
 		58FEF57E0F3B4E9700518E8E /* SPTableData.m in Sources */ = {isa = PBXBuildFile; fileRef = 58FEF57D0F3B4E9700518E8E /* SPTableData.m */; };
 		73F70A961E4E547500636550 /* SPJSONFormatter.m in Sources */ = {isa = PBXBuildFile; fileRef = 73F70A951E4E547500636550 /* SPJSONFormatter.m */; };
+		7A375B1B885C9DF9C1758CF0 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9B17D0B7A246BB4C8EE6A8C1 /* Cocoa.framework */; };
 		8D15AC340486D014006FF6A4 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1058C7A7FEA54F5311CA2CBB /* Cocoa.framework */; };
 		9BE765682376A00C82FB93AA /* SPHelpViewerClient.m in Sources */ = {isa = PBXBuildFile; fileRef = 9BE764320CE8E86E8F63647B /* SPHelpViewerClient.m */; };
 		9BE765EBBDFD2F121C13D274 /* SPFillView.m in Sources */ = {isa = PBXBuildFile; fileRef = 9BE768F3989033CEDDC2027E /* SPFillView.m */; };
@@ -477,6 +480,7 @@
 		BCD0AD490FBBFC340066EA5C /* SPSQLTokenizer.l in Sources */ = {isa = PBXBuildFile; fileRef = BCD0AD480FBBFC340066EA5C /* SPSQLTokenizer.l */; };
 		BCE0025D11173D2A009DA533 /* SPFieldMapperController.m in Sources */ = {isa = PBXBuildFile; fileRef = BCE0025C11173D2A009DA533 /* SPFieldMapperController.m */; };
 		BCEC862012115A30002561DA /* SPQLPluginConnectionBundleWindowTemplate.html in Resources */ = {isa = PBXBuildFile; fileRef = BCEC861F12115A30002561DA /* SPQLPluginConnectionBundleWindowTemplate.html */; };
+		BF6F1FC367DA7DD5A7C13D20 /* SPPostgresSmokeTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 14206C42D4484DCE1FF1564C /* SPPostgresSmokeTests.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 		C9AD7C781676138000234EEE /* database-small@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = C9AD7C771676138000234EEE /* database-small@2x.png */; };
 		C9AD7C7B1676158C00234EEE /* toolbar-switch-to-sql.png in Resources */ = {isa = PBXBuildFile; fileRef = C9AD7C791676158C00234EEE /* toolbar-switch-to-sql.png */; };
 		C9AD7C7C1676158C00234EEE /* toolbar-switch-to-sql@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = C9AD7C7A1676158C00234EEE /* toolbar-switch-to-sql@2x.png */; };
@@ -500,6 +504,7 @@
 		C9F92710162D38D70051CB2E /* toolbar-switch-to-table-info@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = C9F9270F162D38D70051CB2E /* toolbar-switch-to-table-info@2x.png */; };
 		C9F92712162D39E60051CB2E /* toolbar-switch-to-browse.png in Resources */ = {isa = PBXBuildFile; fileRef = C9F92711162D39E60051CB2E /* toolbar-switch-to-browse.png */; };
 		C9F92714162D39FE0051CB2E /* toolbar-switch-to-browse@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = C9F92713162D39FE0051CB2E /* toolbar-switch-to-browse@2x.png */; };
+		F7443FFB4FDCC9CD7EAE96A3 /* SPPostgresTestServers.m in Sources */ = {isa = PBXBuildFile; fileRef = 1FB3DEAED927A1B724F7F5FB /* SPPostgresTestServers.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -544,6 +549,13 @@
 			proxyType = 2;
 			remoteGlobalIDString = 507FF1D51BC0D7D300104523;
 			remoteInfo = "SPMySQL Unit Tests";
+		};
+		468A211D71DD7B1A49C9A76D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 9C8F657A631FB15E092EFA8B /* PostgresKit.xcodeproj */;
+			proxyType = 2;
+			remoteGlobalIDString = 8DC2EF5B0486A6940098B216;
+			remoteInfo = Subproject;
 		};
 		5847571D120A1C6D0057631F /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -594,6 +606,27 @@
 			remoteGlobalIDString = 58CDB3350FCE13C900F8ACA3;
 			remoteInfo = TunnelPassphraseRequester;
 		};
+		C93A2902D792A2CBE3BB4F2B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 2A37F4A9FDCFA73011CA2CEA /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 8D15AC270486D014006FF6A4;
+			remoteInfo = "Sequel Pro";
+		};
+		F48D99F5B03F517BCF03A4BA /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 9C8F657A631FB15E092EFA8B /* PostgresKit.xcodeproj */;
+			proxyType = 2;
+			remoteGlobalIDString = 1724CD0415FB68E800AB2291;
+			remoteInfo = Subproject;
+		};
+		F6CC2E0B7517AD6DB42E8EE3 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 9C8F657A631FB15E092EFA8B /* PostgresKit.xcodeproj */;
+			proxyType = 1;
+			remoteGlobalIDString = 8DC2EF4F0486A6940098B216;
+			remoteInfo = PostgresKit;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -623,6 +656,7 @@
 				58DC0D7C12932AB200B76DA5 /* ShortcutRecorder.framework in Copy Frameworks */,
 				586AAB9314FAD40D007F82BF /* QueryKit.framework in Copy Frameworks */,
 				584D876B15140D7700F24774 /* SPMySQL.framework in Copy Frameworks */,
+				2232AC163B05C92BAAD56950 /* PostgresKit.framework in Copy Frameworks */,
 			);
 			name = "Copy Frameworks";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -642,6 +676,7 @@
 
 /* Begin PBXFileReference section */
 		1058C7A7FEA54F5311CA2CBB /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = /System/Library/Frameworks/Cocoa.framework; sourceTree = "<absolute>"; };
+		10DD83691E25B350417FED81 /* Postgres Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Postgres Tests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 		112730551180788A000737FD /* SPTableCopyTest.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SPTableCopyTest.m; sourceTree = "<group>"; };
 		1141A387117BBFF200126A28 /* SPTableCopy.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SPTableCopy.h; sourceTree = "<group>"; };
 		1141A388117BBFF200126A28 /* SPTableCopy.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SPTableCopy.m; sourceTree = "<group>"; };
@@ -654,6 +689,7 @@
 		11C2109D1180E70800758039 /* SPDatabaseRename.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SPDatabaseRename.m; sourceTree = "<group>"; };
 		11C210DE1180E9B800758039 /* SPDatabaseRenameTest.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SPDatabaseRenameTest.m; sourceTree = "<group>"; };
 		11D44DEF118F5887002AA43C /* OCMock.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = OCMock.framework; path = Frameworks/OCMock.framework; sourceTree = "<group>"; };
+		14206C42D4484DCE1FF1564C /* SPPostgresSmokeTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPPostgresSmokeTests.m; path = PostgresTests/SPPostgresSmokeTests.m; sourceTree = SOURCE_ROOT; };
 		1713122F109C7DF600FB465F /* build.sh */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.script.sh; path = build.sh; sourceTree = "<group>"; };
 		171312CC109D23C700FB465F /* SPTableTextFieldCell.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SPTableTextFieldCell.h; sourceTree = "<group>"; };
 		171312CD109D23C700FB465F /* SPTableTextFieldCell.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SPTableTextFieldCell.m; sourceTree = "<group>"; };
@@ -839,6 +875,7 @@
 		17FDB04B1280778B00DBBBC2 /* SPFontPreviewTextField.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SPFontPreviewTextField.m; sourceTree = "<group>"; };
 		1A56463D14569A0B56EE8BAC /* SPPillAttachmentCell.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SPPillAttachmentCell.m; sourceTree = "<group>"; };
 		1A564C0C0FFB444D2E5CA447 /* SPPillAttachmentCell.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SPPillAttachmentCell.h; sourceTree = "<group>"; };
+		1FB3DEAED927A1B724F7F5FB /* SPPostgresTestServers.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPPostgresTestServers.m; path = PostgresTests/SPPostgresTestServers.m; sourceTree = SOURCE_ROOT; };
 		296DC89E0F8FD336002A3258 /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = /System/Library/Frameworks/WebKit.framework; sourceTree = "<absolute>"; };
 		296DC8A50F909194002A3258 /* MGTemplateMarker.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = MGTemplateMarker.h; sourceTree = "<group>"; };
 		296DC8A60F909194002A3258 /* MGTemplateFilter.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = MGTemplateFilter.h; sourceTree = "<group>"; };
@@ -1152,6 +1189,7 @@
 		73F70A941E4E547500636550 /* SPJSONFormatter.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SPJSONFormatter.h; sourceTree = "<group>"; };
 		73F70A951E4E547500636550 /* SPJSONFormatter.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SPJSONFormatter.m; sourceTree = "<group>"; };
 		8D15AC370486D014006FF6A4 /* Sequel Pro.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Sequel Pro.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		9B17D0B7A246BB4C8EE6A8C1 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
 		9BE760B3C4586EA3B1A48600 /* SPHelpViewerController.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SPHelpViewerController.m; sourceTree = "<group>"; };
 		9BE761AE45D4F6B9B90E67DE /* SPHelpViewerClient.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SPHelpViewerClient.h; sourceTree = "<group>"; };
 		9BE764320CE8E86E8F63647B /* SPHelpViewerClient.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SPHelpViewerClient.m; sourceTree = "<group>"; };
@@ -1160,6 +1198,7 @@
 		9BE76C6E8377959C794385E5 /* SPHelpViewerController.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SPHelpViewerController.h; sourceTree = "<group>"; };
 		9BE76CC0CCE3A4A74E3E8D5E /* SPFillView.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SPFillView.h; sourceTree = "<group>"; };
 		9BE76F9BF9BDA2921CDD05AF /* SPFilterTableController.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SPFilterTableController.h; sourceTree = "<group>"; };
+		9C8F657A631FB15E092EFA8B /* PostgresKit.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; name = PostgresKit.xcodeproj; path = Frameworks/PostgresKit/PostgresKit.xcodeproj; sourceTree = SOURCE_ROOT; };
 		B51D6B9D114C310C0074704E /* toolbar-switch-to-table-triggers.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "toolbar-switch-to-table-triggers.png"; sourceTree = "<group>"; };
 		B52460D30F8EF92300171639 /* SPArrayAdditions.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SPArrayAdditions.h; sourceTree = "<group>"; };
 		B52460D40F8EF92300171639 /* SPArrayAdditions.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SPArrayAdditions.m; sourceTree = "<group>"; };
@@ -1282,6 +1321,7 @@
 		C9F9270F162D38D70051CB2E /* toolbar-switch-to-table-info@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "toolbar-switch-to-table-info@2x.png"; sourceTree = "<group>"; };
 		C9F92711162D39E60051CB2E /* toolbar-switch-to-browse.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "toolbar-switch-to-browse.png"; sourceTree = "<group>"; };
 		C9F92713162D39FE0051CB2E /* toolbar-switch-to-browse@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "toolbar-switch-to-browse@2x.png"; sourceTree = "<group>"; };
+		F762ABFD16473A403FB5CB79 /* SPPostgresTestServers.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; name = SPPostgresTestServers.h; path = PostgresTests/SPPostgresTestServers.h; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -1348,6 +1388,15 @@
 				179ECECA11F265FC009C6A40 /* libbz2.dylib in Frameworks */,
 				58C6C71611FBB17200A3F5E9 /* UniversalDetector.framework in Frameworks */,
 				58DC0D5F1293293400B76DA5 /* ShortcutRecorder.framework in Frameworks */,
+				46DC8C5CFFA9FCD31248BB07 /* PostgresKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CC4753316FA4AE5479F2DE5D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7A375B1B885C9DF9C1758CF0 /* Cocoa.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1908,6 +1957,7 @@
 				17E6416E0EF01F3B001BC333 /* Other */,
 				17DC8825126B222D00E9AAEC /* Third Party */,
 				17FC36AE141425D600AC3602 /* Frameworks */,
+				5D564FE9B7C26D06342D1F6D /* Postgres */,
 			);
 			path = Source;
 			sourceTree = "<group>";
@@ -2266,6 +2316,9 @@
 				58B906E611BD989A000826E5 /* PSMTabBar.framework */,
 				58B9096111C3A42B000826E5 /* xibLocalizationPostprocessor */,
 				584754C2120A04560057631F /* Sequel Pro.qlgenerator */,
+				193F5270C4E3870116661D28 /* PostgresKit.framework */,
+				B701A6BC087FDEC5FA58CE08 /* Tests.xctest */,
+				10DD83691E25B350417FED81 /* Postgres Tests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -2291,7 +2344,7 @@
 			name = MGTemplateEngine;
 			sourceTree = "<group>";
 		};
-		2A37F4AAFDCFA73011CA2CEA /* sequel-pro */ = {
+		2A37F4AAFDCFA73011CA2CEA = {
 			isa = PBXGroup;
 			children = (
 				1798F17E1550171B004B0AB8 /* LICENSE */,
@@ -2303,6 +2356,7 @@
 				1761FD9C0EF0486A00331368 /* Scripts */,
 				2A37F4C3FDCFA73011CA2CEA /* Frameworks */,
 				19C28FB0FE9D524F11CA2CBB /* Products */,
+				7DF45B991635E92B087F8170 /* PostgresTests */,
 			);
 			name = "sequel-pro";
 			sourceTree = "<group>";
@@ -2314,6 +2368,8 @@
 				38C613721C8977E600B3B6EF /* libz.tbd */,
 				38C613701C89777B00B3B6EF /* libz.1.2.5.tbd */,
 				1058C7A6FEA54F5311CA2CBB /* Linked Frameworks */,
+				9C8F657A631FB15E092EFA8B /* PostgresKit.xcodeproj */,
+				431E528DC5999FBE028B2267 /* OS X */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -2335,6 +2391,14 @@
 				386083451C8A3D97006D1B47 /* zlib.1.2.4.h */,
 			);
 			name = zlib;
+			sourceTree = "<group>";
+		};
+		431E528DC5999FBE028B2267 /* OS X */ = {
+			isa = PBXGroup;
+			children = (
+				9B17D0B7A246BB4C8EE6A8C1 /* Cocoa.framework */,
+			);
+			name = "OS X";
 			sourceTree = "<group>";
 		};
 		507FF10E1BBCC4A900104523 /* Utility */ = {
@@ -2546,6 +2610,23 @@
 			name = Parsing;
 			sourceTree = "<group>";
 		};
+		5D564FE9B7C26D06342D1F6D /* Postgres */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Postgres;
+			sourceTree = "<group>";
+		};
+		7DF45B991635E92B087F8170 /* PostgresTests */ = {
+			isa = PBXGroup;
+			children = (
+				F762ABFD16473A403FB5CB79 /* SPPostgresTestServers.h */,
+				1FB3DEAED927A1B724F7F5FB /* SPPostgresTestServers.m */,
+				14206C42D4484DCE1FF1564C /* SPPostgresSmokeTests.m */,
+			);
+			name = PostgresTests;
+			sourceTree = "<group>";
+		};
 		B57747D60F7A8990003B34F9 /* Category Additions */ = {
 			isa = PBXGroup;
 			children = (
@@ -2738,12 +2819,31 @@
 				58B9097011C3A462000826E5 /* PBXTargetDependency */,
 				5847571E120A1C6D0057631F /* PBXTargetDependency */,
 				586AAB1014FAD3A2007F82BF /* PBXTargetDependency */,
+				B0B25A5668E3D5729665A22C /* PBXTargetDependency */,
 			);
 			name = "Sequel Pro";
 			productInstallPath = "$(HOME)/Applications";
 			productName = "sequel-pro";
 			productReference = 8D15AC370486D014006FF6A4 /* Sequel Pro.app */;
 			productType = "com.apple.product-type.application";
+		};
+		B77CED5EA7A224EB59C2C97C /* Postgres Tests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B09FC980984A723204A97E24 /* Build configuration list for PBXNativeTarget "Postgres Tests" */;
+			buildPhases = (
+				C5AC0E7C4CAEAC511C4CA8A0 /* Sources */,
+				CC4753316FA4AE5479F2DE5D /* Frameworks */,
+				55D82BF3515D1D1AAC3E45C8 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				FE1686362647DE03904E5001 /* PBXTargetDependency */,
+			);
+			name = "Postgres Tests";
+			productName = "Postgres Tests";
+			productReference = 10DD83691E25B350417FED81 /* Postgres Tests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
 
@@ -2765,7 +2865,8 @@
 				ru,
 				de,
 			);
-			mainGroup = 2A37F4AAFDCFA73011CA2CEA /* sequel-pro */;
+			mainGroup = 2A37F4AAFDCFA73011CA2CEA;
+			productRefGroup = 19C28FB0FE9D524F11CA2CBB /* Products */;
 			projectDirPath = "";
 			projectReferences = (
 				{
@@ -2775,6 +2876,10 @@
 				{
 					ProductGroup = 584D876115140D3500F24774 /* Products */;
 					ProjectRef = 584D876015140D3500F24774 /* SPMySQLFramework.xcodeproj */;
+				},
+				{
+					ProductGroup = 19C28FB0FE9D524F11CA2CBB /* Products */;
+					ProjectRef = 9C8F657A631FB15E092EFA8B /* PostgresKit.xcodeproj */;
 				},
 			);
 			projectRoot = "";
@@ -2786,6 +2891,7 @@
 				58B9096011C3A42B000826E5 /* xibLocalizationPostprocessor */,
 				584754C1120A04560057631F /* Sequel Pro QLGenerator */,
 				1798AB1C12676EA0000D946A /* Localize */,
+				B77CED5EA7A224EB59C2C97C /* Postgres Tests */,
 			);
 		};
 /* End PBXProject section */
@@ -2805,6 +2911,13 @@
 			remoteRef = 17E596A114F307CE0054EE08 /* PBXContainerItemProxy */;
 			sourceTree = BUILT_PRODUCTS_DIR;
 		};
+		193F5270C4E3870116661D28 /* PostgresKit.framework */ = {
+			isa = PBXReferenceProxy;
+			fileType = wrapper.framework;
+			path = PostgresKit.framework;
+			remoteRef = 468A211D71DD7B1A49C9A76D /* PBXContainerItemProxy */;
+			sourceTree = BUILT_PRODUCTS_DIR;
+		};
 		29B70BD61C805B2A00D1BE0C /* SPMySQL Unit Tests.xctest */ = {
 			isa = PBXReferenceProxy;
 			fileType = wrapper.cfbundle;
@@ -2819,9 +2932,23 @@
 			remoteRef = 584D876715140D3500F24774 /* PBXContainerItemProxy */;
 			sourceTree = BUILT_PRODUCTS_DIR;
 		};
+		B701A6BC087FDEC5FA58CE08 /* Tests.xctest */ = {
+			isa = PBXReferenceProxy;
+			fileType = wrapper.cfbundle;
+			path = Tests.xctest;
+			remoteRef = F48D99F5B03F517BCF03A4BA /* PBXContainerItemProxy */;
+			sourceTree = BUILT_PRODUCTS_DIR;
+		};
 /* End PBXReferenceProxy section */
 
 /* Begin PBXResourcesBuildPhase section */
+		55D82BF3515D1D1AAC3E45C8 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		584754BE120A04560057631F /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -3326,6 +3453,15 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C5AC0E7C4CAEAC511C4CA8A0 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F7443FFB4FDCC9CD7EAE96A3 /* SPPostgresTestServers.m in Sources */,
+				BF6F1FC367DA7DD5A7C13D20 /* SPPostgresSmokeTests.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -3373,6 +3509,17 @@
 			isa = PBXTargetDependency;
 			target = 58CDB3350FCE13C900F8ACA3 /* SequelProTunnelAssistant */;
 			targetProxy = 58CDB34A0FCE144000F8ACA3 /* PBXContainerItemProxy */;
+		};
+		B0B25A5668E3D5729665A22C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = PostgresKit;
+			targetProxy = F6CC2E0B7517AD6DB42E8EE3 /* PBXContainerItemProxy */;
+		};
+		FE1686362647DE03904E5001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = "Sequel Pro";
+			target = 8D15AC270486D014006FF6A4 /* Sequel Pro */;
+			targetProxy = C93A2902D792A2CBE3BB4F2B /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -3891,6 +4038,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = arm64;
 				CLANG_LINK_OBJC_RUNTIME = NO;
 				CLANG_STATIC_ANALYZER_MODE = deep;
 				CLANG_WARN_BOOL_CONVERSION = YES;
@@ -3932,7 +4080,6 @@
 				GCC_WARN_UNUSED_VALUE = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IBC_WARNINGS = YES;
-				ARCHS = arm64;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				SDKROOT = macosx;
 				WARNING_CFLAGS = "-Wmost";
@@ -3942,6 +4089,7 @@
 		588593F10F7AEB6900ED0E67 /* Distribution */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ARCHS = arm64;
 				COPY_PHASE_STRIP = NO;
 				FRAMEWORK_SEARCH_PATHS = "$(SRCROOT)/Frameworks";
 				GCC_GENERATE_DEBUGGING_SYMBOLS = NO;
@@ -3950,10 +4098,9 @@
 				GCC_PREFIX_HEADER = "Source/Sequel-Pro.pch";
 				INFOPLIST_FILE = Resources/Plists/Info.plist;
 				INSTALL_PATH = "$(HOME)/Applications";
-				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Frameworks/zlib";
-				ARCHS = arm64;
-				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
+				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Frameworks/zlib";
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				OTHER_LDFLAGS = "-lz";
 				PRODUCT_NAME = "Sequel Pro";
 				SEPARATE_STRIP = NO;
@@ -4127,9 +4274,44 @@
 			};
 			name = Distribution;
 		};
+		B1C98A44CA4E107F0AD051BD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGN_IDENTITY = "-";
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+				);
+				GCC_PRECOMPILE_PREFIX_HEADER = NO;
+				GCC_PREFIX_HEADER = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Source/Postgres",
+					"$(SRCROOT)/PostgresTests",
+				);
+				INFOPLIST_FILE = PostgresTests/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/../Frameworks @executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				ONLY_ACTIVE_ARCH = NO;
+				OTHER_LDFLAGS = (
+					"-framework",
+					PostgresKit,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.sequelpro.PostgresTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sequel Pro.app/Contents/MacOS/Sequel Pro";
+			};
+			name = Release;
+		};
 		C05733C808A9546B00998B17 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ARCHS = arm64;
 				COPY_PHASE_STRIP = NO;
 				FRAMEWORK_SEARCH_PATHS = "$(SRCROOT)/Frameworks";
 				GCC_DYNAMIC_NO_PIC = NO;
@@ -4138,10 +4320,9 @@
 				GCC_PREFIX_HEADER = "Source/Sequel-Pro.pch";
 				INFOPLIST_FILE = Resources/Plists/Info.plist;
 				INSTALL_PATH = "$(HOME)/Applications";
-				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Frameworks/zlib";
-				ARCHS = arm64;
-				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
+				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Frameworks/zlib";
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				OTHER_LDFLAGS = "-lz";
 				PRODUCT_NAME = "Sequel Pro";
 				SEPARATE_STRIP = NO;
@@ -4151,6 +4332,7 @@
 		C05733C908A9546B00998B17 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ARCHS = arm64;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				FRAMEWORK_SEARCH_PATHS = "$(SRCROOT)/Frameworks";
@@ -4160,10 +4342,9 @@
 				GCC_PREFIX_HEADER = "Source/Sequel-Pro.pch";
 				INFOPLIST_FILE = Resources/Plists/Info.plist;
 				INSTALL_PATH = "$(HOME)/Applications";
-				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Frameworks/zlib";
-				ARCHS = arm64;
-				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
+				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Frameworks/zlib";
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				OTHER_LDFLAGS = "-lz";
 				PRODUCT_NAME = "Sequel Pro";
 				SEPARATE_STRIP = NO;
@@ -4174,6 +4355,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = arm64;
 				CLANG_LINK_OBJC_RUNTIME = NO;
 				CLANG_STATIC_ANALYZER_MODE = deep;
 				CLANG_WARN_BOOL_CONVERSION = YES;
@@ -4220,7 +4402,6 @@
 				IBC_WARNINGS = YES;
 				LEX_INSERT_LINE_DIRECTIVES = YES;
 				LEX_SUPPRESS_DEFAULT_RULE = NO;
-				ARCHS = arm64;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = macosx;
@@ -4233,6 +4414,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
+				ARCHS = arm64;
 				CLANG_LINK_OBJC_RUNTIME = NO;
 				CLANG_STATIC_ANALYZER_MODE = deep;
 				CLANG_WARN_BOOL_CONVERSION = YES;
@@ -4274,12 +4456,79 @@
 				GCC_WARN_UNUSED_VALUE = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IBC_WARNINGS = YES;
-				ARCHS = arm64;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				SDKROOT = macosx;
 				WARNING_CFLAGS = "-Wmost";
 			};
 			name = Release;
+		};
+		C7D65CE13F288F944FEA5254 /* Distribution */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGN_IDENTITY = "-";
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+				);
+				GCC_PRECOMPILE_PREFIX_HEADER = NO;
+				GCC_PREFIX_HEADER = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Source/Postgres",
+					"$(SRCROOT)/PostgresTests",
+				);
+				INFOPLIST_FILE = PostgresTests/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/../Frameworks @executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				ONLY_ACTIVE_ARCH = NO;
+				OTHER_LDFLAGS = (
+					"-framework",
+					PostgresKit,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.sequelpro.PostgresTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sequel Pro.app/Contents/MacOS/Sequel Pro";
+			};
+			name = Distribution;
+		};
+		D82C6220B0C1E096B1D1D5AC /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGN_IDENTITY = "-";
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(BUILT_PRODUCTS_DIR)",
+				);
+				GCC_PRECOMPILE_PREFIX_HEADER = NO;
+				GCC_PREFIX_HEADER = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Source/Postgres",
+					"$(SRCROOT)/PostgresTests",
+				);
+				INFOPLIST_FILE = PostgresTests/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/../Frameworks @executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				ONLY_ACTIVE_ARCH = NO;
+				OTHER_LDFLAGS = (
+					"-framework",
+					PostgresKit,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.sequelpro.PostgresTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sequel Pro.app/Contents/MacOS/Sequel Pro";
+			};
+			name = Debug;
 		};
 /* End XCBuildConfiguration section */
 
@@ -4343,6 +4592,16 @@
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
+		};
+		B09FC980984A723204A97E24 /* Build configuration list for PBXNativeTarget "Postgres Tests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B1C98A44CA4E107F0AD051BD /* Release */,
+				D82C6220B0C1E096B1D1D5AC /* Debug */,
+				C7D65CE13F288F944FEA5254 /* Distribution */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
 		};
 		C05733C708A9546B00998B17 /* Build configuration list for PBXNativeTarget "Sequel Pro" */ = {
 			isa = XCConfigurationList;
