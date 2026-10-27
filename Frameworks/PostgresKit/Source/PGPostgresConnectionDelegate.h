@@ -60,4 +60,14 @@
  */
 - (void)connection:(PGPostgresConnection *)connection willExecute:(NSObject *)query withValues:(NSArray *)values;
 
+@optional
+
+/**
+ * Called, on the main thread, if establishing the supplied connection failed. The reason is available
+ * via the connection's connectionError property.
+ *
+ * @param connection The connection instance.
+ */
+- (void)connectionFailed:(PGPostgresConnection *)connection;
+
 @end

@@ -31,12 +31,14 @@
 
 #import <pthread.h>
 #import <poll.h>
+#import <errno.h>
 
 @interface PGPostgresConnection ()
 
 - (void)_loadDatabaseParameters;
 - (void)_createConnectionParameters;
 - (void)_pollConnection:(NSNumber *)isReset;
+- (void)_setConnectionError:(NSString *)error;
 
 // libpq callback
 static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message);
@@ -59,10 +61,13 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 @synthesize lastQueryWasCancelled = _lastQueryWasCancelled;
 @synthesize lastError = _lastError;
 @synthesize encoding = _encoding;
-@synthesize connectionError = _connectionError;
 @synthesize stringEncoding = _stringEncoding;
 @synthesize parameters = _parameters;
 @synthesize applicationName = _applicationName;
+@synthesize sslMode = _sslMode;
+@synthesize sslRootCertPath = _sslRootCertPath;
+@synthesize sslCertPath = _sslCertPath;
+@synthesize sslKeyPath = _sslKeyPath;
 @synthesize lastQueryAffectedRowCount = _lastQueryAffectedRowCount;
 
 #pragma mark -
@@ -114,6 +119,26 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 
 #pragma mark -
 #pragma mark Accessors
+
+/**
+ * The description of the last connection failure, or nil. Safe to read while the background
+ * connection poll is running.
+ */
+- (NSString *)connectionError
+{
+	@synchronized (self) {
+		return [[_connectionError retain] autorelease];
+	}
+}
+
+- (void)_setConnectionError:(NSString *)error
+{
+	@synchronized (self) {
+		[error retain];
+		[_connectionError release];
+		_connectionError = error;
+	}
+}
 
 /**
  * Get the underlying connection associated with this wrapper.
@@ -171,6 +196,15 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 {
 	if ([self isConnected]) return YES;
 	
+	// Discard the remains of any previous failed attempt
+	if (_connection) {
+		PQfinish(_connection);
+		
+		_connection = nil;
+	}
+	
+	[self _setConnectionError:nil];
+	
 	[self _createConnectionParameters];
 	
 	// Perform the connection
@@ -178,11 +212,11 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 	
 	if (!_connection || PQstatus(_connection) == CONNECTION_BAD) {
 		
-		if (_connectionError) [_connectionError release];
+		NSString *error = _connection ? [NSString stringWithUTF8String:PQerrorMessage(_connection)] : @"Out of memory";
 		
-		_connectionError = [[NSString alloc] initWithUTF8String:PQerrorMessage(_connection)];
+		[self _setConnectionError:error];
 		
-		PQfinish(_connection);
+		if (_connection) PQfinish(_connection);
 		
 		_connection = nil;
 		
@@ -298,28 +332,49 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 	@autoreleasepool {
 		BOOL reset = isReset && [isReset boolValue];
 
-		int sock = PQsocket(_connection);
-
-		if (sock == -1) {
-			return;
-		}
-
-		struct pollfd fdinfo[1];
-
-		fdinfo[0].fd = sock;
-		fdinfo[0].events = POLLIN|POLLOUT;
-
 		PostgresPollingStatusType status;
+
+		// Per the libpq documentation, the first poll is made as if the status were PGRES_POLLING_WRITING,
+		// and the socket must be re-fetched after each poll as it can change (e.g. when falling back from
+		// SSL to a plain connection).
+		status = PGRES_POLLING_WRITING;
 
 		do
 		{
-			status = reset ? PQresetPoll(_connection) : PQconnectPoll(_connection);
+			int sock = PQsocket(_connection);
 
-			if (status == PGRES_POLLING_READING || status == PGRES_POLLING_WRITING) {
-				if (poll(fdinfo, 1, -1) < 0) break;
+			if (sock == -1) {
+				status = PGRES_POLLING_FAILED;
+				
+				break;
 			}
+
+			struct pollfd fdinfo[1];
+
+			fdinfo[0].fd = sock;
+			fdinfo[0].events = (status == PGRES_POLLING_READING) ? POLLIN : POLLOUT;
+
+			if (poll(fdinfo, 1, -1) < 0 && errno != EINTR) {
+				status = PGRES_POLLING_FAILED;
+				
+				break;
+			}
+
+			status = reset ? PQresetPoll(_connection) : PQconnectPoll(_connection);
 		}
 		while (status != PGRES_POLLING_OK && status != PGRES_POLLING_FAILED);
+
+		if (status == PGRES_POLLING_FAILED) {
+			const char *message = _connection ? PQerrorMessage(_connection) : NULL;
+			
+			[self _setConnectionError:[NSString stringWithUTF8String:(message && *message) ? message : "Connection failed"]];
+
+			if (_delegate && [_delegate respondsToSelector:@selector(connectionFailed:)]) {
+				[_delegate performSelectorOnMainThread:@selector(connectionFailed:) withObject:self waitUntilDone:NO];
+			}
+			
+			return;
+		}
 
 		if (status == PGRES_POLLING_OK && [self isConnected]) {
 
@@ -328,13 +383,6 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 
 			// Set notice processor
 			PQsetNoticeProcessor(_connection, _PGPostgresConnectionNoticeProcessor, self);
-
-			// Register or clear type extensions
-			NSInteger success = reset ? PQclearTypes(_connection) : PQinitTypes(_connection);
-
-			if (!success) {
-				NSLog(@"PostgresKit: Error: Failed to initialise or clear type extensions. Connection might return unexpected results!");
-			}
 
 			[self _loadDatabaseParameters];
 
@@ -397,18 +445,30 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 	if (_connectionParamNames) free(_connectionParamNames);
 	if (_connectionParamValues) free(_connectionParamValues);
 	
-	int paramCount = 5;
+	// Application name, port, client encoding, keep alive, keep alive interval and options are always set
+	int paramCount = 6;
 	
 	if (_user && [_user length]) paramCount++, hasUser = YES;
 	if (_host && [_host length]) paramCount++, hasHost = YES;
 	if (_password && [_password length]) paramCount++, hasPassword = YES;
 	if (_database && [_database length]) paramCount++, hasDatabase = YES;
 	
-	_connectionParamNames = malloc(paramCount * sizeof(*_connectionParamNames));
-	_connectionParamValues = malloc(paramCount * sizeof(*_connectionParamValues));
+	BOOL hasSSLMode = _sslMode && [_sslMode length];
+	BOOL hasSSLRootCert = _sslRootCertPath && [_sslRootCertPath length];
+	BOOL hasSSLCert = _sslCertPath && [_sslCertPath length];
+	BOOL hasSSLKey = _sslKeyPath && [_sslKeyPath length];
+	
+	if (hasSSLMode) paramCount++;
+	if (hasSSLRootCert) paramCount++;
+	if (hasSSLCert) paramCount++;
+	if (hasSSLKey) paramCount++;
+	
+	// One extra entry for the terminating NULL
+	_connectionParamNames = malloc((paramCount + 1) * sizeof(*_connectionParamNames));
+	_connectionParamValues = malloc((paramCount + 1) * sizeof(*_connectionParamValues));
 	
 	_connectionParamNames[0] = PGPostgresApplicationParam;
-	_connectionParamValues[0] = !_applicationName ? [_applicationName UTF8String] : PGPostgresKitApplicationName;
+	_connectionParamValues[0] = _applicationName ? [_applicationName UTF8String] : PGPostgresKitApplicationName;
 	
 	_connectionParamNames[1] = PGPostgresPortParam;
 	_connectionParamValues[1] = [[[NSNumber numberWithUnsignedInteger:_port] stringValue] UTF8String];
@@ -422,7 +482,11 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 	_connectionParamNames[4] = PGPostgresKeepAliveIntervalParam;
 	_connectionParamValues[4] = [[[NSNumber numberWithUnsignedInteger:_keepAliveInterval] stringValue] UTF8String];
 	
-	NSUInteger i = 5;
+	// The type handlers parse PostgreSQL's ISO date and 'postgres' interval text formats
+	_connectionParamNames[5] = PGPostgresOptionsParam;
+	_connectionParamValues[5] = PGPostgresOptionsValue;
+	
+	NSUInteger i = 6;
 	
 	if (hasUser) {
 		_connectionParamNames[i] = PGPostgresUserParam;
@@ -452,8 +516,36 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 		i++;
 	}
 	
-	_connectionParamNames[i] = '\0';
-	_connectionParamValues[i] = '\0';
+	if (hasSSLMode) {
+		_connectionParamNames[i] = PGPostgresSSLModeParam;
+		_connectionParamValues[i] = [_sslMode UTF8String];
+		
+		i++;
+	}
+	
+	if (hasSSLRootCert) {
+		_connectionParamNames[i] = PGPostgresSSLRootCertParam;
+		_connectionParamValues[i] = [_sslRootCertPath UTF8String];
+		
+		i++;
+	}
+	
+	if (hasSSLCert) {
+		_connectionParamNames[i] = PGPostgresSSLCertParam;
+		_connectionParamValues[i] = [_sslCertPath UTF8String];
+		
+		i++;
+	}
+	
+	if (hasSSLKey) {
+		_connectionParamNames[i] = PGPostgresSSLKeyParam;
+		_connectionParamValues[i] = [_sslKeyPath UTF8String];
+		
+		i++;
+	}
+	
+	_connectionParamNames[i] = NULL;
+	_connectionParamValues[i] = NULL;
 }
 
 #pragma mark -
@@ -475,6 +567,10 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 	if (_parameters) [_parameters release], _parameters = nil;
 	if (_connectionError) [_connectionError release], _connectionError = nil;
 	if (_applicationName) [_applicationName release], _applicationName = nil;
+	if (_sslMode) [_sslMode release], _sslMode = nil;
+	if (_sslRootCertPath) [_sslRootCertPath release], _sslRootCertPath = nil;
+	if (_sslCertPath) [_sslCertPath release], _sslCertPath = nil;
+	if (_sslKeyPath) [_sslKeyPath release], _sslKeyPath = nil;
 	
 	[super dealloc];
 }

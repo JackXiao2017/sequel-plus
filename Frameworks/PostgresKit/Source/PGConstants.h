@@ -34,25 +34,6 @@ extern NSString *PGPostgresParameterSuperUser;
 extern NSString *PGPostgresParameterTimeZone;
 extern NSString *PGPostgresParameterIntegerDateTimes;
 
-// Result value specifiers
-extern const char *PGPostgresResultValueMacAddr;
-extern const char *PGPostgresResultValueInet;
-extern const char *PGPostgresResultValueCidr;
-extern const char *PGPostgresResultValueDate;
-extern const char *PGPostgresResultValueTime;
-extern const char *PGPostgresResultValueTimeTZ;
-extern const char *PGPostgresResultValueTimestamp;
-extern const char *PGPostgresResultValueTimestmpTZ;
-extern const char *PGPostgresResultValueInterval;
-extern const char *PGPostgresResultValueNumeric;
-extern const char *PGPostgresResultValueBool;
-extern const char *PGPostgresResultValueInt2;
-extern const char *PGPostgresResultValueInt4;
-extern const char *PGPostgresResultValueInt8;
-extern const char *PGPostgresResultValueFloat4;
-extern const char *PGPostgresResultValueFloat8;
-extern const char *PGPostgresResultValueByteA;
-
 // Connection parameters
 extern const char *PGPostgresKitApplicationName;
 extern const char *PGPostgresApplicationParam;
@@ -64,3 +45,9 @@ extern const char *PGPostgresDatabaseParam;
 extern const char *PGPostgresClientEncodingParam;
 extern const char *PGPostgresKeepAliveParam;
 extern const char *PGPostgresKeepAliveIntervalParam;
+extern const char *PGPostgresSSLModeParam;
+extern const char *PGPostgresSSLRootCertParam;
+extern const char *PGPostgresSSLCertParam;
+extern const char *PGPostgresSSLKeyParam;
+extern const char *PGPostgresOptionsParam;
+extern const char *PGPostgresOptionsValue;
