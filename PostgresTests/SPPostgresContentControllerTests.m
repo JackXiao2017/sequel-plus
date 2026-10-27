@@ -351,6 +351,24 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	XCTAssertFalse([[self idsInGrid] containsObject:@"6"]);
 }
 
+- (void)testEditInProgressIsSavedBeforeDatabaseSwitch
+{
+	[self selectTable:@"items"];
+	NSTableView *grid = [self grid];
+	NSInteger column = [[grid tableColumns] indexOfObject:[self columnNamed:@"name"]];
+	[grid editColumn:column row:4 withEvent:nil select:YES];
+	NSText *editor = [grid currentEditor];
+	XCTAssertNotNil(editor, @"the cell is being edited");
+	[editor setString:@"saved before switch"];
+
+	PGPostgresConnection *oldConnection = self.document.connection;
+	[self.document switchToDatabase:@"postgres"];
+	XCTAssertEqualObjects([self serverValue:@"SELECT name FROM content_test.items WHERE id = 5"], @"saved before switch");
+	XCTAssertTrue([self spinUntil:^BOOL{ return [[self.document windowTitleString] hasSuffix:@"/postgres"] && !self.document.isProcessing; } timeout:20]);
+	XCTAssertNotEqual(self.document.connection, oldConnection);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
+}
+
 - (void)testEditOnNoPrimaryKeyIsRefused
 {
 	[self selectTable:@"no_pk"];
