@@ -173,6 +173,20 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 	return PQstatus(_connection) == CONNECTION_OK;
 }
 
+- (PGPostgresTransactionStatus)transactionStatus
+{
+	if (![self isConnected]) return PGPostgresTransactionUnknown;
+	
+	switch (PQtransactionStatus(_connection))
+	{
+		case PQTRANS_IDLE:    return PGPostgresTransactionIdle;
+		case PQTRANS_ACTIVE:  return PGPostgresTransactionActive;
+		case PQTRANS_INTRANS: return PGPostgresTransactionInTransaction;
+		case PQTRANS_INERROR: return PGPostgresTransactionInError;
+		default:              return PGPostgresTransactionUnknown;
+	}
+}
+
 - (NSString *)libpqErrorMessage
 {
 	if (!_connection) return nil;

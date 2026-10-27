@@ -72,14 +72,14 @@ static NSError *SPPostgresTableDataError(NSInteger code, NSString *message)
 @implementation SPPostgresFilter
 
 @synthesize column = _column;
-@synthesize operator = _operator;
+@synthesize comparison = _comparison;
 @synthesize value = _value;
 
-+ (instancetype)filterWithColumn:(NSString *)column operator:(NSString *)op value:(NSString *)value
++ (instancetype)filterWithColumn:(NSString *)column comparison:(NSString *)comparison value:(NSString *)value
 {
 	SPPostgresFilter *filter = [[[self alloc] init] autorelease];
 	filter.column = column;
-	filter.operator = op;
+	filter.comparison = comparison;
 	filter.value = value;
 	return filter;
 }
@@ -87,7 +87,7 @@ static NSError *SPPostgresTableDataError(NSInteger code, NSString *message)
 - (void)dealloc
 {
 	[_column release];
-	[_operator release];
+	[_comparison release];
 	[_value release];
 	[super dealloc];
 }
@@ -166,7 +166,7 @@ static NSError *SPPostgresTableDataError(NSInteger code, NSString *message)
 	// One row per column (LEFT JOIN, so a relation without columns still yields its relkind).
 	PGPostgresResult *result = [self run:
 		@"SELECT c.relkind::text AS kind, a.attname::text AS name, "
-		 "format_type(a.atttypid, a.atttypmod) AS type, format_type(a.atttypid, NULL) AS casttype, "
+		 "format_type(a.atttypid, a.atttypmod) AS type, format_type(a.atttypid, -1) AS casttype, "
 		 "(NOT a.attnotnull)::text AS nullable, "
 		 "CASE WHEN a.attgenerated = '' THEN pg_get_expr(d.adbin, d.adrelid) END AS def, "
 		 // indkey is an int2vector, whose subscripts start at 0, so the 1-based position comes from WITH ORDINALITY.
@@ -268,7 +268,11 @@ static NSError *SPPostgresTableDataError(NSInteger code, NSString *message)
 	if (!column) return nil;
 
 	NSString *quoted = SPPostgresQuoteIdentifier([column name]);
-	NSString *op = [filter operator];
+	NSString *op = [filter comparison];
+	if (![op length]) {
+		if (error) *error = SPPostgresTableDataError(SPPostgresErrorQueryFailed, NSLocalizedString(@"No filter operator was chosen.", @"Postgres content: missing filter operator"));
+		return nil;
+	}
 	NSString *value = [filter value] ?: @"";
 
 	if ([op isEqualToString:@"IS NULL"] || [op isEqualToString:@"IS NOT NULL"]) {
@@ -281,17 +285,24 @@ static NSError *SPPostgresTableDataError(NSInteger code, NSString *message)
 	}
 
 	if ([op isEqualToString:@"IN"]) {
+		// Items are trimmed; empty items (e.g. from a trailing comma) are dropped.
 		NSMutableArray *placeholders = [NSMutableArray array];
 		for (NSString *item in [value componentsSeparatedByString:@","]) {
-			[values addObject:[item stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]];
+			NSString *trimmed = [item stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+			if (![trimmed length]) continue;
+			[values addObject:trimmed];
 			[placeholders addObject:[NSString stringWithFormat:@"$%lu::%@", (unsigned long)[values count], [column castTypeName]]];
+		}
+		if (![placeholders count]) {
+			if (error) *error = SPPostgresTableDataError(SPPostgresErrorQueryFailed, NSLocalizedString(@"Enter at least one value for IN, separated by commas.", @"Postgres content: empty IN list"));
+			return nil;
 		}
 		return [NSString stringWithFormat:@" WHERE %@ IN (%@)", quoted, [placeholders componentsJoinedByString:@", "]];
 	}
 
 	// Only these fixed operators are ever placed in the SQL; ≠ is sent as <>.
 	NSDictionary *comparisons = @{@"=": @"=", @"≠": @"<>", @">": @">", @"<": @"<", @">=": @">=", @"<=": @"<="};
-	NSString *sqlOperator = [comparisons objectForKey:op ?: @""];
+	NSString *sqlOperator = [comparisons objectForKey:op];
 	if (!sqlOperator) {
 		if (error) {
 			*error = SPPostgresTableDataError(SPPostgresErrorQueryFailed,
@@ -390,8 +401,9 @@ static NSError *SPPostgresTableDataError(NSInteger code, NSString *message)
 	}
 	NSString *orderBy = [order count] ? [@" ORDER BY " stringByAppendingString:[order componentsJoinedByString:@", "]] : @"";
 
+	// limit 0 means no limit: LIMIT NULL is the same as LIMIT ALL.
 	unsigned long long maxBigint = (unsigned long long)LLONG_MAX;
-	[values addObject:[NSString stringWithFormat:@"%llu", MIN((unsigned long long)limit, maxBigint)]];
+	[values addObject:limit ? (id)[NSString stringWithFormat:@"%llu", MIN((unsigned long long)limit, maxBigint)] : (id)[NSNull null]];
 	[values addObject:[NSString stringWithFormat:@"%llu", MIN((unsigned long long)offset, maxBigint)]];
 	NSString *sql = [NSString stringWithFormat:@"SELECT %@ FROM %@%@%@ LIMIT $%lu::bigint OFFSET $%lu::bigint",
 					 [self textSelectList], [self qualifiedName], where, orderBy,
@@ -482,33 +494,59 @@ static NSError *SPPostgresTableDataError(NSInteger code, NSString *message)
 	if (![self checkEditable:error]) return NO;
 	if (![rows count]) return YES;
 
-	// Build every statement first, so a malformed row is refused before the transaction starts.
+	// Build every statement first, so a malformed row is refused before anything is sent. Rows with the same
+	// primary key are deleted once (a second DELETE would match nothing and look like a concurrent change).
 	NSMutableArray *statements = [NSMutableArray arrayWithCapacity:[rows count]];
 	NSMutableArray *parameters = [NSMutableArray arrayWithCapacity:[rows count]];
+	NSMutableSet *seenKeys = [NSMutableSet set];
 	for (NSArray *row in rows) {
 		NSMutableArray *values = [NSMutableArray array];
 		NSString *key = [self keyConditionForRow:row values:values error:error];
 		if (!key) return NO;
+		if ([seenKeys containsObject:values]) continue;
+		[seenKeys addObject:values];
 		[statements addObject:[NSString stringWithFormat:@"DELETE FROM %@ WHERE %@", [self qualifiedName], key]];
 		[parameters addObject:values];
 	}
 
-	if (![self run:@"BEGIN" values:nil error:error]) return NO;
+	// All or nothing. Outside a transaction, use one of our own; inside the user's (shared connection), use a
+	// savepoint so the user's transaction is neither committed nor rolled back.
+	NSArray *begin, *finish, *undo;
+	switch ([_connection transactionStatus]) {
+		case PGPostgresTransactionInError:
+			if (error) {
+				*error = SPPostgresTableDataError(SPPostgresErrorQueryFailed,
+					NSLocalizedString(@"The current transaction is aborted, so no rows were deleted. Roll it back first.", @"Postgres content: delete inside an aborted transaction"));
+			}
+			return NO;
+		case PGPostgresTransactionInTransaction:
+			begin = @[@"SAVEPOINT sp_content_delete"];
+			finish = @[@"RELEASE SAVEPOINT sp_content_delete"];
+			undo = @[@"ROLLBACK TO SAVEPOINT sp_content_delete", @"RELEASE SAVEPOINT sp_content_delete"];
+			break;
+		default: // idle (or no connection, which the first statement reports)
+			begin = @[@"BEGIN"];
+			finish = @[@"COMMIT"];
+			undo = @[@"ROLLBACK"];
+			break;
+	}
+
+	if (![self run:[begin firstObject] values:nil error:error]) return NO;
 
 	for (NSUInteger i = 0; i < [statements count]; i++) {
 		if (![self run:[statements objectAtIndex:i] values:[parameters objectAtIndex:i] error:error]) {
-			[self runQuietly:@"ROLLBACK"];
+			for (NSString *sql in undo) [self runQuietly:sql];
 			return NO;
 		}
 		if ([_connection lastQueryAffectedRowCount] == 0) {
-			[self runQuietly:@"ROLLBACK"];
+			for (NSString *sql in undo) [self runQuietly:sql];
 			if (error) *error = [self rowChangedError];
 			return NO;
 		}
 	}
 
-	if (![self run:@"COMMIT" values:nil error:error]) {
-		[self runQuietly:@"ROLLBACK"];
+	if (![self run:[finish firstObject] values:nil error:error]) {
+		for (NSString *sql in undo) [self runQuietly:sql];
 		return NO;
 	}
 	return YES;
