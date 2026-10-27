@@ -110,6 +110,9 @@ __attribute__((visibility("default")))
 - (CGFloat)engineControlAreaHeight;
 
 - (SPConnectionEngine)selectedEngine;
+/// Enables or disables the engine control. The host disables it while a connection (of either engine)
+/// is being made, so switching engine can't re-run the favorite selection mid-connect.
+- (void)setEngineChoiceEnabled:(BOOL)enabled;
 /// Sets the engine without the user-switch behaviour (updates the control and the port placeholders).
 - (void)setSelectedEngine:(SPConnectionEngine)engine;
 /// Action of the engine control. Switching away from the engine of a selected saved favorite moves the

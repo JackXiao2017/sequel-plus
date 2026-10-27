@@ -55,6 +55,7 @@ static NSString *SPPGOrEmpty(NSString *s)
 - (void)_showError:(NSError *)error;
 - (BOOL)_saveFormAsNew:(BOOL)asNew error:(NSError **)error;
 - (void)_storePassword:(NSString *)thePassword sshPassword:(NSString *)theSSHPassword forFavorite:(SPPostgresFavorite *)favorite previous:(SPPostgresFavorite *)previous;
+- (void)_rollBackPasswordsOf:(SPPostgresFavorite *)favorite to:(SPPostgresFavorite *)previous password:(NSString *)oldPassword sshPassword:(NSString *)oldSSHPassword;
 - (void)_applyPortPlaceholders;
 - (void)_collectPortFieldsInView:(NSView *)view;
 - (NSError *)_connectionValidationError;
@@ -79,6 +80,9 @@ static NSString *SPPGOrEmpty(NSString *s)
 
 	SPPostgresFavorite *loadedFavorite;
 	SPPostgresConnector *pendingConnector;
+
+	// YES while the host reloads the outline for a store change (see -loadFavoriteIntoForm:)
+	BOOL handlingStoreChange;
 }
 
 @synthesize keychain;
@@ -259,6 +263,11 @@ static NSString *SPPGOrEmpty(NSString *s)
 	return engine;
 }
 
+- (void)setEngineChoiceEnabled:(BOOL)enabled
+{
+	[engineControl setEnabled:enabled];
+}
+
 - (void)setSelectedEngine:(SPConnectionEngine)newEngine
 {
 	engine = (newEngine == SPConnectionEnginePostgreSQL) ? SPConnectionEnginePostgreSQL : SPConnectionEngineMySQL;
@@ -345,7 +354,10 @@ static NSString *SPPGOrEmpty(NSString *s)
 	}
 
 	if ([host respondsToSelector:@selector(postgresFavoritesDidChange)]) {
+		BOOL wasHandling = handlingStoreChange;
+		handlingStoreChange = YES;
 		[host postgresFavoritesDidChange];
+		handlingStoreChange = wasHandling;
 	}
 }
 
@@ -415,6 +427,14 @@ static NSString *SPPGOrEmpty(NSString *s)
 - (void)loadFavoriteIntoForm:(SPPostgresFavorite *)favorite
 {
 	if (!favorite) return;
+
+	// A store change re-selects the loaded favorite when its row moves (e.g. renamed so it re-sorts).
+	// The form already holds what was saved, including the passwords: reloading it from the store and
+	// keychain at that point could only lose edits, so keep it.
+	if (handlingStoreChange && [[loadedFavorite favoriteID] isEqualToString:[favorite favoriteID]]) {
+		[self setSelectedEngine:SPConnectionEnginePostgreSQL];
+		return;
+	}
 
 	[self setSelectedEngine:SPConnectionEnginePostgreSQL];
 
@@ -577,9 +597,16 @@ static NSString *SPPGOrEmpty(NSString *s)
 	NSString *thePassword = [[[host password] copy] autorelease];
 	NSString *theSSHPassword = [[[host sshPassword] copy] autorelease];
 
-	if (![store saveFavorite:favorite error:error]) return NO;
-
+	// Keychain first: the store's change notification (sent from inside -saveFavorite:) can make the
+	// host load the favorite, and its passwords must already be under the new names by then.
+	NSString *oldPassword = previous ? [keychain getPasswordForName:[previous keychainName] account:[previous keychainAccount]] : nil;
+	NSString *oldSSHPassword = previous ? [keychain getPasswordForName:[previous sshKeychainName] account:[previous sshKeychainAccount]] : nil;
 	[self _storePassword:thePassword sshPassword:theSSHPassword forFavorite:favorite previous:previous];
+
+	if (![store saveFavorite:favorite error:error]) {
+		[self _rollBackPasswordsOf:favorite to:previous password:oldPassword sshPassword:oldSSHPassword];
+		return NO;
+	}
 
 	SPPostgresFavorite *copy = [favorite copy];
 	[loadedFavorite release];
@@ -591,6 +618,21 @@ static NSString *SPPGOrEmpty(NSString *s)
 	}
 
 	return YES;
+}
+
+/**
+ * Undoes -_storePassword:…forFavorite:`favorite` previous:`previous` after a failed store save: the items
+ * go back under `previous`'s names with their old values, or are removed when there was no previous.
+ */
+- (void)_rollBackPasswordsOf:(SPPostgresFavorite *)favorite to:(SPPostgresFavorite *)previous password:(NSString *)oldPassword sshPassword:(NSString *)oldSSHPassword
+{
+	if (previous) {
+		[self _storePassword:oldPassword sshPassword:oldSSHPassword forFavorite:previous previous:favorite];
+	}
+	else {
+		[keychain deletePasswordForName:[favorite keychainName] account:[favorite keychainAccount]];
+		[keychain deletePasswordForName:[favorite sshKeychainName] account:[favorite sshKeychainAccount]];
+	}
 }
 
 /**
@@ -716,12 +758,15 @@ static NSString *SPPGOrEmpty(NSString *s)
 	NSString *thePassword = [keychain getPasswordForName:[original keychainName] account:[original keychainAccount]];
 	NSString *theSSHPassword = [keychain getPasswordForName:[original sshKeychainName] account:[original sshKeychainAccount]];
 
+	// Keychain first (see -_saveFormAsNew:error:)
+	[self _storePassword:thePassword sshPassword:theSSHPassword forFavorite:duplicate previous:nil];
+
 	NSError *error = nil;
 	if (![store saveFavorite:duplicate error:&error]) {
+		[self _rollBackPasswordsOf:duplicate to:nil password:nil sshPassword:nil];
 		if (error) [self _showError:error];
 		return nil;
 	}
-	[self _storePassword:thePassword sshPassword:theSSHPassword forFavorite:duplicate previous:nil];
 
 	return [self nodeForFavoriteID:[duplicate favoriteID]];
 }
@@ -739,12 +784,15 @@ static NSString *SPPGOrEmpty(NSString *s)
 	NSString *thePassword = [keychain getPasswordForName:[original keychainName] account:[original keychainAccount]];
 	NSString *theSSHPassword = [keychain getPasswordForName:[original sshKeychainName] account:[original sshKeychainAccount]];
 
+	// Keychain first (see -_saveFormAsNew:error:)
+	[self _storePassword:thePassword sshPassword:theSSHPassword forFavorite:renamed previous:original];
+
 	NSError *error = nil;
 	if (![store saveFavorite:renamed error:&error]) {
+		[self _rollBackPasswordsOf:renamed to:original password:thePassword sshPassword:theSSHPassword];
 		if (error) [self _showError:error];
 		return;
 	}
-	[self _storePassword:thePassword sshPassword:theSSHPassword forFavorite:renamed previous:original];
 
 	if ([[loadedFavorite favoriteID] isEqualToString:[renamed favoriteID]]) {
 		[loadedFavorite setName:trimmed];

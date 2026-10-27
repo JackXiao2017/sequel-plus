@@ -37,10 +37,37 @@
 @property (assign) NSUInteger favoritesChangedCount;
 @property (assign) BOOL connecting;
 @property (assign) NSUInteger connectingCalls;
+/// When set, behaves like the outline: a reload that moves the selected row re-selects it, and the
+/// selection change loads the favorite into the form (as SPConnectionController does).
+@property (weak) SPPostgresConnectionScreenAdapter *reselectingAdapter;
+@property (copy) NSString *selectedFavoriteID;
+@property (assign) NSUInteger formReloads;
+@property (copy) void (^onFavoritesDidChange)(void);
 @end
 
 @implementation SPPGFakeConnectionScreen
-- (void)postgresFavoritesDidChange { self.favoritesChangedCount++; }
+- (void)postgresFavoritesDidChange
+{
+	self.favoritesChangedCount++;
+	if (self.onFavoritesDidChange) self.onFavoritesDidChange();
+	SPPostgresConnectionScreenAdapter *adapter = self.reselectingAdapter;
+	if (adapter && self.selectedFavoriteID) {
+		id node = [adapter nodeForFavoriteID:self.selectedFavoriteID];
+		if (node) {
+			self.formReloads++;
+			[adapter loadFavoriteIntoForm:[adapter favoriteForNode:node]];
+		}
+	}
+}
+- (void)postgresSelectOutlineItem:(id)item
+{
+	SPPostgresConnectionScreenAdapter *adapter = self.reselectingAdapter;
+	SPPostgresFavorite *favorite = [adapter favoriteForNode:item];
+	if (!adapter || !favorite || [favorite.favoriteID isEqualToString:self.selectedFavoriteID]) return;
+	self.selectedFavoriteID = favorite.favoriteID;
+	self.formReloads++;
+	[adapter loadFavoriteIntoForm:favorite];
+}
 - (void)postgresSetConnecting:(BOOL)connecting { self.connecting = connecting; self.connectingCalls++; }
 @end
 
@@ -353,6 +380,111 @@
 	XCTAssertTrue([[windowController windowTitleString] containsString:@"adapter connect test"], @"%@", [windowController windowTitleString]);
 	XCTAssertNotNil([windowController connection]);
 	[windowController close];
+}
+
+/// Renaming the loaded favorite so that it sorts to another row re-selects it during the store's
+/// change notification; the form must keep its passwords and a second save must keep the keychain items.
+- (void)testRenameThatReSortsKeepsPasswords
+{
+	self.screen.reselectingAdapter = self.adapter;
+	[self.adapter setSelectedEngine:SPConnectionEnginePostgreSQL];
+
+	// Two favorites: "AAA" (sorts first, with passwords) and "MMM"
+	self.screen.type = SPPostgresSSHConnection;
+	self.screen.host = @"db.internal";
+	self.screen.sshHost = @"bastion";
+	self.screen.user = @"alice";
+	self.screen.name = @"MMM adapter test";
+	self.screen.password = nil;
+	NSError *error = nil;
+	XCTAssertTrue([self.adapter saveFormAsNewFavorite:&error], @"%@", error);
+
+	self.screen.name = @"AAA adapter test";
+	self.screen.password = @"pw";
+	self.screen.sshPassword = @"sshpw";
+	XCTAssertTrue([self.adapter saveFormAsNewFavorite:&error], @"%@", error);
+	NSString *favoriteID = [[self.adapter loadedFavorite] favoriteID];
+	XCTAssertEqualObjects(self.screen.selectedFavoriteID, favoriteID);
+	XCTAssertEqualObjects(self.screen.password, @"pw");
+
+	// Form rename to a name that sorts last. When the store announces the change, the keychain items
+	// must already be under the new names (any host may read them then).
+	__block NSString *passwordSeenDuringNotification = nil;
+	__weak SPPostgresConnectionScreenAdapterTests *weakSelf = self;
+	self.screen.onFavoritesDidChange = ^{
+		SPPostgresFavorite *current = [weakSelf.adapter favoriteForNode:[weakSelf.adapter nodeForFavoriteID:favoriteID]];
+		passwordSeenDuringNotification = [weakSelf.keychain getPasswordForName:[current keychainName] account:[current keychainAccount]];
+	};
+	NSUInteger reloadsBefore = self.screen.formReloads;
+	self.screen.name = @"ZZZ adapter test";
+	XCTAssertTrue([self.adapter saveFormAsFavorite:&error], @"%@", error);
+	self.screen.onFavoritesDidChange = nil;
+	XCTAssertEqualObjects(passwordSeenDuringNotification, @"pw", @"keychain items moved before the store notified");
+	XCTAssertGreaterThan(self.screen.formReloads, reloadsBefore, @"the host re-selected the node");
+	XCTAssertEqualObjects(self.screen.password, @"pw");
+	XCTAssertEqualObjects(self.screen.sshPassword, @"sshpw");
+
+	SPPostgresFavorite *renamed = [self.adapter favoriteForNode:[self.adapter nodeForFavoriteID:favoriteID]];
+	XCTAssertEqualObjects(renamed.name, @"ZZZ adapter test");
+	XCTAssertEqualObjects([[self.adapter favoriteNodesForOutline].lastObject valueForKeyPath:@"representedObject.favorite.favoriteID"], favoriteID, @"re-sorted last");
+	XCTAssertEqualObjects([self.keychain getPasswordForName:[renamed keychainName] account:[renamed keychainAccount]], @"pw");
+
+	// A second save keeps the items
+	self.screen.database = @"appdb";
+	XCTAssertTrue([self.adapter saveFormAsFavorite:&error], @"%@", error);
+	renamed = [self.adapter favoriteForNode:[self.adapter nodeForFavoriteID:favoriteID]];
+	XCTAssertEqualObjects([self.keychain getPasswordForName:[renamed keychainName] account:[renamed keychainAccount]], @"pw");
+	XCTAssertEqualObjects([self.keychain getPasswordForName:[renamed sshKeychainName] account:[renamed sshKeychainAccount]], @"sshpw");
+
+	// Outline rename back to the front: same guarantees
+	[self.adapter renameFavoriteNode:[self.adapter nodeForFavoriteID:favoriteID] to:@"AAB adapter test"];
+	XCTAssertEqualObjects(self.screen.password, @"pw");
+	XCTAssertEqualObjects(self.screen.name, @"AAB adapter test");
+	renamed = [self.adapter favoriteForNode:[self.adapter nodeForFavoriteID:favoriteID]];
+	XCTAssertEqualObjects([self.keychain getPasswordForName:[renamed keychainName] account:[renamed keychainAccount]], @"pw");
+	XCTAssertTrue([self.adapter saveFormAsFavorite:&error], @"%@", error);
+	XCTAssertEqualObjects([self.keychain getPasswordForName:[renamed keychainName] account:[renamed keychainAccount]], @"pw");
+	XCTAssertEqual([self.keychain.items count], 2u, @"no stale items under old names");
+}
+
+/// The engine control is disabled while either engine connects (switching engine mid-connect would
+/// re-run the favorite selection) and enabled again when the connection interface is restored.
+/// Uses a bare SPConnectionController on the real nib; the MySQL attempt is cancelled before the run
+/// loop can start it (and its host is an unroutable TEST-NET address).
+- (void)testEngineControlDisabledWhileConnecting
+{
+	static NSMutableArray *keepAlive;
+	if (!keepAlive) keepAlive = [NSMutableArray array];
+
+	id controller = [[NSClassFromString(@"SPConnectionController") alloc] init];
+	[keepAlive addObject:controller];
+	[controller performSelector:@selector(loadNib)];
+
+	SPPostgresConnectionScreenAdapter *adapter = [[SPPostgresConnectionScreenAdapter alloc] initWithConnectionController:controller store:self.store];
+	adapter.keychain = self.keychain;
+	[adapter installEngineControlInContainer:[controller valueForKey:@"connectionResizeContainer"]];
+	[controller setValue:adapter forKey:@"postgresAdapter"];
+	XCTAssertTrue([[adapter engineControl] isEnabled]);
+
+	// MySQL connect: disabled from the start of the attempt
+	[controller setValue:@0 forKey:@"type"];
+	[controller setValue:@"192.0.2.1" forKey:@"host"];
+	[controller performSelector:@selector(initiateConnection:) withObject:nil];
+	[NSObject cancelPreviousPerformRequestsWithTarget:controller];
+	XCTAssertFalse([[adapter engineControl] isEnabled]);
+
+	// ...until the interface is restored (failure, cancel, test result)
+	[controller performSelector:NSSelectorFromString(@"_restoreConnectionInterface")];
+	XCTAssertTrue([[adapter engineControl] isEnabled]);
+
+	// PostgreSQL connect
+	[(id <SPPostgresConnectionScreenHost>)controller postgresSetConnecting:YES];
+	XCTAssertFalse([[adapter engineControl] isEnabled]);
+	[(id <SPPostgresConnectionScreenHost>)controller postgresSetConnecting:NO];
+	XCTAssertTrue([[adapter engineControl] isEnabled]);
+
+	[controller setValue:nil forKey:@"postgresAdapter"];
+	[adapter invalidate];
 }
 
 @end
