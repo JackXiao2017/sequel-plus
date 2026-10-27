@@ -2,10 +2,14 @@
 #import "../Source/Postgres/SPPostgresConnectionScreenAdapter.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
 #import "../Source/Postgres/SPPostgresFavoritesStore.h"
-#import "../Source/Postgres/SPPostgresWindowController.h"
+#import <PostgresKit/PostgresKit.h>
+#import "../Source/Postgres/SPPostgresDocument.h"
+#import "../Source/SPWindowController.h"
 
 @interface NSObject (SPPGConnectionControllerForTests)
 - (void)resizeTabViewToConnectionType:(NSUInteger)theType animating:(BOOL)animate;
+- (id)connectionController;
+- (IBAction)initiateConnection:(id)sender;
 @end
 
 #pragma mark - Test doubles
@@ -45,6 +49,8 @@
 @property (copy) void (^onFavoritesDidChange)(void);
 /// Returned by -postgresSheetWindow (nil: the adapter has no window for sheets).
 @property (strong) NSWindow *sheetWindow;
+/// The documents handed over by -postgresReplaceConnectionTabWithDocument:.
+@property (strong) NSMutableArray<SPPostgresDocument *> *replacementDocuments;
 @end
 
 @implementation SPPGFakeConnectionScreen
@@ -72,6 +78,33 @@
 }
 - (void)postgresSetConnecting:(BOOL)connecting { self.connecting = connecting; self.connectingCalls++; }
 - (NSWindow *)postgresSheetWindow { return self.sheetWindow; }
+- (void)postgresReplaceConnectionTabWithDocument:(SPPostgresDocument *)document
+{
+	if (!self.replacementDocuments) self.replacementDocuments = [NSMutableArray array];
+	[self.replacementDocuments addObject:document];
+}
+@end
+
+/// A tab of another engine standing next to the MySQL connection tab.
+@interface SPPGFakeTabPlaceholder : NSObject <SPWindowTabDocument>
+@property (readwrite) BOOL isProcessing;
+@end
+
+@implementation SPPGFakeTabPlaceholder
+{
+	NSView *_view;
+}
+- (instancetype)init { if ((self = [super init])) _view = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 100, 100)]; return self; }
+- (NSView *)databaseView { return _view; }
+- (void)setParentWindowController:(SPWindowController *)controller {}
+- (void)setParentWindow:(NSWindow *)window {}
+// No tab colour (as tab documents set it; NSTabViewItem's default colour can't be drawn by the tab style)
+- (void)setParentTabViewItem:(NSTabViewItem *)item { [item setValue:nil forKey:@"color"]; }
+- (void)didBecomeActiveTabInWindow {}
+- (void)willResignActiveTabInWindow {}
+- (void)updateWindowTitle:(id)sender {}
+- (BOOL)parentTabShouldClose { return YES; }
+- (void)parentTabDidClose {}
 @end
 
 /// In-memory keychain so the tests never touch the login keychain.
@@ -406,9 +439,10 @@
 	[adapter invalidate];
 }
 
-/// Live: a saved favorite whose password is only in the (Postgres-named) keychain connects and opens
-/// a separate PostgreSQL window (test server PG 18 on 55418, Scripts/pg-test-servers.sh).
-- (void)testConnectFromFormOpensPostgresWindow
+/// Live: a saved favorite whose password is only in the (Postgres-named) keychain connects and hands
+/// a PostgreSQL tab document to the host; no window is opened (test server PG 18 on 55418,
+/// Scripts/pg-test-servers.sh).
+- (void)testConnectFromFormHandsDocumentToHost
 {
 	SPPostgresFavorite *favorite = [[SPPostgresFavorite alloc] init];
 	favorite.name = @"adapter connect test";
@@ -423,30 +457,159 @@
 	XCTAssertEqualObjects(self.screen.password, @"pgkit");
 	self.screen.password = nil; // read from the keychain at connect time
 
-	NSPredicate *isPostgresWindow = [NSPredicate predicateWithBlock:^BOOL(NSWindow *window, NSDictionary *bindings) {
-		return [[window windowController] isKindOfClass:[SPPostgresWindowController class]] && [window isVisible];
-	}];
-	NSArray *before = [[NSApp windows] filteredArrayUsingPredicate:isPostgresWindow];
+	NSArray *windowsBefore = [NSApp windows];
+	PGPostgresConnection *connection = nil;
+	__weak SPPostgresDocument *weakDocument = nil;
 
-	[self.adapter connectFromForm];
-	XCTAssertTrue([self.adapter isConnecting]);
-	XCTAssertTrue(self.screen.connecting);
+	// The pool lets go of whatever the connect autoreleased (this test's own pool isn't drained by the run loop)
+	@autoreleasepool {
+		[self.adapter connectFromForm];
+		XCTAssertTrue([self.adapter isConnecting]);
+		XCTAssertTrue(self.screen.connecting);
 
-	NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:20];
-	while ([self.adapter isConnecting] && [deadline timeIntervalSinceNow] > 0) {
-		[[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+		XCTAssertTrue([self spinUntil:^BOOL{ return ![self.adapter isConnecting]; } timeout:20]);
+		XCTAssertFalse(self.screen.connecting);
+		XCTAssertEqual(self.screen.connectingCalls, 2u);
+
+		XCTAssertEqual([self.screen.replacementDocuments count], 1u, @"one PostgreSQL tab document handed to the host");
+		SPPostgresDocument *document = [self.screen.replacementDocuments firstObject];
+		weakDocument = document;
+		XCTAssertTrue([[document windowTitleString] containsString:@"adapter connect test"], @"%@", [document windowTitleString]);
+		connection = [document connection];
+		XCTAssertTrue([connection isConnected]);
+
+		NSArray *opened = [self newVisibleWindowsSince:windowsBefore];
+		XCTAssertEqual([opened count], 0u, @"no window opened: %@", opened);
+
+		// Not hosted anywhere: releasing the document closes its connection
+		document = nil;
+		self.screen.replacementDocuments = nil;
 	}
-	XCTAssertFalse([self.adapter isConnecting]);
-	XCTAssertFalse(self.screen.connecting);
-	XCTAssertEqual(self.screen.connectingCalls, 2u);
+	XCTAssertNil(weakDocument, @"only the host kept the document");
+	XCTAssertTrue([self spinUntil:^BOOL{ return ![connection isConnected]; } timeout:2]);
+}
 
-	NSMutableArray *opened = [[[NSApp windows] filteredArrayUsingPredicate:isPostgresWindow] mutableCopy];
-	[opened removeObjectsInArray:before];
-	XCTAssertEqual([opened count], 1u, @"one PostgreSQL window opened");
-	SPPostgresWindowController *windowController = [[opened firstObject] windowController];
-	[self addTeardownBlock:^{ [windowController close]; }];
-	XCTAssertTrue([[windowController windowTitleString] containsString:@"adapter connect test"], @"%@", [windowController windowTitleString]);
-	XCTAssertNotNil([windowController connection]);
+#pragma mark - Connecting from a MySQL window's connection tab
+
+/// Visible document-level windows that weren't in `windowsBefore`: not sheets, and not AppKit's private
+/// helper windows (e.g. the glass effect window behind an alert).
+- (NSArray *)newVisibleWindowsSince:(NSArray *)windowsBefore
+{
+	NSMutableArray *opened = [NSMutableArray array];
+	for (NSWindow *window in [NSApp windows]) {
+		if ([windowsBefore containsObject:window] || ![window isVisible] || [window sheetParent]) continue;
+		NSString *className = NSStringFromClass([window class]);
+		if ([className hasPrefix:@"_"] || [className containsString:@"._"]) continue;
+		[opened addObject:window];
+	}
+	return opened;
+}
+
+/// A window (as -[SPAppController newWindow] makes it) with one MySQL tab on its connection screen,
+/// whose form is set up for PG 18 on 55418 with `password`. The adapter's keychain is the in-memory one.
+- (SPWindowController *)windowWithConnectionTabForPassword:(NSString *)password document:(id __autoreleasing *)outDocument
+{
+	SPWindowController *controller = [[SPWindowController alloc] initWithWindowNibName:@"MainWindow"];
+	XCTAssertNotNil([controller window]);
+	[controller showWindow:nil];
+	id mysql = [controller addNewConnection];
+	XCTAssertNotNil(mysql);
+	// A MySQL tab's filter editor resizes itself 0.2 s after it is built and messages freed objects if
+	// the document is gone by then (pre-existing; see SPPostgresDocumentTests). A successful connect
+	// closes this tab: let that happen first.
+	[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.3]];
+
+	[self addTeardownBlock:^{
+		NSWindow *window = [controller window];
+		if (window.attachedSheet) [window endSheet:window.attachedSheet];
+		NSTabView *tabView = [controller valueForKey:@"tabView"];
+		for (NSTabViewItem *item in [tabView tabViewItems]) [tabView removeTabViewItem:item];
+		[window orderOut:nil];
+	}];
+
+	id connectionController = [mysql connectionController];
+	SPPostgresConnectionScreenAdapter *adapter = [connectionController valueForKey:@"postgresAdapter"];
+	XCTAssertNotNil(adapter);
+	adapter.keychain = self.keychain;
+	[adapter setSelectedEngine:SPConnectionEnginePostgreSQL];
+
+	id <SPPostgresConnectionScreenHost> form = connectionController;
+	form.type = SPPostgresTCPIPConnection;
+	form.name = @"adapter tab test";
+	form.host = @"127.0.0.1";
+	form.port = @"55418";
+	form.user = @"pgkit_test";
+	form.password = password;
+	form.database = @"pgkit_test";
+	form.sshPassword = nil;
+
+	*outDocument = mysql;
+	return controller;
+}
+
+- (void)testConnectReplacesConnectionTab
+{
+	id mysql = nil;
+	SPWindowController *controller = [self windowWithConnectionTabForPassword:@"pgkit" document:&mysql];
+	// The MySQL tab is the second of two
+	[controller addTabDocument:[[SPPGFakeTabPlaceholder alloc] init] atIndex:0 select:NO];
+	[controller selectTabAtIndex:1];
+	XCTAssertEqual((id)[controller selectedDocument], mysql);
+	id connectionController = [mysql connectionController];
+	SPPostgresConnectionScreenAdapter *adapter = [connectionController valueForKey:@"postgresAdapter"];
+
+	NSArray *windowsBefore = [NSApp windows];
+
+	[connectionController initiateConnection:nil];
+	XCTAssertTrue([adapter isConnecting]);
+	XCTAssertTrue([self spinUntil:^BOOL{ return [[controller tabDocuments] count] == 2 && [[[controller tabDocuments] objectAtIndex:1] isKindOfClass:[SPPostgresDocument class]]; } timeout:20],
+				  @"%@ (sheet: %@)", [controller tabDocuments], [[controller window] attachedSheet]);
+
+	SPPostgresDocument *document = [[controller tabDocuments] objectAtIndex:1];
+	XCTAssertEqual((id)[controller selectedDocument], document);
+	XCTAssertNil([controller selectedTableDocument]);
+	XCTAssertEqual(document.parentWindowController, controller);
+	XCTAssertEqual(document.parentWindow, [controller window]);
+	XCTAssertEqualObjects([document.parentTabViewItem label], @"adapter tab test");
+	XCTAssertTrue([[document connection] isConnected]);
+	XCTAssertNotNil([[document connection] execute:@"SELECT 1"]);
+	XCTAssertFalse([[controller documents] containsObject:mysql], @"the MySQL tab is gone");
+	XCTAssertNil([mysql valueForKey:@"parentWindow"], @"the MySQL document was told its tab closed");
+
+	NSArray *opened = [self newVisibleWindowsSince:windowsBefore];
+	XCTAssertEqual([opened count], 0u, @"no window opened: %@", opened);
+
+	// Closing the tab disconnects
+	PGPostgresConnection *connection = [document connection];
+	NSTabView *tabView = [controller valueForKey:@"tabView"];
+	[tabView removeTabViewItem:document.parentTabViewItem];
+	document = nil;
+	XCTAssertTrue([self spinUntil:^BOOL{ return ![connection isConnected]; } timeout:2]);
+}
+
+- (void)testFailedConnectLeavesTab
+{
+	id mysql = nil;
+	SPWindowController *controller = [self windowWithConnectionTabForPassword:@"wrong password" document:&mysql];
+	id connectionController = [mysql connectionController];
+	SPPostgresConnectionScreenAdapter *adapter = [connectionController valueForKey:@"postgresAdapter"];
+	NSArray *windowsBefore = [NSApp windows];
+
+	[connectionController initiateConnection:nil];
+	XCTAssertTrue([adapter isConnecting]);
+	XCTAssertTrue([self spinUntil:^BOOL{ return ![adapter isConnecting]; } timeout:20]);
+	XCTAssertTrue([self spinUntil:^BOOL{ return [[controller window] attachedSheet] != nil; } timeout:5], @"the error is shown on the tab's window");
+
+	XCTAssertEqual([[controller tabDocuments] count], 1u);
+	XCTAssertEqual([[controller tabDocuments] firstObject], mysql, @"the same MySQL document is still in its tab");
+	XCTAssertEqual((id)[controller selectedDocument], mysql);
+	XCTAssertEqual([controller selectedTableDocument], mysql);
+	XCTAssertEqual([mysql valueForKey:@"parentWindow"], [controller window]);
+	XCTAssertEqual([connectionController valueForKey:@"postgresAdapter"], adapter, @"the connection screen keeps its adapter");
+	XCTAssertTrue([[adapter engineControl] isEnabled], @"the connection screen is usable again");
+
+	NSArray *opened = [self newVisibleWindowsSince:windowsBefore];
+	XCTAssertEqual([opened count], 0u, @"no window opened: %@", opened);
 }
 
 /// Renaming the loaded favorite so that it sorts to another row re-selects it during the store's

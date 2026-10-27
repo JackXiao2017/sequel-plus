@@ -99,6 +99,7 @@ static BOOL isOSAtLeast10_7;
 }
 
 - (void)_loadPostgresFavoriteNode:(SPTreeNode *)node animating:(BOOL)animate;
+- (void)_enableWindowToolbarItemsAfterConnecting;
 
 // Privately redeclare as read/write to get the synthesized setter
 @property (readwrite, assign) BOOL isEditingConnection;
@@ -227,7 +228,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
  */
 - (IBAction)initiateConnection:(id)sender
 {
-	// PostgreSQL: the adapter connects and opens a separate PostgreSQL window
+	// PostgreSQL: the adapter connects and, on success, replaces this tab with a PostgreSQL tab
 	if ([postgresAdapter selectedEngine] == SPConnectionEnginePostgreSQL || [postgresAdapter isPostgresNode:[self selectedFavoriteNode]]) {
 		if (sender == favoritesOutlineView && [favoritesOutlineView clickedRow] <= 0) return;
 		[postgresAdapter connectFromFormTestingOnly:(sender == testConnectButton)];
@@ -2453,15 +2454,31 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 	[databaseConnectionView setHidden:NO];
 
 	// Restore the toolbar icons
-	NSArray *toolbarItems = [[[dbDocument parentWindow] toolbar] items];
-
-	for (NSUInteger i = 0; i < [toolbarItems count]; i++) [[toolbarItems objectAtIndex:i] setEnabled:YES];
+	[self _enableWindowToolbarItemsAfterConnecting];
 #endif
 
 	// Pass the connection to the table document, allowing it to set
 	// up the other classes and the rest of the interface.
 	[dbDocument setConnection:mySQLConnection];
 }
+
+#ifndef SP_CODA
+/**
+ * Enables every item of the window's toolbar once connected, as before. Not while a tab of another
+ * engine (a PostgreSQL tab) is selected in the window: the toolbar is then that tab's, and its
+ * disabled items must stay disabled. With only MySQL tabs the selected document is always an
+ * SPDatabaseDocument (or nil), so MySQL-only windows behave exactly as before.
+ */
+- (void)_enableWindowToolbarItemsAfterConnecting
+{
+	id selectedDocument = [[dbDocument parentWindowController] selectedDocument];
+	if (selectedDocument && ![selectedDocument isKindOfClass:[SPDatabaseDocument class]]) return;
+
+	NSArray *toolbarItems = [[[dbDocument parentWindow] toolbar] items];
+
+	for (NSUInteger i = 0; i < [toolbarItems count]; i++) [[toolbarItems objectAtIndex:i] setEnabled:YES];
+}
+#endif
 
 /**
  * Ends a connection attempt by stopping the connection animation and
@@ -3899,6 +3916,16 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 - (void)postgresShowTestResult:(NSString *)result
 {
 	[self _showConnectionTestResult:result];
+}
+
+/**
+ * The PostgreSQL connection succeeded: its tab takes this connection screen's place (same index,
+ * selected). Closing this tab sends dbDocument -parentTabDidClose; the window controller keeps it
+ * (and so this controller) alive until the current autorelease pool drains.
+ */
+- (void)postgresReplaceConnectionTabWithDocument:(SPPostgresDocument *)document
+{
+	[[dbDocument parentWindowController] replaceTabDocument:dbDocument withDocument:document];
 }
 
 #endif

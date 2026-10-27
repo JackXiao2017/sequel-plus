@@ -350,6 +350,9 @@
 	//remove the tracking rects and bindings registered on the old tab
 	[tabBar removeTrackingRect:[selectedCell closeButtonTrackingTag]];
 	[tabBar removeTrackingRect:[selectedCell cellTrackingTag]];
+	// -removeTabForCell: removes any non-zero tags again, and AppKit raises for a tag removed twice
+	[selectedCell setCloseButtonTrackingTag:0];
+	[selectedCell setCellTrackingTag:0];
 	[tabBar removeTabForCell:selectedCell];
 
 	//rebind the selected cell to the new control

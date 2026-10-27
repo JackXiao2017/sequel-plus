@@ -2,7 +2,7 @@
 #import "SPPostgresFavorite.h"
 #import "SPPostgresFavoritesStore.h"
 #import "SPPostgresConnector.h"
-#import "SPPostgresWindowController.h"
+#import "SPPostgresDocument.h"
 #import "SPPostgresErrors.h"
 #import "SPKeychain.h"
 #import "SPTreeNode.h"
@@ -1011,10 +1011,13 @@ static NSString *SPPGOrEmpty(NSString *s)
 		return;
 	}
 
-	// The window takes over the connector and keeps itself alive while open
-	SPPostgresWindowController *windowController = [[SPPostgresWindowController alloc] initWithConnection:connection connector:connector favorite:favorite];
-	[windowController showWindow:nil];
-	[windowController release];
+	// The document takes over the connector (and closes the connection when it goes away). The host puts it
+	// in place of the connection tab, which retains it. Replacing the tab closes the host's MySQL document,
+	// which may release the host and this adapter's last owner: nothing here touches either afterwards (the
+	// connector's completion block keeps this adapter alive until this method returns).
+	SPPostgresDocument *document = [[SPPostgresDocument alloc] initWithConnection:connection connector:connector favorite:favorite];
+	[host postgresReplaceConnectionTabWithDocument:document];
+	[document release];
 }
 
 @end
