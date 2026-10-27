@@ -262,6 +262,8 @@ NSString *SPMainToolbarTableInfo                 = @"SwitchToTableInfoToolbarIte
 NSString *SPMainToolbarTableRelations            = @"SwitchToTableRelationsToolbarItemIdentifier";
 NSString *SPMainToolbarTableTriggers             = @"SwitchToTableTriggersToolbarItemIdentifier";
 NSString *SPMainToolbarUserManager               = @"SwitchToUserManagerToolbarItemIdentifier";
+NSString *SPMainToolbarTransfer                  = @"TransferToolbarItemIdentifier";
+NSString *SPToolbarTransferItemAdded             = @"SPToolbarTransferItemAdded";
 
 NSString **SPViewModeToMainToolbarMap[] = 
 { 

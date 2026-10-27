@@ -16,8 +16,9 @@
  * which must be the connector's connected connection. Host it with
  * -[SPWindowController addTabDocument:atIndex:select:]; the tab view item keeps it alive.
  *
- * While its tab is active it installs its own toolbar (stage-1 Postgres item identifiers, replaced
- * by the shared toolbar in a later step), the window title and the compact title chrome.
+ * While its tab is active it installs its own toolbar, the window title and the compact title chrome.
+ * The toolbar is MySQL's (identifier TableWindowToolbar, the same item identifiers and saved layout);
+ * the items Postgres tabs don't support yet are disabled.
  */
 __attribute__((visibility("default")))
 @interface SPPostgresDocument : NSObject <SPWindowTabDocument, NSToolbarDelegate, NSToolbarItemValidation, NSMenuItemValidation, NSSplitViewDelegate>
@@ -41,6 +42,7 @@ __attribute__((visibility("default")))
 - (NSToolbar *)toolbar;
 
 - (NSArray *)toolbarDefaultItemIdentifiers:(NSToolbar *)toolbar;
+- (NSArray *)toolbarAllowedItemIdentifiers:(NSToolbar *)toolbar;
 
 /// NO for every action this tab doesn't implement (MySQL-only items); the window's own items stay enabled.
 - (BOOL)validateMenuItem:(NSMenuItem *)item;

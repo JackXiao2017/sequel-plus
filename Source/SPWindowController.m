@@ -466,6 +466,11 @@
 			collapse = YES;
 		}
 	}
+	else if (selectedTabDocument && !selectedTableDocument) {
+		// Another engine's tab (MySQL tabs keep the rule above): the strip shows its tab colour
+		NSInteger index = [tabView indexOfTabViewItemWithIdentifier:selectedTabDocument];
+		if (index != NSNotFound && [[tabView tabViewItemAtIndex:index] color]) collapse = YES;
+	}
 	
 	tabBar.heightCollapsed = collapse ? 8 : 1;
 	
@@ -642,7 +647,13 @@
 
 	selectedTabDocument = newDoc;
 
-	[self _switchOutSelectedTableDocument:([(NSObject *)newDoc isKindOfClass:[SPDatabaseDocument class]] ? (SPDatabaseDocument *)newDoc : nil)];
+	SPDatabaseDocument *newTableDocument = [(NSObject *)newDoc isKindOfClass:[SPDatabaseDocument class]] ? (SPDatabaseDocument *)newDoc : nil;
+
+	// Between two non-MySQL tabs selectedTableDocument stays nil, so -_switchOutSelectedTableDocument:
+	// returns early: update the tab bar (colour strip) here
+	if (!newTableDocument && !selectedTableDocument) [self updateTabBar];
+
+	[self _switchOutSelectedTableDocument:newTableDocument];
 }
 
 - (void)_selectedTableDocumentDeallocd:(NSNotification *)notification
