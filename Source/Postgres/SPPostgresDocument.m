@@ -261,6 +261,9 @@ static const CGFloat SPPostgresSidebarDefaultWidth = 250;
 	// Compact title and toolbar layout, kept centered as the window resizes
 	[parentWindow sp_useExpandedCompactToolbar];
 
+	// A MySQL tab shows its .spf file as the window's proxy icon; this tab has none
+	[parentWindow setRepresentedURL:nil];
+
 	[self _applyWindowTitle];
 	[self _updateDatabaseToolbarItemWidth];
 
@@ -282,13 +285,47 @@ static const CGFloat SPPostgresSidebarDefaultWidth = 250;
 	return [self windowTitleString];
 }
 
-/// Tab label (favorite name) and colour (favorite colour); the window title too when this tab is selected.
+/// The other open Postgres tabs of this window with the same connection name.
+- (NSArray *)_namesakeTabs
+{
+	NSMutableArray *namesakes = [NSMutableArray array];
+	NSString *name = [self _connectionName];
+
+	for (id document in [parentWindowController tabDocuments]) {
+		if (document == self || ![document isKindOfClass:[SPPostgresDocument class]]) continue;
+		SPPostgresDocument *other = document;
+		if (other->tornDown) continue;
+		if ([[other _connectionName] isEqualToString:name]) [namesakes addObject:other];
+	}
+
+	return namesakes;
+}
+
+/**
+ * The favorite name, plus @"/<database>" while another Postgres tab of the window has the same name
+ * (as MySQL tabs add the database to tell connections to the same server apart).
+ */
+- (NSString *)tabLabel
+{
+	NSString *name = [self _connectionName];
+	if ([currentDatabase length] && [[self _namesakeTabs] count]) return [NSString stringWithFormat:@"%@/%@", name, currentDatabase];
+	return name;
+}
+
+/// Tab label (see -tabLabel) and colour (favorite colour); the window title too when this tab is selected.
 - (void)updateWindowTitle:(id)sender
 {
 	if (tornDown) return;
 
-	[parentTabViewItem setLabel:[self _connectionName]];
+	[parentTabViewItem setLabel:[self tabLabel]];
 	[parentTabViewItem setColor:[[SPFavoriteColorSupport sharedInstance] colorForIndex:[favorite colorIndex]]];
+
+	// Namesakes need the database in their labels too, also when this tab was added without being
+	// selected (the window controller then only asks this tab to update)
+	for (SPPostgresDocument *other in [self _namesakeTabs]) {
+		if (![[[other parentTabViewItem] label] isEqualToString:[other tabLabel]]) [other updateWindowTitle:parentWindowController];
+	}
+
 	[parentWindowController updateTabBar];
 
 	if ([self _isSelectedTab]) [self _applyWindowTitle];
@@ -305,7 +342,12 @@ static const CGFloat SPPostgresSidebarDefaultWidth = 250;
 /// The tab was closed: disconnects (closing the SSH tunnel too) and detaches from the window.
 - (void)parentTabDidClose
 {
+	NSArray *namesakes = [[[self _namesakeTabs] retain] autorelease];
+
 	[self _tearDown];
+
+	// A namesake left alone no longer needs the database in its label (this tab is out of the window's tabs by now)
+	for (SPPostgresDocument *other in namesakes) [other updateWindowTitle:[other parentWindowController]];
 }
 
 #pragma mark - Title
@@ -581,6 +623,11 @@ static const CGFloat SPPostgresSidebarDefaultWidth = 250;
 - (BOOL)validateMenuItem:(NSMenuItem *)item
 {
 	SEL action = [item action];
+
+	// Show/hide console, worded as for MySQL tabs
+	if (action == @selector(toggleConsole:)) {
+		[item setTitle:([[[SPQueryController sharedQueryController] window] isVisible] && [[[NSApp keyWindow] windowController] isKindOfClass:[SPQueryController class]]) ? NSLocalizedString(@"Hide Console", @"hide console") : NSLocalizedString(@"Show Console", @"show console")];
+	}
 
 	if (!action || action == @selector(unavailableInThisVersion:)) return NO;
 

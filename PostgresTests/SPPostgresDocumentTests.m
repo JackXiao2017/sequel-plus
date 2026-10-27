@@ -18,6 +18,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 // Not in the public headers
 @interface SPPostgresDocument (SPPostgresDocumentTestsActions)
 - (void)refreshDatabases:(id)sender;
+- (void)toggleConsole:(id)sender;
 @end
 
 @interface SPWindowController (SPPostgresDocumentTests)
@@ -165,6 +166,68 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	NSColor *expected = [colors colorForIndex:2];
 	XCTAssertNotNil(expected);
 	XCTAssertEqualObjects([item color], expected);
+}
+
+/// A second tab for the same favorite on another database (not selected).
+- (SPPostgresDocument *)addNamesakeOnDatabase:(NSString *)database select:(BOOL)select
+{
+	SPPostgresFavorite *other = [self.favorite copy];
+	other.database = database;
+	PGPostgresConnection *connection = nil;
+	SPPostgresConnector *connector = [self connectorForFavorite:other sshPassword:nil connection:&connection];
+	SPPostgresDocument *document = [[SPPostgresDocument alloc] initWithConnection:connection connector:connector favorite:other];
+	[self.controller addTabDocument:document atIndex:1 select:select];
+	return document;
+}
+
+- (void)testTabLabelsAddDatabaseForNamesakes
+{
+	XCTAssertEqualObjects([self.document.parentTabViewItem label], @"pg18 test", @"alone: the favorite name");
+
+	// Added in the background: both labels gain their database
+	SPPostgresDocument *second = [self addNamesakeOnDatabase:@"pgkit_nopublic" select:NO];
+	XCTAssertEqual([self.controller selectedDocument], self.document);
+	XCTAssertEqualObjects([self.document.parentTabViewItem label], @"pg18 test/pgkit_test");
+	XCTAssertEqualObjects([second.parentTabViewItem label], @"pg18 test/pgkit_nopublic");
+
+	// A database switch renames that tab
+	[self.document switchToDatabase:@"postgres"];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [[self.document.parentTabViewItem label] isEqualToString:@"pg18 test/postgres"]; } timeout:20],
+				  @"%@", [self.document.parentTabViewItem label]);
+	XCTAssertEqualObjects([second.parentTabViewItem label], @"pg18 test/pgkit_nopublic");
+
+	// Closing one leaves the other alone again
+	[[self tabView] removeTabViewItem:second.parentTabViewItem];
+	XCTAssertEqualObjects([self.document.parentTabViewItem label], @"pg18 test");
+}
+
+- (void)testTabLabelsAddDatabaseForSelectedNamesake
+{
+	SPPostgresDocument *second = [self addNamesakeOnDatabase:@"pgkit_nopublic" select:YES];
+	XCTAssertEqual([self.controller selectedDocument], second);
+	XCTAssertEqualObjects([self.document.parentTabViewItem label], @"pg18 test/pgkit_test");
+	XCTAssertEqualObjects([second.parentTabViewItem label], @"pg18 test/pgkit_nopublic");
+}
+
+- (void)testActivationClearsProxyIcon
+{
+	id mysql = [self.controller addNewConnection];
+	XCTAssertEqual([self.controller selectedDocument], mysql);
+	[[self window] setRepresentedURL:[NSURL fileURLWithPath:NSTemporaryDirectory()]];
+	XCTAssertNotNil([self window].representedURL);
+
+	[[self tabView] selectTabViewItem:self.document.parentTabViewItem];
+	XCTAssertNil([self window].representedURL);
+}
+
+- (void)testConsoleMenuItemTitle
+{
+	NSWindow *console = [[NSClassFromString(@"SPQueryController") valueForKey:@"sharedQueryController"] window];
+	[console orderOut:nil];
+
+	NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:@"Console" action:@selector(toggleConsole:) keyEquivalent:@""];
+	XCTAssertTrue([self.document validateMenuItem:item]);
+	XCTAssertEqualObjects(item.title, @"Show Console");
 }
 
 - (void)testClosingTabDisconnects
