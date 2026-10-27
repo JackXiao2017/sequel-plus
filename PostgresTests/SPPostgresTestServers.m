@@ -11,12 +11,17 @@
 
 + (PGPostgresConnection *)connectedConnectionOnPort:(NSUInteger)port
 {
+	return [self connectedConnectionOnPort:port database:@"pgkit_test"];
+}
+
++ (PGPostgresConnection *)connectedConnectionOnPort:(NSUInteger)port database:(NSString *)database
+{
 	PGPostgresConnection *connection = [[PGPostgresConnection alloc] init];
 	connection.host = @"127.0.0.1";
 	connection.port = port;
 	connection.user = @"pgkit_test";
 	connection.password = @"pgkit";
-	connection.database = @"pgkit_test";
+	connection.database = database;
 
 	// -connect is asynchronous: wait for success or failure, up to 10 seconds.
 	[connection connect];

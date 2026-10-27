@@ -11,4 +11,7 @@
 /// Returns a connected connection (user pgkit_test, database pgkit_test) or fails the current test.
 + (PGPostgresConnection *)connectedConnectionOnPort:(NSUInteger)port;
 
+/// Same, against the named database.
++ (PGPostgresConnection *)connectedConnectionOnPort:(NSUInteger)port database:(NSString *)database;
+
 @end

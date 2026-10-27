@@ -11,5 +11,7 @@ typedef NS_ENUM(NSInteger, SPPostgresErrorCode) {
 	/// A socket connection was requested but no socket file was found.
 	SPPostgresErrorNoSocket = 3,
 	/// The attempt was cancelled (by -cancel/-disconnect, or by dismissing the SSH password prompt).
-	SPPostgresErrorCancelled = 4
+	SPPostgresErrorCancelled = 4,
+	/// A catalog or other query failed on the server (the server's message is the localized description).
+	SPPostgresErrorQueryFailed = 5
 };

@@ -150,6 +150,18 @@ PGQueryParamData;
 			continue;
 		}
 		
+		// NSString parameters are sent as text with an unspecified (0) type, so the server infers the type
+		// from the query (e.g. $1::text). The UTF-8 buffer lives as long as the current autorelease pool.
+		if ([nativeObject isKindOfClass:[NSString class]]) {
+			const char *utf8 = [(NSString *)nativeObject UTF8String];
+			paramData->paramValues[i] = utf8 ? (char *)utf8 : "";
+			paramData->paramTypes[i] = 0;
+			paramData->paramLengths[i] = 0;
+			paramData->paramFormats[i] = 0;
+			
+			continue;
+		}
+		
 		// Obtain correct handler for this class
 		id <PGPostgresTypeHandlerProtocol> typeHandler = [self typeHandlerForClass:[nativeObject class]];
 		
