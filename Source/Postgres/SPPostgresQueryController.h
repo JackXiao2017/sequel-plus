@@ -4,8 +4,9 @@
 
 /**
  * The Query view of a PostgreSQL tab, laid out as MySQL's Query tab: the SQL editor on top, then a bar with
- * Run Current (⇧⌘R) and Run All (⌘R), the read-only results grid (an SPTableView) and a status line at the
- * bottom. Built in code. Use on the main thread.
+ * Run Current and Run All, the read-only results grid (an SPTableView) and a status line at the bottom. As
+ * MySQL's: ⌘R runs Current and ⌥⌘R runs All, swapped by MySQL's "QueryPrimaryControlRunsAll" preference.
+ * Built in code. Use on the main thread.
  *
  * Statements (see SPPostgresStatementSplitter) run in order on the tab's connection, on the main thread. The
  * grid shows the last row set the run returned, values in PostgreSQL's text format and NULL as MySQL's NULL
@@ -17,7 +18,7 @@
  * The editor uses MySQL's query editor font preference, without smart quotes or dashes, with undo.
  */
 __attribute__((visibility("default")))
-@interface SPPostgresQueryController : NSObject <NSTableViewDataSource, NSTableViewDelegate>
+@interface SPPostgresQueryController : NSObject <NSTableViewDataSource, NSTableViewDelegate, NSViewToolTipOwner>
 
 - (instancetype)initWithConnection:(PGPostgresConnection *)connection;
 

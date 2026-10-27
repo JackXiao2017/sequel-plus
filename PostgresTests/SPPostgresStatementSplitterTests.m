@@ -97,6 +97,33 @@
 	}
 }
 
+- (void)testBeginAtomicFunctionBody
+{
+	NSString *function = @"CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; SELECT 2; END";
+	XCTAssertEqualObjects([self split:[function stringByAppendingString:@"; SELECT 3;"]], (@[function, @"SELECT 3"]));
+
+	// Any case, comments between the words, CASE … END inside the body
+	NSString *withCase = @"CREATE PROCEDURE p() begin /* x */ -- y\n atomic SELECT CASE WHEN true THEN 1 END; INSERT INTO t VALUES (2); end";
+	XCTAssertEqualObjects([self split:[withCase stringByAppendingString:@";SELECT 3"]], (@[withCase, @"SELECT 3"]));
+
+	// Transactions and ordinary words are not bodies
+	XCTAssertEqualObjects([self split:@"BEGIN; SELECT 1; COMMIT;"], (@[@"BEGIN", @"SELECT 1", @"COMMIT"]));
+	XCTAssertEqualObjects([self split:@"BEGIN; SELECT 1; END;"], (@[@"BEGIN", @"SELECT 1", @"END"]));
+	XCTAssertEqualObjects([self split:@"BEGIN TRANSACTION; SELECT CASE WHEN true THEN 1 END; END"], (@[@"BEGIN TRANSACTION", @"SELECT CASE WHEN true THEN 1 END", @"END"]));
+	XCTAssertEqualObjects([self split:@"SELECT begin, atomic, \"end\" FROM t; SELECT 2"], (@[@"SELECT begin, atomic, \"end\" FROM t", @"SELECT 2"]));
+	XCTAssertEqualObjects([self split:@"SELECT 'BEGIN ATOMIC'; SELECT 2"], (@[@"SELECT 'BEGIN ATOMIC'", @"SELECT 2"]));
+	XCTAssertEqualObjects([self split:@"SELECT xbegin atomic; SELECT 2"], (@[@"SELECT xbegin atomic", @"SELECT 2"]));
+
+	// Run Current inside the body: the whole CREATE
+	NSString *sql = [function stringByAppendingString:@";\nSELECT 3"];
+	NSRange range = [SPPostgresStatementSplitter rangeOfStatementAtLocation:[sql rangeOfString:@"SELECT 2"].location inSQL:sql];
+	XCTAssertEqualObjects([sql substringWithRange:range], function);
+
+	// Unterminated: the rest is one statement
+	XCTAssertEqualObjects([self split:@"SELECT 0; CREATE FUNCTION g() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; SELECT 2"],
+						  (@[@"SELECT 0", @"CREATE FUNCTION g() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT 1; SELECT 2"]));
+}
+
 - (void)testRangeOfStatementAtCursor
 {
 	NSString *sql = @"SELECT 1;\n  SELECT 'a;b' ;\n\nSELECT 3";

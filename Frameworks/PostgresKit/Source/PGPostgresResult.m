@@ -22,6 +22,7 @@
 #import "PGPostgresException.h"
 #import "PGPostgresConnection.h"
 #import "PGPostgresConnectionTypeHandling.h"
+#import "PGPostgresKitPrivateAPI.h"
 
 @interface PGPostgresResult ()
 
@@ -177,6 +178,23 @@
 	ExecStatusType status = PQresultStatus(_result);
 
 	return status == PGRES_TUPLES_OK || status == PGRES_SINGLE_TUPLE;
+}
+
+- (NSString *)commandStatus
+{
+	const char *status = PQcmdStatus(_result);
+	
+	return status ? [NSString stringWithUTF8String:status] : @"";
+}
+
+- (BOOL)copyOutputDiscarded
+{
+	return _copyOutputDiscarded;
+}
+
+- (void)_setCopyOutputDiscarded:(BOOL)discarded
+{
+	_copyOutputDiscarded = discarded;
 }
 
 - (id)textValueAtRow:(unsigned long long)row column:(NSUInteger)column

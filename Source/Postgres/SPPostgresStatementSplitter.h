@@ -6,6 +6,7 @@
  *   - '…' strings ('' is a quote), E'…' strings (\' and '' are quotes), "…" identifiers ("" is a quote),
  *   - $$…$$ and $tag$…$tag$ bodies ($1 and identifiers containing $ are not dollar quotes),
  *   - -- line comments and block comments (slash-star … star-slash, nested).
+ *   - SQL-standard function bodies, BEGIN ATOMIC … END (CASE … END nests inside them).
  * An unterminated quote or comment runs to the end of the text (the server then reports it).
  * Pure functions, linear in the text's length; safe on any thread.
  */

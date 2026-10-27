@@ -219,16 +219,17 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	[splitView setAutosaveName:SPPostgresSplitterName];
 }
 
-/**
- * A Content controller on the current connection, in the right pane (replacing the previous one, which is
- * on the previous connection), showing the selected table.
- */
+/// The right pane (Content or Query view), or nil before it is built.
 - (NSView *)_rightPane
 {
 	if ([[splitView subviews] count] < 2) return nil;
 	return [[splitView subviews] lastObject];
 }
 
+/**
+ * A Content controller on the current connection (replacing the previous one, which is on the previous
+ * connection), in the right pane while the Content view is showing, showing the selected table.
+ */
 - (void)_installContentController
 {
 	NSView *pane = [self _rightPane];
