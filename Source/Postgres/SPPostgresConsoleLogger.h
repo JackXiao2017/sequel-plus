@@ -31,4 +31,16 @@ __attribute__((visibility("default")))
  */
 - (void)attachToConnection:(PGPostgresConnection *)connection;
 
+/// The logger attached to connection (see -attachToConnection:), or nil.
++ (SPPostgresConsoleLogger *)loggerForConnection:(PGPostgresConnection *)connection;
+
+/**
+ * YES while the Query view runs the user's statements (set and reset on the main thread around the run): they
+ * are logged as MySQL logs custom queries (the custom query logging preference) instead of as interface queries.
+ */
+@property (assign) BOOL loggingCustomQueries;
+
+/// Shows a query error in the console, labelled as the queries, when error logging is enabled (as MySQL's).
+- (void)logError:(NSString *)error;
+
 @end

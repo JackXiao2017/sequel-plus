@@ -4,14 +4,17 @@
 @class PGPostgresConnection;
 @class SPPostgresConnector;
 @class SPPostgresContentController;
+@class SPPostgresQueryController;
 @class SPPostgresFavorite;
 @class SPPostgresSidebarController;
 @class SPWindowController;
 
 /**
  * A PostgreSQL connection hosted as a tab of an SPWindowController window: the left panel (schema
- * picker, tables, views, extensions), the Content view of the selected table or view (see
- * SPPostgresContentController), the database picker and the console logger. Built in code. Use on the main thread.
+ * picker, tables, views, extensions), in the right pane the Content view of the selected table or view
+ * (see SPPostgresContentController) or the Query view (SPPostgresQueryController), switched by the Content
+ * and Query toolbar items and View menu items as on MySQL tabs, the database picker and the console
+ * logger. Built in code. Use on the main thread.
  *
  * Takes over `connector` (it keeps it, and disconnects it when the tab closes) and `connection`,
  * which must be the connector's connected connection. Host it with
@@ -48,6 +51,12 @@ __attribute__((visibility("default")))
 /// NO for every action this tab doesn't implement (MySQL-only items); the window's own items stay enabled.
 - (BOOL)validateMenuItem:(NSMenuItem *)item;
 
+/// Shows the Content view of the selected table (needs one), as MySQL's Content toolbar item and View menu item.
+- (IBAction)viewContent:(id)sender;
+
+/// Shows the Query view, as MySQL's Query toolbar item and View > Custom Query.
+- (IBAction)viewQuery:(id)sender;
+
 /**
  * Shows the tab's alerts (catalog errors, a failed database switch). nil (the default) shows them as
  * sheets on the parent window while the tab is active and the window visible; otherwise they wait
@@ -58,6 +67,8 @@ __attribute__((visibility("default")))
 @property (readonly) SPPostgresSidebarController *sidebar;
 /// The right pane: the Content view of the table or view selected in the sidebar.
 @property (readonly) SPPostgresContentController *contentController;
+/// The right pane: the Query view. Its editor's text is kept for the tab's session (also across database switches).
+@property (readonly) SPPostgresQueryController *queryController;
 @property (readonly) PGPostgresConnection *connection;
 @property (readonly) SPPostgresFavorite *favorite;
 

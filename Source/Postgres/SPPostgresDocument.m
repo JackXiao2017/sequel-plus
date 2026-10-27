@@ -1,6 +1,7 @@
 #import "SPPostgresDocument.h"
 #import "SPPostgresSidebarController.h"
 #import "SPPostgresContentController.h"
+#import "SPPostgresQueryController.h"
 #import "SPPostgresConsoleLogger.h"
 #import "SPPostgresCatalog.h"
 #import "SPPostgresConnector.h"
@@ -35,6 +36,9 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 - (void)_attachCurrentConnection;
 - (void)_buildContent;
 - (void)_installContentController;
+- (void)_installQueryController;
+- (void)_showQueryPane:(BOOL)query;
+- (NSView *)_rightPane;
 - (void)_showSelectedTable;
 - (void)_buildToolbar;
 - (void)_reloadDatabasePopup;
@@ -59,6 +63,9 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	SPPostgresConsoleLogger *logger;
 	SPPostgresSidebarController *sidebar;
 	SPPostgresContentController *contentController;
+	SPPostgresQueryController *queryController;
+	/// The right pane shows the Query view (else the Content view)
+	BOOL showingQuery;
 
 	NSString *serverVersion;
 	NSString *currentDatabase;
@@ -80,6 +87,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 
 @synthesize sidebar;
 @synthesize contentController;
+@synthesize queryController;
 @synthesize connection;
 @synthesize favorite;
 @synthesize alertPresenter;
@@ -126,6 +134,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	[logger release];
 	[sidebar release];
 	[contentController release];
+	[queryController release];
 	[serverVersion release];
 	[currentDatabase release];
 	[splitView release];
@@ -200,6 +209,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	NSView *mainView = [[[NSView alloc] initWithFrame:NSMakeRect(contentX, 0, NSWidth(splitFrame) - contentX, NSHeight(splitFrame))] autorelease];
 	[mainView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 	[splitView addSubview:mainView];
+	[self _installQueryController];
 	[self _installContentController];
 
 	// Constrained, and resized with the window, as MySQL's left pane (see -[SPDatabaseDocument splitView:constrain...])
@@ -213,10 +223,16 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
  * A Content controller on the current connection, in the right pane (replacing the previous one, which is
  * on the previous connection), showing the selected table.
  */
+- (NSView *)_rightPane
+{
+	if ([[splitView subviews] count] < 2) return nil;
+	return [[splitView subviews] lastObject];
+}
+
 - (void)_installContentController
 {
-	NSView *pane = [[splitView subviews] lastObject];
-	if (!pane || [[splitView subviews] count] < 2) return;
+	NSView *pane = [self _rightPane];
+	if (!pane) return;
 
 	if (contentController) {
 		[[contentController view] removeFromSuperview];
@@ -236,9 +252,66 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	NSView *contentView = [contentController view];
 	[contentView setFrame:[pane bounds]];
 	[contentView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
-	[pane addSubview:contentView];
+	if (!showingQuery) [pane addSubview:contentView];
 
 	[self _showSelectedTable];
+}
+
+/**
+ * A Query controller on the current connection (replacing the previous one, which is on the previous
+ * connection), keeping the editor's text; in the right pane while the Query view is showing.
+ */
+- (void)_installQueryController
+{
+	NSView *pane = [self _rightPane];
+	if (!pane) return;
+
+	NSString *text = [[[[queryController editor] string] copy] autorelease];
+
+	if (queryController) {
+		[[queryController view] removeFromSuperview];
+		[queryController invalidate];
+		[queryController release];
+	}
+
+	queryController = [[SPPostgresQueryController alloc] initWithConnection:connection];
+	if ([text length]) [[queryController editor] setString:text];
+
+	NSView *queryView = [queryController view];
+	[queryView setFrame:[pane bounds]];
+	[queryView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+	if (showingQuery) [pane addSubview:queryView];
+}
+
+/**
+ * Shows the Query view or the Content view in the right pane, as MySQL's tab view does. The other view is
+ * taken out of the window (keeping its state), so its key equivalents don't apply meanwhile. An edit in
+ * progress in the Content grid is ended (saved) first; if it can't end, nothing changes.
+ */
+- (void)_showQueryPane:(BOOL)query
+{
+	NSView *pane = [self _rightPane];
+	if (!pane) return;
+
+	NSView *showing = query ? [queryController view] : [contentController view];
+	NSView *hiding = query ? [contentController view] : [queryController view];
+
+	if ([hiding superview] && [pane window]) {
+		NSResponder *responder = [[pane window] firstResponder];
+		BOOL editingInHiding = [responder isKindOfClass:[NSView class]] && [(NSView *)responder isDescendantOf:hiding];
+		if (editingInHiding && ![[pane window] makeFirstResponder:nil]) return;
+	}
+
+	showingQuery = query;
+
+	[hiding removeFromSuperview];
+	if ([showing superview] != pane) {
+		[showing setFrame:[pane bounds]];
+		[pane addSubview:showing];
+	}
+
+	[toolbar setSelectedItemIdentifier:query ? SPMainToolbarCustomQuery : ([[sidebar selectedTableName] length] ? SPMainToolbarTableContent : nil)];
+	[toolbar validateVisibleItems];
 }
 
 /// The Content view shows the table or view selected in the sidebar (or nothing), and the Content toolbar item is selected with it.
@@ -251,7 +324,8 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 		[contentController showTable:table inSchema:schema];
 	}
 
-	[toolbar setSelectedItemIdentifier:[table length] ? SPMainToolbarTableContent : nil];
+	// The Query view stays when the selection changes (as MySQL's)
+	[toolbar setSelectedItemIdentifier:showingQuery ? SPMainToolbarCustomQuery : ([table length] ? SPMainToolbarTableContent : nil)];
 	[toolbar validateVisibleItems];
 }
 
@@ -495,6 +569,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	[sidebar invalidate];
 	[sidebar setDelegate:nil];
 	[contentController invalidate];
+	[queryController invalidate];
 	[splitView setDelegate:nil];
 	[databasePopup setTarget:nil];
 
@@ -631,6 +706,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 
 	[self _attachCurrentConnection];
 	[sidebar reloadWithCatalog:catalog];
+	[self _installQueryController];
 	[self _installContentController];
 	[self _reloadDatabasePopup];
 	[self updateWindowTitle:self];
@@ -725,10 +801,10 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	return SPMainToolbarSelectableItemIdentifiers();
 }
 
-/// The database picker, the console and Content work on Postgres tabs so far
+/// The database picker, the console, Content and Query work on Postgres tabs so far
 - (NSArray *)_availableToolbarItemIdentifiers
 {
-	return @[SPMainToolbarDatabaseSelection, SPMainToolbarShowConsole, SPMainToolbarTableContent];
+	return @[SPMainToolbarDatabaseSelection, SPMainToolbarShowConsole, SPMainToolbarTableContent, SPMainToolbarCustomQuery];
 }
 
 - (NSToolbarItem *)toolbar:(NSToolbar *)theToolbar itemForItemIdentifier:(NSString *)identifier willBeInsertedIntoToolbar:(BOOL)flag
@@ -767,6 +843,9 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	else if ([identifier isEqualToString:SPMainToolbarTableContent]) {
 		action = @selector(viewContent:);
 	}
+	else if ([identifier isEqualToString:SPMainToolbarCustomQuery]) {
+		action = @selector(viewQuery:);
+	}
 	else if ([identifier isEqualToString:SPMainToolbarClearConsole]) {
 		[item setToolTip:NSLocalizedString(@"Clear the console which shows all PostgreSQL commands performed by Sequel Pro", @"PostgreSQL toolbar: clear console tooltip")];
 	}
@@ -804,12 +883,23 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	return !tornDown;
 }
 
-/// Shows the Content view of the selected table (the only view of the right pane so far).
-- (void)viewContent:(id)sender
+/// Shows the Content view of the selected table.
+- (IBAction)viewContent:(id)sender
 {
 	if (tornDown || ![[sidebar selectedTableName] length]) return;
+	[self _showQueryPane:NO];
+	if (showingQuery) return;
 	[self _showSelectedTable];
 	[[[contentController view] window] makeFirstResponder:[contentController tableView]];
+}
+
+/// Shows the Query view, the editor focused.
+- (IBAction)viewQuery:(id)sender
+{
+	if (tornDown) return;
+	[self _showQueryPane:YES];
+	if (!showingQuery) return;
+	[[[queryController view] window] makeFirstResponder:[queryController editor]];
 }
 
 - (void)unavailableInThisVersion:(id)sender
@@ -820,8 +910,8 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 /// Shows the shared console, or hides it when it is the key window (as MySQL's Toggle Console).
 - (void)toggleConsole:(id)sender
 {
-	SPQueryController *queryController = [SPQueryController sharedQueryController];
-	NSWindow *consoleWindow = [queryController window];
+	SPQueryController *console = [SPQueryController sharedQueryController];
+	NSWindow *consoleWindow = [console window];
 
 	if ([consoleWindow isVisible] && [consoleWindow isKeyWindow]) {
 		[consoleWindow setIsVisible:NO];
@@ -829,7 +919,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	}
 
 	// Entries aren't reloaded while the console is hidden
-	if (![consoleWindow isVisible]) [queryController updateEntries];
+	if (![consoleWindow isVisible]) [console updateEntries];
 	[consoleWindow makeKeyAndOrderFront:self];
 }
 

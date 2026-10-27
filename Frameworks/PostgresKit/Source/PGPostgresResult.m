@@ -172,6 +172,32 @@
 	return data;
 }
 
+- (BOOL)returnsRows
+{
+	ExecStatusType status = PQresultStatus(_result);
+
+	return status == PGRES_TUPLES_OK || status == PGRES_SINGLE_TUPLE;
+}
+
+- (id)textValueAtRow:(unsigned long long)row column:(NSUInteger)column
+{
+	if (![self returnsRows] || row >= (unsigned long long)PQntuples(_result) || column >= _numberOfFields) return nil;
+
+	if (PQgetisnull(_result, (int)row, (int)column)) return [NSNull null];
+
+	const char *bytes = PQgetvalue(_result, (int)row, (int)column);
+	NSUInteger length = (NSUInteger)PQgetlength(_result, (int)row, (int)column);
+
+	if (!bytes) return @"";
+
+	NSString *string = [[NSString alloc] initWithBytes:bytes length:length encoding:_stringEncoding];
+
+	// Not valid in the connection's encoding: show the bytes as Latin-1 rather than nothing
+	if (!string) string = [[NSString alloc] initWithBytes:bytes length:length encoding:NSISOLatin1StringEncoding];
+
+	return [string autorelease];
+}
+
 #pragma mark -
 #pragma mark Fast enumeration implementation
 

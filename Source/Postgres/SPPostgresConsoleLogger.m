@@ -9,6 +9,7 @@ static char SPPostgresConsoleLoggerKey;
 @synthesize connectionName;
 @synthesize database;
 @synthesize nextDelegate;
+@synthesize loggingCustomQueries;
 
 - (instancetype)initWithConnectionName:(NSString *)theConnectionName database:(NSString *)theDatabase
 {
@@ -41,6 +42,21 @@ static char SPPostgresConsoleLoggerKey;
 	[connection setDelegate:self];
 }
 
++ (SPPostgresConsoleLogger *)loggerForConnection:(PGPostgresConnection *)connection
+{
+	if (!connection) return nil;
+	id logger = objc_getAssociatedObject(connection, &SPPostgresConsoleLoggerKey);
+	return [logger isKindOfClass:[SPPostgresConsoleLogger class]] ? logger : nil;
+}
+
+- (void)logError:(NSString *)error
+{
+	NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+	if ([error length] && [prefs boolForKey:SPConsoleEnableLogging] && [prefs boolForKey:SPConsoleEnableErrorLogging]) {
+		[[SPQueryController sharedQueryController] showErrorInConsole:error connection:connectionName database:database];
+	}
+}
+
 #pragma mark - PGPostgresConnectionDelegate
 
 - (void)connection:(PGPostgresConnection *)connection willExecute:(NSObject *)query withValues:(NSArray *)values
@@ -49,10 +65,12 @@ static char SPPostgresConsoleLoggerKey;
 	if ([query isKindOfClass:[NSString class]]) text = (NSString *)query;
 	else if ([query isKindOfClass:[PGPostgresStatement class]]) text = [(PGPostgresStatement *)query statement];
 
-	// Stage 1 only runs interface queries; respect the same preferences as MySQL's interface logging.
-	// SPQueryController's message list is lock-protected, so this is safe from any thread.
+	// The same preferences as MySQL's logging: the user's statements from the Query view as custom queries,
+	// everything else as interface queries. SPQueryController's message list is lock-protected, so this is
+	// safe from any thread.
 	NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
-	if ([text length] && [prefs boolForKey:SPConsoleEnableLogging] && [prefs boolForKey:SPConsoleEnableInterfaceLogging]) {
+	NSString *kindKey = loggingCustomQueries ? SPConsoleEnableCustomQueryLogging : SPConsoleEnableInterfaceLogging;
+	if ([text length] && [prefs boolForKey:SPConsoleEnableLogging] && [prefs boolForKey:kindKey]) {
 		[[SPQueryController sharedQueryController] showMessageInConsole:text connection:connectionName database:database];
 	}
 

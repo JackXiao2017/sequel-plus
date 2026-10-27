@@ -1,0 +1,232 @@
+#import "SPPostgresStatementSplitter.h"
+
+/// A piece of the text up to and including a semicolon (or the end of the text).
+typedef struct {
+	NSUInteger start;      // first character
+	NSUInteger end;        // after its semicolon (or the end of the text)
+	NSUInteger trimStart;  // first character that isn't whitespace (NSNotFound: none)
+	NSUInteger trimEnd;    // after the last character that isn't whitespace, before the semicolon
+	BOOL hasCode;          // has something besides whitespace and comments
+} SPPostgresSegment;
+
+static BOOL SPIsWhitespace(unichar c)
+{
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v' || c == 0xA0 || c == 0x2028 || c == 0x2029 || c == 0xFEFF;
+}
+
+/// May start an identifier or a dollar-quote tag (PostgreSQL: letters, _, and any non-ASCII character).
+static BOOL SPIsIdentifierStart(unichar c)
+{
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c >= 0x80;
+}
+
+/// May continue a dollar-quote tag.
+static BOOL SPIsTagCharacter(unichar c)
+{
+	return SPIsIdentifierStart(c) || (c >= '0' && c <= '9');
+}
+
+/// May continue an identifier (or a number): then a following $ or ' doesn't open a quote.
+static BOOL SPIsIdentifierCharacter(unichar c)
+{
+	return SPIsTagCharacter(c) || c == '$';
+}
+
+@implementation SPPostgresStatementSplitter
+
+/// Every segment of sql, in order, covering it without gaps (at least one).
++ (NSData *)_segmentsInSQL:(NSString *)sql
+{
+	NSUInteger length = [sql length];
+	NSMutableData *segments = [NSMutableData data];
+
+	unichar *chars = length ? malloc(sizeof(unichar) * length) : NULL;
+	if (length && !chars) return segments;
+	if (length) [sql getCharacters:chars range:NSMakeRange(0, length)];
+
+	SPPostgresSegment segment = {0, 0, NSNotFound, 0, NO};
+
+	// Notes the token [from, to) of the current segment
+	#define SP_NOTE_TOKEN(from, to, code) do { \
+		if (segment.trimStart == NSNotFound) segment.trimStart = (from); \
+		segment.trimEnd = (to); \
+		if (code) segment.hasCode = YES; \
+	} while (0)
+
+	NSUInteger i = 0;
+	while (i < length) {
+		unichar c = chars[i];
+		unichar next = (i + 1 < length) ? chars[i + 1] : 0;
+
+		if (c == ';') {
+			segment.end = i + 1;
+			[segments appendBytes:&segment length:sizeof(segment)];
+			segment = (SPPostgresSegment){i + 1, i + 1, NSNotFound, 0, NO};
+			i++;
+			continue;
+		}
+
+		if (SPIsWhitespace(c)) {
+			i++;
+			continue;
+		}
+
+		NSUInteger j;
+
+		// -- line comment
+		if (c == '-' && next == '-') {
+			j = i + 2;
+			while (j < length && chars[j] != '\n' && chars[j] != '\r') j++;
+			SP_NOTE_TOKEN(i, j, NO);
+			i = j;
+			continue;
+		}
+
+		// /* block comment */, nested
+		if (c == '/' && next == '*') {
+			NSUInteger depth = 1;
+			j = i + 2;
+			while (j < length && depth > 0) {
+				if (chars[j] == '/' && j + 1 < length && chars[j + 1] == '*') {
+					depth++;
+					j += 2;
+				}
+				else if (chars[j] == '*' && j + 1 < length && chars[j + 1] == '/') {
+					depth--;
+					j += 2;
+				}
+				else {
+					j++;
+				}
+			}
+			SP_NOTE_TOKEN(i, MIN(j, length), NO);
+			i = MIN(j, length);
+			continue;
+		}
+
+		// 'string' (E'string' with backslash escapes): '' is a quote in both
+		if (c == '\'') {
+			BOOL escapes = i > 0 && (chars[i - 1] == 'E' || chars[i - 1] == 'e') && !(i > 1 && SPIsIdentifierCharacter(chars[i - 2]));
+			j = i + 1;
+			while (j < length) {
+				if (escapes && chars[j] == '\\') {
+					j += 2;
+					continue;
+				}
+				if (chars[j] == '\'') {
+					if (j + 1 < length && chars[j + 1] == '\'') {
+						j += 2;
+						continue;
+					}
+					j++;
+					break;
+				}
+				j++;
+			}
+			j = MIN(j, length);
+			SP_NOTE_TOKEN(i, j, YES);
+			i = j;
+			continue;
+		}
+
+		// "identifier": "" is a quote
+		if (c == '"') {
+			j = i + 1;
+			while (j < length) {
+				if (chars[j] == '"') {
+					if (j + 1 < length && chars[j + 1] == '"') {
+						j += 2;
+						continue;
+					}
+					j++;
+					break;
+				}
+				j++;
+			}
+			j = MIN(j, length);
+			SP_NOTE_TOKEN(i, j, YES);
+			i = j;
+			continue;
+		}
+
+		// $tag$ … $tag$ (not $1, nor a $ inside an identifier)
+		if (c == '$' && !(i > 0 && SPIsIdentifierCharacter(chars[i - 1]))) {
+			j = i + 1;
+			if (j < length && SPIsIdentifierStart(chars[j])) {
+				j++;
+				while (j < length && SPIsTagCharacter(chars[j])) j++;
+			}
+			if (j < length && chars[j] == '$') {
+				NSRange tag = NSMakeRange(i, j + 1 - i);
+				NSRange close = [sql rangeOfString:[sql substringWithRange:tag] options:NSLiteralSearch range:NSMakeRange(NSMaxRange(tag), length - NSMaxRange(tag))];
+				NSUInteger end = (close.location == NSNotFound) ? length : NSMaxRange(close);
+				SP_NOTE_TOKEN(i, end, YES);
+				i = end;
+				continue;
+			}
+		}
+
+		SP_NOTE_TOKEN(i, i + 1, YES);
+		i++;
+	}
+
+	#undef SP_NOTE_TOKEN
+
+	segment.end = length;
+	[segments appendBytes:&segment length:sizeof(segment)];
+
+	free(chars);
+
+	return segments;
+}
+
++ (NSArray *)statementsInSQL:(NSString *)sql
+{
+	if (![sql length]) return @[];
+
+	NSData *data = [self _segmentsInSQL:sql];
+	const SPPostgresSegment *segments = [data bytes];
+	NSUInteger count = [data length] / sizeof(SPPostgresSegment);
+
+	NSMutableArray *statements = [NSMutableArray arrayWithCapacity:count];
+	for (NSUInteger k = 0; k < count; k++) {
+		if (!segments[k].hasCode) continue;
+		[statements addObject:[sql substringWithRange:NSMakeRange(segments[k].trimStart, segments[k].trimEnd - segments[k].trimStart)]];
+	}
+
+	return statements;
+}
+
++ (NSRange)rangeOfStatementAtLocation:(NSUInteger)location inSQL:(NSString *)sql
+{
+	if (![sql length]) return NSMakeRange(NSNotFound, 0);
+
+	location = MIN(location, [sql length]);
+
+	NSData *data = [self _segmentsInSQL:sql];
+	const SPPostgresSegment *segments = [data bytes];
+	NSUInteger count = [data length] / sizeof(SPPostgresSegment);
+	if (!count) return NSMakeRange(NSNotFound, 0);
+
+	// The segment the location is in, or right after (just after a semicolon: the statement it ends)
+	NSUInteger found = count - 1;
+	for (NSUInteger k = 0; k < count; k++) {
+		if (location <= segments[k].end) {
+			found = k;
+			break;
+		}
+	}
+
+	// Only whitespace or comments there: the statement before, else the one after
+	NSInteger k = (NSInteger)found;
+	while (k >= 0 && !segments[k].hasCode) k--;
+	if (k < 0) {
+		k = (NSInteger)found;
+		while ((NSUInteger)k < count && !segments[k].hasCode) k++;
+		if ((NSUInteger)k >= count) return NSMakeRange(NSNotFound, 0);
+	}
+
+	return NSMakeRange(segments[k].trimStart, segments[k].trimEnd - segments[k].trimStart);
+}
+
+@end
