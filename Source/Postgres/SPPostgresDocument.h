@@ -34,6 +34,9 @@ __attribute__((visibility("default")))
  */
 - (void)switchToDatabase:(NSString *)database;
 
+/// The favorite name, plus @"/<database>" while another Postgres tab of the same window has the same name.
+- (NSString *)tabLabel;
+
 /// The toolbar this tab installs in its window while active.
 - (NSToolbar *)toolbar;
 
