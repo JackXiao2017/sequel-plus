@@ -10,6 +10,8 @@
 /// A reload (-reloadWithCatalog:, or a schema change by the user or -reloadSchema:) had catalog queries
 /// that failed: called once per reload, with the first error. The lists that failed keep what they showed.
 - (void)sidebar:(SPPostgresSidebarController *)sidebar didFailToLoadWithError:(NSError *)error;
+/// "Duplicate Table…" was chosen in the outline's menu for `table`, a table of the selected schema.
+- (void)sidebar:(SPPostgresSidebarController *)sidebar duplicateTableNamed:(NSString *)table;
 @end
 
 /**
@@ -40,8 +42,14 @@ __attribute__((visibility("default")))
 /// Names listed under a section (tables, views or extension names), in display order.
 - (NSArray *)itemTitlesInSection:(NSString *)sectionTitle;
 
-/// Selects a table or view of the selected schema in the outline; NO if it is not listed.
+/// Selects a table or view of the selected schema in the outline; NO if it is not listed. nil clears the selection.
 - (BOOL)selectTableNamed:(NSString *)name;
+
+/**
+ * The outline's right-click menu: "Duplicate Table…", enabled on a table (not a view or extension). It acts on
+ * the row that was right-clicked, or else on the selected one, through the delegate.
+ */
+@property (readonly) NSMenu *tableMenu;
 
 @property (readonly) NSString *selectedSchema;
 

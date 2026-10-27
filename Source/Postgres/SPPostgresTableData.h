@@ -1,9 +1,25 @@
 #import <Foundation/Foundation.h>
 
 @class PGPostgresConnection;
+@class PGPostgresResult;
 
 /// Quotes a PostgreSQL identifier: wraps it in double quotes and doubles any embedded double quote.
 extern NSString *SPPostgresQuoteIdentifier(NSString *identifier) __attribute__((visibility("default")));
+
+/// Runs sql with values ($n parameters); on failure returns nil with SPPostgresErrorQueryFailed and the server's
+/// message (or libpq's, when the connection is gone).
+extern PGPostgresResult *SPPostgresExecute(PGPostgresConnection *connection, NSString *sql, NSArray *values, NSError **error) __attribute__((visibility("default")));
+
+/**
+ * Runs body all or nothing on a connection that may be shared with the Query view, where the user may have a
+ * transaction open: when idle, in a transaction of its own (BEGIN, then COMMIT, or ROLLBACK if body fails);
+ * inside the user's transaction, in the savepoint `savepoint` (a plain identifier), released on success and
+ * rolled back to (and released) on failure, so the user's transaction stays open either way; inside an aborted
+ * transaction, nothing is sent and it fails with abortedMessage (SPPostgresErrorQueryFailed). body returns NO
+ * (setting its error) to undo.
+ */
+extern BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoint, NSString *abortedMessage,
+									BOOL (^body)(NSError **error), NSError **error) __attribute__((visibility("default")));
 
 /// One column of a table or view, as described by pg_attribute.
 __attribute__((visibility("default")))

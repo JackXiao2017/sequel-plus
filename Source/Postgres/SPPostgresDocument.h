@@ -6,6 +6,7 @@
 @class SPPostgresContentController;
 @class SPPostgresQueryController;
 @class SPPostgresFavorite;
+@class SPPostgresHistory;
 @class SPPostgresSidebarController;
 @class SPWindowController;
 
@@ -69,6 +70,8 @@ __attribute__((visibility("default")))
 @property (readonly) SPPostgresContentController *contentController;
 /// The right pane: the Query view. Its editor's text is kept for the tab's session (also across database switches).
 @property (readonly) SPPostgresQueryController *queryController;
+/// The tab's Table History (the toolbar's History control, View > Back/Forward In History).
+@property (readonly) SPPostgresHistory *history;
 @property (readonly) PGPostgresConnection *connection;
 @property (readonly) SPPostgresFavorite *favorite;
 

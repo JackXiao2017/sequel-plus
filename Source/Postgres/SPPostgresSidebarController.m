@@ -54,7 +54,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 #pragma mark -
 
-@interface SPPostgresSidebarController ()
+@interface SPPostgresSidebarController () <NSMenuItemValidation>
 
 - (void)_buildView;
 - (void)_reloadSchemaPopup;
@@ -65,6 +65,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 - (void)_beginReload;
 - (void)_endReload;
 - (SPPostgresSidebarItem *)_sectionNamed:(NSString *)title;
+- (SPPostgresSidebarItem *)_menuTargetItem;
 
 @end
 
@@ -77,6 +78,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	NSView *view;
 	NSPopUpButton *schemaPopup;
 	NSOutlineView *outlineView;
+	NSMenu *tableMenu;
 
 	BOOL reloading;
 
@@ -89,6 +91,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 @synthesize selectedTableName;
 @synthesize lastError;
 @synthesize delegate;
+@synthesize tableMenu;
 
 - (instancetype)initWithCatalog:(SPPostgresCatalog *)theCatalog
 {
@@ -114,6 +117,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[view release];
 	[schemaPopup release];
 	[outlineView release];
+	[tableMenu release];
 	[selectedSchema release];
 	[selectedTableName release];
 	[lastError release];
@@ -127,6 +131,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[outlineView setDelegate:nil];
 	[outlineView setDataSource:nil];
 	[schemaPopup setTarget:nil];
+	for (NSMenuItem *item in [tableMenu itemArray]) [item setTarget:nil];
 }
 
 #pragma mark - View
@@ -197,6 +202,13 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[outlineView setDelegate:self];
 	[scrollView setDocumentView:outlineView];
 	[outlineView sizeLastColumnToFit];
+
+	// Right-click menu, worded as MySQL's tables list menu (DBView.xib)
+	tableMenu = [[NSMenu alloc] initWithTitle:@""];
+	NSMenuItem *duplicate = [tableMenu addItemWithTitle:NSLocalizedString(@"Duplicate Table…", @"PostgreSQL sidebar: duplicate table menu item") action:@selector(duplicateTable:) keyEquivalent:@""];
+	[duplicate setToolTip:NSLocalizedString(@"Duplicate the selected item", @"PostgreSQL sidebar: duplicate table menu item tooltip")];
+	[duplicate setTarget:self];
+	[outlineView setMenu:tableMenu];
 
 	[container addSubview:scrollView];
 }
@@ -379,6 +391,12 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 - (BOOL)selectTableNamed:(NSString *)name
 {
+	if (!name) {
+		[outlineView deselectAll:nil];
+		[self _updateSelectionFromOutline];
+		return YES;
+	}
+
 	for (NSString *sectionTitle in @[SPPostgresSidebarTables, SPPostgresSidebarViews]) {
 		for (SPPostgresSidebarItem *item in [[self _sectionNamed:sectionTitle] children]) {
 			if (![[item title] isEqualToString:name]) continue;
@@ -412,6 +430,31 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	NSString *schema = [schemaPopup titleOfSelectedItem];
 	if (!schema || [schema isEqualToString:selectedSchema]) return;
 	[self reloadSchema:schema];
+}
+
+#pragma mark - Menu
+
+/// The right-clicked row's item, or else the selected row's (nil if neither).
+- (SPPostgresSidebarItem *)_menuTargetItem
+{
+	NSInteger row = [outlineView clickedRow];
+	if (row < 0) row = [outlineView selectedRow];
+	return (row >= 0) ? [outlineView itemAtRow:row] : nil;
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem *)item
+{
+	if ([item action] == @selector(duplicateTable:)) {
+		return [[self _menuTargetItem] kind] == SPPostgresSidebarTable && [delegate respondsToSelector:@selector(sidebar:duplicateTableNamed:)];
+	}
+	return YES;
+}
+
+- (void)duplicateTable:(id)sender
+{
+	SPPostgresSidebarItem *item = [self _menuTargetItem];
+	if ([item kind] != SPPostgresSidebarTable) return;
+	if ([delegate respondsToSelector:@selector(sidebar:duplicateTableNamed:)]) [delegate sidebar:self duplicateTableNamed:[item title]];
 }
 
 #pragma mark - NSOutlineViewDataSource
