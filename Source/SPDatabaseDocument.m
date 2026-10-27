@@ -4427,7 +4427,6 @@ static BOOL isOSAtLeast10_14;
 - (void)willResignActiveTabInWindow
 {
 	[self updateTitlebarStatusVisibilityForcingHide:YES];
-	[parentWindow sp_stopCompactTitleTracking];
 
 	// Remove the task progress window
 	[parentWindow removeChildWindow:taskProgressWindow];
