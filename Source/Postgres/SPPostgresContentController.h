@@ -10,7 +10,7 @@
  *
  * Rows come from SPPostgresTableData as PostgreSQL text. The page size is MySQL's "Limit results"
  * preference (unlimited when it is off); NULL is shown as MySQL's NULL placeholder preference, in grey.
- * Header clicks sort ascending, then descending. Cells are edited as text: ending an edit updates the row
+ * Header clicks sort ascending, then descending, from the first page. Cells are edited as text: ending an edit updates the row
  * on the server. Tables without a primary key, views and generated columns are never edited.
  *
  * A data-layer error is shown as an alert (see alertPresenter); the grid keeps the rows it showed.
@@ -24,6 +24,7 @@ __attribute__((visibility("default")))
 - (NSView *)view;
 
 /// Shows the rows of schema.table from the first page, unfiltered and unsorted. A nil table empties the grid.
+/// If the rows can't be loaded the error is shown and the grid is empty (only Refresh, to retry, is enabled).
 - (void)showTable:(NSString *)table inSchema:(NSString *)schema;
 
 /// Reloads the current page (keeping the filter and sort). On failure the rows stay and the error is shown.
@@ -57,7 +58,9 @@ __attribute__((visibility("default")))
 /// Shows errors. nil (the default) shows them as sheets on the view's window. Replaceable (the tab routes them through its own).
 @property (copy) void (^alertPresenter)(NSAlert *alert);
 
-/// Asks to confirm a deletion; call completion exactly once. nil (the default) shows a sheet on the view's window.
+/// Asks to confirm a deletion; call completion exactly once (later calls are ignored). The completion is a heap
+/// block that stays valid until it is called, so a presenter may store it (copying or retaining it is not needed).
+/// nil (the default) shows a sheet on the view's window.
 @property (copy) void (^confirmationPresenter)(NSAlert *alert, void (^completion)(BOOL confirmed));
 
 @end
