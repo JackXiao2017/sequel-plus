@@ -31,6 +31,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	NSArray *columns;               // SPPostgresColumn, in grid order (identifier = index)
 	NSMutableArray *rows;           // NSArray of NSString / NSNull
 	BOOL editable;
+	BOOL loaded;                    // the current table's rows loaded at least once (the grid and counts are its own)
 
 	SPPostgresFilter *filter;       // nil: no filter
 	NSString *sortColumn;           // nil: primary-key order
@@ -353,18 +354,30 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 
 - (void)_confirm:(NSAlert *)alert completion:(void (^)(BOOL confirmed))completion
 {
+	// A heap copy, so a presenter may keep it (even without copying it) until the answer comes. It runs once
+	// and then balances its own Block_copy (deferred to the autorelease pool, as it is still running).
+	void (^original)(BOOL) = completion;
+	__block BOOL done = NO;
+	__block void (^once)(BOOL) = nil;
+	once = Block_copy(^(BOOL confirmed) {
+		if (done) return;
+		done = YES;
+		original(confirmed);
+		[(id)once autorelease];
+	});
+
 	if (confirmationPresenter) {
-		confirmationPresenter(alert, completion);
+		confirmationPresenter(alert, once);
 		return;
 	}
 
 	NSWindow *window = [view window];
 	if (!window) {
-		completion([alert runModal] == NSAlertFirstButtonReturn);
+		once([alert runModal] == NSAlertFirstButtonReturn);
 		return;
 	}
 	[alert beginSheetModalForWindow:window completionHandler:^(NSModalResponse response) {
-		completion(response == NSAlertFirstButtonReturn);
+		once(response == NSAlertFirstButtonReturn);
 	}];
 }
 
@@ -393,6 +406,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	matchingRowCount = 0;
 	tableRowCount = 0;
 	editable = NO;
+	loaded = NO;
 
 	if ([theTable length] && [theSchema length]) {
 		tableData = [[SPPostgresTableData alloc] initWithConnection:connection schema:theSchema table:theTable];
@@ -414,14 +428,13 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	[self setNoticeText:(tableData && !editable) ? ([tableData readOnlyReason] ?: @"") : @""];
 	[noticeField setStringValue:noticeText];
 
-	if ([columns count]) {
-		[self _loadWithFilter:nil sortColumn:nil ascending:YES page:1];
-		[self _fitColumnWidths];
-	}
-	else {
+	// On failure (alert shown) the grid and bottom bar must not keep the previous table's rows and counts
+	if (![columns count] || ![self _loadWithFilter:nil sortColumn:nil ascending:YES page:1]) {
 		[tableView reloadData];
 		[self _updateBottomBar];
+		return;
 	}
+	[self _fitColumnWidths];
 }
 
 - (void)reload
@@ -481,6 +494,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	pageCount = pages;
 	matchingRowCount = matching;
 	tableRowCount = total;
+	loaded = YES;
 
 	[rows setArray:newRows];
 
@@ -624,7 +638,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	NSString *(^format)(NSInteger) = ^(NSInteger n) { return [formatter stringFromNumber:@(n)]; };
 
 	NSMutableString *text = [NSMutableString string];
-	if (tableData && [columns count]) {
+	if (tableData && [columns count] && loaded) {
 		NSUInteger pageSize = [self _pageSize];
 		NSInteger shown = (NSInteger)[rows count];
 		BOOL isLimited = pageSize && (NSUInteger)matchingRowCount > pageSize;
@@ -655,10 +669,11 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	[countField setStringValue:text];
 	[countField setToolTip:(pageCount > 1) ? [NSString stringWithFormat:NSLocalizedString(@"Page %lu of %lu", @"Postgres content: page tooltip"), (unsigned long)currentPage, (unsigned long)pageCount] : nil];
 
-	BOOL hasTable = tableData && [columns count];
+	// Before the table's rows have loaded only Refresh (to retry) is available
+	BOOL hasTable = tableData && [columns count] && loaded;
+	[refreshButton setEnabled:tableData && [columns count]];
 	[addButton setEnabled:hasTable && editable];
 	[removeButton setEnabled:hasTable && editable && [tableView numberOfSelectedRows] > 0];
-	[refreshButton setEnabled:hasTable];
 	[previousPageButton setEnabled:hasTable && currentPage > 1];
 	[nextPageButton setEnabled:hasTable && currentPage < pageCount];
 }
@@ -694,7 +709,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 
 - (IBAction)addRow:(id)sender
 {
-	if (invalidated || !tableData || !editable) return;
+	if (invalidated || !tableData || !editable || !loaded) return;
 	[self _endEditing];
 
 	// Every column gets its default (as MySQL's new row), then the user edits it in place
@@ -705,9 +720,12 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 		return;
 	}
 
+	// Shown at the end of this page (to be edited in place), and counted: the pages to come are recomputed
 	[rows addObject:row];
 	matchingRowCount++;
 	tableRowCount++;
+	NSUInteger pageSize = [self _pageSize];
+	if (pageSize) pageCount = MAX(currentPage, ((NSUInteger)matchingRowCount + pageSize - 1) / pageSize);
 	[tableView reloadData];
 
 	NSInteger newRow = (NSInteger)[rows count] - 1;
@@ -729,7 +747,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 
 - (IBAction)removeRows:(id)sender
 {
-	if (invalidated || !tableData || !editable) return;
+	if (invalidated || !tableData || !editable || !loaded) return;
 	[self _endEditing];
 
 	NSIndexSet *selection = [tableView selectedRowIndexes];
@@ -800,7 +818,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 /// The end of a cell edit: updates that column of the row on the server, then shows the row as the server has it.
 - (void)tableView:(NSTableView *)theTableView setObjectValue:(id)object forTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
 {
-	if (invalidated || !tableData || !editable) return;
+	if (invalidated || !tableData || !editable || !loaded) return;
 	if (rowIndex < 0 || (NSUInteger)rowIndex >= [rows count]) return;
 
 	SPPostgresColumn *column = [self _columnForTableColumn:tableColumn];
@@ -832,7 +850,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 
 - (BOOL)tableView:(NSTableView *)theTableView shouldEditTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
 {
-	if (invalidated || !tableData || !editable) return NO;
+	if (invalidated || !tableData || !editable || !loaded) return NO;
 	if (rowIndex < 0 || (NSUInteger)rowIndex >= [rows count]) return NO;
 
 	SPPostgresColumn *column = [self _columnForTableColumn:tableColumn];
@@ -851,7 +869,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	[cell setTextColor:(isNull && ![theTableView isRowSelected:rowIndex]) ? [NSColor lightGrayColor] : [NSColor controlTextColor]];
 }
 
-/// Ascending on the first click, then toggles.
+/// Ascending on the first click, then toggles; from the first page.
 - (void)tableView:(NSTableView *)theTableView didClickTableColumn:(NSTableColumn *)tableColumn
 {
 	if (invalidated || !tableData) return;
@@ -860,8 +878,9 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	NSString *name = [[self _columnForTableColumn:tableColumn] name];
 	if (!name) return;
 
+	// From the first page (MySQL keeps the page; the first rows of the new order are what's wanted)
 	BOOL ascending = [name isEqualToString:sortColumn] ? !sortAscending : YES;
-	[self _loadWithFilter:filter sortColumn:name ascending:ascending page:currentPage];
+	[self _loadWithFilter:filter sortColumn:name ascending:ascending page:1];
 }
 
 - (void)tableViewSelectionDidChange:(NSNotification *)notification

@@ -494,6 +494,113 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	XCTAssertEqual([[self grid] numberOfRows], 30);
 }
 
+- (void)testFailedFirstLoadEmptiesGridAndBottomBar
+{
+	// A view whose rows can't be read: its columns load, its count and rows fail on the server
+	XCTAssertNotNil([self.other execute:@"CREATE VIEW content_test.broken_view AS SELECT g AS x FROM generate_series(1, 3) AS g WHERE 1 / (g - g) = 0"]);
+
+	[self selectTable:@"items"];
+	SPPostgresContentController *content = self.content;
+	XCTAssertEqual([[self grid] numberOfRows], 30);
+	XCTAssertEqualObjects(content.countText, @"30 rows in table");
+
+	XCTAssertTrue([self.document.sidebar selectTableNamed:@"broken_view"]);
+	XCTAssertEqual(self.alerts.count, 1u);
+	XCTAssertTrue([[self.alerts[0] informativeText] containsString:@"division by zero"], @"%@", [self.alerts[0] informativeText]);
+
+	// Nothing of the previous table is left: no rows, no counts, nothing to add, delete or page
+	XCTAssertEqual([[self grid] numberOfRows], 0);
+	XCTAssertEqualObjects([[[self grid] tableColumns] valueForKeyPath:@"headerCell.stringValue"], (@[@"x"]));
+	XCTAssertEqualObjects(content.countText, @"");
+	XCTAssertEqualObjects([[content valueForKey:@"countField"] stringValue], @"");
+	XCTAssertEqual(content.currentPage, 1u);
+	XCTAssertEqual(content.pageCount, 1u);
+	for (NSString *button in @[@"addButton", @"removeButton", @"previousPageButton", @"nextPageButton"]) {
+		XCTAssertFalse([[content valueForKey:button] isEnabled], @"%@", button);
+	}
+	XCTAssertTrue([[content valueForKey:@"refreshButton"] isEnabled], @"Refresh retries");
+	XCTAssertFalse([self canEditRow:0 column:@"x"]);
+
+	// Retrying still fails the same way, and still shows the error
+	[content refresh:nil];
+	XCTAssertEqual(self.alerts.count, 2u);
+	XCTAssertEqual([[self grid] numberOfRows], 0);
+	XCTAssertEqualObjects(content.countText, @"");
+}
+
+- (void)testHeaderClickSortsFromFirstPage
+{
+	[self overridePrefs:@{SPLimitResultsValue: @7}];
+	[self selectTable:@"items"];
+	SPPostgresContentController *content = self.content;
+	[content nextPage:nil];
+	[content nextPage:nil];
+	XCTAssertEqual(content.currentPage, 3u);
+
+	[[[self grid] delegate] tableView:[self grid] didClickTableColumn:[self columnNamed:@"id"]];
+	XCTAssertEqual(content.currentPage, 1u);
+	XCTAssertEqualObjects([self valueAtRow:0 column:@"id"], @"1");
+	[[[self grid] delegate] tableView:[self grid] didClickTableColumn:[self columnNamed:@"id"]];
+	XCTAssertEqual(content.currentPage, 1u);
+	XCTAssertEqualObjects([self valueAtRow:0 column:@"id"], @"30");
+	XCTAssertEqualObjects(content.countText, @"Rows 1 - 7 of 30 from table");
+}
+
+- (void)testAddRowOnFullLastPageUpdatesPaging
+{
+	// 35 rows: five full pages of 7
+	XCTAssertNotNil([self.other execute:@"INSERT INTO content_test.items (name) SELECT 'extra ' || g FROM generate_series(1, 5) AS g"]);
+	[self overridePrefs:@{SPLimitResultsValue: @7}];
+	[self selectTable:@"items"];
+	SPPostgresContentController *content = self.content;
+	XCTAssertEqual(content.pageCount, 5u);
+	for (NSUInteger i = 0; i < 4; i++) [content nextPage:nil];
+	XCTAssertEqual(content.currentPage, 5u);
+	XCTAssertEqual([[self grid] numberOfRows], 7);
+	XCTAssertFalse([[content valueForKey:@"nextPageButton"] isEnabled]);
+
+	[content addRow:nil];
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
+	XCTAssertEqual([[self grid] numberOfRows], 8, @"the new row is shown for editing");
+	XCTAssertEqual(content.pageCount, 6u);
+	XCTAssertEqual(content.currentPage, 5u);
+	XCTAssertTrue([[content valueForKey:@"nextPageButton"] isEnabled]);
+	XCTAssertTrue([[content valueForKey:@"previousPageButton"] isEnabled]);
+
+	[content nextPage:nil];
+	XCTAssertEqual(content.currentPage, 6u);
+	XCTAssertEqualObjects([self idsInGrid], (@[@"36"]));
+	XCTAssertFalse([[content valueForKey:@"nextPageButton"] isEnabled]);
+}
+
+- (void)testConfirmationCompletionMayBeStoredAndCalledLater
+{
+	[self selectTable:@"items"];
+	SPPostgresContentController *content = self.content;
+
+	// The presenter keeps the completion (no copy of its own) and answers after the run loop has turned
+	__block void (^stored)(BOOL) = nil;
+	content.confirmationPresenter = ^(NSAlert *alert, void (^completion)(BOOL)) {
+		stored = (__bridge void (^)(BOOL))(__bridge void *)completion; // plain pointer, not copied
+	};
+	[[self grid] selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+	@autoreleasepool {
+		[content removeRows:nil];
+	}
+	XCTAssertNotNil(stored);
+	[self spinUntil:^BOOL{ return NO; } timeout:0.1];
+
+	stored(YES);
+	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.items WHERE id = 1"], @0);
+	XCTAssertEqual([[self grid] numberOfRows], 29);
+
+	// A second answer is ignored
+	[[self grid] selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+	stored(YES);
+	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.items"], @29);
+	stored = nil;
+}
+
 - (void)testContentToolbarItemEnabledOnlyWithTableSelected
 {
 	NSToolbarItem *item = [self contentToolbarItem];
