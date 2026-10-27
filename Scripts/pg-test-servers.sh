@@ -2,20 +2,27 @@
 #
 # Starts/stops the PostgreSQL servers used by PostgresKit's integration tests.
 #
-#   Scripts/pg-test-servers.sh up            start both servers, wait until ready, load test data
-#   Scripts/pg-test-servers.sh down          stop and remove both servers
+#   Scripts/pg-test-servers.sh up            start the servers, wait until ready, load test data
+#   Scripts/pg-test-servers.sh down          stop and remove the servers and their network
 #   Scripts/pg-test-servers.sh psql <port>   open psql against the server on <port>
 #
 # sp-pg12: postgres:12, port 55412, SSL off
 # sp-pg18: postgres:18, port 55418, SSL on (self-signed certificate generated at startup)
 #
-# Both use user pgkit_test / password pgkit / database pgkit_test (the user is a superuser).
+# sp-sshd: OpenSSH server (Alpine), port 55422, user sshtest / password sshtest, password auth and
+#          TCP forwarding enabled. It shares the Docker network sp-pg-net with sp-pg18, so a tunnel
+#          from it can forward to sp-pg18:5432.
+#
+# Both PostgreSQL servers use user pgkit_test / password pgkit / database pgkit_test (the user is a superuser).
 
 set -euo pipefail
 
 USER_NAME=pgkit_test
 PASSWORD=pgkit
 DB_NAME=pgkit_test
+NETWORK=sp-pg-net
+SSH_USER=sshtest
+SSH_PASSWORD=sshtest
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_DATA="$SCRIPT_DIR/../Frameworks/PostgresKit/Resources/TestData.sql"
@@ -59,6 +66,48 @@ wait_ready() {
 	done
 }
 
+ensure_network() {
+	docker network inspect "$NETWORK" > /dev/null 2>&1 || docker network create "$NETWORK" > /dev/null
+}
+
+# Attaches a container to the shared network (idempotent: containers created before the network existed
+# are connected on the next 'up')
+join_network() {
+	local name=$1
+	if ! docker inspect -f '{{json .NetworkSettings.Networks}}' "$name" | grep -q "\"$NETWORK\""; then
+		docker network connect "$NETWORK" "$name"
+	fi
+}
+
+start_sshd() {
+	if docker ps -a --format '{{.Names}}' | grep -qx sp-sshd; then
+		docker start sp-sshd > /dev/null
+		return
+	fi
+
+	docker run -d --name sp-sshd --network "$NETWORK" -p "127.0.0.1:55422:22" alpine:3.20 sh -c "
+		set -e
+		if [ ! -x /usr/sbin/sshd ]; then apk add --no-cache openssh-server > /dev/null; fi
+		ssh-keygen -A > /dev/null
+		id $SSH_USER > /dev/null 2>&1 || adduser -D $SSH_USER
+		echo '$SSH_USER:$SSH_PASSWORD' | chpasswd
+		exec /usr/sbin/sshd -D -e -o PasswordAuthentication=yes -o KbdInteractiveAuthentication=no \\
+			-o AllowTcpForwarding=yes -o PermitRootLogin=no
+	" > /dev/null
+}
+
+wait_sshd() {
+	local tries=0
+	until docker exec sp-sshd sh -c 'nc -z 127.0.0.1 22' > /dev/null 2>&1; do
+		tries=$((tries + 1))
+		if [ $tries -gt 120 ]; then
+			echo "error: sp-sshd did not become ready" >&2
+			exit 1
+		fi
+		sleep 1
+	done
+}
+
 load_test_data() {
 	local name=$1
 
@@ -90,16 +139,23 @@ case "${1:-}" in
 				-c ssl_key_file=/etc/pgkit-ssl/server.key
 		'
 
+		ensure_network
+		join_network sp-pg18
+		start_sshd
+
 		wait_ready sp-pg12
 		wait_ready sp-pg18
+		wait_sshd
 
 		load_test_data sp-pg12
 		load_test_data sp-pg18
 
 		echo "PostgreSQL 12 (no SSL) on 127.0.0.1:55412, PostgreSQL 18 (SSL) on 127.0.0.1:55418"
+		echo "SSH ($SSH_USER/$SSH_PASSWORD) on 127.0.0.1:55422, forwarding to sp-pg18:5432"
 		;;
 	down)
-		docker rm -f sp-pg12 sp-pg18 > /dev/null 2>&1 || true
+		docker rm -f sp-pg12 sp-pg18 sp-sshd > /dev/null 2>&1 || true
+		docker network rm "$NETWORK" > /dev/null 2>&1 || true
 		;;
 	psql)
 		port=${2:?usage: pg-test-servers.sh psql <port>}
