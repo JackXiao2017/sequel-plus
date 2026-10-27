@@ -6,6 +6,10 @@
 @protocol SPPostgresSidebarControllerDelegate <NSObject>
 /// The selected schema or table changed (by the user or through the API).
 - (void)sidebarSelectionDidChange:(SPPostgresSidebarController *)sidebar;
+@optional
+/// A reload (-reloadWithCatalog:, or a schema change by the user or -reloadSchema:) had catalog queries
+/// that failed: called once per reload, with the first error. The lists that failed keep what they showed.
+- (void)sidebar:(SPPostgresSidebarController *)sidebar didFailToLoadWithError:(NSError *)error;
 @end
 
 /**
@@ -23,9 +27,11 @@ __attribute__((visibility("default")))
 - (NSView *)view;
 
 /// Shows the tables and views of `schema` and selects it in the popup. Clears the table selection.
+/// If the tables or views can't be loaded, the schema, lists and selection stay as they were.
 - (void)reloadSchema:(NSString *)schema;
 
 /// Switches to another catalog (another database): reloads schemas, extensions and the default schema.
+/// A list that can't be loaded keeps what it showed.
 - (void)reloadWithCatalog:(SPPostgresCatalog *)catalog;
 
 /// @[@"TABLES", @"VIEWS", @"EXTENSIONS"]: Extensions is always last.
@@ -42,7 +48,7 @@ __attribute__((visibility("default")))
 /// The selected table or view of the selected schema, or nil.
 @property (readonly) NSString *selectedTableName;
 
-/// The error of the last failed catalog query (lists that failed to load are shown empty), or nil.
+/// The first catalog error of the last reload (whose failed lists kept what they showed), or nil.
 @property (readonly) NSError *lastError;
 
 @property (assign) id<SPPostgresSidebarControllerDelegate> delegate;

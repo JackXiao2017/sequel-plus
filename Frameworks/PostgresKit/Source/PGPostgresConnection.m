@@ -173,6 +173,19 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 	return PQstatus(_connection) == CONNECTION_OK;
 }
 
+- (NSString *)libpqErrorMessage
+{
+	if (!_connection) return nil;
+	
+	const char *message = PQerrorMessage(_connection);
+	
+	if (!message || !*message) return nil;
+	
+	NSString *string = [[NSString stringWithUTF8String:message] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	
+	return [string length] ? string : nil;
+}
+
 /**
  * Attempts to disconnect the underlying connection with the server.
  */

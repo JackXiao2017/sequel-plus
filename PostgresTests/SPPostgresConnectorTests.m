@@ -393,6 +393,55 @@
 	XCTAssertFalse(outcome.connection.isConnected);
 }
 
+/// The parent window (the MySQL connection screen's) is only needed while connecting: a finished
+/// connector must not keep it alive.
+- (void)testParentWindowIsReleasedWhenTheAttemptFinishes
+{
+	__weak NSWindow *weakWindow = nil;
+	SPPostgresConnector *connector = nil;
+	SPPGConnectOutcome *outcome = nil;
+	@autoreleasepool {
+		NSWindow *window = [self parentWindow];
+		weakWindow = window;
+		connector = [[SPPostgresConnector alloc] initWithFavorite:[self favoriteOnPort:55418] password:@"pgkit" sshPassword:nil parentWindow:window];
+		outcome = [self connect:connector timeout:15];
+		XCTAssertNil(outcome.error);
+		window = nil;
+	}
+	XCTAssertNil(weakWindow, @"the connector still retains its parent window after connecting");
+	XCTAssertTrue(outcome.connection.isConnected, @"the connector (and its connection) stay alive");
+	[connector disconnect];
+}
+
+- (void)testParentWindowIsReleasedWhenAnSSHAttemptFinishes
+{
+	[self useTestSSHClient];
+	__weak NSWindow *weakWindow = nil;
+	SPPostgresConnector *connector = nil;
+	SPPGConnectOutcome *outcome = nil;
+	@autoreleasepool {
+		NSWindow *window = [self parentWindow];
+		weakWindow = window;
+		connector = [[SPPostgresConnector alloc] initWithFavorite:[self sshFavorite] password:@"pgkit" sshPassword:@"sshtest" parentWindow:window];
+		outcome = [self connect:connector timeout:30];
+		XCTAssertNil(outcome.error);
+		window = nil;
+	}
+	XCTAssertNil(weakWindow, @"the connector or its tunnel still retains the parent window after connecting");
+	XCTAssertTrue(outcome.connection.isConnected);
+	[connector disconnect];
+}
+
+- (void)testConnectorExposesThePasswordsItWasGiven
+{
+	SPPostgresConnector *connector = [[SPPostgresConnector alloc] initWithFavorite:[self sshFavorite] password:@"db pw" sshPassword:@"ssh pw" parentWindow:nil];
+	XCTAssertEqualObjects(connector.password, @"db pw");
+	XCTAssertEqualObjects(connector.sshPassword, @"ssh pw");
+	SPPostgresConnector *without = [[SPPostgresConnector alloc] initWithFavorite:[self sshFavorite] password:nil sshPassword:nil parentWindow:nil];
+	XCTAssertNil(without.password);
+	XCTAssertNil(without.sshPassword);
+}
+
 - (void)testSSHWrongPasswordReportsTunnelFailed
 {
 	[self useTestSSHClient];

@@ -43,6 +43,8 @@
 @property (copy) NSString *selectedFavoriteID;
 @property (assign) NSUInteger formReloads;
 @property (copy) void (^onFavoritesDidChange)(void);
+/// Returned by -postgresSheetWindow (nil: the adapter has no window for sheets).
+@property (strong) NSWindow *sheetWindow;
 @end
 
 @implementation SPPGFakeConnectionScreen
@@ -69,6 +71,7 @@
 	[adapter loadFavoriteIntoForm:favorite];
 }
 - (void)postgresSetConnecting:(BOOL)connecting { self.connecting = connecting; self.connectingCalls++; }
+- (NSWindow *)postgresSheetWindow { return self.sheetWindow; }
 @end
 
 /// In-memory keychain so the tests never touch the login keychain.
@@ -377,9 +380,9 @@
 	[opened removeObjectsInArray:before];
 	XCTAssertEqual([opened count], 1u, @"one PostgreSQL window opened");
 	SPPostgresWindowController *windowController = [[opened firstObject] windowController];
+	[self addTeardownBlock:^{ [windowController close]; }];
 	XCTAssertTrue([[windowController windowTitleString] containsString:@"adapter connect test"], @"%@", [windowController windowTitleString]);
 	XCTAssertNotNil([windowController connection]);
-	[windowController close];
 }
 
 /// Renaming the loaded favorite so that it sorts to another row re-selects it during the store's
@@ -485,6 +488,181 @@
 
 	[controller setValue:nil forKey:@"postgresAdapter"];
 	[adapter invalidate];
+}
+
+#pragma mark - Engine switch and the port
+
+/// A port field holding the previous engine's default (or nothing) is cleared on an engine switch, so the
+/// new engine's default applies; any other port is kept.
+- (void)testEngineSwitchClearsThePreviousEnginesDefaultPort
+{
+	NSSegmentedControl *control = [self.adapter engineControl];
+	SPPostgresFavorite *favorite = [self fullFavorite];
+	favorite.type = SPPostgresTCPIPConnection;
+	favorite.port = 5432;
+	[self.adapter loadFavoriteIntoForm:favorite];
+	XCTAssertEqualObjects(self.screen.port, @"5432");
+
+	[control setSelectedSegment:SPConnectionEngineMySQL];
+	[control sendAction:[control action] to:[control target]];
+	XCTAssertEqual([self.adapter selectedEngine], SPConnectionEngineMySQL);
+	XCTAssertEqual(self.screen.port.length, 0u, @"5432 is PostgreSQL's default: cleared for MySQL (placeholder 3306), got %@", self.screen.port);
+
+	// MySQL's default is cleared the other way
+	self.screen.port = @"3306";
+	[control setSelectedSegment:SPConnectionEnginePostgreSQL];
+	[control sendAction:[control action] to:[control target]];
+	XCTAssertEqual(self.screen.port.length, 0u, @"got %@", self.screen.port);
+	XCTAssertEqual([[self.adapter favoriteFromForm] port], 5432u);
+
+	// A custom port is kept both ways
+	self.screen.port = @"6543";
+	[control setSelectedSegment:SPConnectionEngineMySQL];
+	[control sendAction:[control action] to:[control target]];
+	XCTAssertEqualObjects(self.screen.port, @"6543");
+	[control setSelectedSegment:SPConnectionEnginePostgreSQL];
+	[control sendAction:[control action] to:[control target]];
+	XCTAssertEqualObjects(self.screen.port, @"6543");
+
+	// The other engine's default is a custom port for this one
+	self.screen.port = @"3306";
+	[control setSelectedSegment:SPConnectionEngineMySQL];
+	[control sendAction:[control action] to:[control target]];
+	XCTAssertEqualObjects(self.screen.port, @"3306");
+}
+
+#pragma mark - Unreadable favorites file
+
+- (NSWindow *)visibleSheetWindow
+{
+	NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(-10000, -10000, 400, 300) styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+	window.releasedWhenClosed = NO;
+	[window orderBack:nil];
+	[self addTeardownBlock:^{
+		if (window.attachedSheet) [window endSheet:window.attachedSheet];
+		[window close];
+	}];
+	return window;
+}
+
+- (BOOL)spinUntil:(BOOL (^)(void))condition timeout:(NSTimeInterval)timeout
+{
+	NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
+	while (!condition() && [deadline timeIntervalSinceNow] > 0) {
+		[[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+	}
+	return condition();
+}
+
+/// A PostgresFavorites.plist that can't be read is reported once per distinct problem, and never rewritten.
+- (void)testUnreadableFavoritesFileIsReportedOnce
+{
+	NSURL *fileURL = [self.dir URLByAppendingPathComponent:@"PostgresFavorites.plist"];
+	NSData *garbage = [@"this is not a plist" dataUsingEncoding:NSUTF8StringEncoding];
+	[garbage writeToURL:fileURL atomically:YES];
+
+	NSWindow *window = [self visibleSheetWindow];
+	SPPGFakeConnectionScreen *screen = [[SPPGFakeConnectionScreen alloc] init];
+	screen.sheetWindow = window;
+	SPPostgresConnectionScreenAdapter *adapter = [[SPPostgresConnectionScreenAdapter alloc] initWithConnectionController:screen store:self.store];
+	adapter.keychain = self.keychain;
+	[self addTeardownBlock:^{ [adapter invalidate]; }];
+
+	XCTAssertNil([adapter sectionNode]);
+	XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet != nil; } timeout:5], @"the load error is shown");
+	[window endSheet:window.attachedSheet];
+	XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet == nil; } timeout:5]);
+
+	// The section is rebuilt (e.g. another window saved): the same problem is not shown again
+	[[NSNotificationCenter defaultCenter] postNotificationName:SPPostgresFavoritesDidChangeNotification object:self.store];
+	[self spinUntil:^BOOL{ return window.attachedSheet != nil; } timeout:1];
+	XCTAssertNil(window.attachedSheet, @"the same error is shown once");
+
+	// A different problem is shown
+	NSDictionary *newer = @{@"version": @2, @"favorites": @[]};
+	XCTAssertTrue([newer writeToURL:fileURL atomically:YES]);
+	NSData *newerData = [NSData dataWithContentsOfURL:fileURL];
+	[[NSNotificationCenter defaultCenter] postNotificationName:SPPostgresFavoritesDidChangeNotification object:self.store];
+	XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet != nil; } timeout:5]);
+	[window endSheet:window.attachedSheet];
+
+	XCTAssertEqualObjects([NSData dataWithContentsOfURL:fileURL], newerData, @"the file is never rewritten");
+}
+
+#pragma mark - Store changes from elsewhere
+
+/// A change made by another store client (another connection tab, or the store directly) reloads the
+/// loaded favorite's form; only the adapter's own saves keep the form as it is.
+- (void)testStoreChangeFromAnotherClientReloadsTheForm
+{
+	self.screen.reselectingAdapter = self.adapter;
+	[self.adapter setSelectedEngine:SPConnectionEnginePostgreSQL];
+	self.screen.type = SPPostgresTCPIPConnection;
+	self.screen.host = @"db.internal";
+	self.screen.name = @"Shared favorite";
+	NSError *error = nil;
+	XCTAssertTrue([self.adapter saveFormAsNewFavorite:&error], @"%@", error);
+	NSString *favoriteID = [[self.adapter loadedFavorite] favoriteID];
+	XCTAssertEqualObjects(self.screen.selectedFavoriteID, favoriteID);
+
+	// Direct save on the same store
+	SPPostgresFavorite *changed = [[self.adapter favoriteForNode:[self.adapter nodeForFavoriteID:favoriteID]] copy];
+	changed.name = @"Renamed elsewhere";
+	changed.host = @"db2.internal";
+	XCTAssertTrue([self.store saveFavorite:changed error:&error], @"%@", error);
+	XCTAssertEqualObjects(self.screen.name, @"Renamed elsewhere");
+	XCTAssertEqualObjects(self.screen.host, @"db2.internal");
+
+	// Another adapter (another connection tab) on the same store
+	SPPGFakeConnectionScreen *otherScreen = [[SPPGFakeConnectionScreen alloc] init];
+	SPPostgresConnectionScreenAdapter *other = [[SPPostgresConnectionScreenAdapter alloc] initWithConnectionController:otherScreen store:self.store];
+	other.keychain = self.keychain;
+	[self addTeardownBlock:^{ [other invalidate]; }];
+	[other renameFavoriteNode:[other nodeForFavoriteID:favoriteID] to:@"Renamed in another tab"];
+	XCTAssertEqualObjects(self.screen.name, @"Renamed in another tab");
+}
+
+#pragma mark - Bindings made by the adapter
+
+/// -invalidate removes the port bindings the adapter re-made (they point at the controller), and only those.
+- (void)testInvalidateUnbindsThePortBindingsItMade
+{
+	NSView *container = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 446, 472)];
+	NSTabView *tabView = [[NSTabView alloc] initWithFrame:NSMakeRect(3, 61, 440, 417)];
+	NSTabViewItem *item = [[NSTabViewItem alloc] initWithIdentifier:@"1"];
+	NSView *itemView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 420, 371)];
+	NSTextField *portField = [[NSTextField alloc] initWithFrame:NSMakeRect(10, 10, 100, 22)];
+	[portField bind:NSValueBinding toObject:self.screen withKeyPath:@"port" options:@{ NSNullPlaceholderBindingOption: @"3306" }];
+	[itemView addSubview:portField];
+	[item setView:itemView];
+	[tabView addTabViewItem:item];
+	[container addSubview:tabView];
+	[self addTeardownBlock:^{ [portField unbind:NSValueBinding]; }];
+
+	// Never switched to PostgreSQL: the binding is the host's own and stays
+	SPPostgresConnectionScreenAdapter *untouched = [[SPPostgresConnectionScreenAdapter alloc] initWithConnectionController:self.screen store:self.store];
+	[untouched installEngineControlInContainer:container];
+	[untouched invalidate];
+	XCTAssertNotNil([portField infoForBinding:NSValueBinding], @"a binding the adapter didn't make is left alone");
+	[[untouched engineControl] removeFromSuperview];
+
+	// Switched: the adapter re-made the binding, and removes it
+	[self.adapter installEngineControlInContainer:container];
+	[self.adapter setSelectedEngine:SPConnectionEnginePostgreSQL];
+	XCTAssertEqualObjects([[[portField infoForBinding:NSValueBinding] objectForKey:NSOptionsKey] objectForKey:NSNullPlaceholderBindingOption], @"5432");
+	[self.adapter invalidate];
+	XCTAssertNil([portField infoForBinding:NSValueBinding]);
+
+	// Also after switching back to MySQL (the restored binding is made by the adapter too)
+	SPPostgresConnectionScreenAdapter *third = [[SPPostgresConnectionScreenAdapter alloc] initWithConnectionController:self.screen store:self.store];
+	[portField bind:NSValueBinding toObject:self.screen withKeyPath:@"port" options:@{ NSNullPlaceholderBindingOption: @"3306" }];
+	[[self.adapter engineControl] removeFromSuperview];
+	[third installEngineControlInContainer:container];
+	[third setSelectedEngine:SPConnectionEnginePostgreSQL];
+	[third setSelectedEngine:SPConnectionEngineMySQL];
+	XCTAssertEqualObjects([[portField infoForBinding:NSValueBinding] objectForKey:NSObservedKeyPathKey], @"port");
+	[third invalidate];
+	XCTAssertNil([portField infoForBinding:NSValueBinding]);
 }
 
 @end
