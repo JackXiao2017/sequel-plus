@@ -45,6 +45,7 @@ const char *PGPostgresDatabaseParam          = "dbname";
 const char *PGPostgresClientEncodingParam    = "client_encoding";
 const char *PGPostgresKeepAliveParam         = "keepalives";
 const char *PGPostgresKeepAliveIntervalParam = "keepalives_interval";
+const char *PGPostgresConnectTimeoutParam   = "connect_timeout";
 const char *PGPostgresSSLModeParam           = "sslmode";
 const char *PGPostgresSSLRootCertParam       = "sslrootcert";
 const char *PGPostgresSSLCertParam           = "sslcert";

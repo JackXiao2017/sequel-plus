@@ -59,6 +59,7 @@
 		A0000000000000000000A003 /* PGPostgresSSLTests.m in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000A002 /* PGPostgresSSLTests.m */; };
 		A0000000000000000000A012 /* PGPostgresLibpqShims.c in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000A011 /* PGPostgresLibpqShims.c */; };
 		A0000000000000000000A023 /* PGPostgresTypeDecodingTests.m in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000A022 /* PGPostgresTypeDecodingTests.m */; };
+		A0000000000000000000A033 /* PGPostgresConnectionTests.m in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000A032 /* PGPostgresConnectionTests.m */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -137,6 +138,8 @@
 		A0000000000000000000A011 /* PGPostgresLibpqShims.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = PGPostgresLibpqShims.c; sourceTree = "<group>"; };
 		A0000000000000000000A021 /* PGPostgresTypeDecodingTests.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = PGPostgresTypeDecodingTests.h; sourceTree = "<group>"; };
 		A0000000000000000000A022 /* PGPostgresTypeDecodingTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = PGPostgresTypeDecodingTests.m; sourceTree = "<group>"; };
+		A0000000000000000000A031 /* PGPostgresConnectionTests.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = PGPostgresConnectionTests.h; sourceTree = "<group>"; };
+		A0000000000000000000A032 /* PGPostgresConnectionTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = PGPostgresConnectionTests.m; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -212,6 +215,8 @@
 				1763D4EF174C21DE00EA8D60 /* PGPostgresIntegrationTestCase.h */,
 				1763D4F0174C21DE00EA8D60 /* PGPostgresIntegrationTestCase.m */,
 				A0000000000000000000A001 /* PGPostgresSSLTests.h */,
+				A0000000000000000000A031 /* PGPostgresConnectionTests.h */,
+				A0000000000000000000A032 /* PGPostgresConnectionTests.m */,
 				A0000000000000000000A021 /* PGPostgresTypeDecodingTests.h */,
 				A0000000000000000000A022 /* PGPostgresTypeDecodingTests.m */,
 				A0000000000000000000A002 /* PGPostgresSSLTests.m */,
@@ -494,6 +499,7 @@
 				1763D486174ACA1200EA8D60 /* PGPostgresResultTests.m in Sources */,
 				1763D4F1174C21DE00EA8D60 /* PGPostgresIntegrationTestCase.m in Sources */,
 				A0000000000000000000A003 /* PGPostgresSSLTests.m in Sources */,
+				A0000000000000000000A033 /* PGPostgresConnectionTests.m in Sources */,
 				A0000000000000000000A023 /* PGPostgresTypeDecodingTests.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

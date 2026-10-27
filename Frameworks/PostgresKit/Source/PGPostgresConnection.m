@@ -31,6 +31,7 @@
 
 #import <pthread.h>
 #import <poll.h>
+#import <unistd.h>
 #import <errno.h>
 
 @interface PGPostgresConnection ()
@@ -172,6 +173,25 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 {
 	if (!_connection) return;
 	
+	// If a connection attempt is still being polled on the background thread, ask it to stop 
+	// and wait for it to let go of the PGconn before freeing it.
+	@synchronized (self) {
+		if (_connecting) _disconnectRequested = YES;
+	}
+	
+	for (;;)
+	{
+		@synchronized (self) {
+			if (!_connecting) break;
+		}
+		
+		usleep(5000);
+	}
+	
+	@synchronized (self) {
+		_disconnectRequested = NO;
+	}
+	
 	[self cancelCurrentQuery:nil];
 	
 	PQfinish(_connection);
@@ -194,9 +214,16 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
  */
 - (BOOL)connect 
 {
-	if ([self isConnected]) return YES;
+	// An attempt is still being polled on the background thread, which owns the PGconn until it finishes
+	@synchronized (self) {
+		if (_connecting) return NO;
+		
+		if ([self isConnected]) return YES;
+		
+		_connecting = YES;
+	}
 	
-	// Discard the remains of any previous failed attempt
+	// Discard the remains of any previous failed attempt (safe: no poller is running)
 	if (_connection) {
 		PQfinish(_connection);
 		
@@ -220,6 +247,10 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 		
 		_connection = nil;
 		
+		@synchronized (self) {
+			_connecting = NO;
+		}
+		
 		return NO;
 	}
 	
@@ -240,9 +271,19 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
  */
 - (BOOL)reset 
 {
-	if (![self isConnected]) return NO;
+	@synchronized (self) {
+		if (_connecting || ![self isConnected]) return NO;
+		
+		_connecting = YES;
+	}
 	
-	if (!PQresetStart(_connection)) return NO;
+	if (!PQresetStart(_connection)) {
+		@synchronized (self) {
+			_connecting = NO;
+		}
+		
+		return NO;
+	}
 	
 	[self performSelectorInBackground:@selector(_pollConnection:) withObject:[NSNumber numberWithBool:YES]];
 	
@@ -339,8 +380,24 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 		// SSL to a plain connection).
 		status = PGRES_POLLING_WRITING;
 
+		NSDate *start = [NSDate date];
+		BOOL timedOut = NO;
+		BOOL cancelled = NO;
+
 		do
 		{
+			@synchronized (self) {
+				cancelled = _disconnectRequested;
+			}
+
+			if (cancelled) break;
+
+			if (_timeout > 0 && [[NSDate date] timeIntervalSinceDate:start] > (NSTimeInterval)_timeout) {
+				timedOut = YES;
+				
+				break;
+			}
+
 			int sock = PQsocket(_connection);
 
 			if (sock == -1) {
@@ -354,20 +411,39 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 			fdinfo[0].fd = sock;
 			fdinfo[0].events = (status == PGRES_POLLING_READING) ? POLLIN : POLLOUT;
 
-			if (poll(fdinfo, 1, -1) < 0 && errno != EINTR) {
+			// Wake regularly to notice a disconnect request or the connection timeout
+			int ready = poll(fdinfo, 1, 100);
+
+			if (ready < 0 && errno != EINTR) {
 				status = PGRES_POLLING_FAILED;
 				
 				break;
 			}
 
+			if (ready <= 0) continue;
+
 			status = reset ? PQresetPoll(_connection) : PQconnectPoll(_connection);
 		}
 		while (status != PGRES_POLLING_OK && status != PGRES_POLLING_FAILED);
 
-		if (status == PGRES_POLLING_FAILED) {
+		if (cancelled) {
+			@synchronized (self) {
+				_connecting = NO;
+			}
+			
+			return;
+		}
+
+		if (timedOut || status == PGRES_POLLING_FAILED) {
 			const char *message = _connection ? PQerrorMessage(_connection) : NULL;
 			
-			[self _setConnectionError:[NSString stringWithUTF8String:(message && *message) ? message : "Connection failed"]];
+			NSString *error = timedOut ? [NSString stringWithFormat:@"Connection timed out after %lu seconds", (unsigned long)_timeout] : [NSString stringWithUTF8String:(message && *message) ? message : "Connection failed"];
+			
+			[self _setConnectionError:error];
+
+			@synchronized (self) {
+				_connecting = NO;
+			}
 
 			if (_delegate && [_delegate respondsToSelector:@selector(connectionFailed:)]) {
 				[_delegate performSelectorOnMainThread:@selector(connectionFailed:) withObject:self waitUntilDone:NO];
@@ -386,6 +462,10 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 
 			[self _loadDatabaseParameters];
 
+			@synchronized (self) {
+				_connecting = NO;
+			}
+
 			if (reset) {
 				if (_delegate && [_delegate respondsToSelector:@selector(connectionReset:)]) {
 					[_delegate performSelectorOnMainThread:@selector(connectionReset:) withObject:self waitUntilDone:NO];
@@ -395,6 +475,11 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 				if (_delegate && [_delegate respondsToSelector:@selector(connectionEstablished:)]) {
 					[_delegate performSelectorOnMainThread:@selector(connectionEstablished:) withObject:self waitUntilDone:NO];
 				}
+			}
+		}
+		else {
+			@synchronized (self) {
+				_connecting = NO;
 			}
 		}
 	}
@@ -458,6 +543,9 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 	BOOL hasSSLCert = _sslCertPath && [_sslCertPath length];
 	BOOL hasSSLKey = _sslKeyPath && [_sslKeyPath length];
 	
+	BOOL hasTimeout = _timeout > 0;
+	
+	if (hasTimeout) paramCount++;
 	if (hasSSLMode) paramCount++;
 	if (hasSSLRootCert) paramCount++;
 	if (hasSSLCert) paramCount++;
@@ -512,6 +600,13 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 	if (hasDatabase) {
 		_connectionParamNames[i] = PGPostgresDatabaseParam;
 		_connectionParamValues[i] = [_database UTF8String];
+		
+		i++;
+	}
+	
+	if (hasTimeout) {
+		_connectionParamNames[i] = PGPostgresConnectTimeoutParam;
+		_connectionParamValues[i] = [[[NSNumber numberWithUnsignedInteger:_timeout] stringValue] UTF8String];
 		
 		i++;
 	}
