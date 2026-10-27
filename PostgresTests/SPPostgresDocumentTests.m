@@ -8,11 +8,6 @@
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
 
-// The catalog fixture loader lives in SPPostgresCatalogTests (same test bundle); reuse it rather than duplicating SQL.
-@interface SPPostgresCatalogTests : XCTestCase
-+ (void)loadFixtureOnPort:(NSUInteger)port;
-@end
-
 static const NSUInteger SPPostgresDocumentTestPort = 55418;
 
 // Not in the public headers
@@ -42,7 +37,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 + (void)setUp
 {
 	[super setUp];
-	[SPPostgresCatalogTests loadFixtureOnPort:SPPostgresDocumentTestPort];
+	[SPPostgresTestServers loadFixtureNamed:@"catalog" onPort:SPPostgresDocumentTestPort];
 }
 
 - (BOOL)spinUntil:(BOOL (^)(void))condition timeout:(NSTimeInterval)timeout
