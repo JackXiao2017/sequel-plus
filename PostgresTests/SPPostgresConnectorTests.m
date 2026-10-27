@@ -264,6 +264,58 @@
 	XCTAssertEqual(outcome.error.code, SPPostgresErrorCancelled);
 }
 
+- (void)testReleasingConnectorWhilePendingCompletesWithCancelledOnce
+{
+	for (NSString *host in @[@"10.255.255.1", @"127.0.0.1"]) {
+		SPPostgresFavorite *favorite = [self favoriteOnPort:[host isEqualToString:@"127.0.0.1"] ? 55412 : 5432];
+		favorite.host = host;
+
+		__block NSUInteger calls = 0;
+		__block NSError *receivedError = nil;
+		__block PGPostgresConnection *receivedConnection = nil;
+		__block BOOL onMain = YES;
+		__block BOOL calledInsideConnect = NO;
+		__weak SPPostgresConnector *weakConnector = nil;
+
+		@autoreleasepool {
+			SPPostgresConnector *connector = [[SPPostgresConnector alloc] initWithFavorite:favorite password:@"pgkit" sshPassword:nil parentWindow:nil];
+			weakConnector = connector;
+			[connector connectWithCompletion:^(PGPostgresConnection *connection, NSError *error) {
+				calls++;
+				onMain = onMain && [NSThread isMainThread];
+				receivedError = error;
+				receivedConnection = connection;
+			}];
+			calledInsideConnect = calls > 0;
+			connector = nil;
+		}
+
+		XCTAssertNil(weakConnector, @"%@: connector was not released", host);
+		XCTAssertFalse(calledInsideConnect, @"%@", host);
+		[self spinFor:5 until:^BOOL{ return calls > 0; }];
+		[self spinFor:1.0 until:nil]; // catch a late PostgresKit callback / second call
+		XCTAssertEqual(calls, 1u, @"%@", host);
+		XCTAssertTrue(onMain, @"%@", host);
+		XCTAssertNil(receivedConnection, @"%@", host);
+		XCTAssertEqualObjects(receivedError.domain, SPPostgresErrorDomain, @"%@", host);
+		XCTAssertEqual(receivedError.code, SPPostgresErrorCancelled, @"%@", host);
+	}
+}
+
+- (void)testDisconnectBeforeConnectCompletesWithCancelled
+{
+	SPPostgresConnector *connector = [[SPPostgresConnector alloc] initWithFavorite:[self favoriteOnPort:55412] password:@"pgkit" sshPassword:nil parentWindow:nil];
+	[connector disconnect];
+	SPPGConnectOutcome *outcome = [self connect:connector timeout:5];
+	XCTAssertNil(outcome.connection);
+	XCTAssertEqual(outcome.error.code, SPPostgresErrorCancelled);
+
+	SPPostgresConnector *cancelled = [[SPPostgresConnector alloc] initWithFavorite:[self favoriteOnPort:55412] password:@"pgkit" sshPassword:nil parentWindow:nil];
+	[cancelled cancel];
+	outcome = [self connect:cancelled timeout:5];
+	XCTAssertEqual(outcome.error.code, SPPostgresErrorCancelled);
+}
+
 - (void)testSecondConnectCallFails
 {
 	SPPostgresConnector *connector = [[SPPostgresConnector alloc] initWithFavorite:[self favoriteOnPort:55412] password:@"pgkit" sshPassword:nil parentWindow:nil];
