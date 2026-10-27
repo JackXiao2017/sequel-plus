@@ -34,6 +34,25 @@ __attribute__((visibility("default")))
 /// The editor font from MySQL's query editor font preference data (an archived NSFont), else the monospaced system font.
 + (NSFont *)editorFontFromPreferenceData:(NSData *)data;
 
+/**
+ * Whether a statement that ran may have changed what the tab lists (tables, views, schemas, databases): as
+ * MySQL's Query tab (SPCustomQuery), statements starting with CREATE, ALTER, DROP or RENAME; for PostgreSQL also
+ * IMPORT (IMPORT FOREIGN SCHEMA creates tables) and ROLLBACK / ABORT (DDL is transactional, so a rollback can
+ * undo a CREATE or DROP). Leading whitespace and comments are skipped. Not detected (as MySQL): SELECT … INTO.
+ */
++ (BOOL)statementMayChangeSchema:(NSString *)statement;
+
+/// Whether a statement that ran may have changed table rows: anything but SELECT, SHOW, EXPLAIN, VALUES or TABLE
+/// (a WITH may hold an INSERT, UPDATE or DELETE, so it counts as a change).
++ (BOOL)statementMayChangeData:(NSString *)statement;
+
+/**
+ * Called on the main thread after each run in which at least one statement succeeded that may have changed the
+ * listed objects (schemaChanged) or rows (dataChanged), as classified by the class methods above. The tab uses it
+ * to reload its lists and the Content view. Not called after -invalidate.
+ */
+@property (copy) void (^runDidChangeDatabase)(BOOL schemaChanged, BOOL dataChanged);
+
 /// Detaches the grid, editor and buttons from this controller (called by the tab when it closes or replaces it; also on dealloc).
 - (void)invalidate;
 

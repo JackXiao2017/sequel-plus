@@ -36,6 +36,13 @@ __attribute__((visibility("default")))
 /// A list that can't be loaded keeps what it showed.
 - (void)reloadWithCatalog:(SPPostgresCatalog *)catalog;
 
+/**
+ * Reloads the schemas, the extensions and the shown schema's tables and views (after the Query view changed
+ * them), keeping the selected table if it is still listed. A schema that is gone gives way to the default one.
+ * The delegate hears of a selection change only if the selection ends up different.
+ */
+- (void)reloadKeepingSelection;
+
 /// @[@"TABLES", @"VIEWS", @"EXTENSIONS"]: Extensions is always last.
 - (NSArray *)sectionTitles;
 

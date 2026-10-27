@@ -85,6 +85,9 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	/// Nesting of reloads (a catalog reload contains a schema reload): failures are reported once, at the end
 	NSUInteger reloadDepth;
 	BOOL reloadFailed;
+
+	/// -reloadKeepingSelection tells the delegate once, at the end
+	BOOL holdingSelectionChanges;
 }
 
 @synthesize selectedSchema;
@@ -243,6 +246,40 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[self _endReload];
 }
 
+- (void)reloadKeepingSelection
+{
+	NSString *previousSchema = [[selectedSchema copy] autorelease];
+	NSString *table = [[selectedTableName copy] autorelease];
+	NSString *schema = previousSchema;
+
+	[self _beginReload];
+
+	NSError *error = nil;
+	NSArray *names = [catalog schemaNames:&error];
+	if (names) {
+		[schemas release];
+		schemas = [names copy];
+		if (![names containsObject:schema]) schema = [catalog defaultSchemaFromSchemas:schemas];
+	}
+	else {
+		[self _rememberError:error];
+	}
+
+	[self _reloadExtensions];
+
+	holdingSelectionChanges = YES;
+	[self reloadSchema:schema];
+	// The same schema (not the default one standing in for a schema that is gone): its table again
+	if (table && [previousSchema isEqualToString:selectedSchema]) [self selectTableNamed:table];
+	holdingSelectionChanges = NO;
+
+	BOOL sameSchema = (previousSchema == selectedSchema) || [previousSchema isEqualToString:selectedSchema];
+	BOOL sameTable = (table == selectedTableName) || [table isEqualToString:selectedTableName];
+	if (!sameSchema || !sameTable) [delegate sidebarSelectionDidChange:self];
+
+	[self _endReload];
+}
+
 - (void)reloadSchema:(NSString *)schema
 {
 	[self _beginReload];
@@ -289,7 +326,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 		[self _reloadSchemaPopup];
 		[self _reloadOutline];
 
-		[delegate sidebarSelectionDidChange:self];
+		if (!holdingSelectionChanges) [delegate sidebarSelectionDidChange:self];
 	}
 	else {
 		// Keep the schema, lists and selection that were shown; the popup goes back to the shown schema
@@ -422,7 +459,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[selectedTableName release];
 	selectedTableName = [name copy];
 
-	[delegate sidebarSelectionDidChange:self];
+	if (!holdingSelectionChanges) [delegate sidebarSelectionDidChange:self];
 }
 
 - (void)chooseSchema:(id)sender

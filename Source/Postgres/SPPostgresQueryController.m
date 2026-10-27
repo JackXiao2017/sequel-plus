@@ -88,6 +88,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 @synthesize editor;
 @synthesize resultsView;
 @synthesize statusText;
+@synthesize runDidChangeDatabase;
 
 #pragma mark - Setup
 
@@ -118,6 +119,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[runCurrentButton release];
 	[statusField release];
 	[statementWillRunHook release];
+	[runDidChangeDatabase release];
 
 	[super dealloc];
 }
@@ -135,6 +137,70 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	// Tooltip owners aren't retained
 	[runAllButton removeAllToolTips];
 	[runCurrentButton removeAllToolTips];
+
+	// The block may capture the tab
+	[runDidChangeDatabase release];
+	runDidChangeDatabase = nil;
+}
+
+#pragma mark - Statement kinds
+
+/// The statement without leading whitespace and comments (-- … and /* … */, nested as PostgreSQL allows).
++ (NSString *)_statementBody:(NSString *)statement
+{
+	NSString *rest = statement ?: @"";
+	NSCharacterSet *whitespace = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+	while (YES) {
+		rest = [rest stringByTrimmingCharactersInSet:whitespace];
+		if ([rest hasPrefix:@"--"]) {
+			NSRange newline = [rest rangeOfString:@"\n"];
+			rest = (newline.location == NSNotFound) ? @"" : [rest substringFromIndex:NSMaxRange(newline)];
+		}
+		else if ([rest hasPrefix:@"/*"]) {
+			NSUInteger depth = 0, i = 0, length = [rest length];
+			for (; i + 1 < length; i++) {
+				unichar a = [rest characterAtIndex:i], b = [rest characterAtIndex:i + 1];
+				if (a == '/' && b == '*') { depth++; i++; }
+				else if (a == '*' && b == '/') { i++; if (--depth == 0) break; }
+			}
+			rest = (depth == 0 && i + 1 <= length) ? [rest substringFromIndex:MIN(i + 1, length)] : @"";
+		}
+		else {
+			return rest;
+		}
+	}
+}
+
+/// The statement's first keyword, lowercased (@"" if none).
++ (NSString *)_firstKeyword:(NSString *)statement
+{
+	NSString *body = [self _statementBody:statement];
+	NSUInteger end = 0, length = [body length];
+	NSCharacterSet *letters = [NSCharacterSet letterCharacterSet];
+	while (end < length && [letters characterIsMember:[body characterAtIndex:end]]) end++;
+	return [[body substringToIndex:end] lowercaseString];
+}
+
++ (BOOL)statementMayChangeSchema:(NSString *)statement
+{
+	static NSSet *keywords = nil;
+	static dispatch_once_t once;
+	dispatch_once(&once, ^{
+		// MySQL's (SPCustomQuery: create|alter|drop|rename), and PostgreSQL's transactional DDL undone or imported
+		keywords = [[NSSet alloc] initWithObjects:@"create", @"alter", @"drop", @"rename", @"import", @"rollback", @"abort", nil];
+	});
+	return [keywords containsObject:[self _firstKeyword:statement]];
+}
+
++ (BOOL)statementMayChangeData:(NSString *)statement
+{
+	static NSSet *readOnly = nil;
+	static dispatch_once_t once;
+	dispatch_once(&once, ^{
+		readOnly = [[NSSet alloc] initWithObjects:@"select", @"show", @"explain", @"values", @"table", nil];
+	});
+	NSString *keyword = [self _firstKeyword:statement];
+	return [keyword length] && ![readOnly containsObject:keyword];
 }
 
 /// Test seam (see statementWillRunHook).
@@ -430,6 +496,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 	NSString *status = @"";
 	NSUInteger number = 0;
+	BOOL schemaChanged = NO, dataChanged = NO;
 	NSUInteger shownStatement = 0; // the statement whose rows the grid shows (0: none)
 
 	running = YES;
@@ -472,6 +539,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 				break;
 			}
 
+			if (!schemaChanged) schemaChanged = [[self class] statementMayChangeSchema:statement];
+			if (!dataChanged) dataChanged = [[self class] statementMayChangeData:statement];
+
 			if ([statementResult returnsRows]) {
 				[self _showResult:statementResult];
 				shownStatement = number;
@@ -498,6 +568,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 		[statusField setStringValue:status];
 		[statusField setToolTip:status];
 	}
+
+	// As MySQL's Query tab: the tab reloads what the run may have changed
+	if ((schemaChanged || dataChanged) && !invalidated && runDidChangeDatabase) runDidChangeDatabase(schemaChanged, dataChanged);
 }
 
 #pragma mark - Results

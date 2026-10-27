@@ -39,6 +39,8 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 - (void)_buildContent;
 - (void)_installContentController;
 - (void)_installQueryController;
+- (void)_queryRunChangedSchema:(BOOL)schemaChanged data:(BOOL)dataChanged;
+- (void)_refreshContentIfStale;
 - (void)_showQueryPane:(BOOL)query;
 - (NSView *)_rightPane;
 - (void)_showSelectedTable;
@@ -94,6 +96,12 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	BOOL restoringHistory;
 	/// Waiting for the user to confirm a database switch that rolls back their transaction
 	BOOL confirmingSwitch;
+	/// The Query view changed tables or schemas while the lists couldn't be reloaded (aborted transaction)
+	BOOL listsNeedReload;
+	/// The Query view may have changed rows (contentNeedsReload) or tables (contentNeedsReset) since the
+	/// Content view last loaded: it reloads when it is next shown
+	BOOL contentNeedsReload;
+	BOOL contentNeedsReset;
 
 	/// The Duplicate Table sheet while it is shown, and its controls
 	NSWindow *duplicateSheet;
@@ -319,6 +327,12 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	queryController = [[SPPostgresQueryController alloc] initWithConnection:connection];
 	if ([text length]) [[queryController editor] setString:text];
 
+	// Unretained, as the Content controller's presenter: -invalidate (on replace or teardown) drops the block
+	__block SPPostgresDocument *document = self;
+	[queryController setRunDidChangeDatabase:^(BOOL schemaChanged, BOOL dataChanged) {
+		[document _queryRunChangedSchema:schemaChanged data:dataChanged];
+	}];
+
 	NSView *queryView = [queryController view];
 	[queryView setFrame:[pane bounds]];
 	[queryView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
@@ -355,7 +369,49 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	[toolbar setSelectedItemIdentifier:query ? SPMainToolbarCustomQuery : ([[sidebar selectedTableName] length] ? SPMainToolbarTableContent : nil)];
 	[toolbar validateVisibleItems];
 
+	if (!query) [self _refreshContentIfStale];
+
 	[self _recordHistory];
+}
+
+/**
+ * After a Query run that may have changed things (as MySQL's Query tab reloads its tables list after CREATE,
+ * ALTER, DROP or RENAME): reloads the lists keeping the selection (a dropped selected table empties the Content
+ * view) and the database pop-up, and has the Content view reload when it is next shown. Inside an aborted
+ * transaction the catalog can't be read, so the lists wait for a later run.
+ */
+- (void)_queryRunChangedSchema:(BOOL)schemaChanged data:(BOOL)dataChanged
+{
+	if (tornDown) return;
+
+	if (schemaChanged) listsNeedReload = YES;
+	if (dataChanged) contentNeedsReload = YES;
+
+	if (listsNeedReload && [connection transactionStatus] != PGPostgresTransactionInError) {
+		listsNeedReload = NO;
+		contentNeedsReset = YES; // its columns may have changed
+
+		// Not a place the user went to (history)
+		restoringHistory = YES;
+		[sidebar reloadKeepingSelection];
+		restoringHistory = NO;
+		[self _reloadDatabasePopup];
+		[self updateWindowTitle:self];
+	}
+
+	if (!showingQuery) [self _refreshContentIfStale];
+}
+
+/// Reloads the Content view if the Query view may have changed its table: afresh after DDL, else keeping its filter, sort and page.
+- (void)_refreshContentIfStale
+{
+	if (!contentNeedsReload && !contentNeedsReset) return;
+	BOOL reset = contentNeedsReset;
+	contentNeedsReload = NO;
+	contentNeedsReset = NO;
+
+	if (reset) [contentController showTable:[sidebar selectedTableName] inSchema:[sidebar selectedSchema]];
+	else [contentController reload];
 }
 
 /// The Content view shows the table or view selected in the sidebar (or nothing), and the Content toolbar item is selected with it.
@@ -366,6 +422,8 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 
 	if (![table isEqualToString:[contentController table]] || ![schema isEqualToString:[contentController schema]] || !table) {
 		[contentController showTable:table inSchema:schema];
+		contentNeedsReload = NO;
+		contentNeedsReset = NO;
 	}
 
 	// The Query view stays when the selection changes (as MySQL's)
@@ -874,6 +932,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	favorite = [theFavorite retain];
 
 	[self _attachCurrentConnection];
+	listsNeedReload = NO; // all reloaded below, from the new session
 
 	// A history move: the reload's default schema is not a place the user went to
 	NSDictionary *historyEntry = [[pendingHistoryEntry retain] autorelease];
