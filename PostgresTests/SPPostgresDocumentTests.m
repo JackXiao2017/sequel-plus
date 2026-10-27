@@ -491,7 +491,19 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	name = [self viewWithIdentifier:@"duplicateTableName" in:sheet.contentView];
 	button = [self viewWithIdentifier:@"duplicateTableButton" in:sheet.contentView];
 	XCTAssertEqualObjects(name.stringValue, @"cust copy_copy");
+
+	// Longer than PostgreSQL's 63-byte names: refused in the sheet, which stays up
+	name.stringValue = [@"" stringByPaddingToLength:64 withString:@"n" startingAtIndex:0];
+	[[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification object:name];
+	XCTAssertFalse(button.isEnabled);
+	[button performClick:nil];
+	[self spinUntil:^BOOL{ return NO; } timeout:0.3];
+	XCTAssertEqual([self window].attachedSheet, sheet);
+	XCTAssertEqual(alerts.count, 0u);
+
 	name.stringValue = @"customers";
+	[[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification object:name];
+	XCTAssertTrue(button.isEnabled);
 	[button performClick:nil];
 	XCTAssertTrue([self spinUntil:^BOOL{ return alerts.count == 1; } timeout:5]);
 	XCTAssertTrue([alerts.firstObject.informativeText containsString:@"already exists"], @"%@", alerts.firstObject.informativeText);

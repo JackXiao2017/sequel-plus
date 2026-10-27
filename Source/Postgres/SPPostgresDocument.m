@@ -850,6 +850,9 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 		pendingHistoryEntry = [entry retain];
 		pendingHistoryWentBack = back;
 		[self _switchToDatabase:database forHistory:YES];
+
+		// No switch was started (e.g. torn down): the entry mustn't stay pending, which would stop recording for good
+		if (!pendingConnector) [self _abandonHistoryRestore];
 	}
 	else {
 		[self _applyHistoryEntry:entry];
@@ -977,17 +980,25 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	}];
 }
 
-/// Duplicate is enabled while the name isn't empty.
+/// The sheet's name, trimmed.
+- (NSString *)_duplicateTableName
+{
+	return [[duplicateNameField stringValue] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+/// Duplicate is enabled while the name is one PostgreSQL keeps as given (not empty, at most 63 bytes).
 - (void)controlTextDidChange:(NSNotification *)notification
 {
-	NSString *name = [[duplicateNameField stringValue] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-	[duplicateButton setEnabled:[name length] > 0];
+	[duplicateButton setEnabled:[SPPostgresTableDuplicator isValidTableName:[self _duplicateTableName]]];
 }
 
 - (void)closeDuplicateTableSheet:(id)sender
 {
 	if (!duplicateSheet) return;
-	if ([sender tag] == NSModalResponseOK && ![duplicateButton isEnabled]) return;
+	if ([sender tag] == NSModalResponseOK && ![SPPostgresTableDuplicator isValidTableName:[self _duplicateTableName]]) {
+		NSBeep();
+		return;
+	}
 	[parentWindow endSheet:duplicateSheet returnCode:[sender tag]];
 }
 
