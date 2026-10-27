@@ -13,6 +13,8 @@
 
 static const NSUInteger SPPostgresScreenDefaultPort = 5432;
 static NSString * const SPPostgresScreenMySQLDefaultPort = @"3306";
+static NSString * const SPPostgresScreenMySQLHostLabel = @"MySQL Host:"; // as in ConnectionView.xib's SSH tab
+static NSString * const SPPostgresScreenPostgreSQLHostLabel = @"PostgreSQL Host:";
 
 @interface SPKeychain (SPPostgresKeychainAccess) <SPPostgresKeychainAccess>
 @end
@@ -76,6 +78,11 @@ static NSString *SPPGOrEmpty(NSString *s)
 	NSMutableArray *portFields;
 	NSMutableArray *originalPortPlaceholders;
 
+	// "MySQL Host:" labels in the form (no outlet in ConnectionView.xib) and their frames and fonts as loaded
+	NSMutableArray *hostLabels;
+	NSMutableArray *originalHostLabelFrames;
+	NSMutableArray *originalHostLabelFonts;
+
 	SPTreeNode *rootNode;
 	SPTreeNode *sectionNode;
 	NSMutableDictionary *nodesByID;
@@ -106,6 +113,9 @@ static NSString *SPPGOrEmpty(NSString *s)
 		engine = SPConnectionEngineMySQL;
 		portFields = [[NSMutableArray alloc] init];
 		originalPortPlaceholders = [[NSMutableArray alloc] init];
+		hostLabels = [[NSMutableArray alloc] init];
+		originalHostLabelFrames = [[NSMutableArray alloc] init];
+		originalHostLabelFonts = [[NSMutableArray alloc] init];
 		reboundPortFields = [[NSMutableArray alloc] init];
 		nodesByID = [[NSMutableDictionary alloc] init];
 
@@ -153,6 +163,9 @@ static NSString *SPPGOrEmpty(NSString *s)
 	[engineControl release];
 	[portFields release];
 	[originalPortPlaceholders release];
+	[hostLabels release];
+	[originalHostLabelFrames release];
+	[originalHostLabelFonts release];
 	[reboundPortFields release];
 	[reportedLoadError release];
 	[rootNode release];
@@ -227,6 +240,11 @@ static NSString *SPPGOrEmpty(NSString *s)
 
 - (void)_collectPortFieldsInView:(NSView *)view
 {
+	if ([view isKindOfClass:[NSTextField class]] && ![(NSTextField *)view isEditable] && [[(NSTextField *)view stringValue] isEqualToString:SPPostgresScreenMySQLHostLabel]) {
+		[hostLabels addObject:view];
+		[originalHostLabelFrames addObject:[NSValue valueWithRect:[view frame]]];
+		[originalHostLabelFonts addObject:[(NSTextField *)view font]];
+	}
 	if ([view isKindOfClass:[NSTextField class]]) {
 		NSDictionary *binding = [view infoForBinding:NSValueBinding];
 		if ([[binding objectForKey:NSObservedKeyPathKey] isEqualToString:@"port"]) {
@@ -275,6 +293,31 @@ static NSString *SPPGOrEmpty(NSString *s)
 
 		[[field cell] setPlaceholderString:placeholder];
 		[field setNeedsDisplay:YES];
+	}];
+
+	// The SSH tab's "MySQL Host:" label names the engine. It is right-aligned against its field, so the
+	// longer PostgreSQL text grows it leftwards from the same right edge, as far as the tab's left edge,
+	// and only if it still doesn't fit is its font reduced to fit. MySQL gets the nib frame and font back.
+	BOOL postgres = (engine == SPConnectionEnginePostgreSQL);
+	[hostLabels enumerateObjectsUsingBlock:^(NSTextField *label, NSUInteger idx, BOOL *stop) {
+		NSRect frame = [[originalHostLabelFrames objectAtIndex:idx] rectValue];
+		NSFont *font = [originalHostLabelFonts objectAtIndex:idx];
+		[label setFont:font];
+		[label setStringValue:(postgres ? SPPostgresScreenPostgreSQLHostLabel : SPPostgresScreenMySQLHostLabel)];
+		if (postgres) {
+			CGFloat needed = ceil([[label cell] cellSize].width);
+			if (needed > NSWidth(frame)) {
+				CGFloat grow = MIN(needed - NSWidth(frame), NSMinX(frame));
+				frame.origin.x -= grow;
+				frame.size.width += grow;
+			}
+			if (needed > NSWidth(frame)) {
+				CGFloat size = floor([font pointSize] * NSWidth(frame) / needed * 2) / 2;
+				[label setFont:[NSFont fontWithDescriptor:[font fontDescriptor] size:MAX(size, 10)]];
+			}
+		}
+		[label setFrame:frame];
+		[[label superview] setNeedsDisplay:YES];
 	}];
 }
 

@@ -342,6 +342,59 @@
 	[adapter invalidate];
 }
 
+/// The SSH tab's "MySQL Host:" label reads "PostgreSQL Host:" for PostgreSQL, fully visible from the same
+/// right edge, and returns to the nib text and frame for MySQL.
+- (void)testHostLabelNamesTheEngine
+{
+	static NSMutableArray *keepAlive; // see -testEngineControlFitsTheRealConnectionForm
+	if (!keepAlive) keepAlive = [NSMutableArray array];
+
+	id controller = [[NSClassFromString(@"SPConnectionController") alloc] init];
+	[keepAlive addObject:controller];
+	[controller performSelector:@selector(loadNib)];
+
+	NSView *container = [controller valueForKey:@"connectionResizeContainer"];
+	NSTabView *tabView = nil;
+	for (NSView *subview in [container subviews]) if ([subview isKindOfClass:[NSTabView class]]) tabView = (NSTabView *)subview;
+	XCTAssertNotNil(tabView);
+
+	NSMutableArray *labels = [NSMutableArray array];
+	NSMutableArray *stack = [NSMutableArray array];
+	for (NSTabViewItem *item in [tabView tabViewItems]) [stack addObject:[item view]];
+	while ([stack count]) {
+		NSView *view = [stack lastObject];
+		[stack removeLastObject];
+		[stack addObjectsFromArray:[view subviews]];
+		if ([view isKindOfClass:[NSTextField class]] && [[(NSTextField *)view stringValue] isEqualToString:@"MySQL Host:"]) [labels addObject:view];
+	}
+	XCTAssertEqual([labels count], 1u, @"the SSH tab's host label");
+	NSTextField *label = [labels firstObject];
+	NSRect nibFrame = [label frame];
+	NSFont *nibFont = [label font];
+
+	SPPostgresConnectionScreenAdapter *adapter = [[SPPostgresConnectionScreenAdapter alloc] initWithConnectionController:controller store:self.store];
+	adapter.keychain = self.keychain;
+	[adapter installEngineControlInContainer:container];
+	[controller setValue:adapter forKey:@"postgresAdapter"];
+
+	XCTAssertEqualObjects([label stringValue], @"MySQL Host:");
+	XCTAssertTrue(NSEqualRects([label frame], nibFrame));
+
+	[adapter setSelectedEngine:SPConnectionEnginePostgreSQL];
+	XCTAssertEqualObjects([label stringValue], @"PostgreSQL Host:");
+	XCTAssertEqualWithAccuracy(NSMaxX([label frame]), NSMaxX(nibFrame), 0.5, @"same right edge, next to the field");
+	XCTAssertGreaterThanOrEqual(NSWidth([label frame]), ceil([[label cell] cellSize].width), @"whole text visible");
+	XCTAssertGreaterThanOrEqual(NSMinX([label frame]), 0.0);
+
+	[adapter setSelectedEngine:SPConnectionEngineMySQL];
+	XCTAssertEqualObjects([label stringValue], @"MySQL Host:");
+	XCTAssertTrue(NSEqualRects([label frame], nibFrame), @"nib frame restored");
+	XCTAssertEqualObjects([label font], nibFont, @"nib font restored");
+
+	[controller setValue:nil forKey:@"postgresAdapter"];
+	[adapter invalidate];
+}
+
 /// Live: a saved favorite whose password is only in the (Postgres-named) keychain connects and opens
 /// a separate PostgreSQL window (test server PG 18 on 55418, Scripts/pg-test-servers.sh).
 - (void)testConnectFromFormOpensPostgresWindow
