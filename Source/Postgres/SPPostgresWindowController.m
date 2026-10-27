@@ -41,6 +41,8 @@ static const CGFloat SPPostgresTabBarHeight = 25;
 - (void)_updateDatabaseToolbarItemWidth;
 - (void)_tearDown;
 - (NSString *)_connectionName;
+- (void)_reportCatalogError:(NSError *)error;
+- (void)_presentAlert:(NSAlert *)alert;
 - (void)_databaseSwitchBy:(SPPostgresConnector *)theConnector favorite:(SPPostgresFavorite *)theFavorite finishedWithConnection:(PGPostgresConnection *)newConnection error:(NSError *)error;
 
 @end
@@ -67,12 +69,16 @@ static const CGFloat SPPostgresTabBarHeight = 25;
 	NSSegmentedControl *historyControl;
 	NSToolbarItem *databaseToolbarItem; // not retained; owned by the toolbar
 
+	/// An alert that came up before the window was shown (presented by -showWindow:)
+	NSAlert *pendingAlert;
+
 	BOOL keepingSelfAlive;
 	BOOL tornDown;
 }
 
 @synthesize sidebar;
 @synthesize connection;
+@synthesize alertPresenter;
 
 #pragma mark - Setup
 
@@ -100,6 +106,7 @@ static const CGFloat SPPostgresTabBarHeight = 25;
 
 		sidebar = [[SPPostgresSidebarController alloc] initWithCatalog:catalog];
 		[sidebar setDelegate:self];
+		if ([sidebar lastError]) [self _reportCatalogError:[sidebar lastError]];
 
 		[self _buildContent];
 		[self _buildToolbar];
@@ -129,6 +136,8 @@ static const CGFloat SPPostgresTabBarHeight = 25;
 	[splitView release];
 	[databasePopup release];
 	[historyControl release];
+	[pendingAlert release];
+	[alertPresenter release];
 
 	[super dealloc];
 }
@@ -159,6 +168,12 @@ static const CGFloat SPPostgresTabBarHeight = 25;
 
 	// server_version may carry a build suffix ("18.6 (Debian 18.6-1.pgdg13+2)"): the title shows the number
 	NSString *version = [[[catalog serverVersionString] componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] firstObject];
+	if (![version length] && [connection isConnected]) {
+		// The query failed: libpq knows the version from the connection (e.g. 180006, or 90624 before 10)
+		NSInteger number = (NSInteger)[connection serverVersion];
+		if (number >= 100000) version = [NSString stringWithFormat:@"%ld.%ld", (long)(number / 10000), (long)(number % 10000)];
+		else if (number > 0) version = [NSString stringWithFormat:@"%ld.%ld.%ld", (long)(number / 10000), (long)(number / 100 % 100), (long)(number % 100)];
+	}
 	[serverVersion release];
 	serverVersion = [([version length] ? version : @"unknown") copy];
 }
@@ -282,6 +297,58 @@ static const CGFloat SPPostgresTabBarHeight = 25;
 		[self retain];
 	}
 	[super showWindow:sender];
+
+	if (pendingAlert && [[self window] isVisible]) {
+		NSAlert *alert = pendingAlert;
+		pendingAlert = nil;
+		[self _presentAlert:alert];
+		[alert release];
+	}
+}
+
+#pragma mark - Alerts
+
+- (void)_presentAlert:(NSAlert *)alert
+{
+	if (tornDown) return;
+
+	if (alertPresenter) {
+		alertPresenter(alert);
+		return;
+	}
+
+	// Not shown yet (e.g. a failure while the window is being built): show it with the window
+	if (![[self window] isVisible]) {
+		if (!pendingAlert) pendingAlert = [alert retain];
+		return;
+	}
+
+	[alert beginSheetModalForWindow:[self window] completionHandler:nil];
+}
+
+/**
+ * A catalog query failed (the lists keep what they showed). Shown once per failed reload; when the
+ * connection is gone, says so (reconnecting is not offered in this version).
+ */
+- (void)_reportCatalogError:(NSError *)error
+{
+	NSString *detail = [[error localizedDescription] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+
+	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+	[alert setAlertStyle:NSAlertStyleWarning];
+
+	NSString *advice;
+	if (![connection isConnected]) {
+		[alert setMessageText:NSLocalizedString(@"The connection to the PostgreSQL server was lost", @"PostgreSQL window: connection lost title")];
+		advice = NSLocalizedString(@"The lists show what was loaded before the connection was lost. Close this window and connect again.", @"PostgreSQL window: connection lost advice");
+	}
+	else {
+		[alert setMessageText:NSLocalizedString(@"Could not load the database objects", @"PostgreSQL window: catalog query failed title")];
+		advice = NSLocalizedString(@"The lists show what was loaded before.", @"PostgreSQL window: catalog query failed advice");
+	}
+	[alert setInformativeText:[detail length] ? [NSString stringWithFormat:@"%@\n\n%@", detail, advice] : advice];
+
+	[self _presentAlert:alert];
 }
 
 - (NSString *)windowTitleString
@@ -354,6 +421,11 @@ static const CGFloat SPPostgresTabBarHeight = 25;
 	[self _updateWindowTitle];
 }
 
+- (void)sidebar:(SPPostgresSidebarController *)theSidebar didFailToLoadWithError:(NSError *)error
+{
+	[self _reportCatalogError:error];
+}
+
 #pragma mark - Databases
 
 - (void)_reloadDatabasePopup
@@ -361,8 +433,15 @@ static const CGFloat SPPostgresTabBarHeight = 25;
 	NSError *error = nil;
 	NSArray *names = [catalog databaseNames:&error];
 
+	if (!names) {
+		// Keep the databases that were listed (the separator and "Refresh Databases" follow them)
+		NSInteger listed = [databasePopup numberOfItems] - 2;
+		names = (listed > 0) ? [[databasePopup itemTitles] subarrayWithRange:NSMakeRange(0, (NSUInteger)listed)] : @[];
+		[self _reportCatalogError:error];
+	}
+
 	[databasePopup removeAllItems];
-	[databasePopup addItemsWithTitles:names ?: @[]];
+	[databasePopup addItemsWithTitles:names];
 	if ([currentDatabase length] && ![names containsObject:currentDatabase]) [databasePopup addItemWithTitle:currentDatabase];
 
 	[[databasePopup menu] addItem:[NSMenuItem separatorItem]];
@@ -392,8 +471,10 @@ static const CGFloat SPPostgresTabBarHeight = 25;
 	SPPostgresFavorite *target = [[favorite copy] autorelease];
 	[target setDatabase:database];
 
-	// Same favorite and password; SSH passwords come from the Keychain or the tunnel's prompt on this window
-	SPPostgresConnector *newConnector = [[SPPostgresConnector alloc] initWithFavorite:target password:[connection password] sshPassword:nil parentWindow:[self window]];
+	// Same favorite and the passwords the current session was opened with, so an SSH favorite isn't asked
+	// again (without one, SSH passwords come from the Keychain or the tunnel's prompt on this window)
+	NSString *thePassword = [connector password] ?: [connection password];
+	SPPostgresConnector *newConnector = [[SPPostgresConnector alloc] initWithFavorite:target password:thePassword sshPassword:[connector sshPassword] parentWindow:[self window]];
 
 	// Only the latest request counts: an earlier pending one is abandoned (its completion is then ignored)
 	SPPostgresConnector *previous = pendingConnector;
@@ -429,7 +510,7 @@ static const CGFloat SPPostgresTabBarHeight = 25;
 			[alert setAlertStyle:NSAlertStyleWarning];
 			[alert setMessageText:[NSString stringWithFormat:NSLocalizedString(@"Could not open database “%@”", @"PostgreSQL window: database switch failed (database)"), [theFavorite database]]];
 			[alert setInformativeText:[error localizedDescription] ?: @""];
-			[alert beginSheetModalForWindow:[self window] completionHandler:nil];
+			[self _presentAlert:alert];
 		}
 		return;
 	}

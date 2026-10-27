@@ -25,8 +25,17 @@
 	PGPostgresResult *result = [_connection execute:sql values:values ?: @[]];
 	if (!result && error) {
 		PGPostgresError *pgError = [_connection lastError];
-		NSString *message = [pgError errorPrimaryMessage];
-		if (![message length]) message = NSLocalizedString(@"The catalog query failed.", @"Postgres catalog query failure");
+		NSString *message = nil;
+		if ([_connection isConnected]) {
+			message = [pgError errorPrimaryMessage];
+			if (![message length]) message = NSLocalizedString(@"The catalog query failed.", @"Postgres catalog query failure");
+		}
+		else {
+			// The connection is gone: libpq's message says why (e.g. the server closed it). The last query
+			// error may be older than that, so it isn't used.
+			message = [_connection libpqErrorMessage];
+			if (![message length]) message = NSLocalizedString(@"There is no connection to the server.", @"Postgres catalog query without a connection");
+		}
 		*error = [NSError errorWithDomain:SPPostgresErrorDomain
 									 code:SPPostgresErrorQueryFailed
 								 userInfo:@{NSLocalizedDescriptionKey: message}];

@@ -62,6 +62,8 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 - (void)_reloadOutline;
 - (void)_updateSelectionFromOutline;
 - (void)_rememberError:(NSError *)error;
+- (void)_beginReload;
+- (void)_endReload;
 - (SPPostgresSidebarItem *)_sectionNamed:(NSString *)title;
 
 @end
@@ -77,6 +79,10 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	NSOutlineView *outlineView;
 
 	BOOL reloading;
+
+	/// Nesting of reloads (a catalog reload contains a schema reload): failures are reported once, at the end
+	NSUInteger reloadDepth;
+	BOOL reloadFailed;
 }
 
 @synthesize selectedSchema;
@@ -204,63 +210,97 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 		catalog = [theCatalog retain];
 	}
 
-	[lastError release], lastError = nil;
+	[self _beginReload];
 
 	NSError *error = nil;
 	NSArray *names = [catalog schemaNames:&error];
-	if (!names) [self _rememberError:error];
-	[schemas release];
-	schemas = [(names ?: @[]) copy];
+	if (names) {
+		[schemas release];
+		schemas = [names copy];
+	}
+	else {
+		// Keep the schemas that were listed
+		[self _rememberError:error];
+	}
 
 	[self _reloadExtensions];
 
 	// The default schema of this database (the previous database's schema doesn't carry over)
 	[self reloadSchema:[catalog defaultSchemaFromSchemas:schemas]];
+
+	[self _endReload];
 }
 
 - (void)reloadSchema:(NSString *)schema
 {
-	if (selectedSchema != schema) {
-		[selectedSchema release];
-		selectedSchema = [schema copy];
-	}
-	[selectedTableName release], selectedTableName = nil;
+	[self _beginReload];
 
-	SPPostgresSidebarItem *tables = [self _sectionNamed:SPPostgresSidebarTables];
-	SPPostgresSidebarItem *views = [self _sectionNamed:SPPostgresSidebarViews];
-	[[tables children] removeAllObjects];
-	[[views children] removeAllObjects];
+	NSArray *tableNames = nil;
+	NSArray *viewNames = nil;
+	BOOL loaded = YES;
 
-	if (selectedSchema) {
+	if (schema) {
 		NSError *error = nil;
-		NSArray *tableNames = [catalog tableNamesInSchema:selectedSchema error:&error];
-		if (!tableNames) [self _rememberError:error];
-		for (NSString *name in tableNames) {
-			[[tables children] addObject:[SPPostgresSidebarItem itemWithTitle:name detail:nil kind:SPPostgresSidebarTable]];
+		tableNames = [catalog tableNamesInSchema:schema error:&error];
+		if (!tableNames) {
+			[self _rememberError:error];
+			loaded = NO;
 		}
 
 		error = nil;
-		NSArray *viewNames = [catalog viewNamesInSchema:selectedSchema error:&error];
-		if (!viewNames) [self _rememberError:error];
-		for (NSString *name in viewNames) {
-			[[views children] addObject:[SPPostgresSidebarItem itemWithTitle:name detail:nil kind:SPPostgresSidebarView]];
+		viewNames = [catalog viewNamesInSchema:schema error:&error];
+		if (!viewNames) {
+			[self _rememberError:error];
+			loaded = NO;
 		}
 	}
 
-	[self _reloadSchemaPopup];
-	[self _reloadOutline];
+	if (loaded) {
+		if (selectedSchema != schema) {
+			[selectedSchema release];
+			selectedSchema = [schema copy];
+		}
+		[selectedTableName release], selectedTableName = nil;
 
-	[delegate sidebarSelectionDidChange:self];
+		SPPostgresSidebarItem *tables = [self _sectionNamed:SPPostgresSidebarTables];
+		SPPostgresSidebarItem *views = [self _sectionNamed:SPPostgresSidebarViews];
+		[[tables children] removeAllObjects];
+		[[views children] removeAllObjects];
+
+		for (NSString *name in tableNames) {
+			[[tables children] addObject:[SPPostgresSidebarItem itemWithTitle:name detail:nil kind:SPPostgresSidebarTable]];
+		}
+		for (NSString *name in viewNames) {
+			[[views children] addObject:[SPPostgresSidebarItem itemWithTitle:name detail:nil kind:SPPostgresSidebarView]];
+		}
+
+		[self _reloadSchemaPopup];
+		[self _reloadOutline];
+
+		[delegate sidebarSelectionDidChange:self];
+	}
+	else {
+		// Keep the schema, lists and selection that were shown; the popup goes back to the shown schema
+		[self _reloadSchemaPopup];
+		// An enclosing catalog reload may have reloaded the extensions: show them, leaving the table selection
+		[outlineView reloadItem:[self _sectionNamed:SPPostgresSidebarExtensions] reloadChildren:YES];
+	}
+
+	[self _endReload];
 }
 
 - (void)_reloadExtensions
 {
-	SPPostgresSidebarItem *extensions = [self _sectionNamed:SPPostgresSidebarExtensions];
-	[[extensions children] removeAllObjects];
-
 	NSError *error = nil;
 	NSArray *installed = [catalog installedExtensions:&error];
-	if (!installed) [self _rememberError:error];
+	if (!installed) {
+		// Keep the extensions that were listed
+		[self _rememberError:error];
+		return;
+	}
+
+	SPPostgresSidebarItem *extensions = [self _sectionNamed:SPPostgresSidebarExtensions];
+	[[extensions children] removeAllObjects];
 	for (NSDictionary *extension in installed) {
 		[[extensions children] addObject:[SPPostgresSidebarItem itemWithTitle:[extension objectForKey:@"name"] detail:[extension objectForKey:@"version"] kind:SPPostgresSidebarExtension]];
 	}
@@ -287,11 +327,31 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	reloading = NO;
 }
 
+/// Records the first failure of the current reload (a failed query without an NSError still counts).
 - (void)_rememberError:(NSError *)error
 {
+	if (reloadFailed && lastError) return;
+	reloadFailed = YES;
 	if (!error) return;
 	[lastError release];
 	lastError = [error retain];
+}
+
+- (void)_beginReload
+{
+	if (reloadDepth++ == 0) {
+		reloadFailed = NO;
+		[lastError release], lastError = nil;
+	}
+}
+
+- (void)_endReload
+{
+	if (--reloadDepth > 0 || !reloadFailed) return;
+
+	if ([delegate respondsToSelector:@selector(sidebar:didFailToLoadWithError:)]) {
+		[delegate sidebar:self didFailToLoadWithError:lastError];
+	}
 }
 
 - (SPPostgresSidebarItem *)_sectionNamed:(NSString *)title

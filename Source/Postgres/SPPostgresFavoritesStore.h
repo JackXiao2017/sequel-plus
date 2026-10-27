@@ -17,6 +17,9 @@ __attribute__((visibility("default")))
 
 /// Favorites sorted by name, case-insensitive. Reloaded from disk on each call.
 - (NSArray *)favorites;
+/// Why the last -favorites call could not read the file (it then returned no favorites), or nil when the
+/// file was missing or valid. The description names the file. The file is never overwritten in that state.
+- (NSError *)lastLoadError;
 - (BOOL)saveFavorite:(SPPostgresFavorite *)favorite error:(NSError **)error;
 - (BOOL)removeFavoriteWithID:(NSString *)favoriteID error:(NSError **)error;
 

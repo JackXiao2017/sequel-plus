@@ -44,6 +44,11 @@ __attribute__((visibility("default")))
 
 @property (readonly) SPSSHTunnel *tunnel;
 
+/// The database and SSH passwords this connector was given (nil if none), e.g. to open another
+/// session for the same favorite without asking again.
+@property (readonly, copy) NSString *password;
+@property (readonly, copy) NSString *sshPassword;
+
 + (NSArray *)defaultSocketDirectories;
 
 /// The first directory in `directories` containing `.s.PGSQL.<port>`, or nil.

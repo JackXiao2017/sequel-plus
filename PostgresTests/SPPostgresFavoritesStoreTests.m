@@ -187,6 +187,30 @@
 	XCTAssertEqualObjects([NSData dataWithContentsOfURL:self.fileURL], garbage);
 }
 
+- (void)testLastLoadErrorReportsAnUnreadableFile
+{
+	SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initWithFileURL:self.fileURL];
+
+	// Missing file: no error
+	XCTAssertEqual(store.favorites.count, 0u);
+	XCTAssertNil([store lastLoadError]);
+
+	// Corrupt file: the error names the file, which is left untouched
+	NSData *garbage = [@"this is not a plist" dataUsingEncoding:NSUTF8StringEncoding];
+	[garbage writeToURL:self.fileURL atomically:YES];
+	XCTAssertEqual(store.favorites.count, 0u);
+	NSError *error = [store lastLoadError];
+	XCTAssertNotNil(error);
+	XCTAssertTrue([error.localizedDescription containsString:self.fileURL.path], @"%@", error.localizedDescription);
+	XCTAssertEqualObjects([NSData dataWithContentsOfURL:self.fileURL], garbage);
+
+	// Valid file again: cleared
+	[[NSFileManager defaultManager] removeItemAtURL:self.fileURL error:nil];
+	XCTAssertTrue([store saveFavorite:[self fullFavorite] error:NULL]);
+	XCTAssertEqual(store.favorites.count, 1u);
+	XCTAssertNil([store lastLoadError]);
+}
+
 - (void)testNewerVersionFileIsRefusedAndLeftUntouched
 {
 	NSDictionary *root = @{@"version": @2, @"favorites": @[[[self fullFavorite] dictionaryRepresentation]]};

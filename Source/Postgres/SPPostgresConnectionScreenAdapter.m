@@ -12,6 +12,7 @@
 #import "SPAlertSheets.h"
 
 static const NSUInteger SPPostgresScreenDefaultPort = 5432;
+static NSString * const SPPostgresScreenMySQLDefaultPort = @"3306";
 
 @interface SPKeychain (SPPostgresKeychainAccess) <SPPostgresKeychainAccess>
 @end
@@ -59,6 +60,7 @@ static NSString *SPPGOrEmpty(NSString *s)
 - (void)_applyPortPlaceholders;
 - (void)_collectPortFieldsInView:(NSView *)view;
 - (NSError *)_connectionValidationError;
+- (void)_reportFavoritesLoadError;
 - (void)_connectionAttemptFinished:(SPPostgresConnector *)attemptConnector connection:(PGPostgresConnection *)connection error:(NSError *)error favorite:(SPPostgresFavorite *)favorite testOnly:(BOOL)testOnly;
 @end
 
@@ -81,7 +83,15 @@ static NSString *SPPGOrEmpty(NSString *s)
 	SPPostgresFavorite *loadedFavorite;
 	SPPostgresConnector *pendingConnector;
 
-	// YES while the host reloads the outline for a store change (see -loadFavoriteIntoForm:)
+	// Port fields whose value binding the adapter re-made (see -_applyPortPlaceholders); unbound by -invalidate
+	NSMutableArray *reboundPortFields;
+
+	// The description of the favorites file error last reported (see -_reportFavoritesLoadError)
+	NSString *reportedLoadError;
+
+	// YES during the adapter's own store writes (see -_favoritesDidChange:)
+	BOOL writingToStore;
+	// YES while the host reloads the outline for a store change made by this adapter (see -loadFavoriteIntoForm:)
 	BOOL handlingStoreChange;
 }
 
@@ -96,6 +106,7 @@ static NSString *SPPGOrEmpty(NSString *s)
 		engine = SPConnectionEngineMySQL;
 		portFields = [[NSMutableArray alloc] init];
 		originalPortPlaceholders = [[NSMutableArray alloc] init];
+		reboundPortFields = [[NSMutableArray alloc] init];
 		nodesByID = [[NSMutableDictionary alloc] init];
 
 		// An invisible root, so the section is a top-level row and its favorites are not
@@ -118,8 +129,14 @@ static NSString *SPPGOrEmpty(NSString *s)
 - (void)invalidate
 {
 	[[NSNotificationCenter defaultCenter] removeObserver:self];
+	[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(_reportFavoritesLoadError) object:nil];
 	[engineControl setTarget:nil];
 	host = nil;
+
+	// The port bindings this adapter made point at the host (the controller), which is going away. Only
+	// these: bindings the adapter never re-made are the host's own. None are restored.
+	for (NSTextField *field in reboundPortFields) [field unbind:NSValueBinding];
+	[reboundPortFields removeAllObjects];
 
 	// The completion still runs (Cancelled); with no pending connector it does nothing
 	SPPostgresConnector *connector = pendingConnector;
@@ -136,6 +153,8 @@ static NSString *SPPGOrEmpty(NSString *s)
 	[engineControl release];
 	[portFields release];
 	[originalPortPlaceholders release];
+	[reboundPortFields release];
+	[reportedLoadError release];
 	[rootNode release];
 	[sectionNode release];
 	[nodesByID release];
@@ -251,6 +270,7 @@ static NSString *SPPGOrEmpty(NSString *s)
 			[field unbind:NSValueBinding];
 			[field bind:NSValueBinding toObject:observed withKeyPath:keyPath options:options];
 			[observed release];
+			if (![reboundPortFields containsObject:field]) [reboundPortFields addObject:field];
 		}
 
 		[[field cell] setPlaceholderString:placeholder];
@@ -314,6 +334,12 @@ static NSString *SPPGOrEmpty(NSString *s)
 		}
 	}
 
+	// The previous engine's default port (or none) means "the default": clear it so the new engine's
+	// default applies (shown as the placeholder). Any other port was chosen and is kept.
+	NSString *previousDefault = (engine == SPConnectionEnginePostgreSQL) ? [NSString stringWithFormat:@"%lu", (unsigned long)SPPostgresScreenDefaultPort] : SPPostgresScreenMySQLDefaultPort;
+	NSString *port = [[host port] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	if (![port length] || [port isEqualToString:previousDefault]) [host setPort:nil];
+
 	[self setSelectedEngine:newEngine];
 }
 
@@ -342,6 +368,36 @@ static NSString *SPPGOrEmpty(NSString *s)
 
 	[[sectionNode mutableChildNodes] setArray:nodes];
 	[nodesByID setDictionary:newNodesByID];
+
+	// An unreadable favorites file is reported from a later run loop turn: the host may still be setting up
+	// its window (the adapter is made while the connection screen loads)
+	NSError *loadError = [store lastLoadError];
+	if (!loadError) {
+		[reportedLoadError release], reportedLoadError = nil;
+	}
+	else if (![[loadError localizedDescription] isEqualToString:reportedLoadError]) {
+		[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(_reportFavoritesLoadError) object:nil];
+		[self performSelector:@selector(_reportFavoritesLoadError) withObject:nil afterDelay:0];
+	}
+}
+
+/// Shows the favorites file error once per distinct error: as a sheet on the host's window, else in the log.
+- (void)_reportFavoritesLoadError
+{
+	NSError *loadError = [store lastLoadError];
+	NSString *description = [loadError localizedDescription];
+	if (!host || !loadError || [description isEqualToString:reportedLoadError]) return;
+
+	[reportedLoadError release];
+	reportedLoadError = [description copy];
+
+	NSWindow *window = [self _sheetWindow];
+	if (window) {
+		SPOnewayAlertSheet(NSLocalizedString(@"PostgreSQL favorites could not be read", @"PostgreSQL favorites file unreadable title"), window, description);
+	}
+	else {
+		NSLog(@"PostgreSQL favorites could not be read: %@", description);
+	}
 }
 
 - (void)_favoritesDidChange:(NSNotification *)notification
@@ -354,11 +410,31 @@ static NSString *SPPGOrEmpty(NSString *s)
 	}
 
 	if ([host respondsToSelector:@selector(postgresFavoritesDidChange)]) {
+		// Only this adapter's own writes keep the loaded form as it is (it already holds what was saved);
+		// a change made elsewhere (another connection tab, another store client) reloads it
 		BOOL wasHandling = handlingStoreChange;
-		handlingStoreChange = YES;
+		handlingStoreChange = writingToStore;
 		[host postgresFavoritesDidChange];
 		handlingStoreChange = wasHandling;
 	}
+}
+
+- (BOOL)_saveToStore:(SPPostgresFavorite *)favorite error:(NSError **)error
+{
+	BOOL wasWriting = writingToStore;
+	writingToStore = YES;
+	BOOL saved = [store saveFavorite:favorite error:error];
+	writingToStore = wasWriting;
+	return saved;
+}
+
+- (BOOL)_removeFromStoreFavoriteWithID:(NSString *)favoriteID error:(NSError **)error
+{
+	BOOL wasWriting = writingToStore;
+	writingToStore = YES;
+	BOOL removed = [store removeFavoriteWithID:favoriteID error:error];
+	writingToStore = wasWriting;
+	return removed;
 }
 
 - (id)sectionNode
@@ -603,7 +679,7 @@ static NSString *SPPGOrEmpty(NSString *s)
 	NSString *oldSSHPassword = previous ? [keychain getPasswordForName:[previous sshKeychainName] account:[previous sshKeychainAccount]] : nil;
 	[self _storePassword:thePassword sshPassword:theSSHPassword forFavorite:favorite previous:previous];
 
-	if (![store saveFavorite:favorite error:error]) {
+	if (![self _saveToStore:favorite error:error]) {
 		[self _rollBackPasswordsOf:favorite to:previous password:oldPassword sshPassword:oldSSHPassword];
 		return NO;
 	}
@@ -701,7 +777,7 @@ static NSString *SPPGOrEmpty(NSString *s)
 	[favorite setName:NSLocalizedString(@"New Favorite", @"new favorite name")];
 
 	NSError *error = nil;
-	if (![store saveFavorite:favorite error:&error]) {
+	if (![self _saveToStore:favorite error:&error]) {
 		if (error) [self _showError:error];
 		return nil;
 	}
@@ -726,7 +802,7 @@ static NSString *SPPGOrEmpty(NSString *s)
 
 	void (^remove)(void) = ^{
 		NSError *error = nil;
-		if (![store removeFavoriteWithID:[favorite favoriteID] error:&error]) {
+		if (![self _removeFromStoreFavoriteWithID:[favorite favoriteID] error:&error]) {
 			if (error) [self _showError:error];
 			return;
 		}
@@ -762,7 +838,7 @@ static NSString *SPPGOrEmpty(NSString *s)
 	[self _storePassword:thePassword sshPassword:theSSHPassword forFavorite:duplicate previous:nil];
 
 	NSError *error = nil;
-	if (![store saveFavorite:duplicate error:&error]) {
+	if (![self _saveToStore:duplicate error:&error]) {
 		[self _rollBackPasswordsOf:duplicate to:nil password:nil sshPassword:nil];
 		if (error) [self _showError:error];
 		return nil;
@@ -788,7 +864,7 @@ static NSString *SPPGOrEmpty(NSString *s)
 	[self _storePassword:thePassword sshPassword:theSSHPassword forFavorite:renamed previous:original];
 
 	NSError *error = nil;
-	if (![store saveFavorite:renamed error:&error]) {
+	if (![self _saveToStore:renamed error:&error]) {
 		[self _rollBackPasswordsOf:renamed to:original password:thePassword sshPassword:theSSHPassword];
 		if (error) [self _showError:error];
 		return;

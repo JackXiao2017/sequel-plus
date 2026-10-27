@@ -112,6 +112,12 @@
 - (BOOL)connect;
 - (void)disconnect;
 - (BOOL)isConnected;
+
+/**
+ * libpq's most recent error message for the underlying connection (PQerrorMessage), e.g. why the server
+ * closed it. nil when there is no underlying connection or no message. Use when not connecting.
+ */
+- (NSString *)libpqErrorMessage;
 - (BOOL)reset;
 
 - (NSUInteger)clientVersion;

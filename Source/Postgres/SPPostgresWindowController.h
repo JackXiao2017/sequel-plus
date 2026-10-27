@@ -46,6 +46,12 @@ __attribute__((visibility("default")))
  */
 - (void)switchToDatabase:(NSString *)database;
 
+/**
+ * Shows the window's alerts (catalog errors, a failed database switch). nil (the default) shows them as
+ * sheets on the window, once it is visible. Replaceable, e.g. by tests.
+ */
+@property (copy) void (^alertPresenter)(NSAlert *alert);
+
 @property (readonly) SPPostgresSidebarController *sidebar;
 @property (readonly) PGPostgresConnection *connection;
 

@@ -14,6 +14,11 @@
 
 static const NSUInteger SPPostgresWindowTestPort = 55418;
 
+// The "Refresh Databases" menu item's action (not in the public header)
+@interface SPPostgresWindowController (SPPostgresWindowTestsActions)
+- (void)refreshDatabases:(id)sender;
+@end
+
 @interface SPPostgresWindowTests : XCTestCase
 @property (strong) SPPostgresWindowController *controller;
 @property (strong) PGPostgresConnection *connection;
@@ -188,11 +193,21 @@ static const NSUInteger SPPostgresWindowTestPort = 55418;
 
 - (void)testConsoleLoggerForwardsQueries
 {
+	// The console reads these with -boolForKey:, so the volatile argument domain is enough: nothing is
+	// written to the app's saved preferences, and the teardown block restores the domain even on failure.
 	NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
-	id oldLogging = [prefs objectForKey:@"ConsoleEnableLogging"];
-	id oldInterface = [prefs objectForKey:@"ConsoleEnableInterfaceLogging"];
-	[prefs setBool:YES forKey:@"ConsoleEnableLogging"];
-	[prefs setBool:YES forKey:@"ConsoleEnableInterfaceLogging"];
+	NSDictionary *original = [prefs volatileDomainForName:NSArgumentDomain] ?: @{};
+	NSMutableDictionary *domain = [original mutableCopy];
+	domain[@"ConsoleEnableLogging"] = @YES;
+	domain[@"ConsoleEnableInterfaceLogging"] = @YES;
+	[prefs removeVolatileDomainForName:NSArgumentDomain];
+	[prefs setVolatileDomain:domain forName:NSArgumentDomain];
+	[self addTeardownBlock:^{
+		[prefs removeVolatileDomainForName:NSArgumentDomain];
+		[prefs setVolatileDomain:original forName:NSArgumentDomain];
+	}];
+	XCTAssertTrue([prefs boolForKey:@"ConsoleEnableLogging"]);
+	XCTAssertTrue([prefs boolForKey:@"ConsoleEnableInterfaceLogging"]);
 
 	XCTAssertNotNil([self.connection execute:@"SELECT 42"]);
 
@@ -206,9 +221,6 @@ static const NSUInteger SPPostgresWindowTestPort = 55418;
 	XCTAssertNotNil(found);
 	XCTAssertEqualObjects([found valueForKey:@"messageConnection"], @"pg18 test");
 	XCTAssertEqualObjects([found valueForKey:@"messageDatabase"], @"pgkit_test");
-
-	if (oldLogging) [prefs setObject:oldLogging forKey:@"ConsoleEnableLogging"]; else [prefs removeObjectForKey:@"ConsoleEnableLogging"];
-	if (oldInterface) [prefs setObject:oldInterface forKey:@"ConsoleEnableInterfaceLogging"]; else [prefs removeObjectForKey:@"ConsoleEnableInterfaceLogging"];
 }
 
 #pragma mark - Database switching and teardown
@@ -242,6 +254,129 @@ static const NSUInteger SPPostgresWindowTestPort = 55418;
 	[self.controller showWindow:nil];
 	[self.controller close];
 	XCTAssertTrue([self spinUntil:^BOOL{ return !self.connection.isConnected; } timeout:5]);
+}
+
+#pragma mark - Catalog errors
+
+- (NSPopUpButton *)databasePopup
+{
+	for (NSToolbarItem *item in self.controller.window.toolbar.items) {
+		if ([item.itemIdentifier isEqualToString:SPPostgresToolbarDatabase]) return (NSPopUpButton *)item.view;
+	}
+	return nil;
+}
+
+/// Collects what the window would show as sheets.
+- (NSMutableArray<NSAlert *> *)captureAlerts
+{
+	NSMutableArray<NSAlert *> *alerts = [NSMutableArray array];
+	self.controller.alertPresenter = ^(NSAlert *alert) { [alerts addObject:alert]; };
+	return alerts;
+}
+
+/// The connection goes away under the window (as after a server restart or an idle-killed tunnel):
+/// reloading reports the loss once per reload and keeps the lists that were shown.
+- (void)testCatalogFailuresAfterDisconnectAreReportedAndListsKept
+{
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	SPPostgresSidebarController *sidebar = self.controller.sidebar;
+	NSArray *tables = [sidebar itemTitlesInSection:@"TABLES"];
+	NSArray *views = [sidebar itemTitlesInSection:@"VIEWS"];
+	NSArray *extensions = [sidebar itemTitlesInSection:@"EXTENSIONS"];
+	NSArray *databases = [[self databasePopup] itemTitles];
+	XCTAssertTrue([tables containsObject:@"customers"]);
+	XCTAssertTrue([databases containsObject:@"pgkit_nopublic"]);
+	XCTAssertEqual(alerts.count, 0u);
+
+	[self.connection disconnect];
+
+	// Schema change: tables and views both fail, reported once
+	[sidebar reloadSchema:@"public"];
+	XCTAssertNotNil(sidebar.lastError);
+	XCTAssertEqual(alerts.count, 1u);
+	XCTAssertTrue([alerts.lastObject.messageText.lowercaseString containsString:@"lost"], @"%@", alerts.lastObject.messageText);
+	XCTAssertEqualObjects([sidebar itemTitlesInSection:@"TABLES"], tables, @"lists are kept");
+	XCTAssertEqualObjects([sidebar itemTitlesInSection:@"VIEWS"], views);
+	XCTAssertEqualObjects(sidebar.selectedSchema, @"public");
+
+	// Full sidebar reload (schemas, extensions, tables): once
+	[sidebar reloadWithCatalog:[sidebar valueForKey:@"catalog"]];
+	XCTAssertEqual(alerts.count, 2u);
+	XCTAssertEqualObjects([sidebar itemTitlesInSection:@"TABLES"], tables);
+	XCTAssertEqualObjects([sidebar itemTitlesInSection:@"EXTENSIONS"], extensions);
+
+	// Refresh Databases: reported, and the picker keeps its databases
+	[self.controller refreshDatabases:nil];
+	XCTAssertEqual(alerts.count, 3u);
+	XCTAssertTrue([alerts.lastObject.messageText.lowercaseString containsString:@"lost"], @"%@", alerts.lastObject.messageText);
+	XCTAssertEqualObjects([[self databasePopup] itemTitles], databases);
+	XCTAssertEqualObjects([[self databasePopup] titleOfSelectedItem], @"pgkit_test");
+}
+
+/// A backend killed on the server: the next catalog query fails, the connection is then not connected,
+/// and the server's reason is included.
+- (void)testServerTerminatedConnectionIsReportedAsLost
+{
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	NSUInteger pid = [self.connection serverProcessId];
+
+	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPPostgresWindowTestPort];
+	NSString *terminate = [NSString stringWithFormat:@"SELECT pg_terminate_backend(%lu)", (unsigned long)pid];
+	XCTAssertNotNil([admin execute:terminate]);
+	[admin disconnect];
+
+	[self.controller.sidebar reloadSchema:@"public"];
+	XCTAssertFalse(self.connection.isConnected);
+	XCTAssertEqual(alerts.count, 1u);
+	NSAlert *alert = alerts.firstObject;
+	XCTAssertTrue([alert.messageText.lowercaseString containsString:@"lost"], @"%@", alert.messageText);
+	XCTAssertTrue([alert.informativeText containsString:@"terminat"] || [alert.informativeText containsString:@"closed"],
+				  @"the server's reason is included: %@", alert.informativeText);
+	XCTAssertTrue([[self.controller.sidebar itemTitlesInSection:@"TABLES"] containsObject:@"customers"]);
+}
+
+/// Without a presenter the error is a sheet on the PostgreSQL window.
+- (void)testCatalogFailureShowsSheetOnWindow
+{
+	[self.controller showWindow:nil];
+	[self.connection disconnect];
+	[self.controller refreshDatabases:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return self.controller.window.attachedSheet != nil; } timeout:5]);
+}
+
+#pragma mark - Database switch passwords
+
+/// The switch connector gets the passwords the window's connector was given, so an SSH favorite
+/// isn't asked for its SSH password again.
+- (void)testDatabaseSwitchReusesPasswords
+{
+	SPPostgresConnector *connector = [[SPPostgresConnector alloc] initWithFavorite:self.favorite password:@"pgkit" sshPassword:@"ssh secret" parentWindow:nil];
+	XCTAssertEqualObjects(connector.password, @"pgkit");
+	XCTAssertEqualObjects(connector.sshPassword, @"ssh secret");
+
+	__block PGPostgresConnection *connection = nil;
+	__block BOOL done = NO;
+	[connector connectWithCompletion:^(PGPostgresConnection *theConnection, NSError *theError) { connection = theConnection; done = YES; }];
+	XCTAssertTrue([self spinUntil:^BOOL{ return done; } timeout:20]);
+	XCTAssertNotNil(connection);
+
+	SPPostgresWindowController *controller = [[SPPostgresWindowController alloc] initWithConnection:connection connector:connector favorite:self.favorite];
+	[self addTeardownBlock:^{ [controller close]; }];
+
+	[controller switchToDatabase:@"pgkit_nopublic"];
+	SPPostgresConnector *pending = [controller valueForKey:@"pendingConnector"];
+	XCTAssertNotNil(pending);
+	XCTAssertEqualObjects(pending.password, @"pgkit");
+	XCTAssertEqualObjects(pending.sshPassword, @"ssh secret");
+
+	XCTAssertTrue([self spinUntil:^BOOL{ return [[controller windowTitleString] hasSuffix:@"/pgkit_nopublic"]; } timeout:20]);
+
+	// ...and the next switch still has them
+	[controller switchToDatabase:@"pgkit_test"];
+	pending = [controller valueForKey:@"pendingConnector"];
+	XCTAssertEqualObjects(pending.password, @"pgkit");
+	XCTAssertEqualObjects(pending.sshPassword, @"ssh secret");
+	XCTAssertTrue([self spinUntil:^BOOL{ return [[controller windowTitleString] hasSuffix:@"/pgkit_test"]; } timeout:20]);
 }
 
 @end

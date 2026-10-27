@@ -114,6 +114,8 @@ static char SPPostgresConnectorProxyKey;
 }
 
 @synthesize tunnel;
+@synthesize password;
+@synthesize sshPassword;
 
 - (instancetype)initWithFavorite:(SPPostgresFavorite *)theFavorite password:(NSString *)thePassword sshPassword:(NSString *)theSSHPassword parentWindow:(NSWindow *)theParentWindow
 {
@@ -402,6 +404,17 @@ static char SPPostgresConnectorProxyKey;
 		[self _closeTunnel];
 		[self _closeConnectionWaiting:NO];
 	}
+	else if (tunnel && parentWindow) {
+		// The tunnel only needs the window for its password and host-key sheets, which come up while
+		// connecting. It doesn't retain it; detach it so it never points at a closed window.
+		[tunnel setParentWindow:nil];
+	}
+
+	// The parent window (normally the MySQL connection screen's) is only needed during the attempt.
+	// On failure the tunnel, if any, is already torn down (it keeps an unretained pointer for a moment;
+	// any sheet it showed is over by then).
+	[parentWindow release];
+	parentWindow = nil;
 
 	void (^theCompletion)(PGPostgresConnection *, NSError *) = completion;
 	completion = nil;

@@ -5,6 +5,7 @@ NSString * const SPPostgresFavoritesDidChangeNotification = @"SPPostgresFavorite
 
 @implementation SPPostgresFavoritesStore {
 	NSURL *fileURL;
+	NSError *lastLoadError;
 }
 
 - (instancetype)initWithFileURL:(NSURL *)url
@@ -36,6 +37,7 @@ NSString * const SPPostgresFavoritesDidChangeNotification = @"SPPostgresFavorite
 - (void)dealloc
 {
 	[fileURL release];
+	[lastLoadError release];
 	[super dealloc];
 }
 
@@ -75,10 +77,20 @@ NSString * const SPPostgresFavoritesDidChangeNotification = @"SPPostgresFavorite
 	return result;
 }
 
+- (NSError *)lastLoadError
+{
+	return [[lastLoadError retain] autorelease];
+}
+
 - (NSArray *)favorites
 {
+	NSError *error = nil;
+	NSArray *raw = [self loadRawFavoritesError:&error];
+	[lastLoadError release];
+	lastLoadError = raw ? nil : [error retain];
+
 	NSMutableArray *list = [NSMutableArray array];
-	for (NSDictionary *d in [self loadRawFavoritesError:NULL] ?: @[]) {
+	for (NSDictionary *d in raw ?: @[]) {
 		SPPostgresFavorite *f = [SPPostgresFavorite favoriteWithDictionary:d];
 		if (f) [list addObject:f];
 	}
