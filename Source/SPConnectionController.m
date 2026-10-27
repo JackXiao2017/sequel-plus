@@ -2633,7 +2633,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 	// PostgreSQL favorite rows: as MySQL favorite rows, with the colour from the Postgres favorite
 	if ([postgresAdapter favoriteForNode:item]) {
 		[cell setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
-		[favoriteCell setImage:[NSImage imageNamed:SPDatabaseImage]];
+		[favoriteCell setImage:[SPPostgresConnectionScreenAdapter favoriteImage]];
 		[favoriteCell setLabelColor:[postgresAdapter labelColorForNode:item]];
 		if (isEditingConnection && [outlineView rowForItem:item] == [outlineView selectedRow]) {
 			NSMutableAttributedString *editedCellString = [[cell attributedStringValue] mutableCopy];

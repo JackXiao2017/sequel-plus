@@ -342,6 +342,17 @@
 	[adapter invalidate];
 }
 
+/// Postgres favorite rows get their own icon: the MySQL favorites' database icon, the same size, tinted.
+- (void)testPostgresFavoriteIconDiffersFromMySQL
+{
+	NSImage *mysqlIcon = [NSImage imageNamed:@"database-small"];
+	NSImage *postgresIcon = [SPPostgresConnectionScreenAdapter favoriteImage];
+	XCTAssertNotNil(mysqlIcon);
+	XCTAssertNotNil(postgresIcon);
+	XCTAssertTrue(NSEqualSizes([postgresIcon size], [mysqlIcon size]));
+	XCTAssertNotEqualObjects([postgresIcon TIFFRepresentation], [mysqlIcon TIFFRepresentation]);
+}
+
 /// The SSH tab's "MySQL Host:" label reads "PostgreSQL Host:" for PostgreSQL, fully visible from the same
 /// right edge, and returns to the nib text and frame for MySQL.
 - (void)testHostLabelNamesTheEngine

@@ -133,6 +133,8 @@ __attribute__((visibility("default")))
 - (id)nodeForFavoriteID:(NSString *)favoriteID;
 - (NSColor *)labelColorForNode:(id)outlineItem;
 - (NSString *)toolTipForNode:(id)outlineItem;
+/// The icon for Postgres favorite rows: the MySQL favorites' database icon tinted PostgreSQL blue.
++ (NSImage *)favoriteImage;
 
 /// A MySQL item (or nothing) was selected: forget the loaded Postgres favorite; a saved MySQL favorite
 /// switches the engine back to MySQL.

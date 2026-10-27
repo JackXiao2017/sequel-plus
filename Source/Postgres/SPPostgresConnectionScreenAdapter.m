@@ -15,6 +15,7 @@ static const NSUInteger SPPostgresScreenDefaultPort = 5432;
 static NSString * const SPPostgresScreenMySQLDefaultPort = @"3306";
 static NSString * const SPPostgresScreenMySQLHostLabel = @"MySQL Host:"; // as in ConnectionView.xib's SSH tab
 static NSString * const SPPostgresScreenPostgreSQLHostLabel = @"PostgreSQL Host:";
+static NSString * const SPPostgresScreenDatabaseImage = @"database-small"; // the MySQL favorites' icon (SPConnectionController.m)
 
 @interface SPKeychain (SPPostgresKeychainAccess) <SPPostgresKeychainAccess>
 @end
@@ -515,6 +516,23 @@ static NSString *SPPGOrEmpty(NSString *s)
 	SPPostgresFavorite *favorite = [self favoriteForNode:outlineItem];
 	if (!favorite || [favorite colorIndex] < 0) return nil;
 	return [[SPFavoriteColorSupport sharedInstance] colorForIndex:[favorite colorIndex]];
+}
+
++ (NSImage *)favoriteImage
+{
+	static NSImage *image = nil;
+	if (!image) {
+		NSImage *base = [NSImage imageNamed:SPPostgresScreenDatabaseImage];
+		NSSize size = base ? [base size] : NSMakeSize(16, 16);
+		// Drawn on demand, so the tint follows the base image's 1x/2x representations
+		image = [[NSImage imageWithSize:size flipped:NO drawingHandler:^BOOL(NSRect rect) {
+			[base drawInRect:rect fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0];
+			[[NSColor colorWithCalibratedRed:0x33 / 255.0 green:0x67 / 255.0 blue:0x91 / 255.0 alpha:0.75] set];
+			NSRectFillUsingOperation(rect, NSCompositingOperationSourceAtop);
+			return YES;
+		}] retain];
+	}
+	return image;
 }
 
 - (NSString *)toolTipForNode:(id)outlineItem
