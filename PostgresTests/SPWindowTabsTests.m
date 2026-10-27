@@ -680,17 +680,19 @@
 
 	NSToolbar *postgresToolbar = [[self.controller window] toolbar];
 	XCTAssertEqual(postgresToolbar, [postgres toolbar]);
-	NSToolbarItem *history = nil;
+	// Structure isn't available on Postgres tabs: off, as validation leaves it once the window is shown
+	NSToolbarItem *structure = nil;
 	for (NSToolbarItem *item in [postgresToolbar items]) {
-		if ([[item itemIdentifier] isEqualToString:@"HistoryNavigationToolbarItemIdentifier"]) history = item;
+		if ([[item itemIdentifier] isEqualToString:@"SwitchToTableStructureToolbarItemIdentifier"]) structure = item;
 	}
-	XCTAssertNotNil(history);
-	XCTAssertFalse([history isEnabled]);
+	XCTAssertNotNil(structure);
+	XCTAssertFalse([postgres validateToolbarItem:structure]);
+	[structure setEnabled:NO];
 	NSArray *enabledBefore = [[postgresToolbar items] valueForKey:@"enabled"];
 
 	[[mysql connectionController] _enableWindowToolbarItemsAfterConnecting];
 
-	XCTAssertFalse([history isEnabled]);
+	XCTAssertFalse([structure isEnabled]);
 	XCTAssertEqualObjects([[postgresToolbar items] valueForKey:@"enabled"], enabledBefore);
 
 	// MySQL tab selected: its (window's) toolbar items are all enabled, as before

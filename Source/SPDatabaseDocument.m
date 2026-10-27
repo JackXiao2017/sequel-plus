@@ -86,6 +86,7 @@
 #import "SPHelpViewerClient.h"
 #import "SPHelpViewerController.h"
 #import "SPToolbarTransferItem.h"
+#import "SPMainToolbar.h"
 
 #import <SPMySQL/SPMySQL.h>
 
@@ -4077,11 +4078,11 @@ static BOOL isOSAtLeast10_14;
  */
 - (NSToolbarItem *)toolbar:(NSToolbar *)toolbar itemForItemIdentifier:(NSString *)itemIdentifier willBeInsertedIntoToolbar:(BOOL)willBeInsertedIntoToolbar
 {
-	NSToolbarItem *toolbarItem = [[[NSToolbarItem alloc] initWithItemIdentifier:itemIdentifier] autorelease];
+	// Labels, tooltips, images and item classes are shared with PostgreSQL tabs (SPMainToolbar.m)
+	NSToolbarItem *toolbarItem = SPCreateMainToolbarItem(itemIdentifier);
+	SEL action = NULL;
 
 	if ([itemIdentifier isEqualToString:SPMainToolbarDatabaseSelection]) {
-		[toolbarItem setLabel:NSLocalizedString(@"Select Database", @"toolbar item for selecting a db")];
-		[toolbarItem setPaletteLabel:[toolbarItem label]];
 		[toolbarItem setView:chooseDatabaseButton];
 		[toolbarItem setMinSize:NSMakeSize(200,26)];
 		[toolbarItem setMaxSize:NSMakeSize(200,32)];
@@ -4090,8 +4091,6 @@ static BOOL isOSAtLeast10_14;
 		[chooseDatabaseButton setEnabled:(_isConnected && !_isWorkingLevel)];
 
 	} else if ([itemIdentifier isEqualToString:SPMainToolbarHistoryNavigation]) {
-		[toolbarItem setLabel:NSLocalizedString(@"Table History", @"toolbar item for navigation history")];
-		[toolbarItem setPaletteLabel:[toolbarItem label]];
 		// At some point after 10.9 the sizing of NSSegmentedControl changed, resulting in clipping in newer OS X versions.
 		// We can't just adjust the XIB, because then it would be wrong for older versions (possibly resulting in drawing artifacts),
 		// so we have the OS determine the proper size at runtime.
@@ -4099,108 +4098,30 @@ static BOOL isOSAtLeast10_14;
 		[toolbarItem setView:historyControl];
 
 	} else if ([itemIdentifier isEqualToString:SPMainToolbarShowConsole]) {
-		[toolbarItem setPaletteLabel:NSLocalizedString(@"Show Console", @"show console")];
-		[toolbarItem setToolTip:NSLocalizedString(@"Show the console which shows all MySQL commands performed by Sequel Pro", @"tooltip for toolbar item for show console")];
-
-		[toolbarItem setLabel:NSLocalizedString(@"Console", @"Console")];
-		[toolbarItem setImage:[NSImage imageNamed:@"hideconsole"]];
-
-		//set up the target action
-		[toolbarItem setTarget:self];
-		[toolbarItem setAction:@selector(showConsole:)];
-
+		action = @selector(showConsole:);
 	} else if ([itemIdentifier isEqualToString:SPMainToolbarClearConsole]) {
-		//set the text label to be displayed in the toolbar and customization palette 
-		[toolbarItem setLabel:NSLocalizedString(@"Clear Console", @"toolbar item for clear console")];
-		[toolbarItem setPaletteLabel:NSLocalizedString(@"Clear Console", @"toolbar item for clear console")];
-		//set up tooltip and image
-		[toolbarItem setToolTip:NSLocalizedString(@"Clear the console which shows all MySQL commands performed by Sequel Pro", @"tooltip for toolbar item for clear console")];
-		[toolbarItem setImage:[NSImage imageNamed:@"clearconsole"]];
-		//set up the target action
-		[toolbarItem setTarget:self];
-		[toolbarItem setAction:@selector(clearConsole:)];
-
+		action = @selector(clearConsole:);
 	} else if ([itemIdentifier isEqualToString:SPMainToolbarTableStructure]) {
-		[toolbarItem setLabel:NSLocalizedString(@"Structure", @"toolbar item label for switching to the Table Structure tab")];
-		[toolbarItem setPaletteLabel:NSLocalizedString(@"Edit Table Structure", @"toolbar item label for switching to the Table Structure tab")];
-		//set up tooltip and image
-		[toolbarItem setToolTip:NSLocalizedString(@"Switch to the Table Structure tab", @"tooltip for toolbar item for switching to the Table Structure tab")];
-		[toolbarItem setImage:[NSImage imageNamed:@"toolbar-switch-to-structure"]];
-		//set up the target action
-		[toolbarItem setTarget:self];
-		[toolbarItem setAction:@selector(viewStructure:)];
-
+		action = @selector(viewStructure:);
 	} else if ([itemIdentifier isEqualToString:SPMainToolbarTableContent]) {
-		[toolbarItem setLabel:NSLocalizedString(@"Content", @"toolbar item label for switching to the Table Content tab")];
-		[toolbarItem setPaletteLabel:NSLocalizedString(@"Browse & Edit Table Content", @"toolbar item label for switching to the Table Content tab")];
-		//set up tooltip and image
-		[toolbarItem setToolTip:NSLocalizedString(@"Switch to the Table Content tab", @"tooltip for toolbar item for switching to the Table Content tab")];
-		[toolbarItem setImage:[NSImage imageNamed:@"toolbar-switch-to-browse"]];
-		//set up the target action
-		[toolbarItem setTarget:self];
-		[toolbarItem setAction:@selector(viewContent:)];
-
+		action = @selector(viewContent:);
 	} else if ([itemIdentifier isEqualToString:SPMainToolbarCustomQuery]) {
-		[toolbarItem setLabel:NSLocalizedString(@"Query", @"toolbar item label for switching to the Run Query tab")];
-		[toolbarItem setPaletteLabel:NSLocalizedString(@"Run Custom Query", @"toolbar item label for switching to the Run Query tab")];
-		//set up tooltip and image
-		[toolbarItem setToolTip:NSLocalizedString(@"Switch to the Run Query tab", @"tooltip for toolbar item for switching to the Run Query tab")];
-		[toolbarItem setImage:[NSImage imageNamed:@"toolbar-switch-to-sql"]];
-		//set up the target action
-		[toolbarItem setTarget:self];
-		[toolbarItem setAction:@selector(viewQuery:)];
-
+		action = @selector(viewQuery:);
 	} else if ([itemIdentifier isEqualToString:SPMainToolbarTableInfo]) {
-		[toolbarItem setLabel:NSLocalizedString(@"Table Info", @"toolbar item label for switching to the Table Info tab")];
-		[toolbarItem setPaletteLabel:NSLocalizedString(@"Table Info", @"toolbar item label for switching to the Table Info tab")];
-		//set up tooltip and image
-		[toolbarItem setToolTip:NSLocalizedString(@"Switch to the Table Info tab", @"tooltip for toolbar item for switching to the Table Info tab")];
-		[toolbarItem setImage:[NSImage imageNamed:@"toolbar-switch-to-table-info"]];
-		//set up the target action
-		[toolbarItem setTarget:self];
-		[toolbarItem setAction:@selector(viewStatus:)];
-
+		action = @selector(viewStatus:);
 	} else if ([itemIdentifier isEqualToString:SPMainToolbarTableRelations]) {
-		[toolbarItem setLabel:NSLocalizedString(@"Relations", @"toolbar item label for switching to the Table Relations tab")];
-		[toolbarItem setPaletteLabel:NSLocalizedString(@"Table Relations", @"toolbar item label for switching to the Table Relations tab")];
-		//set up tooltip and image
-		[toolbarItem setToolTip:NSLocalizedString(@"Switch to the Table Relations tab", @"tooltip for toolbar item for switching to the Table Relations tab")];
-		[toolbarItem setImage:[NSImage imageNamed:@"toolbar-switch-to-table-relations"]];
-		//set up the target action
-		[toolbarItem setTarget:self];
-		[toolbarItem setAction:@selector(viewRelations:)];
-
+		action = @selector(viewRelations:);
 	} else if ([itemIdentifier isEqualToString:SPMainToolbarTableTriggers]) {
-		[toolbarItem setLabel:NSLocalizedString(@"Triggers", @"toolbar item label for switching to the Table Triggers tab")];
-		[toolbarItem setPaletteLabel:NSLocalizedString(@"Table Triggers", @"toolbar item label for switching to the Table Triggers tab")];
-		//set up tooltip and image
-		[toolbarItem setToolTip:NSLocalizedString(@"Switch to the Table Triggers tab", @"tooltip for toolbar item for switching to the Table Triggers tab")];
-		[toolbarItem setImage:[NSImage imageNamed:@"toolbar-switch-to-table-triggers"]];
-		//set up the target action
-		[toolbarItem setTarget:self];
-		[toolbarItem setAction:@selector(viewTriggers:)];
-		
+		action = @selector(viewTriggers:);
 	} else if ([itemIdentifier isEqualToString:SPMainToolbarUserManager]) {
-		[toolbarItem setLabel:NSLocalizedString(@"Users", @"toolbar item label for switching to the User Manager tab")];
-		[toolbarItem setPaletteLabel:NSLocalizedString(@"Users", @"toolbar item label for switching to the User Manager tab")];
-		//set up tooltip and image
-		[toolbarItem setToolTip:NSLocalizedString(@"Switch to the User Manager tab", @"tooltip for toolbar item for switching to the User Manager tab")];
-		[toolbarItem setImage:[NSImage imageNamed:NSImageNameEveryone]];
-		//set up the target action
-		[toolbarItem setTarget:self];
-		[toolbarItem setAction:@selector(showUserManager:)];
-
-	} else if ([itemIdentifier isEqualToString:SPMainToolbarTransfer]) {
-		// PostgreSQL-only (shared toolbar layout): always disabled on MySQL tabs, also after a connect enables every item
-		toolbarItem = [[[SPDisabledToolbarItem alloc] initWithItemIdentifier:itemIdentifier] autorelease];
-		SPConfigureTransferToolbarItem(toolbarItem);
-
-	} else {
-		//itemIdentifier refered to a toolbar item that is not provided or supported by us or cocoa
-		toolbarItem = nil;
+		action = @selector(showUserManager:);
 	}
+	// SPMainToolbarTransfer is PostgreSQL-only: always disabled on MySQL tabs (an SPDisabledToolbarItem, no action)
 
-	if ([toolbarItem image]) [toolbarItem setImage:SPCompactToolbarImage([toolbarItem image])];
+	if (action) {
+		[toolbarItem setTarget:self];
+		[toolbarItem setAction:action];
+	}
 
 	return toolbarItem;
 }
@@ -4229,24 +4150,7 @@ static BOOL isOSAtLeast10_14;
  */
 - (NSArray *)toolbarAllowedItemIdentifiers:(NSToolbar*)toolbar
 {
-	return @[
-		SPMainToolbarDatabaseSelection,
-		SPMainToolbarHistoryNavigation,
-		SPMainToolbarShowConsole,
-		SPMainToolbarClearConsole,
-		SPMainToolbarTableStructure,
-		SPMainToolbarTableContent,
-		SPMainToolbarCustomQuery,
-		SPMainToolbarTableInfo,
-		SPMainToolbarTableRelations,
-		SPMainToolbarTableTriggers,
-		SPMainToolbarUserManager,
-		SPMainToolbarTransfer,
-		NSToolbarCustomizeToolbarItemIdentifier,
-		NSToolbarFlexibleSpaceItemIdentifier,
-		NSToolbarSpaceItemIdentifier,
-		NSToolbarSeparatorItemIdentifier
-	];
+	return SPMainToolbarAllowedItemIdentifiers();
 }
 
 /**
@@ -4254,20 +4158,7 @@ static BOOL isOSAtLeast10_14;
  */
 - (NSArray *)toolbarDefaultItemIdentifiers:(NSToolbar*)toolbar
 {
-	return @[
-		SPMainToolbarDatabaseSelection,
-		SPMainToolbarTableStructure,
-		SPMainToolbarTableContent,
-		SPMainToolbarTableRelations,
-		SPMainToolbarTableTriggers,
-		SPMainToolbarTableInfo,
-		SPMainToolbarCustomQuery,
-		NSToolbarFlexibleSpaceItemIdentifier,
-		SPMainToolbarHistoryNavigation,
-		SPMainToolbarUserManager,
-		SPMainToolbarTransfer,
-		SPMainToolbarShowConsole
-	];
+	return SPMainToolbarDefaultItemIdentifiers();
 }
 
 /**
@@ -4275,15 +4166,7 @@ static BOOL isOSAtLeast10_14;
  */
 - (NSArray *)toolbarSelectableItemIdentifiers:(NSToolbar *)toolbar
 {
-	return @[
-		SPMainToolbarTableStructure,
-		SPMainToolbarTableContent,
-		SPMainToolbarCustomQuery,
-		SPMainToolbarTableInfo,
-		SPMainToolbarTableRelations,
-		SPMainToolbarTableTriggers
-	];
-
+	return SPMainToolbarSelectableItemIdentifiers();
 }
 
 /**

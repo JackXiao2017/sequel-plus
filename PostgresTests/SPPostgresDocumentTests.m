@@ -146,8 +146,10 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	NSView *view = [self.document databaseView];
 	XCTAssertTrue([view isKindOfClass:[NSSplitView class]], @"%@", view);
 	XCTAssertEqual([self.document.parentTabViewItem view], view);
-	// The app saves the divider under "PGViewSplitter"; in tests the name is recorded, not set (SPTestPrefsGuard)
-	XCTAssertEqualObjects([(NSSplitView *)view sp_requestedAutosaveName], @"PGViewSplitter");
+	// The app saves the divider under MySQL's "DBViewSplitter" (one left pane width for both engines);
+	// in tests the name is recorded, not set (SPTestPrefsGuard)
+	XCTAssertEqualObjects([(NSSplitView *)view sp_requestedAutosaveName], @"DBViewSplitter");
+	XCTAssertNil([(NSSplitView *)view autosaveName]);
 	XCTAssertNil([(NSSplitView *)view autosaveName]);
 	XCTAssertEqual([[view subviews] count], 2u);
 	XCTAssertEqual([[view subviews] firstObject], [self.document.sidebar view]);
@@ -332,6 +334,10 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	for (NSToolbarItem *item in toolbar.items) {
 		if ([disabled containsObject:item.itemIdentifier]) {
 			BOOL enabled = item.view ? [(NSControl *)item.view isEnabled] && item.isEnabled : [self.document validateToolbarItem:item];
+			if ([item.view isKindOfClass:[NSSegmentedControl class]]) {
+				NSSegmentedControl *control = (NSSegmentedControl *)item.view;
+				enabled = enabled && ([control isEnabledForSegment:0] || [control isEnabledForSegment:1]);
+			}
 			XCTAssertFalse(enabled, @"%@ should be disabled", item.itemIdentifier);
 		}
 	}

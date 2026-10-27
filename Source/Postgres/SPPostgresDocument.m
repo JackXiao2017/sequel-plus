@@ -11,14 +11,18 @@
 #import "SPFavoriteColorSupport.h"
 #import "NSWindow+SPCompactChrome.h"
 #import "SPToolbarTransferItem.h"
+#import "SPMainToolbar.h"
 #import "SPConstants.h"
 #import <PostgresKit/PostgresKit.h>
 
-static NSString * const SPPostgresSplitterName = @"PGViewSplitter";
+// MySQL's left pane name (DBView.xib): one left pane width for both engines, so the database pickers match
+static NSString * const SPPostgresSplitterName = @"DBViewSplitter";
 // Shared with MySQL tabs, and so is the saved layout (see -[SPDatabaseDocument setupToolbar])
 static NSString * const SPPostgresDocumentToolbarIdentifier = @"TableWindowToolbar";
 
-static const CGFloat SPPostgresSidebarDefaultWidth = 250;
+// The MySQL split view's size in DBView.xib, so both panes start (and grow with the window) alike
+static const CGFloat SPPostgresSidebarDefaultWidth = 214;
+static const NSSize SPPostgresSplitViewSize = {943, 549};
 
 @interface SPPostgresDocument () <SPPostgresSidebarControllerDelegate>
 
@@ -174,7 +178,7 @@ static const CGFloat SPPostgresSidebarDefaultWidth = 250;
 /// Left panel | content, as MySQL's DBViewSplitter. The window's tab bar is used; the tab has none of its own.
 - (void)_buildContent
 {
-	NSRect splitFrame = NSMakeRect(0, 0, 948, 530);
+	NSRect splitFrame = NSMakeRect(0, 0, SPPostgresSplitViewSize.width, SPPostgresSplitViewSize.height);
 	splitView = [[SPSplitView alloc] initWithFrame:splitFrame];
 	[splitView setVertical:YES];
 	[splitView setDividerStyle:NSSplitViewDividerStyleThin];
@@ -191,7 +195,8 @@ static const CGFloat SPPostgresSidebarDefaultWidth = 250;
 	[mainView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 	[splitView addSubview:mainView];
 
-	[splitView setMinSize:120 ofSubviewAtIndex:0];
+	// Constrained, and resized with the window, as MySQL's left pane (see -[SPDatabaseDocument splitView:constrain...])
+	[splitView setCollapsibleSubviewIndex:0];
 	[splitView setDelegate:self];
 	[splitView adjustSubviews];
 	[splitView setAutosaveName:SPPostgresSplitterName];
@@ -199,28 +204,15 @@ static const CGFloat SPPostgresSidebarDefaultWidth = 250;
 
 - (void)_buildToolbar
 {
-	databasePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 200, 26) pullsDown:NO];
-	[databasePopup setBezelStyle:NSBezelStyleTexturedRounded];
-	[databasePopup setFont:[NSFont titleBarFontOfSize:12]];
-	[[databasePopup cell] setLineBreakMode:NSLineBreakByTruncatingTail];
+	// As MySQL's picker and history control (DBView.xib), see SPMainToolbar.m
+	databasePopup = [SPCreateDatabaseToolbarPopUpButton() retain];
 	[databasePopup setToolTip:NSLocalizedString(@"Select a database to view", @"PostgreSQL window: database picker tooltip")];
 	[databasePopup setTarget:self];
 	[databasePopup setAction:@selector(chooseDatabase:)];
 	[self _reloadDatabasePopup];
 
-	// Same control as MySQL's history navigation (DBView.xib); stage 1 has no history yet
-	historyControl = [[NSSegmentedControl alloc] initWithFrame:NSMakeRect(0, 0, 57, 25)];
-	[historyControl setSegmentCount:2];
-	[historyControl setSegmentStyle:NSSegmentStyleTexturedSquare];
-	[historyControl setTrackingMode:NSSegmentSwitchTrackingMomentary];
-	[historyControl setImage:[NSImage imageNamed:NSImageNameGoLeftTemplate] forSegment:0];
-	[historyControl setImage:[NSImage imageNamed:NSImageNameGoRightTemplate] forSegment:1];
-	[historyControl setWidth:27 forSegment:0];
-	[historyControl setWidth:27 forSegment:1];
-	[historyControl setToolTip:NSLocalizedString(@"Back", @"history back") forSegment:0];
-	[historyControl setToolTip:NSLocalizedString(@"Forward", @"history forward") forSegment:1];
-	[historyControl setEnabled:NO];
-	[historyControl sizeToFit];
+	// Stage 1 has no history yet: both segments stay disabled, as on a MySQL connection screen
+	historyControl = [SPCreateHistoryToolbarControl() retain];
 
 	// Installed in the window while this tab is active (see -didBecomeActiveTabInWindow). Set up as
 	// MySQL's toolbar, so the user's saved layout and customizing it apply to both engines.
@@ -613,10 +605,16 @@ static const CGFloat SPPostgresSidebarDefaultWidth = 250;
 #pragma clang diagnostic pop
 }
 
+// The left pane width is shared with MySQL tabs (same autosave name): constrained as theirs
+
+- (CGFloat)splitView:(NSSplitView *)theSplitView constrainMinCoordinate:(CGFloat)proposedMinimumPosition ofSubviewAt:(NSInteger)dividerIndex
+{
+	return (dividerIndex == 0 && proposedMinimumPosition < 40) ? 40 : proposedMinimumPosition;
+}
+
 - (CGFloat)splitView:(NSSplitView *)theSplitView constrainMaxCoordinate:(CGFloat)proposedMaximumPosition ofSubviewAt:(NSInteger)dividerIndex
 {
-	// Keep a usable content pane
-	return (dividerIndex == 0) ? MAX(proposedMaximumPosition - 400, 120) : proposedMaximumPosition;
+	return (dividerIndex == 0) ? proposedMaximumPosition - 505 : proposedMaximumPosition;
 }
 
 #pragma mark - Menus
@@ -647,52 +645,24 @@ static const CGFloat SPPostgresSidebarDefaultWidth = 250;
 #pragma mark - Toolbar
 
 /**
- * The same identifiers as the MySQL document's toolbar (-[SPDatabaseDocument toolbarAllowedItemIdentifiers:]):
- * both use the toolbar identifier TableWindowToolbar and share its saved layout, and toolbars with one
- * identifier sync their items, so this tab must serve every item a MySQL tab can show.
+ * The same identifiers as the MySQL document's toolbar (SPMainToolbar.m): both use the toolbar
+ * identifier TableWindowToolbar and share its saved layout, and toolbars with one identifier sync
+ * their items, so this tab must serve every item a MySQL tab can show.
  */
 - (NSArray *)toolbarAllowedItemIdentifiers:(NSToolbar *)theToolbar
 {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-	return @[
-		SPMainToolbarDatabaseSelection,
-		SPMainToolbarHistoryNavigation,
-		SPMainToolbarShowConsole,
-		SPMainToolbarClearConsole,
-		SPMainToolbarTableStructure,
-		SPMainToolbarTableContent,
-		SPMainToolbarCustomQuery,
-		SPMainToolbarTableInfo,
-		SPMainToolbarTableRelations,
-		SPMainToolbarTableTriggers,
-		SPMainToolbarUserManager,
-		SPMainToolbarTransfer,
-		NSToolbarCustomizeToolbarItemIdentifier,
-		NSToolbarFlexibleSpaceItemIdentifier,
-		NSToolbarSpaceItemIdentifier,
-		NSToolbarSeparatorItemIdentifier
-	];
-#pragma clang diagnostic pop
+	return SPMainToolbarAllowedItemIdentifiers();
 }
 
-/// As -[SPDatabaseDocument toolbarDefaultItemIdentifiers:].
 - (NSArray *)toolbarDefaultItemIdentifiers:(NSToolbar *)theToolbar
 {
-	return @[
-		SPMainToolbarDatabaseSelection,
-		SPMainToolbarTableStructure,
-		SPMainToolbarTableContent,
-		SPMainToolbarTableRelations,
-		SPMainToolbarTableTriggers,
-		SPMainToolbarTableInfo,
-		SPMainToolbarCustomQuery,
-		NSToolbarFlexibleSpaceItemIdentifier,
-		SPMainToolbarHistoryNavigation,
-		SPMainToolbarUserManager,
-		SPMainToolbarTransfer,
-		SPMainToolbarShowConsole
-	];
+	return SPMainToolbarDefaultItemIdentifiers();
+}
+
+/// As MySQL's: these items are drawn without a button bezel (and are a few points taller)
+- (NSArray *)toolbarSelectableItemIdentifiers:(NSToolbar *)theToolbar
+{
+	return SPMainToolbarSelectableItemIdentifiers();
 }
 
 /// Only the database picker and the console work on Postgres tabs so far
@@ -703,15 +673,15 @@ static const CGFloat SPPostgresSidebarDefaultWidth = 250;
 
 - (NSToolbarItem *)toolbar:(NSToolbar *)theToolbar itemForItemIdentifier:(NSString *)identifier willBeInsertedIntoToolbar:(BOOL)flag
 {
-	NSToolbarItem *item = [[[NSToolbarItem alloc] initWithItemIdentifier:identifier] autorelease];
-	NSString *imageName = nil;
-	NSImage *image = nil;
-	SEL action = @selector(unavailableInThisVersion:);
+	// The items MySQL tabs show (SPMainToolbar.m): same images, labels, sizes and item kinds
+	NSToolbarItem *item = SPCreateMainToolbarItem(identifier);
+	if (!item) return nil;
 
-	// Labels, palette labels, tooltips and images as MySQL's (-[SPDatabaseDocument toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:])
+	// The items of features Postgres tabs don't have yet keep an action (as MySQL's do, which is what
+	// sizes them), validated off; Transfer has none, as on MySQL tabs
+	SEL action = [identifier isEqualToString:SPMainToolbarTransfer] ? NULL : @selector(unavailableInThisVersion:);
+
 	if ([identifier isEqualToString:SPMainToolbarDatabaseSelection]) {
-		[item setLabel:NSLocalizedString(@"Select Database", @"toolbar item for selecting a db")];
-		[item setPaletteLabel:[item label]];
 		[item setView:databasePopup];
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -726,68 +696,17 @@ static const CGFloat SPPostgresSidebarDefaultWidth = 250;
 		action = NULL;
 	}
 	else if ([identifier isEqualToString:SPMainToolbarHistoryNavigation]) {
-		[item setLabel:NSLocalizedString(@"Table History", @"toolbar item for navigation history")];
-		[item setPaletteLabel:[item label]];
+		[historyControl sizeToFit];
 		[item setView:historyControl];
-		[item setEnabled:NO];
 		action = NULL;
 	}
 	else if ([identifier isEqualToString:SPMainToolbarShowConsole]) {
-		[item setLabel:NSLocalizedString(@"Console", @"Console")];
-		[item setPaletteLabel:NSLocalizedString(@"Show Console", @"show console")];
 		[item setToolTip:NSLocalizedString(@"Show the console which shows all PostgreSQL commands performed by Sequel Pro", @"PostgreSQL toolbar: console tooltip")];
-		imageName = @"hideconsole";
 		action = @selector(toggleConsole:);
 	}
 	else if ([identifier isEqualToString:SPMainToolbarClearConsole]) {
-		[item setLabel:NSLocalizedString(@"Clear Console", @"toolbar item for clear console")];
-		[item setPaletteLabel:[item label]];
-		imageName = @"clearconsole";
+		[item setToolTip:NSLocalizedString(@"Clear the console which shows all PostgreSQL commands performed by Sequel Pro", @"PostgreSQL toolbar: clear console tooltip")];
 	}
-	else if ([identifier isEqualToString:SPMainToolbarTableStructure]) {
-		[item setLabel:NSLocalizedString(@"Structure", @"toolbar item label for switching to the Table Structure tab")];
-		[item setPaletteLabel:NSLocalizedString(@"Edit Table Structure", @"toolbar item label for switching to the Table Structure tab")];
-		imageName = @"toolbar-switch-to-structure";
-	}
-	else if ([identifier isEqualToString:SPMainToolbarTableContent]) {
-		[item setLabel:NSLocalizedString(@"Content", @"toolbar item label for switching to the Table Content tab")];
-		[item setPaletteLabel:NSLocalizedString(@"Browse & Edit Table Content", @"toolbar item label for switching to the Table Content tab")];
-		imageName = @"toolbar-switch-to-browse";
-	}
-	else if ([identifier isEqualToString:SPMainToolbarCustomQuery]) {
-		[item setLabel:NSLocalizedString(@"Query", @"toolbar item label for switching to the Run Query tab")];
-		[item setPaletteLabel:NSLocalizedString(@"Run Custom Query", @"toolbar item label for switching to the Run Query tab")];
-		imageName = @"toolbar-switch-to-sql";
-	}
-	else if ([identifier isEqualToString:SPMainToolbarTableInfo]) {
-		[item setLabel:NSLocalizedString(@"Table Info", @"toolbar item label for switching to the Table Info tab")];
-		[item setPaletteLabel:[item label]];
-		imageName = @"toolbar-switch-to-table-info";
-	}
-	else if ([identifier isEqualToString:SPMainToolbarTableRelations]) {
-		[item setLabel:NSLocalizedString(@"Relations", @"toolbar item label for switching to the Table Relations tab")];
-		[item setPaletteLabel:NSLocalizedString(@"Table Relations", @"toolbar item label for switching to the Table Relations tab")];
-		imageName = @"toolbar-switch-to-table-relations";
-	}
-	else if ([identifier isEqualToString:SPMainToolbarTableTriggers]) {
-		[item setLabel:NSLocalizedString(@"Triggers", @"toolbar item label for switching to the Table Triggers tab")];
-		[item setPaletteLabel:NSLocalizedString(@"Table Triggers", @"toolbar item label for switching to the Table Triggers tab")];
-		imageName = @"toolbar-switch-to-table-triggers";
-	}
-	else if ([identifier isEqualToString:SPMainToolbarUserManager]) {
-		[item setLabel:NSLocalizedString(@"Users", @"toolbar item label for switching to the User Manager tab")];
-		[item setPaletteLabel:[item label]];
-		image = [NSImage imageNamed:NSImageNameEveryone];
-	}
-	else if ([identifier isEqualToString:SPMainToolbarTransfer]) {
-		SPConfigureTransferToolbarItem(item);
-	}
-	else {
-		return nil;
-	}
-
-	if (imageName) image = [NSImage imageNamed:imageName];
-	if (image) [item setImage:SPCompactToolbarImage(image)];
 
 	if (action) {
 		[item setTarget:self];
