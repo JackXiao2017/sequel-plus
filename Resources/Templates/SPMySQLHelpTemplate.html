@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+	<title>{{title}}</title>
+	<style type="text/css" media="all">
+		body {
+			margin: 2px;
+			padding: 10px;
+			font-family: 'Helvetica', 'Helvetica Neue', sans-serif;
+			font-size:9pt;
+		}
+		
+		.internallink {
+			color: #6A81DD;
+			text-decoration: none;
+		}
+
+		.internallink:hover {
+			text-decoration: underline;
+		}
+		
+		.description {
+			font-family: Monaco, monospace;
+		}
+		
+		.example {
+			font-family: Courier, monospace;
+		}
+		
+		.header {
+			padding-bottom: 5px;
+		}
+
+		.nothing {
+			color: gray;
+		}
+
+		.error {
+			color: #ff415a;
+			font-family: monospace;
+		}
+
+		body.dark {
+			background-color: rgb(42, 38, 38);
+			color: white;
+		}
+
+		.dark .internallink {
+			color: rgb(65, 156, 255);
+		}
+
+		.dark a {
+			color: rgb(65, 156, 255);
+		}
+	</style>
+	<script type="text/javascript">
+		window.onThemeChange = function(theme) {
+		    document.body.className = (theme === 'dark') ? 'dark' : '';
+		};
+	</script>
+</head>
+<body class="{{bodyClass}}">
+{{body}}
+</body>
+</html>
