@@ -49,4 +49,8 @@ CREATE TABLE content_test.generated_cols (
 	doubled int GENERATED ALWAYS AS (a * 2) STORED
 )
 -- @@
+CREATE TABLE content_test.fixed_width (k char(3) PRIMARY KEY, c char(3), b bit(3))
+-- @@
+INSERT INTO content_test.fixed_width (k, c, b) VALUES ('a', 'abc', B'101'), ('abc', 'xyz', B'010')
+-- @@
 CREATE VIEW content_test.items_view AS SELECT id, name FROM content_test.items

@@ -21,9 +21,10 @@ __attribute__((visibility("default")))
 @property (readonly, copy) NSString *name;
 /// format_type(atttypid, atttypmod), e.g. @"numeric(20,6)" or @"text[]".
 @property (readonly, copy) NSString *typeName;
-/// format_type(atttypid, NULL): the type without its modifier, used to cast parameters. Casting to it (rather
-/// than to typeName) leaves the modifier to the assignment, which errors instead of silently truncating
-/// (an explicit ::varchar(3) cast truncates).
+/// format_type(atttypid, -1): the type without its modifier, used to cast parameters (e.g. @"bpchar", @"\"bit\"",
+/// @"character varying"). Casting to it (rather than to typeName) leaves the modifier to the assignment, which
+/// errors instead of silently truncating (an explicit ::varchar(3) cast truncates). Not format_type(…, NULL):
+/// that gives @"character" / @"bit", which the parser reads as character(1) / bit(1).
 @property (readonly, copy) NSString *castTypeName;
 @property (readonly) BOOL nullable;
 /// The column default as SQL text, or nil if there is none (generated columns have none).
@@ -41,18 +42,18 @@ __attribute__((visibility("default")))
 @interface SPPostgresFilter : NSObject
 {
 	NSString *_column;
-	NSString *_operator;
+	NSString *_comparison;
 	NSString *_value;
 }
 
-+ (instancetype)filterWithColumn:(NSString *)column operator:(NSString *)op value:(NSString *)value;
++ (instancetype)filterWithColumn:(NSString *)column comparison:(NSString *)comparison value:(NSString *)value;
 
 @property (readwrite, copy) NSString *column;
 /// One of @"=", @"≠" (sent as <>), @">", @"<", @">=", @"<=", @"LIKE", @"NOT LIKE", @"ILIKE",
 /// @"IS NULL", @"IS NOT NULL", @"IN".
-@property (readwrite, copy) NSString *operator;
+@property (readwrite, copy) NSString *comparison;
 /// The value, sent as a parameter (ignored for IS NULL / IS NOT NULL). For IN, a comma-separated list whose
-/// items (trimmed of surrounding whitespace) are sent as separate parameters.
+/// items (trimmed of surrounding whitespace; empty items dropped) are sent as separate parameters.
 @property (readwrite, copy) NSString *value;
 
 @end
@@ -96,7 +97,7 @@ __attribute__((visibility("default")))
 /// Why the rows can't be edited, or nil when they can.
 - (NSString *)readOnlyReason;
 
-/// A page of rows. column may be nil for no explicit sort; rows are then in primary-key order (if any), and the
+/// A page of rows; limit 0 means no limit. column may be nil for no explicit sort; rows are then in primary-key order (if any), and the
 /// primary key also breaks ties after the sort column, so paging is stable. filter may be nil.
 - (NSArray *)rowsWithFilter:(SPPostgresFilter *)filter sortColumn:(NSString *)column ascending:(BOOL)ascending
 					 offset:(NSUInteger)offset limit:(NSUInteger)limit error:(NSError **)error;
@@ -112,8 +113,10 @@ __attribute__((visibility("default")))
 /// Returns the inserted row (via RETURNING) in the same format as -rowsWithFilter:…, or nil on failure.
 - (NSArray *)insertRowWithValues:(NSDictionary *)valuesByColumn error:(NSError **)error;
 
-/// Deletes the rows (as returned by -rowsWithFilter:…) by primary key, in one transaction. If any row is
-/// already gone, nothing is deleted and the error is SPPostgresErrorRowChanged.
+/// Deletes the rows (as returned by -rowsWithFilter:…) by primary key, all or nothing; rows repeating a key are
+/// deleted once. If any row is already gone, nothing is deleted and the error is SPPostgresErrorRowChanged.
+/// Inside an open transaction on the connection it uses a savepoint, leaving that transaction open; inside an
+/// aborted transaction it refuses.
 - (BOOL)deleteRows:(NSArray *)rows error:(NSError **)error;
 
 @end

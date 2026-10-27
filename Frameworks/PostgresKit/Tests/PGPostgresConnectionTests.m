@@ -42,6 +42,49 @@
 	[connection release];
 }
 
+- (void)testSuccessiveErrorsDoNotOverReleaseErrorStrings
+{
+	PGPostgresConnection *connection = [self _connectionForHost:@"localhost" port:[self _testPort]];
+	
+	XCTAssertTrue([connection connect]);
+	XCTAssertTrue([self _waitForConnectionToSettle:connection timeout:10.0]);
+	
+	// Each error replaces (and frees) the previous lastError; its strings must outlive the autorelease pool.
+	for (int i = 0; i < 3; i++)
+	{
+		@autoreleasepool {
+			XCTAssertNil([connection execute:@"SELECT 1/0"]);
+			XCTAssertEqualObjects([[connection lastError] errorStateCode], @"22012");
+		}
+	}
+	XCTAssertEqualObjects([[connection lastError] errorPrimaryMessage], @"division by zero");
+	
+	[connection disconnect];
+	[connection release];
+}
+
+- (void)testTransactionStatusTracksIdleInTransactionAndInError
+{
+	PGPostgresConnection *connection = [self _connectionForHost:@"localhost" port:[self _testPort]];
+	
+	XCTAssertEqual([connection transactionStatus], PGPostgresTransactionUnknown, @"No connection yet");
+	XCTAssertTrue([connection connect]);
+	XCTAssertTrue([self _waitForConnectionToSettle:connection timeout:10.0]);
+	XCTAssertTrue([connection isConnected], @"%@", [connection connectionError]);
+	
+	XCTAssertEqual([connection transactionStatus], PGPostgresTransactionIdle);
+	XCTAssertNotNil([connection execute:@"BEGIN"]);
+	XCTAssertEqual([connection transactionStatus], PGPostgresTransactionInTransaction);
+	XCTAssertNil([connection execute:@"SELECT 1/0"]);
+	XCTAssertEqual([connection transactionStatus], PGPostgresTransactionInError);
+	XCTAssertNotNil([connection execute:@"ROLLBACK"]);
+	XCTAssertEqual([connection transactionStatus], PGPostgresTransactionIdle);
+	
+	[connection disconnect];
+	XCTAssertEqual([connection transactionStatus], PGPostgresTransactionUnknown);
+	[connection release];
+}
+
 - (void)testDisconnectWhileConnectingIsSafe
 {
 	for (int i = 0; i < 20; i++)

@@ -20,6 +20,19 @@
 
 #import "PGPostgresConnectionDelegate.h"
 
+/**
+ * The connection's transaction state (libpq's PQtransactionStatus).
+ */
+typedef enum
+{
+	PGPostgresTransactionIdle = 0,     // PQTRANS_IDLE: not in a transaction block
+	PGPostgresTransactionActive,       // PQTRANS_ACTIVE: a command is in progress
+	PGPostgresTransactionInTransaction,// PQTRANS_INTRANS: idle, in a valid transaction block
+	PGPostgresTransactionInError,      // PQTRANS_INERROR: idle, in a failed transaction block
+	PGPostgresTransactionUnknown       // PQTRANS_UNKNOWN: no (or a bad) connection
+}
+PGPostgresTransactionStatus;
+
 @class PGPostgresError;
 @class PGPostgresResult;
 @class PGPostgresStatement;
@@ -118,6 +131,12 @@
  * closed it. nil when there is no underlying connection or no message. Use when not connecting.
  */
 - (NSString *)libpqErrorMessage;
+
+/**
+ * Whether the session is idle, inside a transaction block, or inside a failed one (PQtransactionStatus).
+ * PGPostgresTransactionUnknown when there is no usable connection.
+ */
+- (PGPostgresTransactionStatus)transactionStatus;
 - (BOOL)reset;
 
 - (NSUInteger)clientVersion;
