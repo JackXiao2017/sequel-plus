@@ -98,6 +98,11 @@ static NSString * const SPTestUsers = @"SwitchToUserManagerToolbarItemIdentifier
 
 	// The test-run-wide guard (SPTestPrefsGuard.m) is in place: nothing in these tests may write the real preferences
 	XCTAssertEqualObjects([[NSUserDefaults standardUserDefaults] volatileDomainForName:NSArgumentDomain][SPTestTransferAddedKey], @YES);
+	// MySQL tabs preselect no saved favorite, so they never read a password from the keychain
+	XCTAssertFalse([[NSUserDefaults standardUserDefaults] boolForKey:SPTestSelectLastFavoriteUsedKey]);
+	XCTAssertEqual([[NSUserDefaults standardUserDefaults] integerForKey:SPTestDefaultFavoriteKey], 0);
+	XCTAssertEqualObjects([[NSUserDefaults standardUserDefaults] volatileDomainForName:NSArgumentDomain][SPTestSelectLastFavoriteUsedKey], @NO);
+	XCTAssertEqualObjects([[NSUserDefaults standardUserDefaults] volatileDomainForName:NSArgumentDomain][SPTestDefaultFavoriteKey], @0);
 	NSToolbar *probe = [[NSToolbar alloc] initWithIdentifier:@"SPPrefsGuardProbe"];
 	[probe setAutosavesConfiguration:YES];
 	XCTAssertFalse([probe autosavesConfiguration], @"toolbars never autosave in tests");
