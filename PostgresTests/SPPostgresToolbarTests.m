@@ -400,6 +400,13 @@ static NSString * const SPTestUsers = @"SwitchToUserManagerToolbarItemIdentifier
 
 - (BOOL)isEnabled:(NSToolbarItem *)item forDocument:(SPPostgresDocument *)document
 {
+	if ([[item view] isKindOfClass:[NSSegmentedControl class]]) {
+		// As MySQL's history control: enabled, with its segments enabled as history allows
+		NSSegmentedControl *control = (NSSegmentedControl *)[item view];
+		BOOL anySegment = NO;
+		for (NSInteger i = 0; i < [control segmentCount]; i++) anySegment = anySegment || [control isEnabledForSegment:i];
+		return [item isEnabled] && [control isEnabled] && anySegment;
+	}
 	if ([item view]) return [item isEnabled] && [(NSControl *)[item view] isEnabled];
 	return [document validateToolbarItem:item];
 }
@@ -420,10 +427,12 @@ static NSString * const SPTestUsers = @"SwitchToUserManagerToolbarItemIdentifier
 	}
 	XCTAssertEqualObjects(enabled, (@[SPTestDatabase, SPTestShowConsole]));
 
-	// History is a disabled view item
+	// History is a view item with both segments disabled (as on a MySQL connection screen)
 	NSToolbarItem *history = [self itemWithIdentifier:SPTestHistory inToolbar:toolbar];
-	XCTAssertNotNil([history view]);
-	XCTAssertFalse([history isEnabled]);
+	NSSegmentedControl *historyControl = (NSSegmentedControl *)[history view];
+	XCTAssertTrue([historyControl isKindOfClass:[NSSegmentedControl class]]);
+	XCTAssertFalse([historyControl isEnabledForSegment:0]);
+	XCTAssertFalse([historyControl isEnabledForSegment:1]);
 
 	// Transfer has the stage-1 image
 	XCTAssertNotNil([[self itemWithIdentifier:SPTestTransfer inToolbar:toolbar] image]);
