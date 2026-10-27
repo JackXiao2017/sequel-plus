@@ -4,6 +4,8 @@
 #   ruby Scripts/pg-xcodeproj.rb setup               one-time (idempotent) wiring of PostgresKit + "Postgres Tests"
 #   ruby Scripts/pg-xcodeproj.rb add-app  <files...>  add sources to the "Sequel Pro" target (group Source/Postgres)
 #   ruby Scripts/pg-xcodeproj.rb add-test <files...>  add sources to the "Postgres Tests" target (group PostgresTests)
+#   ruby Scripts/pg-xcodeproj.rb remove   <files...>  remove files from the project (every target's build phases
+#                                                     and their group); the files on disk are left alone
 #
 # File paths are relative to the repo root (e.g. Source/Postgres/SPPostgresFoo.m). Headers are added
 # to the group only; .m/.mm/.c files are added to the target's compile sources. Idempotent.
@@ -40,6 +42,26 @@ def add_files(project, target, group, files, compile)
       unless target.source_build_phase.files_references.include?(ref)
         target.add_file_references([ref], target.name == TESTS ? '-fobjc-arc' : nil)
       end
+    end
+  end
+end
+
+def remove_files(project, files)
+  files.each do |f|
+    abs = File.expand_path(f, ROOT)
+    refs = project.files.select { |x| x.real_path.to_s == abs }
+    if refs.empty?
+      puts "Not in the project (nothing to do): #{f}"
+      next
+    end
+    refs.each do |ref|
+      project.targets.each do |t|
+        t.build_phases.each do |phase|
+          next unless phase.respond_to?(:files_references)
+          phase.remove_file_reference(ref) if phase.files_references.include?(ref)
+        end
+      end
+      ref.remove_from_project
     end
   end
 end
@@ -218,6 +240,10 @@ when 'add-test'
   t = project.targets.find { |x| x.name == TESTS } or abort 'run setup first'
   add_files(project, t, find_or_create_group(project.main_group, 'PostgresTests'), ARGV, true)
   project.save
+when 'remove'
+  abort 'no files' if ARGV.empty?
+  remove_files(project, ARGV)
+  project.save
 else
-  abort "usage: #{$0} setup | add-app <files...> | add-test <files...>"
+  abort "usage: #{$0} setup | add-app <files...> | add-test <files...> | remove <files...>"
 end

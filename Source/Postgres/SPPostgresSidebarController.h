@@ -13,7 +13,7 @@
 @end
 
 /**
- * The left panel of the PostgreSQL window: a schema picker on top, then an outline with the
+ * The left panel of a PostgreSQL tab: a schema picker on top, then an outline with the
  * TABLES and VIEWS of the selected schema and, last, the EXTENSIONS installed in the database.
  * Use on the main thread.
  */

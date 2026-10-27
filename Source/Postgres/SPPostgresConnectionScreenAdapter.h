@@ -1,5 +1,6 @@
 #import <Cocoa/Cocoa.h>
 
+@class SPPostgresDocument;
 @class SPPostgresFavorite;
 @class SPPostgresFavoritesStore;
 
@@ -38,6 +39,14 @@ typedef NS_ENUM(NSInteger, SPConnectionEngine) {
 @property (readwrite, assign) NSInteger sshKeyLocationEnabled;
 @property (readwrite, retain) NSString *sshKeyLocation;
 @property (readwrite, retain) NSString *sshPort;
+
+/**
+ * A connection succeeded: put `document` (connected, not hosted yet) in place of the connection
+ * screen's tab, at the same index, and select it. SPConnectionController does it with
+ * -[SPWindowController replaceTabDocument:withDocument:], which closes its own MySQL tab.
+ * The host retains the document as long as it needs it (the tab view item does).
+ */
+- (void)postgresReplaceConnectionTabWithDocument:(SPPostgresDocument *)document;
 
 @optional
 
@@ -78,7 +87,9 @@ typedef NS_ENUM(NSInteger, SPConnectionEngine) {
  * - The "POSTGRESQL" section of the favorites outline, below FAVORITES. Its favorites come from
  *   SPPostgresFavoritesStore (never Favorites.plist); passwords use the "Sequel Pro (PostgreSQL)"
  *   keychain names.
- * - Connecting: opens a separate SPPostgresWindowController; the MySQL tab stays on its connection screen.
+ * - Connecting: on success the connection screen's tab becomes an SPPostgresDocument tab (see
+ *   -postgresReplaceConnectionTabWithDocument:); no window is opened. On failure the error is shown as a
+ *   sheet and the tab stays on its connection screen.
  *
  * Main thread only. The host is not retained; the host calls -invalidate before it goes away.
  */
@@ -169,8 +180,8 @@ __attribute__((visibility("default")))
 - (id)duplicateFavoriteNode:(id)outlineItem;
 - (void)renameFavoriteNode:(id)outlineItem to:(NSString *)newName;
 
-/// Reads the passwords from the form (or the keychain), runs SPPostgresConnector, and on success opens a
-/// PostgreSQL window. Errors are shown as a sheet on the host's window.
+/// Reads the passwords from the form (or the keychain), runs SPPostgresConnector, and on success hands an
+/// SPPostgresDocument to the host to replace the connection tab. Errors are shown as a sheet on the host's window.
 - (void)connectFromForm;
 /// As -connectFromForm; with `testOnly`, disconnects after success and reports the result instead.
 - (void)connectFromFormTestingOnly:(BOOL)testOnly;
