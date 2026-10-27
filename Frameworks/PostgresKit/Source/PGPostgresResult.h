@@ -38,7 +38,7 @@ PGPostgresResultRowType;
 	
 	NSUInteger _numberOfFields;
 	
-	NSString **_fields;
+	__unsafe_unretained NSString **_fields;
 	
 	NSStringEncoding _stringEncoding;
 	PGPostgresResultRowType _defaultRowType;
