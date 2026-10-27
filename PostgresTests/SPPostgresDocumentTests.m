@@ -1,6 +1,7 @@
 #import <XCTest/XCTest.h>
 #import <PostgresKit/PostgresKit.h>
 #import "SPPostgresTestServers.h"
+#import "SPTestPrefsGuard.h"
 #import "../Source/SPWindowController.h"
 #import "../Source/Postgres/SPPostgresDocument.h"
 #import "../Source/Postgres/SPPostgresSidebarController.h"
@@ -145,7 +146,9 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	NSView *view = [self.document databaseView];
 	XCTAssertTrue([view isKindOfClass:[NSSplitView class]], @"%@", view);
 	XCTAssertEqual([self.document.parentTabViewItem view], view);
-	XCTAssertEqualObjects([(NSSplitView *)view autosaveName], @"PGViewSplitter");
+	// The app saves the divider under "PGViewSplitter"; in tests the name is recorded, not set (SPTestPrefsGuard)
+	XCTAssertEqualObjects([(NSSplitView *)view sp_requestedAutosaveName], @"PGViewSplitter");
+	XCTAssertNil([(NSSplitView *)view autosaveName]);
 	XCTAssertEqual([[view subviews] count], 2u);
 	XCTAssertEqual([[view subviews] firstObject], [self.document.sidebar view]);
 	NSMutableArray *queue = [NSMutableArray arrayWithObject:view];
@@ -154,6 +157,35 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 		XCTAssertFalse([NSStringFromClass([v class]) hasPrefix:@"PSMTabBar"], @"no tab bar inside the tab");
 		[queue addObjectsFromArray:v.subviews];
 	}
+}
+
+/// Split views in tests never save their divider positions into the real preferences (SPTestPrefsGuard).
+- (void)testSplitViewAutosaveNeverReachesPreferences
+{
+	NSString *name = @"SPTestPrefsGuardSplitProbe";
+	NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+	NSArray *keys = @[[@"NSSplitView Subview Frames " stringByAppendingString:name], [@"SPSplitView Lengths " stringByAppendingString:name]];
+	for (NSString *key in keys) XCTAssertNil([prefs objectForKey:key]);
+
+	NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 400, 300) styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:YES];
+	[window setReleasedWhenClosed:NO];
+	NSSplitView *splitView = [[NSClassFromString(@"SPSplitView") alloc] initWithFrame:NSMakeRect(0, 0, 400, 300)];
+	[splitView setVertical:YES];
+	[splitView addSubview:[[NSView alloc] initWithFrame:NSMakeRect(0, 0, 150, 300)]];
+	[splitView addSubview:[[NSView alloc] initWithFrame:NSMakeRect(151, 0, 249, 300)]];
+	[[window contentView] addSubview:splitView];
+	[splitView setAutosaveName:name];
+	XCTAssertEqualObjects([splitView sp_requestedAutosaveName], name);
+	XCTAssertNil([splitView autosaveName]);
+
+	[splitView adjustSubviews];
+	[splitView setPosition:200 ofDividerAtIndex:0];
+	[splitView resizeSubviewsWithOldSize:NSMakeSize(380, 300)];
+	[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+	[splitView removeFromSuperview];
+	[window close];
+
+	for (NSString *key in keys) XCTAssertNil([prefs objectForKey:key], @"%@", key);
 }
 
 - (void)testTabLabelAndColourComeFromFavorite

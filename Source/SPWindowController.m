@@ -210,7 +210,11 @@
 {
 	NSInteger index = [tabView indexOfTabViewItemWithIdentifier:oldDocument];
 
-	if (index == NSNotFound || !newDocument) return;
+	if (index == NSNotFound || !newDocument) {
+		NSLog(@"-[SPWindowController replaceTabDocument:withDocument:]: not replacing %@ with %@: %@", oldDocument, newDocument,
+		      (index == NSNotFound) ? @"the document is not a tab in this window" : @"no new document");
+		return;
+	}
 
 	// Keep the old document alive until its tab has been closed
 	[[oldDocument retain] autorelease];
@@ -218,6 +222,11 @@
 	NSTabViewItem *oldItem = [tabView tabViewItemAtIndex:index];
 
 	[self addTabDocument:newDocument atIndex:index select:YES];
+
+	// The old document's tab closes because it is replaced, not because the user closed it
+	if ([oldDocument respondsToSelector:@selector(setIsBeingReplacedInTab:)]) {
+		[oldDocument setIsBeingReplacedInTab:YES];
+	}
 
 	// Closing the tab sends the old document -parentTabDidClose via -tabView:didCloseTabViewItem:
 	[tabView removeTabViewItem:oldItem];

@@ -142,6 +142,7 @@ static BOOL isOSAtLeast10_14;
 @synthesize databaseStructureRetrieval;
 @synthesize processID;
 @synthesize instanceId;
+@synthesize isBeingReplacedInTab;
 @synthesize dbTablesTableView;
 @synthesize tableDumpInstance;
 @synthesize tablesListInstance;
@@ -4421,7 +4422,8 @@ static BOOL isOSAtLeast10_14;
 		[connectionController cancelConnection:self];
 	}
 #ifndef SP_CODA
-	if ([[[SPQueryController sharedQueryController] window] isVisible]) [self toggleConsole:self];
+	// Not when the tab is being replaced (connecting to PostgreSQL): the console would pop to the front
+	if (!isBeingReplacedInTab && [[[SPQueryController sharedQueryController] window] isVisible]) [self toggleConsole:self];
 	[createTableSyntaxWindow orderOut:nil];
 #endif
 	[[NSNotificationCenter defaultCenter] removeObserver:self];

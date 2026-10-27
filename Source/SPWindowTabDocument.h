@@ -44,4 +44,10 @@
  */
 - (NSString *)tabToolTip;
 
+/**
+ * Sent just before the tab is closed by -[SPWindowController replaceTabDocument:withDocument:]
+ * (its place taken by another document), so -parentTabDidClose can tell that close from the user's.
+ */
+- (void)setIsBeingReplacedInTab:(BOOL)flag;
+
 @end

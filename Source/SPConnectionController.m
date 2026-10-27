@@ -3925,7 +3925,14 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
  */
 - (void)postgresReplaceConnectionTabWithDocument:(SPPostgresDocument *)document
 {
-	[[dbDocument parentWindowController] replaceTabDocument:dbDocument withDocument:document];
+	SPWindowController *windowController = [dbDocument parentWindowController];
+
+	if (!windowController) {
+		NSLog(@"-[SPConnectionController postgresReplaceConnectionTabWithDocument:]: %@ has no window controller; the PostgreSQL tab %@ was not added", dbDocument, document);
+		return;
+	}
+
+	[windowController replaceTabDocument:dbDocument withDocument:document];
 }
 
 #endif
