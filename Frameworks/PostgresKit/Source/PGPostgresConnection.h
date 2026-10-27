@@ -37,6 +37,10 @@
 	NSString *_encoding;
 	NSString *_connectionError;
 	NSString *_applicationName;
+	NSString *_sslMode;
+	NSString *_sslRootCertPath;
+	NSString *_sslCertPath;
+	NSString *_sslKeyPath;
 	
 	const char **_connectionParamNames;
 	const char **_connectionParamValues;
@@ -70,6 +74,19 @@
 @property (readwrite, retain) NSString *password;
 @property (readwrite, retain) NSString *socketPath;
 @property (readwrite, retain) NSString *applicationName;
+
+/**
+ * @property The libpq 'sslmode' (disable, allow, prefer, require, verify-ca or verify-full).
+ *           nil means libpq's default (currently 'prefer').
+ */
+@property (readwrite, retain) NSString *sslMode;
+
+/**
+ * @property Paths passed as libpq's 'sslrootcert', 'sslcert' and 'sslkey' parameters when non-nil.
+ */
+@property (readwrite, retain) NSString *sslRootCertPath;
+@property (readwrite, retain) NSString *sslCertPath;
+@property (readwrite, retain) NSString *sslKeyPath;
 
 @property (readonly) NSString *encoding;
 @property (readonly) NSString *connectionError;

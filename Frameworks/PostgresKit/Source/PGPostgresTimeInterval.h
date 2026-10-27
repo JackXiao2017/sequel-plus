@@ -31,7 +31,7 @@
  *
  * @author Stuart Connolly http://stuconnolly.com
  *
- * Simple wrapper around libpqtypes' PQinterval structure.
+ * Simple value object describing a PostgreSQL interval.
  */
 @interface PGPostgresTimeInterval : NSObject 
 {

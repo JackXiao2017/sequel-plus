@@ -94,34 +94,26 @@ static PGPostgresOid PGPostgresTypeNumberTypes[] =
 #pragma mark Integer
 
 /**
- * Converts an integer value to an NSNumber instance.
+ * Converts a (text format) integer value to an NSNumber instance.
  *
  * @return An NSNumber representation of the the value.
  */
 - (id)_integerObjectFromResult
-{	
-	NSUInteger length = PQgetlength(_result, (int)_row, (int)_column);
+{
+	const char *value = PQgetvalue(_result, (int)_row, (int)_column);
 	
-	if (!length) return [NSNull null];
+	if (!value || !*value) return [NSNull null];
 	
-	PGint2 int2;
-	PGint4 int4;
-	PGint8 int8;
+	long long number = strtoll(value, NULL, 10);
 	
-	switch (length) 
+	switch (_type) 
 	{
-		case 2:
-			if (!PQgetf(_result, (int)_row, PGPostgresResultValueInt2, (int)_column, &int2)) return [NSNull null];
-			
-			return [NSNumber numberWithShort:int2];
-		case 4:			
-			if (!PQgetf(_result, (int)_row, PGPostgresResultValueInt4, (int)_column, &int4)) return [NSNull null];
-			
-			return [NSNumber numberWithInteger:int4];
-		case 8:			
-			if (!PQgetf(_result, (int)_row, PGPostgresResultValueInt8, (int)_column, &int8)) return [NSNull null];
-			
-			return [NSNumber numberWithLongLong:int8];
+		case PGPostgresOidInt2:
+			return [NSNumber numberWithShort:(short)number];
+		case PGPostgresOidInt4:
+			return [NSNumber numberWithInteger:(int)number];
+		case PGPostgresOidInt8:
+			return [NSNumber numberWithLongLong:number];
 	}
 	
 	return [NSNull null];
@@ -131,76 +123,60 @@ static PGPostgresOid PGPostgresTypeNumberTypes[] =
 #pragma mark Floating Point
 
 /**
- * Converts a float value to an NSNumber instance.
+ * Converts a (text format) float value to an NSNumber instance.
  *
  * @return An NSNumber representation of the the value.
  */
 - (id)_floatObjectFromResult
-{	
-	NSUInteger length = PQgetlength(_result, (int)_row, (int)_column);
+{
+	const char *value = PQgetvalue(_result, (int)_row, (int)_column);
 	
-	if (!length) return [NSNull null];
+	if (!value || !*value) return [NSNull null];
 	
-	PGfloat4 float4;
-	PGfloat8 float8;
+	// strtof/strtod also understand the 'NaN', 'Infinity' and '-Infinity' spellings PostgreSQL uses
+	if (_type == PGPostgresOidFloat4) return [NSNumber numberWithFloat:strtof(value, NULL)];
 	
-	switch (length) 
-	{
-		case 4:
-			if (!PQgetf(_result, (int)_row, PGPostgresResultValueFloat4, (int)_column, &float4)) return [NSNull null];
-			
-			return [NSNumber numberWithFloat:float4];
-		case 8:
-			if (!PQgetf(_result, (int)_row, PGPostgresResultValueFloat8, (int)_column, &float8)) return [NSNull null];
-			
-			return [NSNumber numberWithDouble:float8];
-	}
-	
-	return [NSNull null];
+	return [NSNumber numberWithDouble:strtod(value, NULL)];
 }
 
 #pragma mark -
 #pragma mark Boolean
 
 /**
- * Converts a boolean value to an NSNumber instance.
+ * Converts a (text format) boolean value to an NSNumber instance.
  *
  * @return An NSNumber representation of the the value.
  */
 - (id)_booleanObjectFromResult
 {
-	PGbool b;
+	const char *value = PQgetvalue(_result, (int)_row, (int)_column);
 	
-	if (!PQgetf(_result, (int)_row, PGPostgresResultValueBool, (int)_column, &b)) return [NSNull null];
+	if (!value || !*value) return [NSNull null];
 	
-	return [NSNumber numberWithInt:b];
+	return [NSNumber numberWithInt:(*value == 't' || *value == 'T') ? 1 : 0];
 }
 
 #pragma mark -
 #pragma mark Numeric
 
 /**
- * Converts a numeric value to a native NSNumber instance.
+ * Converts a (text format) numeric value to a native NSNumber instance.
  *
  * @return An NSNumber representation of the the value.
  */
 - (id)_numericFromResult
 {
-	PGnumeric numeric;
+	const char *numeric = PQgetvalue(_result, (int)_row, (int)_column);
 	
-	if (!PQgetf(_result, (int)_row, PGPostgresResultValueNumeric, (int)_column, &numeric)) return [NSNull null];
+	if (!numeric || !*numeric) return [NSNull null];
 	
 	NSString *stringValue = [[NSString alloc] initWithUTF8String:numeric];
 	
 	double value = [stringValue doubleValue];
 	
-	if (value == HUGE_VAL || value == -HUGE_VAL) {
-		[stringValue release];
-		
-		return [NSNull null];
-	}
-	
 	[stringValue release];
+	
+	if (value == HUGE_VAL || value == -HUGE_VAL) return [NSNull null];
 	
 	return [NSNumber numberWithDouble:value];
 }

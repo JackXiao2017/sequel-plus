@@ -32,7 +32,8 @@
 #pragma clang diagnostic ignored "-Wobjc-protocol-method-implementation"
 
 // Constants
-static int PGPostgresResultsAsBinary = 1;
+// Results are requested in text format and decoded by the type handlers
+static int PGPostgresResultsAsText = 0;
 
 // Internal query structure
 typedef struct 
@@ -198,7 +199,7 @@ PGQueryParamData;
 		}
 	}	
 	
-	// Execute the command - return data in binary
+	// Execute the command - return data as text
 	PGresult *pgResult = nil;
 	
 	if ([query isKindOfClass:[NSString class]]) {
@@ -210,7 +211,7 @@ PGQueryParamData;
 								(const char **)paramData->paramValues, 
 								(const int *)paramData->paramLengths, 
 								(const int *)paramData->paramFormats, 
-								PGPostgresResultsAsBinary);
+								PGPostgresResultsAsText);
 	} 
 	else if ([query isKindOfClass:[PGPostgresStatement class]]) {
 		PGPostgresStatement *statement = (PGPostgresStatement *)query;
@@ -232,7 +233,7 @@ PGQueryParamData;
 								  (const char **)paramData->paramValues, 
 								  (const int *)paramData->paramLengths, 
 								  (const int *)paramData->paramFormats, 
-								  PGPostgresResultsAsBinary);		
+								  PGPostgresResultsAsText);		
 	}
 	
 	[self _destroyParamDataStructure:paramData];

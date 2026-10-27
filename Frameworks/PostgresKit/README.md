@@ -19,8 +19,8 @@ Any new code added during it's development is licensed under the MIT license
 and is copyrighted by the respective developer and the Sequel Pro team.
 
 The framework also includes libpq, the static C library interface to PostgreSQL
-and libpqtypes, a libpq extension designed to ease the use of parameterised
-queries and enhanced support for handling native PostgreSQL data types.
+(statically linked against OpenSSL). Query results are requested in text format
+and decoded by the framework's type handlers.
 
 libpq is licensed under The PostgreSQL License and is copyrighted by:
 
@@ -30,14 +30,6 @@ libpq is licensed under The PostgreSQL License and is copyrighted by:
 Full license:
 
 [https://www.postgresql.org/about/licence/](https://www.postgresql.org/about/licence/)
-
-libpqtypes is licensed under the BSD license and is copyrighted by:
-
-	Copyright (c) 2008-2011 eSilo, LLC. All rights reserved
-
-Full License:
-
-[http://libpqtypes.esilo.com/pkgdocs.html?file=LICENSE](http://libpqtypes.esilo.com/pkgdocs.html?file=LICENSE)
 
 The entire framework is dual licensed under both version 2 of the Apache
 license and the MIT license. Use of it must carry both of the following
