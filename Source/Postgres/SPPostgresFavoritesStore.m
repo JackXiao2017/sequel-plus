@@ -39,16 +39,38 @@ NSString * const SPPostgresFavoritesDidChangeNotification = @"SPPostgresFavorite
 	[super dealloc];
 }
 
-// Returns the raw stored dictionaries (unsorted); empty if file is missing or unreadable.
-- (NSMutableArray *)loadRawFavorites
+// Returns the raw stored dictionaries (unsorted). A missing file yields an empty array.
+// Returns nil (with *error set) if the file exists but is unreadable, corrupt, not the expected
+// structure, or has a newer version than this code understands.
+- (NSMutableArray *)loadRawFavoritesError:(NSError **)error
 {
 	NSMutableArray *result = [NSMutableArray array];
+	if (![fileURL checkResourceIsReachableAndReturnError:NULL]) return result;
+
+	NSString *problem = nil;
 	NSDictionary *root = [NSDictionary dictionaryWithContentsOfURL:fileURL];
-	NSArray *items = [root isKindOfClass:[NSDictionary class]] ? [root objectForKey:@"favorites"] : nil;
-	if ([items isKindOfClass:[NSArray class]]) {
-		for (id item in items) {
-			if ([item isKindOfClass:[NSDictionary class]]) [result addObject:item];
+	if (![root isKindOfClass:[NSDictionary class]]) {
+		problem = @"The file could not be read or is not a valid favorites property list.";
+	} else {
+		id version = [root objectForKey:@"version"];
+		id items = [root objectForKey:@"favorites"];
+		if (![version isKindOfClass:[NSNumber class]] || ![items isKindOfClass:[NSArray class]]) {
+			problem = @"The file does not have the expected structure.";
+		} else if ([version integerValue] > 1) {
+			problem = [NSString stringWithFormat:@"The file uses version %@, which is newer than this version of the application supports.", version];
+		} else {
+			for (id item in items) {
+				if ([item isKindOfClass:[NSDictionary class]]) [result addObject:item];
+			}
 		}
+	}
+	if (problem) {
+		if (error) {
+			*error = [NSError errorWithDomain:@"SPPostgresFavoritesStoreErrorDomain" code:1 userInfo:
+				[NSDictionary dictionaryWithObjectsAndKeys:
+					[NSString stringWithFormat:@"Cannot use PostgreSQL favorites file \"%@\". %@ It was left untouched.", [fileURL path], problem], NSLocalizedDescriptionKey, nil]];
+		}
+		return nil;
 	}
 	return result;
 }
@@ -56,7 +78,7 @@ NSString * const SPPostgresFavoritesDidChangeNotification = @"SPPostgresFavorite
 - (NSArray *)favorites
 {
 	NSMutableArray *list = [NSMutableArray array];
-	for (NSDictionary *d in [self loadRawFavorites]) {
+	for (NSDictionary *d in [self loadRawFavoritesError:NULL] ?: @[]) {
 		SPPostgresFavorite *f = [SPPostgresFavorite favoriteWithDictionary:d];
 		if (f) [list addObject:f];
 	}
@@ -93,7 +115,8 @@ NSString * const SPPostgresFavoritesDidChangeNotification = @"SPPostgresFavorite
 
 - (BOOL)saveFavorite:(SPPostgresFavorite *)favorite error:(NSError **)error
 {
-	NSMutableArray *raw = [self loadRawFavorites];
+	NSMutableArray *raw = [self loadRawFavoritesError:error];
+	if (!raw) return NO;
 	NSDictionary *dict = [favorite dictionaryRepresentation];
 	NSUInteger index = NSNotFound;
 	for (NSUInteger i = 0; i < [raw count]; i++) {
@@ -106,7 +129,8 @@ NSString * const SPPostgresFavoritesDidChangeNotification = @"SPPostgresFavorite
 
 - (BOOL)removeFavoriteWithID:(NSString *)favoriteID error:(NSError **)error
 {
-	NSMutableArray *raw = [self loadRawFavorites];
+	NSMutableArray *raw = [self loadRawFavoritesError:error];
+	if (!raw) return NO;
 	NSIndexSet *matches = [raw indexesOfObjectsPassingTest:^BOOL(NSDictionary *d, NSUInteger idx, BOOL *stop) {
 		return [[d objectForKey:@"id"] isEqual:favoriteID];
 	}];
