@@ -506,6 +506,109 @@
 	}
 }
 
+- (void)testFailedEditsAndLoadsInsideUserTransactionLeaveItOpen
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue];
+		SPPostgresTableData *data = [[SPPostgresTableData alloc] initWithConnection:connection schema:@"content_test" table:@"items"];
+		NSArray *row = [self rowWithId:@"5" in:data];
+		NSError *error = nil;
+
+		XCTAssertNotNil([connection execute:@"BEGIN"]);
+		NSArray *inserted = [data insertRowWithValues:@{@"name": @"in tx"} error:&error];
+		XCTAssertNotNil(inserted, @"%@", error);
+		XCTAssertEqual([connection transactionStatus], PGPostgresTransactionInTransaction);
+
+		// A bad cell edit fails, but the user's transaction (and its earlier insert) survives.
+		error = nil;
+		XCTAssertFalse([data updateRow:row column:@"price" value:@"abc" error:&error]);
+		XCTAssertEqual(error.code, SPPostgresErrorQueryFailed);
+		XCTAssertEqual([connection transactionStatus], PGPostgresTransactionInTransaction, @"a failed edit must not abort the user's transaction");
+		XCTAssertEqual([data countRowsWithFilter:nil error:&error], 31, @"%@", error);
+		XCTAssertEqualObjects([self rowWithId:inserted[0] in:data][1], @"in tx");
+
+		// A failed insert (duplicate key) likewise.
+		error = nil;
+		XCTAssertNil([data insertRowWithValues:@{@"id": @"5"} error:&error]);
+		XCTAssertNotNil(error);
+		XCTAssertEqual([connection transactionStatus], PGPostgresTransactionInTransaction);
+
+		// A bad filter value fails both the page load and the count, and the transaction survives.
+		SPPostgresFilter *bad = [SPPostgresFilter filterWithColumn:@"price" comparison:@"=" value:@"abc"];
+		error = nil;
+		XCTAssertNil([data rowsWithFilter:bad sortColumn:@"id" ascending:YES offset:0 limit:10 error:&error]);
+		XCTAssertNotNil(error);
+		XCTAssertEqual([connection transactionStatus], PGPostgresTransactionInTransaction, @"a failed load must not abort the user's transaction");
+		error = nil;
+		XCTAssertEqual([data countRowsWithFilter:bad error:&error], -1);
+		XCTAssertNotNil(error);
+		XCTAssertEqual([connection transactionStatus], PGPostgresTransactionInTransaction);
+		XCTAssertEqual([data countRowsWithFilter:nil error:&error], 31, @"the earlier insert is still visible: %@", error);
+
+		// Successful edits and loads inside the transaction leave no savepoint behind.
+		XCTAssertTrue([data updateRow:row column:@"name" value:@"edited in tx" error:&error], @"%@", error);
+		XCTAssertNotNil([data rowsWithFilter:nil sortColumn:nil ascending:YES offset:0 limit:5 error:&error], @"%@", error);
+		XCTAssertEqual([connection transactionStatus], PGPostgresTransactionInTransaction);
+		for (NSString *name in @[@"sp_content_write", @"sp_content_read"]) {
+			// Releasing a savepoint that doesn't exist fails; the probe savepoint undoes that failure.
+			XCTAssertNotNil([connection execute:@"SAVEPOINT probe"]);
+			NSString *release = [NSString stringWithFormat:@"RELEASE SAVEPOINT %@", name];
+			XCTAssertNil([connection execute:release], @"%@ was left behind", name);
+			XCTAssertNotNil([connection execute:@"ROLLBACK TO SAVEPOINT probe"]);
+		}
+		XCTAssertEqual([data countRowsWithFilter:nil error:&error], 31, @"%@", error);
+		XCTAssertNotNil([connection execute:@"ROLLBACK"]);
+		XCTAssertEqual([data countRowsWithFilter:nil error:&error], 30, @"the user's rollback undoes everything");
+		[connection disconnect];
+	}
+}
+
+- (void)testIdleEditsSendNoTransactionStatements
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresStatementRecorder *recorder = [[SPPostgresStatementRecorder alloc] init];
+		PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_test" delegate:recorder];
+		SPPostgresTableData *data = [[SPPostgresTableData alloc] initWithConnection:connection schema:@"content_test" table:@"items"];
+		NSArray *row = [self rowWithId:@"5" in:data];
+		NSError *error = nil;
+		XCTAssertTrue([data updateRow:row column:@"name" value:@"idle" error:&error], @"%@", error);
+		XCTAssertNotNil([data rowsWithFilter:nil sortColumn:nil ascending:YES offset:0 limit:5 error:&error]);
+		XCTAssertFalse([data updateRow:row column:@"price" value:@"abc" error:&error]);
+		for (NSString *sql in recorder.statements) {
+			XCTAssertFalse([sql hasPrefix:@"SAVEPOINT"] || [sql hasPrefix:@"BEGIN"] || [sql hasPrefix:@"ROLLBACK"], @"%@", sql);
+		}
+		XCTAssertEqual([connection transactionStatus], PGPostgresTransactionIdle);
+		[connection disconnect];
+	}
+}
+
+- (void)testEditsRefusedAndLoadsExplainedInsideAbortedTransaction
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue];
+		SPPostgresTableData *data = [[SPPostgresTableData alloc] initWithConnection:connection schema:@"content_test" table:@"items"];
+		NSArray *row = [self rowWithId:@"5" in:data];
+		XCTAssertNotNil([connection execute:@"BEGIN"]);
+		XCTAssertNil([connection execute:@"SELECT 1/0"]);
+
+		NSError *error = nil;
+		XCTAssertFalse([data updateRow:row column:@"name" value:@"x" error:&error]);
+		XCTAssertTrue([error.localizedDescription containsString:@"aborted"], @"%@", error);
+		error = nil;
+		XCTAssertNil([data insertRowWithValues:@{@"name": @"x"} error:&error]);
+		XCTAssertTrue([error.localizedDescription containsString:@"aborted"], @"%@", error);
+		error = nil;
+		XCTAssertNil([data rowsWithFilter:nil sortColumn:nil ascending:YES offset:0 limit:5 error:&error]);
+		XCTAssertTrue([error.localizedDescription containsString:@"Roll it back"], @"%@", error);
+		error = nil;
+		XCTAssertEqual([data countRowsWithFilter:nil error:&error], -1);
+		XCTAssertTrue([error.localizedDescription containsString:@"Roll it back"], @"%@", error);
+		XCTAssertEqual([connection transactionStatus], PGPostgresTransactionInError, @"nothing ended the user's transaction");
+		XCTAssertNotNil([connection execute:@"ROLLBACK"]);
+		[connection disconnect];
+	}
+}
+
 - (void)testViewIsReadOnly
 {
 	for (NSNumber *port in [SPPostgresTestServers ports]) {

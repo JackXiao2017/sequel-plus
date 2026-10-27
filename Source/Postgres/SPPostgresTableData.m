@@ -31,13 +31,36 @@ PGPostgresResult *SPPostgresExecute(PGPostgresConnection *connection, NSString *
 	return result;
 }
 
-BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoint, NSString *abortedMessage,
-							 BOOL (^body)(NSError **error), NSError **error)
+/// How SPPostgresRunGuarded protects the user's transaction around body.
+typedef NS_ENUM(NSInteger, SPPostgresGuardMode) {
+	SPPostgresGuardAtomic, // several statements: when idle, wrapped in a transaction of our own
+	SPPostgresGuardWrite,  // one statement: when idle, run as is (it is its own transaction)
+	SPPostgresGuardRead    // one read: as Write, but inside an aborted transaction it is still sent
+};
+
+/**
+ * The shared core of SPPostgresRunAtomically and the Content view's single-statement edits and loads. The
+ * connection may be shared with the Query view, where the user may have a transaction open; a failure inside
+ * it would abort that transaction, so there body runs in the savepoint `savepoint`, released on success and
+ * rolled back to (then released) on failure. When idle, Atomic wraps body in BEGIN / COMMIT (ROLLBACK on
+ * failure) and the others run it as is. Inside an aborted transaction nothing can succeed: Atomic and Write
+ * send nothing and fail with abortedMessage; Read sends body anyway (as before) and, if it fails while the
+ * transaction is still aborted, reports abortedMessage instead of the server's terser message.
+ */
+static BOOL SPPostgresRunGuarded(PGPostgresConnection *connection, SPPostgresGuardMode mode, NSString *savepoint,
+								 NSString *abortedMessage, BOOL (^body)(NSError **error), NSError **error)
 {
-	NSString *begin, *finish;
-	NSArray *undo;
+	NSString *begin = nil, *finish = nil;
+	NSArray *undo = nil;
 	switch ([connection transactionStatus]) {
 		case PGPostgresTransactionInError:
+			if (mode == SPPostgresGuardRead) {
+				if (body(error)) return YES;
+				if (error && [connection transactionStatus] == PGPostgresTransactionInError) {
+					*error = SPPostgresTableDataError(SPPostgresErrorQueryFailed, abortedMessage);
+				}
+				return NO;
+			}
 			if (error) *error = SPPostgresTableDataError(SPPostgresErrorQueryFailed, abortedMessage);
 			return NO;
 		case PGPostgresTransactionInTransaction:
@@ -46,6 +69,7 @@ BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoi
 			undo = @[[NSString stringWithFormat:@"ROLLBACK TO SAVEPOINT %@", savepoint], finish];
 			break;
 		default: // idle (or no connection, which the first statement reports)
+			if (mode != SPPostgresGuardAtomic) return body(error);
 			begin = @"BEGIN";
 			finish = @"COMMIT";
 			undo = @[@"ROLLBACK"];
@@ -60,6 +84,12 @@ BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoi
 		return NO;
 	}
 	return YES;
+}
+
+BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoint, NSString *abortedMessage,
+							 BOOL (^body)(NSError **error), NSError **error)
+{
+	return SPPostgresRunGuarded(connection, SPPostgresGuardAtomic, savepoint, abortedMessage, body, error);
 }
 
 #pragma mark - SPPostgresColumn
@@ -176,6 +206,20 @@ BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoi
 - (PGPostgresResult *)run:(NSString *)sql values:(NSArray *)values error:(NSError **)error
 {
 	return SPPostgresExecute(_connection, sql, values, error);
+}
+
+/// Runs one read so that, inside the user's transaction, its failure doesn't abort that transaction.
+- (BOOL)guardRead:(BOOL (^)(NSError **error))body error:(NSError **)error
+{
+	NSString *aborted = NSLocalizedString(@"The current transaction is aborted, so the rows can't be read. Roll it back first (ROLLBACK in the Query view).", @"Postgres content: load inside an aborted transaction");
+	return SPPostgresRunGuarded(_connection, SPPostgresGuardRead, @"sp_content_read", aborted, body, error);
+}
+
+/// Runs one change so that, inside the user's transaction, its failure doesn't abort that transaction; inside an
+/// aborted transaction it is refused with abortedMessage.
+- (BOOL)guardWrite:(NSString *)abortedMessage body:(BOOL (^)(NSError **error))body error:(NSError **)error
+{
+	return SPPostgresRunGuarded(_connection, SPPostgresGuardWrite, @"sp_content_write", abortedMessage, body, error);
 }
 
 - (NSString *)qualifiedName
@@ -439,9 +483,13 @@ BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoi
 					 [self textSelectList], [self qualifiedName], where, orderBy,
 					 (unsigned long)[values count] - 1, (unsigned long)[values count]];
 
-	PGPostgresResult *result = [self run:sql values:values error:error];
-	if (!result) return nil;
-	return [self rowsFromResult:result];
+	__block NSArray *rows = nil;
+	BOOL ok = [self guardRead:^BOOL(NSError **bodyError) {
+		PGPostgresResult *result = [self run:sql values:values error:bodyError];
+		if (result) rows = [self rowsFromResult:result];
+		return result != nil;
+	} error:error];
+	return ok ? rows : nil;
 }
 
 - (NSInteger)countRowsWithFilter:(SPPostgresFilter *)filter error:(NSError **)error
@@ -452,10 +500,14 @@ BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoi
 	NSString *where = [self whereClauseForFilter:filter values:values error:error];
 	if (!where) return -1;
 
-	PGPostgresResult *result = [self run:[NSString stringWithFormat:@"SELECT count(*)::text AS n FROM %@%@", [self qualifiedName], where]
-								  values:values error:error];
-	if (!result) return -1;
-	return [[[result rowAsArray] firstObject] integerValue];
+	NSString *sql = [NSString stringWithFormat:@"SELECT count(*)::text AS n FROM %@%@", [self qualifiedName], where];
+	__block NSInteger count = -1;
+	BOOL ok = [self guardRead:^BOOL(NSError **bodyError) {
+		PGPostgresResult *result = [self run:sql values:values error:bodyError];
+		if (result) count = [[[result rowAsArray] firstObject] integerValue];
+		return result != nil;
+	} error:error];
+	return ok ? count : -1;
 }
 
 - (BOOL)updateRow:(NSArray *)originalRow column:(NSString *)column value:(id)value error:(NSError **)error
@@ -475,15 +527,17 @@ BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoi
 
 	NSString *sql = [NSString stringWithFormat:@"UPDATE %@ SET %@ = $1::%@ WHERE %@",
 					 [self qualifiedName], SPPostgresQuoteIdentifier([target name]), [target castTypeName], key];
-	PGPostgresResult *result = [self run:sql values:values error:error];
-	if (!result) return NO;
+	NSString *aborted = NSLocalizedString(@"The current transaction is aborted, so the row was not changed. Roll it back first.", @"Postgres content: edit inside an aborted transaction");
+	return [self guardWrite:aborted body:^BOOL(NSError **bodyError) {
+		if (![self run:sql values:values error:bodyError]) return NO;
 
-	// The WHERE clause is the full primary key, so at most one row can match.
-	if ([_connection lastQueryAffectedRowCount] == 0) {
-		if (error) *error = [self rowChangedError];
-		return NO;
-	}
-	return YES;
+		// The WHERE clause is the full primary key, so at most one row can match.
+		if ([_connection lastQueryAffectedRowCount] == 0) {
+			if (bodyError) *bodyError = [self rowChangedError];
+			return NO;
+		}
+		return YES;
+	} error:error];
 }
 
 - (NSArray *)insertRowWithValues:(NSDictionary *)valuesByColumn error:(NSError **)error
@@ -514,9 +568,14 @@ BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoi
 		   [names componentsJoinedByString:@", "], [placeholders componentsJoinedByString:@", "], [self textSelectList]]
 		: [NSString stringWithFormat:@"INSERT INTO %@ DEFAULT VALUES RETURNING %@", [self qualifiedName], [self textSelectList]];
 
-	PGPostgresResult *result = [self run:sql values:values error:error];
-	if (!result) return nil;
-	return [[self rowsFromResult:result] firstObject];
+	NSString *aborted = NSLocalizedString(@"The current transaction is aborted, so the row was not added. Roll it back first.", @"Postgres content: insert inside an aborted transaction");
+	__block NSArray *row = nil;
+	BOOL ok = [self guardWrite:aborted body:^BOOL(NSError **bodyError) {
+		PGPostgresResult *result = [self run:sql values:values error:bodyError];
+		if (result) row = [[self rowsFromResult:result] firstObject];
+		return result != nil;
+	} error:error];
+	return ok ? row : nil;
 }
 
 - (BOOL)deleteRows:(NSArray *)rows error:(NSError **)error
