@@ -3,7 +3,6 @@
 #import "SPPostgresTestServers.h"
 #import "../Source/SPWindowController.h"
 #import "../Source/Postgres/SPPostgresDocument.h"
-#import "../Source/Postgres/SPPostgresWindowController.h" // SPPostgresToolbar* identifiers (stage-1 toolbar)
 #import "../Source/Postgres/SPPostgresSidebarController.h"
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
@@ -280,29 +279,33 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 
 - (void)testToolbarOrderMatchesSpec
 {
-	NSArray *expected = @[SPPostgresToolbarDatabase, SPPostgresToolbarStructure, SPPostgresToolbarContent,
-						  SPPostgresToolbarRelations, SPPostgresToolbarTriggers, SPPostgresToolbarTableInfo,
-						  SPPostgresToolbarQuery, NSToolbarFlexibleSpaceItemIdentifier,
-						  SPPostgresToolbarUsers, SPPostgresToolbarTransfer, SPPostgresToolbarHistory, SPPostgresToolbarConsole];
+	// MySQL's identifiers (the app's constants aren't exported to the test bundle)
+	NSString *database = @"DatabaseSelectToolbarItemIdentifier", *history = @"HistoryNavigationToolbarItemIdentifier",
+		*console = @"ShowConsoleIdentifier", *structure = @"SwitchToTableStructureToolbarItemIdentifier",
+		*content = @"SwitchToTableContentToolbarItemIdentifier", *query = @"SwitchToRunQueryToolbarItemIdentifier",
+		*tableInfo = @"SwitchToTableInfoToolbarItemIdentifier", *relations = @"SwitchToTableRelationsToolbarItemIdentifier",
+		*triggers = @"SwitchToTableTriggersToolbarItemIdentifier", *users = @"SwitchToUserManagerToolbarItemIdentifier",
+		*transfer = @"TransferToolbarItemIdentifier";
+	NSArray *expected = @[database, structure, content, relations, triggers, tableInfo, query,
+						  NSToolbarFlexibleSpaceItemIdentifier, history, users, transfer, console];
 	NSToolbar *toolbar = [self window].toolbar;
 	XCTAssertNotNil(toolbar);
 	XCTAssertEqual(toolbar, [self.document toolbar]);
+	XCTAssertEqualObjects([toolbar identifier], @"TableWindowToolbar");
 	XCTAssertEqualObjects([self.document toolbarDefaultItemIdentifiers:toolbar], expected);
 	XCTAssertEqualObjects([toolbar.items valueForKey:@"itemIdentifier"], expected);
 
-	// Stage 1: everything but the database picker and the console is present but disabled
-	NSArray *disabled = @[SPPostgresToolbarStructure, SPPostgresToolbarContent, SPPostgresToolbarRelations,
-						  SPPostgresToolbarTriggers, SPPostgresToolbarTableInfo, SPPostgresToolbarQuery,
-						  SPPostgresToolbarUsers, SPPostgresToolbarTransfer, SPPostgresToolbarHistory];
+	// Everything but the database picker and the console is present but disabled
+	NSArray *disabled = @[structure, content, relations, triggers, tableInfo, query, users, transfer, history];
 	for (NSToolbarItem *item in toolbar.items) {
 		if ([disabled containsObject:item.itemIdentifier]) {
 			BOOL enabled = item.view ? [(NSControl *)item.view isEnabled] && item.isEnabled : [self.document validateToolbarItem:item];
-			XCTAssertFalse(enabled, @"%@ should be disabled in stage 1", item.itemIdentifier);
+			XCTAssertFalse(enabled, @"%@ should be disabled", item.itemIdentifier);
 		}
 	}
-	NSToolbarItem *console = toolbar.items.lastObject;
-	XCTAssertTrue([self.document validateToolbarItem:console]);
-	XCTAssertNotNil(console.image);
+	NSToolbarItem *consoleItem = toolbar.items.lastObject;
+	XCTAssertTrue([self.document validateToolbarItem:consoleItem]);
+	XCTAssertNotNil(consoleItem.image);
 }
 
 #pragma mark - Title
@@ -456,7 +459,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 - (NSPopUpButton *)databasePopup
 {
 	for (NSToolbarItem *item in [self.document toolbar].items) {
-		if ([item.itemIdentifier isEqualToString:SPPostgresToolbarDatabase]) return (NSPopUpButton *)item.view;
+		if ([item.itemIdentifier isEqualToString:@"DatabaseSelectToolbarItemIdentifier"]) return (NSPopUpButton *)item.view;
 	}
 	return nil;
 }

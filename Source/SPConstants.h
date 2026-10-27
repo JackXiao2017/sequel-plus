@@ -477,6 +477,9 @@ extern NSString *SPMainToolbarTableInfo;
 extern NSString *SPMainToolbarTableRelations;
 extern NSString *SPMainToolbarTableTriggers;
 extern NSString *SPMainToolbarUserManager;
+extern NSString *SPMainToolbarTransfer;
+// YES once the Transfer item was added to the saved main toolbar layout (it is added only once)
+extern NSString *SPToolbarTransferItemAdded;
 extern NSString **SPViewModeToMainToolbarMap[];
 
 // Preferences toolbar

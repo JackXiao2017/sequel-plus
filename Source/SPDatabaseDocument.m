@@ -85,6 +85,7 @@
 #import "SPSSHTunnel.h"
 #import "SPHelpViewerClient.h"
 #import "SPHelpViewerController.h"
+#import "SPToolbarTransferItem.h"
 
 #import <SPMySQL/SPMySQL.h>
 
@@ -4187,7 +4188,12 @@ static BOOL isOSAtLeast10_14;
 		//set up the target action
 		[toolbarItem setTarget:self];
 		[toolbarItem setAction:@selector(showUserManager:)];
-		
+
+	} else if ([itemIdentifier isEqualToString:SPMainToolbarTransfer]) {
+		// PostgreSQL-only (shared toolbar layout): always disabled on MySQL tabs, also after a connect enables every item
+		toolbarItem = [[[SPDisabledToolbarItem alloc] initWithItemIdentifier:itemIdentifier] autorelease];
+		SPConfigureTransferToolbarItem(toolbarItem);
+
 	} else {
 		//itemIdentifier refered to a toolbar item that is not provided or supported by us or cocoa
 		toolbarItem = nil;
@@ -4234,6 +4240,7 @@ static BOOL isOSAtLeast10_14;
 		SPMainToolbarTableRelations,
 		SPMainToolbarTableTriggers,
 		SPMainToolbarUserManager,
+		SPMainToolbarTransfer,
 		NSToolbarCustomizeToolbarItemIdentifier,
 		NSToolbarFlexibleSpaceItemIdentifier,
 		NSToolbarSpaceItemIdentifier,
@@ -4257,6 +4264,7 @@ static BOOL isOSAtLeast10_14;
 		NSToolbarFlexibleSpaceItemIdentifier,
 		SPMainToolbarHistoryNavigation,
 		SPMainToolbarUserManager,
+		SPMainToolbarTransfer,
 		SPMainToolbarShowConsole
 	];
 }
@@ -4285,6 +4293,9 @@ static BOOL isOSAtLeast10_14;
 	if (!_isConnected || _isWorkingLevel) return NO;
 
 	NSString *identifier = [toolbarItem itemIdentifier];
+
+	// PostgreSQL-only
+	if ([identifier isEqualToString:SPMainToolbarTransfer]) return NO;
 
 	// Show console item
 	if ([identifier isEqualToString:SPMainToolbarShowConsole]) {
@@ -4443,6 +4454,9 @@ static BOOL isOSAtLeast10_14;
 	BOOL toolbarVisible = ![parentWindow toolbar] || [[parentWindow toolbar] isVisible];
 	[parentWindow setToolbar:mainToolbar];
 	[[parentWindow toolbar] setVisible:toolbarVisible];
+
+	// A layout saved before Transfer existed gets it once (the toolbar has its items once in a window)
+	SPInsertTransferToolbarItemIfNeeded(mainToolbar, prefs);
 
 	// Compact title and toolbar layout, kept centered as the window resizes
 	[parentWindow sp_useExpandedCompactToolbar];

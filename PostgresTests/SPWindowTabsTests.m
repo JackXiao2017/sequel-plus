@@ -400,4 +400,60 @@
 	XCTAssertTrue([self.controller validateMenuItem:closeTab]);
 }
 
+#pragma mark - Colour strip
+
+- (CGFloat)collapsedTabBarHeight
+{
+	return [[[self tabBar] valueForKey:@"heightCollapsed"] doubleValue];
+}
+
+- (void)testCollapsedTabBarShowsColourOfNonMySQLTab
+{
+	SPFakeTabDocument *coloured = [[SPFakeTabDocument alloc] init];
+	SPFakeTabDocument *plain = [[SPFakeTabDocument alloc] init];
+	[self.controller addTabDocument:coloured atIndex:0 select:NO];
+	[[[self tabView] tabViewItemAtIndex:0] setColor:[NSColor systemRedColor]];
+	[self.controller addTabDocument:plain atIndex:1 select:NO];
+	// No colour: nil, as tab documents set it (NSTabViewItem's default colour isn't nil)
+	[[[self tabView] tabViewItemAtIndex:1] setValue:nil forKey:@"color"];
+	[[self tabView] selectTabViewItemAtIndex:1];
+	XCTAssertEqual((id)[self.controller selectedDocument], plain);
+	XCTAssertEqual([self collapsedTabBarHeight], 1.0);
+
+	// Switching between two non-MySQL tabs updates the tab bar: the selected tab's colour shows as the 8 pt strip
+	[[self tabView] selectTabViewItemAtIndex:0];
+	XCTAssertEqual((id)[self.controller selectedDocument], coloured);
+	XCTAssertEqual([self collapsedTabBarHeight], 8.0);
+
+	[[self tabView] selectTabViewItemAtIndex:1];
+	XCTAssertEqual([self collapsedTabBarHeight], 1.0);
+
+	// A colour change followed by -updateTabBar (as a tab document's -updateWindowTitle: does)
+	[[[self tabView] tabViewItemAtIndex:1] setColor:[NSColor systemBlueColor]];
+	[self.controller updateTabBar];
+	XCTAssertEqual([self collapsedTabBarHeight], 8.0);
+}
+
+- (void)testCollapsedTabBarForMySQLTabIsUnchanged
+{
+	// A coloured non-MySQL tab, then an unconnected MySQL tab: MySQL's own rule (connection colour) applies
+	SPFakeTabDocument *coloured = [[SPFakeTabDocument alloc] init];
+	[self.controller addTabDocument:coloured atIndex:0 select:YES];
+	[[[self tabView] tabViewItemAtIndex:0] setColor:[NSColor systemRedColor]];
+	[self.controller updateTabBar];
+	XCTAssertEqual([self collapsedTabBarHeight], 8.0);
+
+	id mysql = [self.controller addNewConnection];
+	XCTAssertEqual([self.controller selectedTableDocument], mysql);
+	[[[self tabView] tabViewItemAtIndex:1] setColor:[NSColor systemBlueColor]];
+	[self.controller updateTabBar];
+	XCTAssertEqual([self collapsedTabBarHeight], 1.0, @"not connected: no strip, whatever the tab colour");
+
+	[[self tabView] selectTabViewItemAtIndex:0];
+	XCTAssertEqual([self collapsedTabBarHeight], 8.0);
+
+	// Let the MySQL tab's filter editor finish its delayed resize before it closes (see SPPostgresDocumentTests)
+	[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.4]];
+}
+
 @end
