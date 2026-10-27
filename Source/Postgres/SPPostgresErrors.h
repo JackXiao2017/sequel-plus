@@ -13,5 +13,7 @@ typedef NS_ENUM(NSInteger, SPPostgresErrorCode) {
 	/// The attempt was cancelled (by -cancel/-disconnect, or by dismissing the SSH password prompt).
 	SPPostgresErrorCancelled = 4,
 	/// A catalog or other query failed on the server (the server's message is the localized description).
-	SPPostgresErrorQueryFailed = 5
+	SPPostgresErrorQueryFailed = 5,
+	/// The connection form is missing required details (e.g. a TCP/IP favorite without a host).
+	SPPostgresErrorInvalidSettings = 6
 };
