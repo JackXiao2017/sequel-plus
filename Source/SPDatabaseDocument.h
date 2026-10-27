@@ -56,6 +56,7 @@
 #import "SPDatabaseContentViewDelegate.h"
 #import "SPConnectionControllerDelegateProtocol.h"
 #import "SPThreadAdditions.h"
+#import "SPWindowTabDocument.h"
 
 #import <WebKit/WebKit.h>
 #import <SPMySQL/SPMySQLConnectionDelegate.h>
@@ -63,7 +64,7 @@
 /**
  * The SPDatabaseDocument class controls the primary database view window.
  */
-@interface SPDatabaseDocument : NSObject <SPConnectionControllerDelegateProtocol, SPMySQLConnectionDelegate, NSTextFieldDelegate, NSToolbarDelegate, SPCountedObject, WebFrameLoadDelegate>
+@interface SPDatabaseDocument : NSObject <SPConnectionControllerDelegateProtocol, SPMySQLConnectionDelegate, NSTextFieldDelegate, NSToolbarDelegate, SPCountedObject, WebFrameLoadDelegate, SPWindowTabDocument>
 {
 	// IBOutlets
 	IBOutlet SPTablesList *tablesListInstance;

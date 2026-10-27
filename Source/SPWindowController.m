@@ -43,6 +43,7 @@
 - (void)_setUpTabBar;
 - (void)_updateProgressIndicatorForItem:(NSTabViewItem *)theItem;
 - (void)_switchOutSelectedTableDocument:(SPDatabaseDocument *)newDoc;
+- (void)_switchOutSelectedDocument:(id <SPWindowTabDocument>)newDoc;
 - (void)_selectedTableDocumentDeallocd:(NSNotification *)notification;
 
 #pragma mark - SPWindowControllerDelegate
@@ -133,13 +134,85 @@
 }
 
 /**
+ * The selected tab's document, whatever its engine (see header).
+ */
+- (id <SPWindowTabDocument>)selectedDocument
+{
+	return selectedTabDocument;
+}
+
+/**
+ * Every tab's document, of any engine, in tab order.
+ */
+- (NSArray *)tabDocuments
+{
+	NSMutableArray *documentsArray = [NSMutableArray array];
+	for (NSTabViewItem *eachItem in [tabView tabViewItems]) {
+		[documentsArray addObject:[eachItem identifier]];
+	}
+	return documentsArray;
+}
+
+/**
+ * Host a document of any engine in a new tab. Mirrors -addNewConnection: the tab view item
+ * retains the document (as its identifier) and the window controller does not.
+ */
+- (void)addTabDocument:(id <SPWindowTabDocument>)document atIndex:(NSInteger)index select:(BOOL)select
+{
+	if (!document) return;
+
+	if (index < 0) index = 0;
+	if (index > [tabView numberOfTabViewItems]) index = [tabView numberOfTabViewItems];
+
+	[document setParentWindowController:self];
+	[document setParentWindow:[self window]];
+
+	NSTabViewItem *newItem = [[[NSTabViewItem alloc] initWithIdentifier:document] autorelease];
+
+	[newItem setView:[document databaseView]];
+	[document setParentTabViewItem:newItem];
+
+	// Adding the first tab selects it, which activates the document via -tabView:didSelectTabViewItem:
+	[tabView insertTabViewItem:newItem atIndex:index];
+
+	// Bind the tab bar's progress display to the document
+	[self _updateProgressIndicatorForItem:newItem];
+
+	if (select && [tabView selectedTabViewItem] != newItem) {
+		[tabView selectTabViewItem:newItem];
+	}
+
+	[document updateWindowTitle:self];
+}
+
+/**
+ * Put newDocument where oldDocument's tab is and select it, then close oldDocument's tab.
+ */
+- (void)replaceTabDocument:(id <SPWindowTabDocument>)oldDocument withDocument:(id <SPWindowTabDocument>)newDocument
+{
+	NSInteger index = [tabView indexOfTabViewItemWithIdentifier:oldDocument];
+
+	if (index == NSNotFound || !newDocument) return;
+
+	// Keep the old document alive until its tab has been closed
+	[[oldDocument retain] autorelease];
+
+	NSTabViewItem *oldItem = [tabView tabViewItemAtIndex:index];
+
+	[self addTabDocument:newDocument atIndex:index select:YES];
+
+	// Closing the tab sends the old document -parentTabDidClose via -tabView:didCloseTabViewItem:
+	[tabView removeTabViewItem:oldItem];
+}
+
+/**
  * Update the currently selected connection view
  */
 - (void)updateSelectedTableDocument
 {
-	[self _switchOutSelectedTableDocument:[[tabView selectedTabViewItem] identifier]];
+	[self _switchOutSelectedDocument:[[tabView selectedTabViewItem] identifier]];
 	
-	[selectedTableDocument didBecomeActiveTabInWindow];
+	[selectedTabDocument didBecomeActiveTabInWindow];
 }
 
 /**
@@ -152,7 +225,7 @@
 {
 	for (NSTabViewItem *eachItem in [tabView tabViewItems]) 
 	{
-		SPDatabaseDocument *eachDocument = [eachItem identifier];
+		id <SPWindowTabDocument> eachDocument = [eachItem identifier];
 		
 		if (eachDocument != sender) {
 			[eachDocument updateWindowTitle:self];
@@ -168,7 +241,7 @@
 	// If there are multiple tabs, close the front tab.
 	if ([tabView numberOfTabViewItems] > 1) {
 		// Return if the selected tab shouldn't be closed
-		if (![selectedTableDocument parentTabShouldClose]) return;
+		if (![selectedTabDocument parentTabShouldClose]) return;
 		[tabView removeTabViewItem:[tabView selectedTabViewItem]];
 	} 
 	else {
@@ -210,7 +283,7 @@
 {
 	static NSPoint cascadeLocation = {.x = 0, .y = 0};
 
-	SPDatabaseDocument *selectedDocument = [[tabView selectedTabViewItem] identifier];
+	id <SPWindowTabDocument> selectedDocument = [[tabView selectedTabViewItem] identifier];
 	NSTabViewItem *selectedTabViewItem = [tabView selectedTabViewItem];
 	PSMTabBarCell *selectedCell = [[tabBar cells] objectAtIndex:[tabView indexOfTabViewItem:selectedTabViewItem]];
 
@@ -236,7 +309,12 @@
 	[newWindow setDelegate:newWindowController];
 
 	// Set window title
-	[newWindow setTitle:[[[[tabView selectedTabViewItem] identifier] parentWindow] title]];
+	if ([selectedDocument isKindOfClass:[SPDatabaseDocument class]]) {
+		[newWindow setTitle:[[[[tabView selectedTabViewItem] identifier] parentWindow] title]];
+	}
+	else {
+		[newWindow setTitle:[[self window] title]];
+	}
 
 	// New window's tabBar control
 #warning Private ivar accessed from outside (#2978)
@@ -246,7 +324,7 @@
 	[[control cells] insertObject:selectedCell atIndex:0];
 
 	// Remove 'isProcessing' observer from old windowController
-	[selectedDocument removeObserver:self forKeyPath:@"isProcessing"];
+	[(NSObject *)selectedDocument removeObserver:self forKeyPath:@"isProcessing"];
 
 	// Update new 'isProcessing' observer and bind the new tab bar's progress display to the document
 	[self _updateProgressIndicatorForItem:selectedTabViewItem];
@@ -303,6 +381,14 @@
 		return [[tabBar cells] count] <= 1;
 	}
 	
+	// A non-MySQL tab validates the items it handles itself; the window's own items stay enabled
+	if (selectedTabDocument && ![selectedTabDocument isKindOfClass:[SPDatabaseDocument class]]) {
+		if ([selectedTabDocument respondsToSelector:@selector(validateMenuItem:)]) {
+			return [(id)selectedTabDocument validateMenuItem:menuItem];
+		}
+		return YES;
+	}
+
 	// See if the front document blocks validation of this item
 	if (![selectedTableDocument validateMenuItem:menuItem]) return NO;
 
@@ -316,6 +402,8 @@
 {
 	NSMutableArray *documentsArray = [NSMutableArray array];
 	for (NSTabViewItem *eachItem in [tabView tabViewItems]) {
+		// Only MySQL documents; see -tabDocuments for every tab
+		if (![[eachItem identifier] isKindOfClass:[SPDatabaseDocument class]]) continue;
 		[documentsArray addObject:[eachItem identifier]];
 	}
 	return documentsArray;
@@ -378,11 +466,11 @@
 {
 	SEL theSelector = [theInvocation selector];
 	
-	if (![selectedTableDocument respondsToSelector:theSelector]) {
+	if (![selectedTabDocument respondsToSelector:theSelector]) {
 		[self doesNotRecognizeSelector:theSelector];
 	}
 	
-	[theInvocation invokeWithTarget:selectedTableDocument];
+	[theInvocation invokeWithTarget:selectedTabDocument];
 }
 
 /**
@@ -393,7 +481,12 @@
 {
 	NSMethodSignature *defaultSignature = [super methodSignatureForSelector:theSelector];
 	
-	return defaultSignature ? defaultSignature : [selectedTableDocument methodSignatureForSelector:theSelector];
+	if (defaultSignature) return defaultSignature;
+
+	// Only borrow a signature the selected document actually implements
+	if (![selectedTabDocument respondsToSelector:theSelector]) return nil;
+
+	return [(NSObject *)selectedTabDocument methodSignatureForSelector:theSelector];
 }
 
 /**
@@ -402,7 +495,7 @@
  */
 - (BOOL)respondsToSelector:(SEL)theSelector
 {
-	return ([super respondsToSelector:theSelector] || [selectedTableDocument respondsToSelector:theSelector]);
+	return ([super respondsToSelector:theSelector] || [selectedTabDocument respondsToSelector:theSelector]);
 }
 
 /**
@@ -415,11 +508,11 @@
 		return [super performSelector:theSelector];
 	}
 
-	if (![selectedTableDocument respondsToSelector:theSelector]) {
+	if (![selectedTabDocument respondsToSelector:theSelector]) {
 		[self doesNotRecognizeSelector:theSelector];
 	}
 	
-	return [selectedTableDocument performSelector:theSelector];
+	return [selectedTabDocument performSelector:theSelector];
 }
 
 /**
@@ -431,11 +524,11 @@
 		return [super performSelector:theSelector withObject:theObject];
 	}
 
-	if (![selectedTableDocument respondsToSelector:theSelector]) {
+	if (![selectedTabDocument respondsToSelector:theSelector]) {
 		[self doesNotRecognizeSelector:theSelector];
 	}
 	
-	return [selectedTableDocument performSelector:theSelector withObject:theObject];
+	return [selectedTabDocument performSelector:theSelector withObject:theObject];
 }
 
 /**
@@ -486,7 +579,7 @@
 	
 	[[theCell indicator] setControlSize:NSSmallControlSize];
 	
-	SPDatabaseDocument *theDocument = [theItem identifier];
+	id <SPWindowTabDocument> theDocument = [theItem identifier];
 	
 	[[theCell indicator] setHidden:NO];
 	
@@ -497,7 +590,7 @@
 	[[theCell indicator] bind:@"animate" toObject:theDocument withKeyPath:@"isProcessing" options:nil];
 	[[theCell indicator] bind:@"hidden" toObject:theDocument withKeyPath:@"isProcessing" options:bindingOptions];
 	
-	[theDocument addObserver:self forKeyPath:@"isProcessing" options:0 context:nil];
+	[(NSObject *)theDocument addObserver:self forKeyPath:@"isProcessing" options:0 context:nil];
 }
 
 
@@ -521,9 +614,23 @@
 	[self updateTabBar];
 }
 
+/**
+ * Switch the selected document of any engine. selectedTableDocument follows it when it is a
+ * MySQL document and becomes nil otherwise; for MySQL documents both are the same object.
+ */
+- (void)_switchOutSelectedDocument:(id <SPWindowTabDocument>)newDoc
+{
+	NSAssert([NSThread isMainThread], @"Switching the selected document via a background thread is not supported!");
+
+	selectedTabDocument = newDoc;
+
+	[self _switchOutSelectedTableDocument:([(NSObject *)newDoc isKindOfClass:[SPDatabaseDocument class]] ? (SPDatabaseDocument *)newDoc : nil)];
+}
+
 - (void)_selectedTableDocumentDeallocd:(NSNotification *)notification
 {
-	[self _switchOutSelectedTableDocument:nil];
+	// Only MySQL documents are observed, and only while selected, so they are also selectedTabDocument
+	[self _switchOutSelectedDocument:nil];
 }
 
 #pragma mark - SPWindowControllerDelegate
@@ -537,7 +644,7 @@
 {
 	for (NSTabViewItem *eachItem in [tabView tabViewItems])
 	{
-		SPDatabaseDocument *eachDocument = [eachItem identifier];
+		id <SPWindowTabDocument> eachDocument = [eachItem identifier];
 
 		if (![eachDocument parentTabShouldClose]) return NO;
 	}
@@ -570,7 +677,7 @@
  */
 - (void)windowDidBecomeKey:(NSNotification *)notification
 {
-	[selectedTableDocument tabDidBecomeKey];
+	if ([selectedTabDocument respondsToSelector:@selector(tabDidBecomeKey)]) [selectedTabDocument tabDidBecomeKey];
 
 	// Update the "Close window" item
 	[closeWindowMenuItem setTitle:NSLocalizedString(@"Close Window", @"Close Window menu item")];
@@ -615,9 +722,9 @@
 {
 	for (NSTabViewItem *eachItem in [tabView tabViewItems])
 	{
-		SPDatabaseDocument *eachDocument = [eachItem identifier];
+		id <SPWindowTabDocument> eachDocument = [eachItem identifier];
 
-		[eachDocument tabDidResize];
+		if ([eachDocument respondsToSelector:@selector(tabDidResize)]) [eachDocument tabDidResize];
 	}
 }
 
@@ -645,7 +752,7 @@
  */
 - (void)tabView:(NSTabView *)tabView willSelectTabViewItem:(NSTabViewItem *)tabViewItem
 {
-	[selectedTableDocument willResignActiveTabInWindow];
+	[selectedTabDocument willResignActiveTabInWindow];
 }
 
 /**
@@ -655,10 +762,10 @@
 {
 	if ([[PSMTabDragAssistant sharedDragAssistant] isDragging]) return;
 
-	[self _switchOutSelectedTableDocument:[tabViewItem identifier]];
-	[selectedTableDocument didBecomeActiveTabInWindow];
+	[self _switchOutSelectedDocument:[tabViewItem identifier]];
+	[selectedTabDocument didBecomeActiveTabInWindow];
 
-	if ([[self window] isKeyWindow]) [selectedTableDocument tabDidBecomeKey];
+	if ([[self window] isKeyWindow] && [selectedTabDocument respondsToSelector:@selector(tabDidBecomeKey)]) [selectedTabDocument tabDidBecomeKey];
 
 	[self updateAllTabTitles:self];
 }
@@ -670,7 +777,7 @@
  */
 - (BOOL)tabView:(NSTabView *)aTabView shouldCloseTabViewItem:(NSTabViewItem *)tabViewItem
 {
-	SPDatabaseDocument *theDocument = [tabViewItem identifier];
+	id <SPWindowTabDocument> theDocument = [tabViewItem identifier];
 
 	if (![theDocument parentTabShouldClose]) return NO;
 
@@ -682,10 +789,15 @@
  */
 - (void)tabView:(NSTabView *)aTabView didCloseTabViewItem:(NSTabViewItem *)tabViewItem
 {
-	SPDatabaseDocument *theDocument = [tabViewItem identifier];
+	id <SPWindowTabDocument> theDocument = [tabViewItem identifier];
 
-	[theDocument removeObserver:self forKeyPath:@"isProcessing"];
+	[(NSObject *)theDocument removeObserver:self forKeyPath:@"isProcessing"];
 	[theDocument parentTabDidClose];
+
+	// MySQL documents clear the selection through SPDocumentWillCloseNotification; others do it here
+	if (theDocument == selectedTabDocument && ![(NSObject *)theDocument isKindOfClass:[SPDatabaseDocument class]]) {
+		[self _switchOutSelectedDocument:nil];
+	}
 }
 
 /**
@@ -701,10 +813,16 @@
  */
 - (void)tabView:(NSTabView*)aTabView didDropTabViewItem:(NSTabViewItem *)tabViewItem inTabBar:(PSMTabBarControl *)tabBarControl
 {
-	SPDatabaseDocument *draggedDocument = [tabViewItem identifier];
+	id draggedDocument = [tabViewItem identifier];
 
-	// Grab a reference to the old window
-	NSWindow *draggedFromWindow = [draggedDocument parentWindow];
+	// Grab a reference to the old window (a non-MySQL document may not expose it: fall back to its controller's)
+	NSWindow *draggedFromWindow = nil;
+	if ([draggedDocument isKindOfClass:[SPDatabaseDocument class]] || [draggedDocument respondsToSelector:@selector(parentWindow)]) {
+		draggedFromWindow = [draggedDocument parentWindow];
+	}
+	else if ([draggedDocument respondsToSelector:@selector(parentWindowController)]) {
+		draggedFromWindow = [[draggedDocument parentWindowController] window];
+	}
 
 	// If the window changed, perform additional processing.
 	if (draggedFromWindow != [tabBarControl window]) {
@@ -747,6 +865,9 @@
 {
 	SPDatabaseDocument *theDocument = [tabViewItem identifier];
 
+	// Switching to the custom query view on a text drag is MySQL-only
+	if (![theDocument isKindOfClass:[SPDatabaseDocument class]]) return;
+
 	if (![theDocument isCustomQuerySelected] && [[[dragEvent draggingPasteboard] types] indexOfObject:NSStringPboardType] != NSNotFound)
 	{
 		[theDocument viewQuery:self];
@@ -782,8 +903,16 @@
 	}
 	// if cell is not selected show full title plus MySQL version is enabled as tooltip
 	else {
-		if ([[tabViewItem identifier] respondsToSelector:@selector(tabTitleForTooltip)]) {
-			return [[tabViewItem identifier] tabTitleForTooltip];
+		if ([[tabViewItem identifier] isKindOfClass:[SPDatabaseDocument class]]) {
+			if ([[tabViewItem identifier] respondsToSelector:@selector(tabTitleForTooltip)]) {
+				return [[tabViewItem identifier] tabTitleForTooltip];
+			}
+
+			return @"";
+		}
+
+		if ([[tabViewItem identifier] respondsToSelector:@selector(tabToolTip)]) {
+			return [(id <SPWindowTabDocument>)[tabViewItem identifier] tabToolTip];
 		}
 
 		return @"";
@@ -847,7 +976,12 @@
 	[newWindow setDelegate:newWindowController];
 
 	// Set window title
-	[newWindow setTitle:[[[tabViewItem identifier] parentWindow] title]];
+	if ([[tabViewItem identifier] isKindOfClass:[SPDatabaseDocument class]]) {
+		[newWindow setTitle:[[[tabViewItem identifier] parentWindow] title]];
+	}
+	else {
+		[newWindow setTitle:[[self window] title]];
+	}
 
 	// Return the window's tab bar
 #warning Private ivar accessed from outside (#2978)
@@ -936,7 +1070,7 @@
 
 - (void)dealloc
 {
-	[self _switchOutSelectedTableDocument:nil];
+	[self _switchOutSelectedDocument:nil];
 	[[NSNotificationCenter defaultCenter] removeObserver:self];
 	
 	[NSObject cancelPreviousPerformRequestsWithTarget:self];
