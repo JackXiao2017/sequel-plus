@@ -1349,6 +1349,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 		return;
 	}
 
+	// With a sheet already attached (e.g. a job's progress sheet still ending), AppKit queues this one behind it
 	[alert beginSheetModalForWindow:parentWindow completionHandler:nil];
 }
 
@@ -2623,9 +2624,10 @@ NSString * const SPPostgresPaneExtension = @"extension";
  * and the passwords this session was opened with (as -_switchToDatabase:forHistory:), with the console logger
  * attached. adopt (may be nil) is handed each connector as it is made, and keeps it; without one, the connector is
  * kept until the background job on its connection ends (SPPostgresBackgroundJob). sheetWindow (may be nil) gives the
- * window the connector's SSH sheets go to, else this tab's window.
+ * window the connector's SSH sheets go to, else this tab's window. connecting (may be nil) is handed each connector as
+ * its attempt starts (e.g. to -cancel it), and called with nil once the attempt is over.
  */
-- (SPPostgresConnectionProvider)_defaultConnectionProviderAdopting:(void (^)(SPPostgresConnector *theConnector))adopt sheetWindow:(NSWindow *(^)(void))sheetWindow
+- (SPPostgresConnectionProvider)_defaultConnectionProviderAdopting:(void (^)(SPPostgresConnector *theConnector))adopt sheetWindow:(NSWindow *(^)(void))sheetWindow connecting:(void (^)(SPPostgresConnector *theConnector))connecting
 {
 	SPPostgresFavorite *base = [[favorite copy] autorelease];
 	NSString *thePassword = [connector password] ?: [connection password];
@@ -2634,6 +2636,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	NSWindow *window = parentWindow;
 	void (^theAdopt)(SPPostgresConnector *) = [[adopt copy] autorelease];
 	NSWindow *(^theSheetWindow)(void) = [[sheetWindow copy] autorelease];
+	void (^theConnecting)(SPPostgresConnector *) = [[connecting copy] autorelease];
 
 	SPPostgresConnectionProvider provider = ^(NSString *database, void (^completion)(PGPostgresConnection *, NSError *)) {
 		SPPostgresFavorite *target = [[base copy] autorelease];
@@ -2641,6 +2644,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 		NSWindow *host = (theSheetWindow ? theSheetWindow() : nil) ?: window;
 		SPPostgresConnector *newConnector = [[[SPPostgresConnector alloc] initWithFavorite:target password:thePassword sshPassword:theSSHPassword parentWindow:host] autorelease];
 		if (theAdopt) theAdopt(newConnector);
+		if (theConnecting) theConnecting(newConnector);
 		void (^done)(PGPostgresConnection *, NSError *) = [[completion copy] autorelease];
 		// The completion block keeps the connector during the attempt (the connector lets go of it once called)
 		[newConnector connectWithCompletion:^(PGPostgresConnection *theConnection, NSError *error) {
@@ -2650,6 +2654,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 				[jobLogger attachToConnection:theConnection];
 				if (!theAdopt) [SPPostgresBackgroundJob keepOwner:newConnector untilJobEndsOnConnection:theConnection];
 			}
+			if (theConnecting) theConnecting(nil);
 			done(theConnection, error);
 		}];
 	};
@@ -2658,8 +2663,18 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 - (SPPostgresConnectionProvider)effectiveConnectionProvider
 {
+	return [self connectionProviderForJobWithSheetWindow:nil connecting:nil];
+}
+
+- (SPPostgresConnectionProvider)connectionProviderForJobWithSheetWindow:(NSWindow *(^)(void))sheetWindow connecting:(void (^)(SPPostgresConnector *connector))connecting
+{
 	if (connectionProvider) return [[connectionProvider retain] autorelease];
-	return [self _defaultConnectionProviderAdopting:nil sheetWindow:nil];
+	return [self _defaultConnectionProviderAdopting:nil sheetWindow:sheetWindow connecting:connecting];
+}
+
+- (void)presentAlert:(NSAlert *)alert
+{
+	[self _presentAlert:alert];
 }
 
 - (IBAction)showUserManager:(id)sender
@@ -2676,7 +2691,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 			[owner adoptConnector:theConnector];
 		} sheetWindow:^NSWindow *{
 			return [owner windowForConnectorSheets];
-		}];
+		} connecting:nil];
 	}
 
 	SPPostgresUsersController *controller = [[SPPostgresUsersController alloc] initWithDatabase:currentDatabase connectionProvider:provider];

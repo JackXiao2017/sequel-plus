@@ -8,6 +8,7 @@
 #import "SPPostgresErrors.h"
 #import "SPPostgresProgressSheet.h"
 #import "SPPostgresBackgroundJob.h"
+#import "SPPostgresConnector.h"
 #import <PostgresKit/PostgresKit.h>
 
 typedef NS_ENUM(NSInteger, SPPostgresExportFormat) {
@@ -82,6 +83,13 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 	BOOL running;
 	/// Cancel came while the path was being chosen: nothing starts
 	BOOL abandoned;
+
+	/// The running job, and the connector the default provider is connecting for it (nil once connected)
+	SPPostgresBackgroundJob *job;
+	SPPostgresConnector *pendingConnector;
+	/// Partitioned tables (relkind p) as @[schema, table]: a CSV of a database or schemas leaves them out, as their
+	/// partitions export their own rows
+	NSSet *partitionedTables;
 }
 
 @synthesize didEnd;
@@ -104,6 +112,7 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 @synthesize progressObserver;
 @synthesize progressSheet;
 @synthesize lastErrorMessage;
+@synthesize pendingConnector;
 
 - (instancetype)initWithDocument:(SPPostgresDocument *)theDocument
 {
@@ -156,6 +165,9 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 	[queryColumnNames release];
 	[queryRows release];
 	[progressSheet release];
+	[job release];
+	[pendingConnector release];
+	[partitionedTables release];
 	[lastErrorMessage release];
 	[database release];
 	[document release];
@@ -382,6 +394,16 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 	}
 	if (error) [self _setLastErrorMessage:[error localizedDescription]];
 
+	// Which of them are partitioned (a failure leaves the set empty)
+	NSMutableSet *partitioned = [NSMutableSet set];
+	PGPostgresResult *partitionedResult = [[document connection] execute:@"SELECT n.nspname::text, c.relname::text FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'p'"];
+	for (unsigned long long row = 0; row < [partitionedResult numberOfRows]; row++) {
+		id schema = [partitionedResult textValueAtRow:row column:0], table = [partitionedResult textValueAtRow:row column:1];
+		if ([schema isKindOfClass:[NSString class]] && [table isKindOfClass:[NSString class]]) [partitioned addObject:@[schema, table]];
+	}
+	[partitionedTables release];
+	partitionedTables = [partitioned copy];
+
 	[schemaNames release];
 	schemaNames = [(schemas ?: @[]) copy];
 	[tableRows release];
@@ -554,12 +576,12 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 		case SPPostgresExportSourceSchemas: {
 			NSArray *schemas = [self checkedSchemas];
 			NSMutableArray *pairs = [NSMutableArray array];
-			for (id row in tableRows) if ([row isKindOfClass:[NSArray class]] && [schemas containsObject:[row objectAtIndex:0]]) [pairs addObject:row];
+			for (id row in tableRows) if ([row isKindOfClass:[NSArray class]] && [schemas containsObject:[row objectAtIndex:0]] && ![partitionedTables containsObject:row]) [pairs addObject:row];
 			return pairs;
 		}
 		case SPPostgresExportSourceDatabase: {
 			NSMutableArray *pairs = [NSMutableArray array];
-			for (id row in tableRows) if ([row isKindOfClass:[NSArray class]]) [pairs addObject:row];
+			for (id row in tableRows) if ([row isKindOfClass:[NSArray class]] && ![partitionedTables containsObject:row]) [pairs addObject:row];
 			return pairs;
 		}
 		default:
@@ -781,6 +803,35 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 	return progressSheet;
 }
 
+/**
+ * Runs work as a background job on a connection from the document's provider. Its SSH sheets (host key, passwords)
+ * go to the progress sheet, which is on the window by then; a Cancel while connecting cancels the pending connector
+ * and ends the job at once.
+ */
+- (void)_runJobWithProgress:(SPPostgresProgressSheet *)progress work:(BOOL (^)(PGPostgresConnection *connection, NSError **error))work
+{
+	NSWindow *progressWindow = [progress panel];
+	SPPostgresConnectionProvider provider = [document connectionProviderForJobWithSheetWindow:^NSWindow *{
+		return progressWindow;
+	} connecting:^(SPPostgresConnector *theConnector) {
+		if (theConnector == pendingConnector) return;
+		[pendingConnector release];
+		pendingConnector = [theConnector retain];
+	}];
+
+	[progress setCancelHandler:^{
+		if (![job waitingForConnection]) return; // the work checks the sheet itself
+		SPPostgresConnector *connecting = [[pendingConnector retain] autorelease];
+		[job cancel];
+		[connecting cancel];
+	}];
+
+	[job release];
+	job = [[SPPostgresBackgroundJob runOnDatabase:database provider:provider work:work completion:^(BOOL ok, NSError *error) {
+		[self _jobEndedWithSuccess:ok error:error];
+	}] retain];
+}
+
 /// The job's progress report: shows it, lets the test seam see it, and answers whether to go on.
 static BOOL SPPostgresExportReport(SPPostgresProgressSheet *progress, void (^observer)(SPPostgresProgressSheet *), NSUInteger index, NSUInteger count, NSString *table)
 {
@@ -801,7 +852,7 @@ static BOOL SPPostgresExportReport(SPPostgresProgressSheet *progress, void (^obs
 	BOOL compress = [compressCheckbox state] == NSControlStateValueOn;
 	void (^observer)(SPPostgresProgressSheet *) = [[progressObserver copy] autorelease];
 
-	[SPPostgresBackgroundJob runOnDatabase:database provider:[document effectiveConnectionProvider] work:^BOOL(PGPostgresConnection *connection, NSError **error) {
+	[self _runJobWithProgress:progress work:^BOOL(PGPostgresConnection *connection, NSError **error) {
 		if ([progress cancelled]) {
 			if (error) *error = SPPostgresMakeError(SPPostgresErrorCancelled, NSLocalizedString(@"The export was cancelled.", @"Postgres export: cancelled"), nil);
 			return NO;
@@ -817,8 +868,6 @@ static BOOL SPPostgresExportReport(SPPostgresProgressSheet *progress, void (^obs
 			return SPPostgresExportReport(progress, observer, index, count, table);
 		}];
 		return [writer writeToPath:path error:error];
-	} completion:^(BOOL ok, NSError *error) {
-		[self _jobEndedWithSuccess:ok error:error];
 	}];
 }
 
@@ -828,7 +877,7 @@ static BOOL SPPostgresExportReport(SPPostgresProgressSheet *progress, void (^obs
 	SPPostgresCSVOptions *options = [[[self _csvOptions] copy] autorelease];
 	void (^observer)(SPPostgresProgressSheet *) = [[progressObserver copy] autorelease];
 
-	[SPPostgresBackgroundJob runOnDatabase:database provider:[document effectiveConnectionProvider] work:^BOOL(PGPostgresConnection *connection, NSError **error) {
+	[self _runJobWithProgress:progress work:^BOOL(PGPostgresConnection *connection, NSError **error) {
 		NSMutableArray *written = [NSMutableArray array];
 		NSError *failure = nil; // retained until the end
 		BOOL ok = YES;
@@ -872,8 +921,6 @@ static BOOL SPPostgresExportReport(SPPostgresProgressSheet *progress, void (^obs
 		}
 		[failure release];
 		return ok;
-	} completion:^(BOOL ok, NSError *error) {
-		[self _jobEndedWithSuccess:ok error:error];
 	}];
 }
 
@@ -913,7 +960,12 @@ static BOOL SPPostgresExportReport(SPPostgresProgressSheet *progress, void (^obs
 
 - (void)_jobEndedWithSuccess:(BOOL)ok error:(NSError *)error
 {
+	if (finished) return;
 	[progressSheet end];
+	[job release];
+	job = nil;
+	[pendingConnector release];
+	pendingConnector = nil;
 	running = NO;
 
 	if (!ok) {
@@ -932,13 +984,10 @@ static BOOL SPPostgresExportReport(SPPostgresProgressSheet *progress, void (^obs
 	[alert setInformativeText:message ?: @""];
 	[alert addButtonWithTitle:NSLocalizedString(@"OK", @"OK button")];
 
-	void (^presenter)(NSAlert *) = [document alertPresenter];
-	if (presenter) {
-		presenter(alert);
-		return;
-	}
-	NSWindow *window = [sheet sheetParent] ? sheet : [document parentWindow];
-	if (window && ![window attachedSheet]) [alert beginSheetModalForWindow:window completionHandler:nil];
+	// On the Export sheet while it is up (no presenter set); otherwise as the document shows its alerts: never
+	// dropped, it waits while the tab isn't shown and queues behind a sheet still attached
+	if ([sheet sheetParent] && ![document alertPresenter]) [alert beginSheetModalForWindow:sheet completionHandler:nil];
+	else [document presentAlert:alert];
 }
 
 @end

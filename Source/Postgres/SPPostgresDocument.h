@@ -139,6 +139,17 @@ __attribute__((visibility("default")))
 - (SPPostgresConnectionProvider)effectiveConnectionProvider;
 
 /**
+ * The provider a job uses: connectionProvider when set; otherwise the default one, whose connectors show their SSH
+ * sheets (host key, passwords) on the window sheetWindow returns (e.g. the job's progress sheet: the tab's window
+ * can't take another sheet then; nil or a nil result: this tab's window), and are handed to connecting as their
+ * attempt starts (so a Cancel can -cancel them), then nil once it is over. Both blocks may be nil.
+ */
+- (SPPostgresConnectionProvider)connectionProviderForJobWithSheetWindow:(NSWindow *(^)(void))sheetWindow connecting:(void (^)(SPPostgresConnector *connector))connecting;
+
+/// Shows an alert as the tab shows its own (alertPresenter, or a sheet on the window; held while the tab isn't shown).
+- (void)presentAlert:(NSAlert *)alert;
+
+/**
  * File ▸ Export…: the Export sheet (SPPostgresExportController). Enabled while connected, not processing and no sheet
  * is attached.
  */

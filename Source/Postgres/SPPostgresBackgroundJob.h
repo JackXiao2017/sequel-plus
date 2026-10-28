@@ -17,11 +17,22 @@ __attribute__((visibility("default")))
  * late cancel request could still reach it), and completion is called on the main thread, always from a later run
  * loop turn: ok is what work returned, error what it set (or the provider's error, when no connection could be had;
  * work isn't called then). A provider that calls its completion more than once is only listened to the first time.
+ * Returns the job (autoreleased; keep it to -cancel it while it waits for its connection).
  */
-+ (void)runOnDatabase:(NSString *)database
-			 provider:(SPPostgresConnectionProvider)provider
-				 work:(BOOL (^)(PGPostgresConnection *connection, NSError **error))work
-		   completion:(void (^)(BOOL ok, NSError *error))completion;
++ (instancetype)runOnDatabase:(NSString *)database
+					 provider:(SPPostgresConnectionProvider)provider
+						 work:(BOOL (^)(PGPostgresConnection *connection, NSError **error))work
+				   completion:(void (^)(BOOL ok, NSError *error))completion;
+
+/// YES until the provider has answered (or the job was cancelled before it did). Main thread.
+@property (readonly) BOOL waitingForConnection;
+
+/**
+ * While the job waits for its connection: completion is called at once (from a later run loop turn) with NO and
+ * SPPostgresErrorCancelled, work is never called, and a connection the provider hands out later is disconnected
+ * unused (its owner released). Once work runs, this does nothing: work checks its own cancel. Main thread.
+ */
+- (void)cancel;
 
 /**
  * Keeps owner (e.g. the SPPostgresConnector that opened connection, with its SSH tunnel) alive until a job that runs

@@ -4,6 +4,7 @@
 NSString * const SPTestTransferAddedKey = @"SPToolbarTransferItemAdded";
 NSString * const SPTestSelectLastFavoriteUsedKey = @"SelectLastFavoriteUsed";
 NSString * const SPTestDefaultFavoriteKey = @"DefaultFavorite";
+NSString * const SPTestSparkleAutomaticChecksKey = @"SUEnableAutomaticChecks";
 
 static const void *SPRequestedAutosaveKey = &SPRequestedAutosaveKey;
 static const void *SPRequestedAutosaveNameKey = &SPRequestedAutosaveNameKey;
@@ -29,6 +30,9 @@ static const void *SPRequestedAutosaveNameKey = &SPRequestedAutosaveNameKey;
  *   selects the owner's favorite and reads its password from the login keychain
  *   (-[SPConnectionController updateFavoriteSelection:]), which can block the run on a keychain
  *   access prompt (e.g. after a rebuild changes the app's signature).
+ *
+ * - Sparkle's automatic update checks are off (SUEnableAutomaticChecks reads NO from the volatile argument
+ *   domain, and a check already scheduled is dropped), so no check runs in the middle of a test.
  *
  * All are in place before any test runs (+load runs when the bundle is loaded).
  *
@@ -86,8 +90,19 @@ static const void *SPRequestedAutosaveNameKey = &SPRequestedAutosaveNameKey;
 	domain[SPTestTransferAddedKey] = @YES;
 	domain[SPTestSelectLastFavoriteUsedKey] = @NO;
 	domain[SPTestDefaultFavoriteKey] = @0;
+	// Sparkle never checks for updates during the run: a check needs the bundle version, which test builds leave
+	// empty, and its SUNoVersionException would surface in whichever test is spinning the run loop
+	domain[SPTestSparkleAutomaticChecksKey] = @NO;
 	[prefs removeVolatileDomainForName:NSArgumentDomain];
 	[prefs setVolatileDomain:domain forName:NSArgumentDomain];
+
+	// A check the updater already scheduled is dropped: it reschedules from the (now disabled) preference. This
+	// doesn't write the preference (unlike -setAutomaticallyChecksForUpdates:).
+	dispatch_async(dispatch_get_main_queue(), ^{
+		Class updaterClass = NSClassFromString(@"SUUpdater");
+		id updater = [updaterClass respondsToSelector:@selector(sharedUpdater)] ? [updaterClass performSelector:@selector(sharedUpdater)] : nil;
+		if ([updater respondsToSelector:@selector(resetUpdateCycle)]) [updater performSelector:@selector(resetUpdateCycle)];
+	});
 }
 
 @end
