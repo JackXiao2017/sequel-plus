@@ -7,11 +7,14 @@ static char SPPostgresBackgroundJobOwnerKey;
 
 @implementation SPPostgresBackgroundJob
 {
-	/// Main thread only
+	/// Main thread only: whether every connection arrived (or the job ended before), the index of the provider being
+	/// waited for, and the connections that arrived so far (until the work takes them)
 	BOOL answered;
+	NSUInteger awaitedProvider;
+	NSMutableArray *arrived;
 	void (^completion)(BOOL ok, NSError *error);
-	/// Guarded by @synchronized(self): the job connection's cancel token while work runs, and whether a cancel came
-	PGPostgresCancelToken *cancelToken;
+	/// Guarded by @synchronized(self): the job connections' cancel tokens while work runs, and whether a cancel came
+	NSArray *cancelTokens;
 	BOOL cancelRequested;
 }
 
@@ -52,8 +55,9 @@ static void SPPostgresBackgroundJobSendCancel(PGPostgresCancelToken *token)
 
 - (void)dealloc
 {
-	[cancelToken invalidate];
-	[cancelToken release];
+	for (PGPostgresCancelToken *token in cancelTokens) [token invalidate];
+	[cancelTokens release];
+	[arrived release];
 	[completion release];
 	[super dealloc];
 }
@@ -90,85 +94,128 @@ static void SPPostgresBackgroundJobSendCancel(PGPostgresCancelToken *token)
 	});
 }
 
+/// Discards the connections that arrived so far (no work will use them). Main thread.
+- (void)_discardArrivedConnections
+{
+	for (PGPostgresConnection *connection in arrived) [SPPostgresBackgroundJob _discardConnection:connection];
+	[arrived removeAllObjects];
+}
+
 - (void)cancel
 {
 	if (answered) {
-		// The work runs (or is about to): interrupt what its connection is running
-		PGPostgresCancelToken *token = nil;
+		// The work runs (or is about to): interrupt what its connections are running
+		NSArray *tokens = nil;
 		@synchronized(self) {
 			cancelRequested = YES;
-			token = [[cancelToken retain] autorelease];
+			tokens = [[cancelTokens retain] autorelease];
 		}
-		if (token) SPPostgresBackgroundJobSendCancel(token);
+		for (PGPostgresCancelToken *token in tokens) SPPostgresBackgroundJobSendCancel(token);
 		return;
 	}
 	answered = YES;
+	[self _discardArrivedConnections];
 	[self _finishWithSuccess:NO error:SPPostgresMakeError(SPPostgresErrorCancelled, NSLocalizedString(@"The job was cancelled.", @"Postgres background job: cancelled while connecting"), nil)];
 }
 
-- (void)_startWithDatabase:(NSString *)database provider:(SPPostgresConnectionProvider)provider work:(BOOL (^)(PGPostgresConnection *, NSError **))work
+/// Asks providers[index] for a connection to databases[index]; when it arrives, asks the next provider, and once all
+/// arrived, runs the work. Main thread.
+- (void)_askProviderAtIndex:(NSUInteger)index databases:(NSArray *)databases providers:(NSArray *)providers work:(BOOL (^)(NSArray *, NSError **))work
 {
-	if (!provider) {
-		answered = YES;
-		[self _finishWithSuccess:NO error:SPPostgresMakeError(SPPostgresErrorConnectionFailed, NSLocalizedString(@"No connection could be opened for this job.", @"Postgres background job: no connection provider"), nil)];
-		return;
-	}
-
-	BOOL (^jobWork)(PGPostgresConnection *, NSError **) = [[work copy] autorelease];
+	awaitedProvider = index;
+	SPPostgresConnectionProvider provider = [providers objectAtIndex:index];
 	SPPostgresBackgroundJob *job = self; // retained by the provider's copy of the block until it answers
-	provider(database, ^(PGPostgresConnection *connection, NSError *error) {
-		if (job->answered) {
-			// Too late (cancelled, or a second answer): never used
+	id database = [databases objectAtIndex:index];
+	provider(database == [NSNull null] ? nil : database, ^(PGPostgresConnection *connection, NSError *error) {
+		if (job->answered || job->awaitedProvider != index) {
+			// Too late (cancelled, failed, or a second answer): never used
 			if (connection) [SPPostgresBackgroundJob _discardConnection:connection];
 			return;
 		}
-		job->answered = YES;
+		job->awaitedProvider = NSNotFound;
 
 		if (!connection) {
+			job->answered = YES;
+			[job _discardArrivedConnections];
 			[job _finishWithSuccess:NO error:error];
 			return;
 		}
 
-		void (^theCompletion)(BOOL, NSError *) = job->completion;
-		job->completion = nil;
-		[connection retain];
-		dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-			BOOL ok = NO;
-			NSError *workError = nil;
-			@autoreleasepool {
-				// The cancel token is taken here, on the thread that uses the connection; -cancel uses it from the
-				// main thread. A cancel that came before it existed is sent now.
+		[job->arrived addObject:connection];
+		if (index + 1 < [providers count]) {
+			[job _askProviderAtIndex:index + 1 databases:databases providers:providers work:work];
+			return;
+		}
+		job->answered = YES;
+		[job _runWork:work];
+	});
+}
+
+/// Runs work with the connections that arrived, on a background thread; disconnects them afterwards and calls the
+/// completion on the main thread. Main thread.
+- (void)_runWork:(BOOL (^)(NSArray *, NSError **))work
+{
+	NSArray *connections = [arrived copy]; // released on the main thread after the work
+	[arrived removeAllObjects];
+	void (^theCompletion)(BOOL, NSError *) = completion;
+	completion = nil;
+	SPPostgresBackgroundJob *job = self; // retained by the blocks below until the completion was called
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+		BOOL ok = NO;
+		NSError *workError = nil;
+		@autoreleasepool {
+			// The cancel tokens are taken here, on the thread that uses the connections; -cancel uses them from the
+			// main thread. A cancel that came before they existed is sent now.
+			NSMutableArray *tokens = [NSMutableArray array];
+			for (PGPostgresConnection *connection in connections) {
 				PGPostgresCancelToken *token = [connection newCancelToken];
-				BOOL cancelNow = NO;
-				@synchronized(job) {
-					job->cancelToken = token;
-					cancelNow = job->cancelRequested;
-				}
-				if (cancelNow && token) SPPostgresBackgroundJobSendCancel(token);
-
-				NSError *theError = nil;
-				ok = jobWork ? jobWork(connection, &theError) : YES;
-				workError = [theError retain];
-
-				// No cancel request is sent once the work has returned (one being sent finishes first)
-				@synchronized(job) {
-					job->cancelToken = nil;
-				}
-				[token invalidate];
+				if (token) [tokens addObject:token];
 				[token release];
-
-				// Never reused: after a cancel, a late cancel request could still reach it
-				[connection disconnect];
 			}
-			dispatch_async(dispatch_get_main_queue(), ^{
-				[SPPostgresBackgroundJob _releaseOwnerOfConnection:connection];
-				[connection release];
-				if (theCompletion) theCompletion(ok, workError);
-				[theCompletion release];
-				[workError release];
-			});
+			BOOL cancelNow = NO;
+			@synchronized(job) {
+				[job->cancelTokens release];
+				job->cancelTokens = [tokens copy];
+				cancelNow = job->cancelRequested;
+			}
+			if (cancelNow) {
+				for (PGPostgresCancelToken *token in tokens) SPPostgresBackgroundJobSendCancel(token);
+			}
+
+			NSError *theError = nil;
+			ok = work ? work(connections, &theError) : YES;
+			workError = [theError retain];
+
+			// No cancel request is sent once the work has returned (one being sent finishes first)
+			@synchronized(job) {
+				[job->cancelTokens release];
+				job->cancelTokens = nil;
+			}
+			for (PGPostgresCancelToken *token in tokens) [token invalidate];
+
+			// Never reused: after a cancel, a late cancel request could still reach them
+			for (PGPostgresConnection *connection in connections) [connection disconnect];
+		}
+		dispatch_async(dispatch_get_main_queue(), ^{
+			for (PGPostgresConnection *connection in connections) [SPPostgresBackgroundJob _releaseOwnerOfConnection:connection];
+			[connections release];
+			if (theCompletion) theCompletion(ok, workError);
+			[theCompletion release];
+			[workError release];
 		});
 	});
+}
+
+/// Asks the providers in turn (see -_askProviderAtIndex:…), or fails at once when one is missing. Main thread.
+- (void)_startWithDatabases:(NSArray *)databases providers:(NSArray *)providers count:(NSUInteger)count work:(BOOL (^)(NSArray *, NSError **))work
+{
+	if ([providers count] < count) {
+		answered = YES;
+		[self _finishWithSuccess:NO error:SPPostgresMakeError(SPPostgresErrorConnectionFailed, NSLocalizedString(@"No connection could be opened for this job.", @"Postgres background job: no connection provider"), nil)];
+		return;
+	}
+	arrived = [[NSMutableArray alloc] init];
+	[self _askProviderAtIndex:0 databases:databases providers:providers work:[[work copy] autorelease]];
 }
 
 + (instancetype)runOnDatabase:(NSString *)database
@@ -178,7 +225,27 @@ static void SPPostgresBackgroundJobSendCancel(PGPostgresCancelToken *token)
 {
 	SPPostgresBackgroundJob *job = [[[self alloc] init] autorelease];
 	job->completion = [theCompletion copy];
-	[job _startWithDatabase:database provider:provider work:work];
+	BOOL (^oneWork)(PGPostgresConnection *, NSError **) = [[work copy] autorelease];
+	[job _startWithDatabases:@[database ?: (id)[NSNull null]] providers:(provider ? @[[[provider copy] autorelease]] : @[]) count:1 work:^BOOL(NSArray *connections, NSError **error) {
+		return oneWork ? oneWork([connections objectAtIndex:0], error) : YES;
+	}];
+	return job;
+}
+
++ (instancetype)runOnDatabase:(NSString *)database
+					 provider:(SPPostgresConnectionProvider)provider
+			   targetDatabase:(NSString *)targetDatabase
+			   targetProvider:(SPPostgresConnectionProvider)targetProvider
+						 work:(BOOL (^)(PGPostgresConnection *connection, PGPostgresConnection *target, NSError **error))work
+				   completion:(void (^)(BOOL ok, NSError *error))theCompletion
+{
+	SPPostgresBackgroundJob *job = [[[self alloc] init] autorelease];
+	job->completion = [theCompletion copy];
+	BOOL (^twoWork)(PGPostgresConnection *, PGPostgresConnection *, NSError **) = [[work copy] autorelease];
+	NSArray *providers = (provider && targetProvider) ? @[[[provider copy] autorelease], [[targetProvider copy] autorelease]] : @[];
+	[job _startWithDatabases:@[database ?: (id)[NSNull null], targetDatabase ?: (id)[NSNull null]] providers:providers count:2 work:^BOOL(NSArray *connections, NSError **error) {
+		return twoWork ? twoWork([connections objectAtIndex:0], [connections objectAtIndex:1], error) : YES;
+	}];
 	return job;
 }
 
