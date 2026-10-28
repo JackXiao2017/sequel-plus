@@ -2067,6 +2067,10 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 	contentNeedsReset = YES;
 	structureNeedsReset = YES;
 
+	// History's entries for it name it by its new name (going back to them finds it, and the new name's entry
+	// isn't a place of its own)
+	[history renameTable:table to:newName inDatabase:currentDatabase schema:schema];
+
 	// The renamed table stays selected (another selection is kept); the reload on the way is not a place the user went to
 	if (![schema isEqualToString:[sidebar selectedSchema]]) return;
 	NSString *selected = [[[sidebar selectedTableName] copy] autorelease];

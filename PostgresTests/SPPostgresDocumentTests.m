@@ -602,6 +602,53 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	XCTAssertEqualObjects(sidebar.selectedTableName, @"t renamed");
 }
 
+/// History follows a table renamed from the sidebar menu: the entries before and after the current one name it by
+/// its new name, so Back and Forward both find it (with their panes).
+- (void)testRenameTableFromSidebarMenuUpdatesHistory
+{
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self.controller showWindow:nil];
+	[self selectStructureTable:@"t"];
+	[self.document viewContent:nil];
+	[self.document viewStructure:nil];
+	XCTAssertTrue([self.document.sidebar selectTableNamed:@"child"]);
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
+	[self.document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"t");
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
+
+	// Rename Table… t to t2
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	NSMenu *menu = sidebar.tableMenu;
+	NSMenuItem *rename = menu.itemArray.lastObject;
+	XCTAssertEqualObjects(rename.title, @"Rename Table…");
+	[menu performActionForItemAtIndex:[menu indexOfItem:rename]];
+	NSWindow *sheet = [self window].attachedSheet;
+	XCTAssertNotNil(sheet);
+	NSTextField *name = [self viewWithIdentifier:@"renameTableName" in:sheet.contentView];
+	NSButton *button = [self viewWithIdentifier:@"renameTableButton" in:sheet.contentView];
+	name.stringValue = @"t2";
+	[[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification object:name];
+	[button performClick:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [sidebar.selectedTableName isEqualToString:@"t2"]; } timeout:5], @"%@ %@", sidebar.selectedTableName, alerts.firstObject.informativeText);
+	XCTAssertEqualObjects(self.document.history.currentEntry[@"table"], @"t2");
+	XCTAssertTrue(self.document.history.canGoForward, @"the rename isn't a new place: the entries ahead stay");
+
+	// Back: t2's Content
+	[self.document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"t2");
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneContent);
+
+	// Forward: t2's Structure, then child's
+	[self.document backForwardInHistory:[self historyMenuItemWithTag:1]];
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"t2");
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
+	XCTAssertEqualObjects(self.document.structureController.table, @"t2");
+	[self.document backForwardInHistory:[self historyMenuItemWithTag:1]];
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"child");
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+}
+
 /// R4: a rename inside the user's transaction, rolled back in Query, leaves no stale structure behind.
 - (void)testRollbackAfterRenameRebuildsStructure
 {
