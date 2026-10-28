@@ -33,6 +33,24 @@ typedef enum
 }
 PGPostgresTransactionStatus;
 
+/**
+ * The domain of the NSErrors PGPostgresConnection returns (also declared in PGConstants.h).
+ */
+extern NSString *PGPostgresConnectionErrorDomain;
+
+/**
+ * Codes of the NSErrors in PGPostgresConnectionErrorDomain returned by -copyOut:handler:error: and
+ * -copyIn:provider:error:.
+ */
+typedef enum
+{
+	PGConnectionErrorServer = 1,       // The server (or libpq) reported an error; the description holds its message
+	PGConnectionErrorCancelled = 2,    // The caller cancelled the operation ("Cancelled.")
+	PGConnectionErrorNotConnected = 3, // There is no usable connection
+	PGConnectionErrorNotCopy = 4       // The statement isn't a COPY in the expected direction
+}
+PGConnectionErrorCode;
+
 @class PGPostgresError;
 @class PGPostgresResult;
 @class PGPostgresStatement;
@@ -152,5 +170,27 @@ PGPostgresTransactionStatus;
  * nil when not connected or when hashing fails.
  */
 - (NSString *)encryptedPassword:(NSString *)password forRole:(NSString *)role;
+
+/**
+ * Runs a COPY … TO STDOUT statement, calling handler with each row's bytes (in the COPY's format, line ending
+ * included). Synchronous, on the caller's thread. The delegate's willExecute gets the statement only, never the data.
+ *
+ * Returning NO from handler cancels: the query is cancelled (PQcancel), the rest of the output is discarded, and the
+ * method returns NO with a PGConnectionErrorCancelled error ("Cancelled."). A server error returns NO with a
+ * PGConnectionErrorServer error holding the server's message (plus DETAIL and CONTEXT when present), also in
+ * lastError. On success lastQueryAffectedRowCount holds the number of rows copied.
+ */
+- (BOOL)copyOut:(NSString *)sql handler:(BOOL (^)(NSData *chunk))handler error:(NSError **)error;
+
+/**
+ * Runs a COPY … FROM STDIN statement, sending the chunks provider returns (any split of the COPY data) until it
+ * returns nil. Synchronous, on the caller's thread. The delegate's willExecute gets the statement only, never the data.
+ *
+ * Setting *cancel = YES ends the COPY with a failure (the server rolls it back) and returns NO with a
+ * PGConnectionErrorCancelled error ("Cancelled."). A server error, e.g. bad data, returns NO with a
+ * PGConnectionErrorServer error holding the server's message, DETAIL and CONTEXT (which names the line), also in
+ * lastError. On success lastQueryAffectedRowCount holds the number of rows copied.
+ */
+- (BOOL)copyIn:(NSString *)sql provider:(NSData * (^)(BOOL *cancel))provider error:(NSError **)error;
 
 @end

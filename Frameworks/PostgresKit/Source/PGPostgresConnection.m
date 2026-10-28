@@ -28,6 +28,7 @@
 #import "PGPostgresException.h"
 #import "PGPostgresStatement.h"
 #import "PGPostgresResult.h"
+#import "PGPostgresError.h"
 
 #import <pthread.h>
 #import <poll.h>
@@ -41,6 +42,9 @@
 - (void)_pollConnection:(NSNumber *)isReset;
 - (void)_setConnectionError:(NSString *)error;
 - (NSString *)_applySessionSettings;
+- (PGresult *)_startCopy:(NSString *)sql expecting:(ExecStatusType)expected error:(NSError **)error;
+- (BOOL)_finishCopyCancelled:(BOOL)cancelled error:(NSError **)error;
+- (void)_setLastErrorFromResult:(PGresult *)result;
 
 // libpq callback
 static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message);
@@ -411,6 +415,303 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 	PQfreemem(hashed);
 	
 	return result;
+}
+
+#pragma mark -
+#pragma mark COPY
+
+/**
+ * An NSError in PGPostgresConnectionErrorDomain with the given code and description.
+ */
+static NSError *_PGConnectionError(PGConnectionErrorCode code, NSString *message)
+{
+	return [NSError errorWithDomain:PGPostgresConnectionErrorDomain
+							   code:code
+						   userInfo:[NSDictionary dictionaryWithObject:(message ? message : @"Unknown error.") forKey:NSLocalizedDescriptionKey]];
+}
+
+/**
+ * A libpq C string as an NSString (UTF-8, falling back to Latin-1 for invalid bytes), or nil for NULL/empty.
+ */
+static NSString *_PGCopyString(const char *string)
+{
+	if (!string || !*string) return nil;
+	
+	NSString *result = [NSString stringWithUTF8String:string];
+	
+	if (!result) result = [NSString stringWithCString:string encoding:NSISOLatin1StringEncoding];
+	
+	return [result stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+/**
+ * The message of an error result: the primary message, then "DETAIL: …" and "CONTEXT: …" lines when present
+ * (for COPY the context names the line, e.g. "COPY t, line 2: …").
+ */
+static NSString *_PGCopyErrorMessage(const PGresult *result)
+{
+	NSString *primary = _PGCopyString(PQresultErrorField(result, PG_DIAG_MESSAGE_PRIMARY));
+	
+	if (!primary) primary = _PGCopyString(PQresultErrorMessage(result));
+	
+	NSMutableString *message = [NSMutableString stringWithString:primary ? primary : @"Unknown error."];
+	
+	NSString *detail = _PGCopyString(PQresultErrorField(result, PG_DIAG_MESSAGE_DETAIL));
+	NSString *context = _PGCopyString(PQresultErrorField(result, PG_DIAG_CONTEXT));
+	
+	if (detail) [message appendFormat:@"\nDETAIL: %@", detail];
+	if (context) [message appendFormat:@"\nCONTEXT: %@", context];
+	
+	return message;
+}
+
+- (BOOL)copyOut:(NSString *)sql handler:(BOOL (^)(NSData *chunk))handler error:(NSError **)error
+{
+	PGresult *result = [self _startCopy:sql expecting:PGRES_COPY_OUT error:error];
+	
+	if (!result) return NO;
+	
+	PQclear(result);
+	
+	BOOL cancelled = NO;
+	char *buffer = NULL;
+	int length = 0;
+	
+	// > 0: a row; -1: done; -2: failed. After a cancel the remaining rows are discarded.
+	while ((length = PQgetCopyData(_connection, &buffer, 0)) > 0)
+	{
+		if (!cancelled && handler) {
+			NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+			NSData *chunk = [[NSData alloc] initWithBytes:buffer length:(NSUInteger)length];
+			
+			if (!handler(chunk)) {
+				cancelled = YES;
+				
+				[self cancelCurrentQuery:NULL];
+			}
+			
+			[chunk release];
+			[pool drain];
+		}
+		
+		PQfreemem(buffer);
+		buffer = NULL;
+	}
+	
+	return [self _finishCopyCancelled:cancelled error:error];
+}
+
+- (BOOL)copyIn:(NSString *)sql provider:(NSData * (^)(BOOL *cancel))provider error:(NSError **)error
+{
+	PGresult *result = [self _startCopy:sql expecting:PGRES_COPY_IN error:error];
+	
+	if (!result) return NO;
+	
+	PQclear(result);
+	
+	BOOL cancelled = NO;
+	BOOL sendFailed = NO;
+	
+	while (!cancelled && !sendFailed)
+	{
+		NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
+		BOOL cancel = NO;
+		NSData *chunk = provider ? provider(&cancel) : nil;
+		
+		if (cancel) {
+			cancelled = YES;
+		}
+		else if (!chunk) {
+			[pool drain];
+			break;
+		}
+		else {
+			const char *bytes = (const char *)[chunk bytes];
+			NSUInteger remaining = [chunk length];
+			
+			while (remaining > 0)
+			{
+				int piece = remaining > INT_MAX ? INT_MAX : (int)remaining;
+				
+				// 1: queued; -1: failed (e.g. the server already rejected the data; the error comes from PQgetResult)
+				if (PQputCopyData(_connection, bytes, piece) != 1) {
+					sendFailed = YES;
+					break;
+				}
+				
+				bytes += piece;
+				remaining -= (NSUInteger)piece;
+			}
+		}
+		
+		[pool drain];
+	}
+	
+	if (cancelled) {
+		PQputCopyEnd(_connection, "cancelled");
+	}
+	else if (!sendFailed) {
+		PQputCopyEnd(_connection, NULL);
+	}
+	
+	return [self _finishCopyCancelled:cancelled error:error];
+}
+
+/**
+ * Sends a COPY statement (reporting it, and only it, to the delegate) and checks it entered the expected copy mode.
+ *
+ * @return The copy-mode result (the caller clears it), or NULL with *error set: on a server error, when not
+ *         connected, or when the statement isn't a COPY in the expected direction (any copy it started is ended).
+ */
+- (PGresult *)_startCopy:(NSString *)sql expecting:(ExecStatusType)expected error:(NSError **)error
+{
+	_lastQueryWasCancelled = NO;
+	_lastQueryAffectedRowCount = 0;
+	
+	if (!sql || ![self isConnected]) {
+		if (error) *error = _PGConnectionError(PGConnectionErrorNotConnected, @"Not connected.");
+		
+		return NULL;
+	}
+	
+	if (_delegate && _delegateSupportsWillExecute) {
+		[_delegate connection:self willExecute:sql withValues:nil];
+	}
+	
+	// The extended protocol (no parameters) runs a single statement
+	PGresult *result = PQexecParams(_connection, [sql UTF8String], 0, NULL, NULL, NULL, NULL, 0);
+	
+	if (!result) {
+		if (error) *error = _PGConnectionError(PGConnectionErrorServer, [self libpqErrorMessage]);
+		
+		return NULL;
+	}
+	
+	ExecStatusType status = PQresultStatus(result);
+	
+	if (status == expected) return result;
+	
+	if (status == PGRES_BAD_RESPONSE || status == PGRES_FATAL_ERROR) {
+		[self _setLastErrorFromResult:result];
+		
+		if (error) *error = _PGConnectionError(PGConnectionErrorServer, _PGCopyErrorMessage(result));
+		
+		PQclear(result);
+		
+		return NULL;
+	}
+	
+	PQclear(result);
+	
+	// Not a COPY in the expected direction: end any copy it started and leave the connection idle
+	if (status == PGRES_COPY_IN || status == PGRES_COPY_OUT || status == PGRES_COPY_BOTH) {
+		[self _finishCopyCancelled:YES error:NULL];
+		
+		_lastQueryWasCancelled = NO;
+	}
+	
+	if (error) {
+		*error = _PGConnectionError(PGConnectionErrorNotCopy, expected == PGRES_COPY_IN ?
+									@"The statement is not a COPY … FROM STDIN." :
+									@"The statement is not a COPY … TO STDOUT.");
+	}
+	
+	return NULL;
+}
+
+/**
+ * Collects a COPY's final result once its data has been sent or received, leaving the connection idle.
+ *
+ * @param cancelled Whether the caller cancelled; the result is then the cancelled error whatever the server said.
+ *
+ * @return YES when the COPY succeeded (lastQueryAffectedRowCount set), NO with *error set otherwise.
+ */
+- (BOOL)_finishCopyCancelled:(BOOL)cancelled error:(NSError **)error
+{
+	PGresult *failure = NULL;
+	PGresult *next = NULL;
+	BOOL succeeded = NO;
+	NSUInteger unexpectedCopies = 0;
+	
+	while ((next = PQgetResult(_connection)))
+	{
+		ExecStatusType status = PQresultStatus(next);
+		
+		if (status == PGRES_COMMAND_OK) {
+			const char *tuples = PQcmdTuples(next);
+			
+			_lastQueryAffectedRowCount = (tuples && *tuples) ? strtoull(tuples, NULL, 10) : 0;
+			succeeded = YES;
+		}
+		else if ((status == PGRES_BAD_RESPONSE || status == PGRES_FATAL_ERROR) && !failure) {
+			failure = next;
+			
+			continue;
+		}
+		else if (status == PGRES_COPY_IN || status == PGRES_COPY_OUT || status == PGRES_COPY_BOTH) {
+			// Still in copy mode (e.g. ending the copy failed): end it, once, rather than loop forever
+			PQclear(next);
+			
+			if (++unexpectedCopies > 1) break;
+			
+			if (status != PGRES_COPY_OUT) PQputCopyEnd(_connection, "cancelled");
+			
+			if (status != PGRES_COPY_IN) {
+				char *buffer = NULL;
+				
+				while (PQgetCopyData(_connection, &buffer, 0) > 0) 
+				{
+					PQfreemem(buffer);
+					buffer = NULL;
+				}
+			}
+			
+			continue;
+		}
+		
+		PQclear(next);
+	}
+	
+	if (cancelled) {
+		if (failure) PQclear(failure);
+		
+		_lastQueryWasCancelled = YES;
+		_lastQueryAffectedRowCount = 0;
+		
+		if (error) *error = _PGConnectionError(PGConnectionErrorCancelled, @"Cancelled.");
+		
+		return NO;
+	}
+	
+	if (failure) {
+		[self _setLastErrorFromResult:failure];
+		
+		if (error) *error = _PGConnectionError(PGConnectionErrorServer, _PGCopyErrorMessage(failure));
+		
+		PQclear(failure);
+		
+		return NO;
+	}
+	
+	if (!succeeded) {
+		NSString *message = [self libpqErrorMessage];
+		
+		if (error) *error = _PGConnectionError(PGConnectionErrorServer, message ? message : @"The COPY did not complete.");
+		
+		return NO;
+	}
+	
+	return YES;
+}
+
+/**
+ * Replaces lastError with the error in the given result (not cleared).
+ */
+- (void)_setLastErrorFromResult:(PGresult *)result
+{
+	if (_lastError) [_lastError release], _lastError = nil;
+	
+	_lastError = [[PGPostgresError alloc] initWithResult:result];
 }
 
 #pragma mark -
