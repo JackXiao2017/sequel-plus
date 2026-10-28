@@ -26,8 +26,8 @@ extern NSString * const SPPostgresPaneInfo __attribute__((visibility("default"))
 extern NSString * const SPPostgresPaneQuery __attribute__((visibility("default")));     // @"query"
 /// Shown whenever a sequence is selected in the sidebar (it has no toolbar item; Query stays available).
 extern NSString * const SPPostgresPaneSequence __attribute__((visibility("default")));  // @"sequence"
-/// Shown whenever an extension is selected in the sidebar (no toolbar item; Query stays available, ⌘1 brings it
-/// back). Extensions are database-wide: this pane is not recorded in History.
+/// Shown whenever an extension is selected in the sidebar (no toolbar item: as with a sequence, Structure and ⌘1
+/// show it, and Query stays available). Extensions are database-wide: this pane is not recorded in History.
 extern NSString * const SPPostgresPaneExtension __attribute__((visibility("default"))); // @"extension"
 
 /**

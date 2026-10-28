@@ -41,7 +41,8 @@ __attribute__((visibility("default")))
 /// Schema popup on top, outline below. Built once; sized by the caller (autoresizes).
 - (NSView *)view;
 
-/// Shows the tables, views and sequences of `schema` and selects it in the popup. Clears the selection.
+/// Shows the tables, views and sequences of `schema` and selects it in the popup. Clears the selection of a table,
+/// view or sequence; a selected extension (the database's, not the schema's) stays selected if it is still listed.
 /// If the tables or views can't be loaded, the schema, lists and selection stay as they were.
 - (void)reloadSchema:(NSString *)schema;
 
@@ -52,7 +53,8 @@ __attribute__((visibility("default")))
  */
 - (void)reloadSchema:(NSString *)schema selectingSequence:(NSString *)sequence;
 
-/// Switches to another catalog (another database): reloads schemas, extensions and the default schema.
+/// Switches to another catalog (another database): reloads schemas, extensions and the default schema, with nothing
+/// selected.
 /// A list that can't be loaded keeps what it showed.
 - (void)reloadWithCatalog:(SPPostgresCatalog *)catalog;
 

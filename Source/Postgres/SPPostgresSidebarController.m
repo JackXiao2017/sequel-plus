@@ -291,6 +291,9 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 	[self _reloadExtensions];
 
+	// Nor does a selected extension (another database's)
+	[selectedExtensionName release], selectedExtensionName = nil;
+
 	// The default schema of this database (the previous database's schema doesn't carry over)
 	[self reloadSchema:[catalog defaultSchemaFromSchemas:schemas]];
 
@@ -377,6 +380,8 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 		}
 		[selectedTableName release], selectedTableName = nil;
 		[selectedSequenceName release], selectedSequenceName = nil;
+		// An extension is the database's, not the schema's: it stays selected (if still listed) below
+		NSString *keptExtension = [[selectedExtensionName copy] autorelease];
 		[selectedExtensionName release], selectedExtensionName = nil;
 
 		SPPostgresSidebarItem *tables = [self _sectionNamed:SPPostgresSidebarTables];
@@ -398,6 +403,12 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 		[self _reloadSchemaPopup];
 		[self _reloadOutline];
+		if (keptExtension) {
+			BOOL wasHolding = holdingSelectionChanges;
+			holdingSelectionChanges = YES;
+			[self _selectItemNamed:keptExtension inSection:SPPostgresSidebarExtensions];
+			holdingSelectionChanges = wasHolding;
+		}
 
 		if (!holdingSelectionChanges) [delegate sidebarSelectionDidChange:self];
 	}
@@ -406,8 +417,11 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 		[self _reloadSchemaPopup];
 		// An enclosing catalog reload may have reloaded the extensions: show them, leaving the table selection
 		[outlineView reloadItem:[self _sectionNamed:SPPostgresSidebarExtensions] reloadChildren:YES];
-		// Its rows are new: a selected extension still listed stays selected (else the selection follows the outline)
-		if (selectedExtensionName && ![self selectExtensionNamed:selectedExtensionName]) [self _updateSelectionFromOutline];
+		// Its rows are new: a selected extension still listed stays selected; one that is gone leaves nothing selected
+		if (selectedExtensionName && ![self selectExtensionNamed:selectedExtensionName]) {
+			[outlineView deselectAll:nil];
+			[self _updateSelectionFromOutline];
+		}
 	}
 
 	[self _endReload];
