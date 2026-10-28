@@ -49,7 +49,7 @@ static const CGFloat SPPostgresExtensionPopupWidth = 220;
 {
 	if ((self = [super init])) {
 		connection = [theConnection retain];
-		extensions = [[SPPostgresExtensions alloc] initWithConnection:connection];
+		extensions = [self newExtensionsWithConnection:connection];
 		[extensions setLockTimeout:5];
 		[self _buildView];
 		[self _load];
@@ -99,6 +99,12 @@ static const CGFloat SPPostgresExtensionPopupWidth = 220;
 - (void)setLockTimeout:(NSTimeInterval)timeout
 {
 	[extensions setLockTimeout:timeout];
+}
+
+/// The pane's data layer (retained: the caller releases it). A test seam: a subclass can return one that fails.
+- (SPPostgresExtensions *)newExtensionsWithConnection:(PGPostgresConnection *)theConnection
+{
+	return [[SPPostgresExtensions alloc] initWithConnection:theConnection];
 }
 
 #pragma mark View
@@ -236,18 +242,16 @@ static const CGFloat SPPostgresExtensionPopupWidth = 220;
 }
 
 /// Reads the extension and its update targets; an extension that isn't installed (any more) empties the pane, and
-/// a read error is shown.
+/// a read error is shown. When only the update targets can't be read, the details and Drop stay (Drop doesn't need
+/// them), Update is off, and the error is shown.
 - (void)_load
 {
-	NSError *error = nil;
+	NSError *error = nil, *targetsError = nil;
 	SPPostgresExtension *loaded = nil;
 	NSArray *targets = nil;
 	if ([extensionName length]) {
 		loaded = [extensions extensionNamed:extensionName error:&error];
-		if (loaded) {
-			targets = [extensions updateTargetsForExtension:extensionName error:&error];
-			if (!targets) loaded = nil;
-		}
+		if (loaded) targets = [extensions updateTargetsForExtension:extensionName error:&targetsError];
 	}
 	[self setExtension:loaded];
 
@@ -285,6 +289,9 @@ static const CGFloat SPPostgresExtensionPopupWidth = 220;
 	if (!loaded && error) {
 		[self _presentError:error title:[NSString stringWithFormat:NSLocalizedString(@"Could not load the extension “%@”", @"Postgres extension: load failed"), extensionName]];
 	}
+	else if (loaded && !targets) {
+		[self _presentError:targetsError title:[NSString stringWithFormat:NSLocalizedString(@"Could not read the versions “%@” can be updated to", @"Postgres extension: update targets read failed"), extensionName]];
+	}
 }
 
 #pragma mark Actions
@@ -300,7 +307,8 @@ static const CGFloat SPPostgresExtensionPopupWidth = 220;
 	BOOL updated = [extensions updateExtension:name toVersion:version error:&error];
 	if (!updated) [self _presentError:error title:[NSString stringWithFormat:NSLocalizedString(@"Could not update the extension “%@”", @"Postgres extension: update failed"), name]];
 
-	[self _load];
+	// Inside an aborted transaction nothing was sent and nothing can be read: keep what is shown
+	if (updated || [connection transactionStatus] != PGPostgresTransactionInError) [self _load];
 
 	// Last: the tab reloads its lists
 	[[self retain] autorelease];

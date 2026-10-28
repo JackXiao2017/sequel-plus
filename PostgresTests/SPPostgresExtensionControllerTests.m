@@ -4,6 +4,34 @@
 #import "../Source/Postgres/SPPostgresExtensionController.h"
 #import "../Source/Postgres/SPPostgresExtensions.h"
 
+/// A data layer whose update-targets read fails (the server can't be made to fail only that read).
+@interface SPFailingTargetsExtensions : SPPostgresExtensions
+@end
+
+@implementation SPFailingTargetsExtensions
+- (NSArray *)updateTargetsForExtension:(NSString *)name error:(NSError **)error
+{
+	if (error) *error = [NSError errorWithDomain:@"SPTest" code:1 userInfo:@{NSLocalizedDescriptionKey: @"could not open extension control file"}];
+	return nil;
+}
+@end
+
+/// The test seam: the pane's data layer is made by -newExtensionsWithConnection:.
+@interface SPPostgresExtensionController (SPTestSeam)
+- (SPPostgresExtensions *)newExtensionsWithConnection:(PGPostgresConnection *)connection;
+@end
+
+/// A pane whose update-targets read fails.
+@interface SPFailingTargetsExtensionController : SPPostgresExtensionController
+@end
+
+@implementation SPFailingTargetsExtensionController
+- (SPPostgresExtensions *)newExtensionsWithConnection:(PGPostgresConnection *)connection
+{
+	return [[SPFailingTargetsExtensions alloc] initWithConnection:connection];
+}
+@end
+
 /// The Extension pane, on PG 12 and 18, in database pgkit_ext.
 @interface SPPostgresExtensionControllerTests : XCTestCase <SPPostgresExtensionControllerDelegate>
 @property (strong) NSMutableArray<PGPostgresConnection *> *openConnections;
@@ -185,6 +213,91 @@
 		[pane.dropButton performClick:nil];
 		XCTAssertEqualObjects(self.dropRequests, @[@"cube"]);
 		XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+	}
+}
+
+/// An installed extension whose control file is gone (renamed in pg_extension, so the server has none for it): the
+/// pane shows it with Drop enabled, sends no update-paths read, and leaves the user's transaction open.
+- (void)testMissingControlFileKeepsDetailsAndDrop
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		[self.alerts removeAllObjects];
+		[self.dropRequests removeAllObjects];
+		PGPostgresConnection *connection = [self connectOn:port];
+		[self install:@"citext" version:nil on:connection];
+		XCTAssertNotNil([connection execute:@"UPDATE pg_catalog.pg_extension SET extname = 'sp_t5_ghost' WHERE extname = 'citext'"]);
+
+		XCTAssertNotNil([connection execute:@"BEGIN"]);
+		SPPostgresExtensionController *pane = [self paneOn:connection];
+		[pane showExtension:@"sp_t5_ghost"];
+		XCTAssertEqual(connection.transactionStatus, PGPostgresTransactionInTransaction, @"%@", port);
+		XCTAssertNotNil([connection execute:@"SELECT 1"]);
+		XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+		XCTAssertNotNil(pane.extension);
+		XCTAssertEqualObjects(pane.nameField.stringValue, @"sp_t5_ghost");
+		XCTAssertGreaterThan(pane.versionField.stringValue.length, 0u);
+		XCTAssertTrue(pane.dropButton.isEnabled);
+		XCTAssertFalse(pane.updateButton.isEnabled);
+		XCTAssertTrue(pane.updatePopup.isHidden);
+		XCTAssertFalse(pane.noUpdateLabel.isHidden);
+		XCTAssertNotNil([connection execute:@"ROLLBACK"]);
+
+		[pane.dropButton performClick:nil];
+		XCTAssertEqualObjects(self.dropRequests, @[@"sp_t5_ghost"]);
+	}
+}
+
+/// The update targets can't be read: the details stay, Drop stays enabled, Update is off and the error is shown.
+- (void)testTargetsReadFailureKeepsDetailsAndDrop
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		[self.alerts removeAllObjects];
+		PGPostgresConnection *connection = [self connectOn:port];
+		[self install:@"hstore" version:@"1.4" on:connection];
+
+		SPPostgresExtensionController *pane = [[SPFailingTargetsExtensionController alloc] initWithConnection:connection];
+		NSMutableArray *alerts = self.alerts;
+		pane.alertPresenter = ^(NSAlert *alert) { [alerts addObject:alert]; };
+		pane.delegate = self;
+		[self addTeardownBlock:^{ [pane invalidate]; }];
+
+		[pane showExtension:@"hstore"];
+		XCTAssertNotNil(pane.extension, @"%@", port);
+		XCTAssertEqualObjects(pane.nameField.stringValue, @"hstore");
+		XCTAssertEqualObjects(pane.versionField.stringValue, @"1.4");
+		XCTAssertTrue(pane.dropButton.isEnabled);
+		XCTAssertFalse(pane.updateButton.isEnabled);
+		XCTAssertTrue(pane.updatePopup.isHidden);
+		XCTAssertFalse(pane.noUpdateLabel.isHidden);
+		XCTAssertEqual(self.alerts.count, 1u);
+		XCTAssertTrue([self.alerts.firstObject.informativeText containsString:@"control file"], @"%@", self.alerts.firstObject.informativeText);
+	}
+}
+
+/// Update inside an aborted transaction is refused without sending: one alert, and the pane keeps the extension.
+- (void)testFailedUpdateInAbortedTransactionKeepsPane
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		[self.alerts removeAllObjects];
+		[self.changed removeAllObjects];
+		PGPostgresConnection *connection = [self connectOn:port];
+		[self install:@"hstore" version:@"1.4" on:connection];
+
+		SPPostgresExtensionController *pane = [self paneOn:connection];
+		[pane showExtension:@"hstore"];
+		XCTAssertNotNil([connection execute:@"BEGIN"]);
+		XCTAssertNil([connection execute:@"SELECT 1/0"]);
+		[pane update:pane.updateButton];
+
+		XCTAssertEqual(self.alerts.count, 1u, @"%@: %@", port, [self.alerts valueForKey:@"informativeText"]);
+		XCTAssertTrue([self.alerts.firstObject.informativeText containsString:@"aborted"], @"%@", self.alerts.firstObject.informativeText);
+		XCTAssertEqualObjects(self.changed, @[]);
+		XCTAssertEqualObjects(pane.nameField.stringValue, @"hstore");
+		XCTAssertEqualObjects(pane.versionField.stringValue, @"1.4");
+		XCTAssertTrue(pane.dropButton.isEnabled);
+		XCTAssertTrue(pane.updateButton.isEnabled);
+		XCTAssertEqual(connection.transactionStatus, PGPostgresTransactionInError);
+		XCTAssertNotNil([connection execute:@"ROLLBACK"]);
 	}
 }
 

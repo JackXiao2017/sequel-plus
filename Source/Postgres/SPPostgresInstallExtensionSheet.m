@@ -20,6 +20,9 @@ static SPPostgresInstallExtensionSheet *SPPostgresCurrentInstallExtensionSheet =
 	NSArray *available;              // SPPostgresAvailableExtension, sorted by name
 	NSArray *filtered;               // those the filter leaves
 	NSString *installedName;
+	NSString *shownName;             // the extension whose versions, schema and requirements are shown, nil for none
+	BOOL shown;                      // shownName is set (the controls were filled at least once)
+	BOOL filtering;                  // in -_applyFilter: the table's passing selection changes are ignored
 	NSString *loadErrorMessage;
 	void (^completion)(NSString *);
 
@@ -91,6 +94,7 @@ static SPPostgresInstallExtensionSheet *SPPostgresCurrentInstallExtensionSheet =
 	[available release];
 	[filtered release];
 	[installedName release];
+	[shownName release];
 	[loadErrorMessage release];
 	[lastErrorMessage release];
 	[completion release];
@@ -282,6 +286,8 @@ static SPPostgresInstallExtensionSheet *SPPostgresCurrentInstallExtensionSheet =
 			[matching addObject:extension];
 		}
 	}
+	// The reload may drop the selection before it is restored: only where it ends up counts
+	filtering = YES;
 	[filtered release];
 	filtered = [matching copy];
 	[extensionsTable reloadData];
@@ -289,6 +295,7 @@ static SPPostgresInstallExtensionSheet *SPPostgresCurrentInstallExtensionSheet =
 	NSInteger row = [self _rowOf:selected];
 	if (row >= 0) [extensionsTable selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
 	else [extensionsTable deselectAll:nil];
+	filtering = NO;
 	[self _selectionChanged];
 }
 
@@ -331,10 +338,16 @@ static SPPostgresInstallExtensionSheet *SPPostgresCurrentInstallExtensionSheet =
 	return YES;
 }
 
-/// The selected extension's versions (its default preselected), its schema and its missing requirements.
+/// The selected extension's versions (its default preselected), its schema and its missing requirements; nothing
+/// changes while the same extension stays selected (as when the filter is edited), so the chosen version stays.
 - (void)_selectionChanged
 {
 	SPPostgresAvailableExtension *extension = [self _selectedExtension];
+	NSString *name = [extension name];
+	if (shown && (name == shownName || [name isEqualToString:shownName])) return;
+	shown = YES;
+	[shownName release];
+	shownName = [name copy];
 
 	[versionPopup removeAllItems];
 	if (extension) {
@@ -434,6 +447,7 @@ static SPPostgresInstallExtensionSheet *SPPostgresCurrentInstallExtensionSheet =
 
 - (void)tableViewSelectionDidChange:(NSNotification *)notification
 {
+	if (filtering) return;
 	[self _selectionChanged];
 }
 

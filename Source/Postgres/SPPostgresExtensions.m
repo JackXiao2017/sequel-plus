@@ -30,6 +30,24 @@ static NSArray *SPPostgresExtensionRows(PGPostgresConnection *connection, NSStri
 	return rows;
 }
 
+/**
+ * As SPPostgresExtensionRows, for a read of pg_available_extension(s), pg_available_extension_versions or
+ * pg_extension_update_paths: they read the server's extension directory and raise ERROR on a missing or malformed
+ * control file, so inside the user's transaction the read runs in a savepoint (SPPostgresRunGuardedRead) and a
+ * failure leaves that transaction open.
+ */
+static NSArray *SPPostgresExtensionCatalogRows(PGPostgresConnection *connection, NSString *sql, NSArray *values, NSError **error)
+{
+	NSString *aborted = NSLocalizedString(@"The current transaction is aborted, so the extensions can't be read. Roll it back first (ROLLBACK in the Query view).", @"Postgres extensions: read inside an aborted transaction");
+	__block NSArray *rows = nil;
+	BOOL read = SPPostgresRunGuardedRead(connection, @"sp_extension_read", aborted, ^BOOL(NSError **bodyError) {
+		rows = [SPPostgresExtensionRows(connection, sql, values, bodyError) retain];
+		return rows != nil;
+	}, error);
+	[rows autorelease];
+	return read ? rows : nil;
+}
+
 /// The installed extensions with their available-extension details. $1 (optional): only that name.
 static NSString * const SPPostgresInstalledExtensionsSQL =
 	@"SELECT e.extname::text, e.extversion::text, n.nspname::text, a.comment::text,"
@@ -159,7 +177,7 @@ static NSString * const SPPostgresExtensionRequirementsSQL =
 - (NSArray *)installedExtensionsNamed:(NSString *)name error:(NSError **)error
 {
 	NSString *sql = name ? [SPPostgresInstalledExtensionsSQL stringByAppendingString:@" WHERE e.extname = $1::text"] : SPPostgresInstalledExtensionsSQL;
-	NSArray *rows = SPPostgresExtensionRows(_connection, [sql stringByAppendingString:@" ORDER BY e.extname"], name ? @[name] : nil, error);
+	NSArray *rows = SPPostgresExtensionCatalogRows(_connection, [sql stringByAppendingString:@" ORDER BY e.extname"], name ? @[name] : nil, error);
 	if (!rows) return nil;
 	if (![rows count]) return @[];
 
@@ -206,12 +224,12 @@ static NSArray *SPPostgresExtensionSortedVersions(NSArray *versions)
 
 - (NSArray *)availableExtensions:(NSError **)error
 {
-	NSArray *rows = SPPostgresExtensionRows(_connection, (@"SELECT name::text, default_version::text, comment::text"
+	NSArray *rows = SPPostgresExtensionCatalogRows(_connection, (@"SELECT name::text, default_version::text, comment::text"
 														  @" FROM pg_catalog.pg_available_extensions"
 														  @" WHERE installed_version IS NULL ORDER BY name"), nil, error);
 	if (!rows) return nil;
 	// Every version (sorted below); schema is the control file's, per version
-	NSArray *versionRows = SPPostgresExtensionRows(_connection, (@"SELECT v.name::text, v.version::text, v.schema::text"
+	NSArray *versionRows = SPPostgresExtensionCatalogRows(_connection, (@"SELECT v.name::text, v.version::text, v.schema::text"
 																 @" FROM pg_catalog.pg_available_extension_versions v"
 																 @" WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_extension e WHERE e.extname = v.name)"), nil, error);
 	if (!versionRows) return nil;
@@ -249,10 +267,20 @@ static NSArray *SPPostgresExtensionSortedVersions(NSArray *versions)
 		if (error) *error = readError;
 		return readError ? nil : @[];
 	}
-	NSArray *rows = SPPostgresExtensionRows(_connection, (@"SELECT p.target::text"
-														  @" FROM pg_catalog.pg_extension_update_paths($1::text::pg_catalog.name) WITH ORDINALITY p(source, target, path, ord)"
-														  @" WHERE p.source = $2::text AND p.path IS NOT NULL ORDER BY p.ord"),
-											@[[extension name], [extension version] ?: @""], error);
+	// No default version: its control file is gone (the LEFT JOIN found none), so pg_extension_update_paths would
+	// raise ERROR, and there is nothing to update to
+	if (![extension defaultVersion]) return @[];
+	return [self updateTargetsOf:[extension name] fromVersion:[extension version] error:error];
+}
+
+/// The versions name can be updated to from version (pg_extension_update_paths, with a path), sorted; nil on
+/// failure. (Separate from -updateTargetsForExtension: for tests: the read itself, without the short cut.)
+- (NSArray *)updateTargetsOf:(NSString *)name fromVersion:(NSString *)version error:(NSError **)error
+{
+	NSArray *rows = SPPostgresExtensionCatalogRows(_connection, (@"SELECT p.target::text"
+																 @" FROM pg_catalog.pg_extension_update_paths($1::text::pg_catalog.name) WITH ORDINALITY p(source, target, path, ord)"
+																 @" WHERE p.source = $2::text AND p.path IS NOT NULL ORDER BY p.ord"),
+												   @[name ?: @"", version ?: @""], error);
 	if (!rows) return nil;
 	NSMutableArray *targets = [NSMutableArray arrayWithCapacity:[rows count]];
 	for (NSArray *row in rows) {
@@ -283,7 +311,7 @@ static NSArray *SPPostgresExtensionSortedVersions(NSArray *versions)
 					 @" WHERE v.name = $1::text AND v.version = COALESCE($2::text,"
 					 @" (SELECT a.default_version FROM pg_catalog.pg_available_extensions a WHERE a.name = $1::text))"
 					 @" ORDER BY r.ord");
-	NSArray *rows = SPPostgresExtensionRows(_connection, sql, @[name ?: @"", version ?: [NSNull null]], error);
+	NSArray *rows = SPPostgresExtensionCatalogRows(_connection, sql, @[name ?: @"", version ?: [NSNull null]], error);
 	if (!rows) return nil;
 	NSMutableArray *names = [NSMutableArray arrayWithCapacity:[rows count]];
 	for (NSArray *row in rows) {
@@ -328,7 +356,7 @@ static NSArray *SPPostgresExtensionSortedVersions(NSArray *versions)
 	NSString *sql = (@"SELECT a.default_version::text, (SELECT v.schema::text FROM pg_catalog.pg_available_extension_versions v"
 					 @" WHERE v.name = a.name AND v.version = COALESCE($2::text, a.default_version))"
 					 @" FROM pg_catalog.pg_available_extensions a WHERE a.name = $1::text");
-	NSArray *rows = SPPostgresExtensionRows(_connection, sql, @[name ?: @"", version ?: [NSNull null]], error);
+	NSArray *rows = SPPostgresExtensionCatalogRows(_connection, sql, @[name ?: @"", version ?: [NSNull null]], error);
 	if (!rows) return NO;
 	NSArray *row = [rows firstObject];
 	*defaultVersion = row ? SPPostgresExtensionText(row[0]) : nil;

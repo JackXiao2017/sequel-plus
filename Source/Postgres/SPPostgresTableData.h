@@ -33,6 +33,15 @@ extern PGPostgresResult *SPPostgresExecuteWithDetails(PGPostgresConnection *conn
 extern BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoint, NSString *abortedMessage,
 									BOOL (^body)(NSError **error), NSError **error) __attribute__((visibility("default")));
 
+/**
+ * Runs body, one read, so that its failure doesn't abort the user's transaction: inside it, in the savepoint
+ * `savepoint` (a plain identifier), released on success and rolled back to (and released) on failure; when idle, as
+ * is; inside an aborted transaction it is still sent, and a failure there is reported as abortedMessage
+ * (SPPostgresErrorQueryFailed). As the Content view's loads.
+ */
+extern BOOL SPPostgresRunGuardedRead(PGPostgresConnection *connection, NSString *savepoint, NSString *abortedMessage,
+									 BOOL (^body)(NSError **error), NSError **error) __attribute__((visibility("default")));
+
 /// One column of a table or view, as described by pg_attribute.
 __attribute__((visibility("default")))
 @interface SPPostgresColumn : NSObject

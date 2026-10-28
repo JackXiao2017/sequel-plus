@@ -21,6 +21,11 @@
 }
 @end
 
+/// The test seam: the update-paths read itself, without the missing-control-file short cut.
+@interface SPPostgresExtensions (SPTestSeam)
+- (NSArray *)updateTargetsOf:(NSString *)name fromVersion:(NSString *)version error:(NSError **)error;
+@end
+
 /// SPPostgresExtensions, on PG 12 and 18, in database pgkit_ext.
 @interface SPPostgresExtensionsTests : XCTestCase
 @property (strong) NSMutableArray<PGPostgresConnection *> *openConnections;
@@ -357,6 +362,93 @@
 		XCTAssertTrue([extensions dropExtension:@"uuid-ossp" error:&error], @"%@", error);
 		XCTAssertNil([extensions extensionNamed:@"uuid-ossp" error:&error]);
 		XCTAssertNil(error);
+	}
+}
+
+#pragma mark - Missing control file
+
+/// Installs citext and renames it in pg_extension, so the server has no control file for it: as when the control
+/// file was removed after installing.
+- (void)makeGhostWith:(SPPostgresExtensions *)extensions on:(PGPostgresConnection *)connection
+{
+	[self install:@"citext" version:nil schema:@"public" in:extensions];
+	XCTAssertNotNil([connection execute:@"UPDATE pg_catalog.pg_extension SET extname = 'sp_t5_ghost' WHERE extname = 'citext'"]);
+}
+
+/// No default version (no control file): the update targets are empty without asking pg_extension_update_paths,
+/// which would raise ERROR; the reads leave the user's transaction open and the extension can still be dropped.
+- (void)testMissingControlFileShortCircuitsUpdateTargets
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPExtensionStatementRecorder *recorder = nil;
+		PGPostgresConnection *connection = [self connectOn:port recorder:&recorder];
+		SPPostgresExtensions *extensions = [[SPPostgresExtensions alloc] initWithConnection:connection];
+		[self makeGhostWith:extensions on:connection];
+
+		XCTAssertNotNil([connection execute:@"BEGIN"]);
+		XCTAssertNotNil([connection execute:@"CREATE TEMP TABLE sp_t5_tx (n int)"]);
+		SPPostgresExtension *ghost = [self extension:@"sp_t5_ghost" of:extensions];
+		XCTAssertNil(ghost.defaultVersion, @"%@", port);
+		[recorder.statements removeAllObjects];
+		NSError *error = nil;
+		XCTAssertEqualObjects([extensions updateTargetsForExtension:@"sp_t5_ghost" error:&error], @[], @"%@: %@", port, error);
+		XCTAssertNil(error);
+		for (NSString *statement in recorder.statements) {
+			XCTAssertFalse([statement containsString:@"pg_extension_update_paths"], @"%@", statement);
+		}
+		XCTAssertNotNil([extensions availableExtensions:&error], @"%@", error);
+		XCTAssertTrue([[self installedNames:extensions] containsObject:@"sp_t5_ghost"]);
+		XCTAssertEqual(connection.transactionStatus, PGPostgresTransactionInTransaction);
+		XCTAssertNotNil([connection execute:@"SELECT count(*) FROM sp_t5_tx"]);
+		XCTAssertNotNil([connection execute:@"ROLLBACK"]);
+
+		XCTAssertTrue([extensions dropExtension:@"sp_t5_ghost" error:&error], @"%@", error);
+		XCTAssertEqualObjects([self installedNames:extensions], @[@"plpgsql"]);
+	}
+}
+
+/// A catalog read the server fails (pg_extension_update_paths without a control file) runs in a savepoint inside
+/// the user's transaction, so the transaction stays open and usable; idle, it fails as is; inside an aborted
+/// transaction, it says so.
+- (void)testFailingCatalogReadInsideTransactionKeepsItOpen
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPExtensionStatementRecorder *recorder = nil;
+		PGPostgresConnection *connection = [self connectOn:port recorder:&recorder];
+		SPPostgresExtensions *extensions = [[SPPostgresExtensions alloc] initWithConnection:connection];
+		[self makeGhostWith:extensions on:connection];
+		NSString *version = [self extension:@"sp_t5_ghost" of:extensions].version;
+		NSError *error = nil;
+
+		// Idle
+		XCTAssertNil([extensions updateTargetsOf:@"sp_t5_ghost" fromVersion:version error:&error], @"%@", port);
+		XCTAssertNotNil(error);
+		XCTAssertEqual(connection.transactionStatus, PGPostgresTransactionIdle);
+
+		// Inside the user's transaction
+		XCTAssertNotNil([connection execute:@"BEGIN"]);
+		XCTAssertNotNil([connection execute:@"CREATE TEMP TABLE sp_t5_tx (n int)"]);
+		XCTAssertNotNil([connection execute:@"INSERT INTO sp_t5_tx VALUES (1)"]);
+		[recorder.statements removeAllObjects];
+		error = nil;
+		XCTAssertNil([extensions updateTargetsOf:@"sp_t5_ghost" fromVersion:version error:&error], @"%@", port);
+		XCTAssertNotNil(error);
+		XCTAssertFalse([error.localizedDescription containsString:@"aborted"], @"the server's own error: %@", error);
+		XCTAssertTrue([recorder.statements.firstObject hasPrefix:@"SAVEPOINT"], @"%@", recorder.statements);
+		XCTAssertEqual(connection.transactionStatus, PGPostgresTransactionInTransaction, @"%@", port);
+		XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM sp_t5_tx" on:connection], @"1");
+
+		// The other catalog reads, inside the transaction, still work
+		XCTAssertNotNil([extensions availableExtensions:&error], @"%@", error);
+		XCTAssertNotNil([extensions missingRequirementsForExtension:@"earthdistance" version:nil error:&error], @"%@", error);
+		XCTAssertEqual(connection.transactionStatus, PGPostgresTransactionInTransaction);
+
+		// Inside an aborted transaction
+		XCTAssertNil([connection execute:@"SELECT 1/0"]);
+		error = nil;
+		XCTAssertNil([extensions updateTargetsOf:@"sp_t5_ghost" fromVersion:version error:&error]);
+		XCTAssertTrue([error.localizedDescription containsString:@"aborted"], @"%@", error);
+		XCTAssertNotNil([connection execute:@"ROLLBACK"]);
 	}
 }
 
