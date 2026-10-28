@@ -211,6 +211,9 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	NSMenuItem *duplicate = [tableMenu addItemWithTitle:NSLocalizedString(@"Duplicate Table…", @"PostgreSQL sidebar: duplicate table menu item") action:@selector(duplicateTable:) keyEquivalent:@""];
 	[duplicate setToolTip:NSLocalizedString(@"Duplicate the selected item", @"PostgreSQL sidebar: duplicate table menu item tooltip")];
 	[duplicate setTarget:self];
+	NSMenuItem *rename = [tableMenu addItemWithTitle:NSLocalizedString(@"Rename Table…", @"PostgreSQL sidebar: rename table menu item") action:@selector(renameTable:) keyEquivalent:@""];
+	[rename setToolTip:NSLocalizedString(@"Rename the selected item", @"PostgreSQL sidebar: rename table menu item tooltip")];
+	[rename setTarget:self];
 	[outlineView setMenu:tableMenu];
 
 	[container addSubview:scrollView];
@@ -469,6 +472,15 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[self reloadSchema:schema];
 }
 
+- (BOOL)selectionIsTable
+{
+	if (![selectedTableName length]) return NO;
+	for (SPPostgresSidebarItem *item in [[self _sectionNamed:SPPostgresSidebarTables] children]) {
+		if ([[item title] isEqualToString:selectedTableName]) return YES;
+	}
+	return NO;
+}
+
 #pragma mark - Menu
 
 /// The right-clicked row's item, or else the selected row's (nil if neither).
@@ -484,7 +496,17 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	if ([item action] == @selector(duplicateTable:)) {
 		return [[self _menuTargetItem] kind] == SPPostgresSidebarTable && [delegate respondsToSelector:@selector(sidebar:duplicateTableNamed:)];
 	}
+	if ([item action] == @selector(renameTable:)) {
+		return [[self _menuTargetItem] kind] == SPPostgresSidebarTable && [delegate respondsToSelector:@selector(sidebar:renameTableNamed:)];
+	}
 	return YES;
+}
+
+- (void)renameTable:(id)sender
+{
+	SPPostgresSidebarItem *item = [self _menuTargetItem];
+	if ([item kind] != SPPostgresSidebarTable) return;
+	if ([delegate respondsToSelector:@selector(sidebar:renameTableNamed:)]) [delegate sidebar:self renameTableNamed:[item title]];
 }
 
 - (void)duplicateTable:(id)sender

@@ -24,4 +24,15 @@
 /// failing the current test if a statement fails.
 + (void)loadFixtureNamed:(NSString *)name onPort:(NSUInteger)port;
 
+/**
+ * The Structure fixture (schema structure_test: table t with odd columns, indexes, a check, view t_view and table
+ * child referencing t; and "Sales Data"."Mixed Case"), dropped and rebuilt on the server at port, failing the
+ * current test if a statement fails. "Sales Data" belongs to the catalog fixture, so only its "Mixed Case" table
+ * is dropped and rebuilt.
+ */
++ (void)loadStructureFixtureOnPort:(NSUInteger)port;
+
+/// Drops what -loadStructureFixtureOnPort: built.
++ (void)dropStructureFixtureOnPort:(NSUInteger)port;
+
 @end
