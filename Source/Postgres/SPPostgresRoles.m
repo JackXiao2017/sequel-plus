@@ -71,12 +71,16 @@ static NSArray *SPPostgresRolesPair(NSString *member, NSString *group)
 
 #pragma mark - SPPostgresRole
 
+@interface SPPostgresRole ()
+@property (readwrite) BOOL hasMD5Password;
+@end
+
 @implementation SPPostgresRole
 
 @synthesize name = _name, originalName = _originalName, canLogin = _canLogin, inherit = _inherit, superuser = _superuser;
 @synthesize createDB = _createDB, createRole = _createRole, replication = _replication, bypassRLS = _bypassRLS;
 @synthesize connectionLimit = _connectionLimit, validUntil = _validUntil, newPassword = _newPassword, clearPassword = _clearPassword;
-@synthesize memberOf = _memberOf, members = _members, markedForDeletion = _markedForDeletion;
+@synthesize memberOf = _memberOf, members = _members, markedForDeletion = _markedForDeletion, hasMD5Password = _hasMD5Password;
 
 + (instancetype)roleWithName:(NSString *)name
 {
@@ -115,6 +119,7 @@ static NSArray *SPPostgresRolesPair(NSString *member, NSString *group)
 	[copy setMemberOf:_memberOf];
 	[copy setMembers:_members];
 	[copy setMarkedForDeletion:_markedForDeletion];
+	[copy setHasMD5Password:_hasMD5Password];
 	return copy;
 }
 
@@ -242,6 +247,18 @@ BOOL SPPostgresApplyInTransaction(PGPostgresConnection *connection, NSArray *sta
 	[_grantorsByPair release];
 	_grantorsByPair = [grantors copy];
 
+	// The roles with an MD5 password (renaming one clears it). Only a superuser can read pg_authid: without
+	// the right, none are known (the query isn't even tried, so nothing fails).
+	NSMutableSet *md5Names = [NSMutableSet set];
+	PGPostgresResult *readable = SPPostgresExecute(_connection, @"SELECT has_table_privilege('pg_catalog.pg_authid', 'SELECT')::text", nil, NULL);
+	if ([readable numberOfRows] && [SPPostgresRolesText([readable textValueAtRow:0 column:0]) isEqualToString:@"true"]) {
+		NSArray *md5Rows = SPPostgresRolesRows(_connection, @"SELECT rolname::text FROM pg_catalog.pg_authid WHERE rolpassword LIKE 'md5%'", NULL);
+		for (NSArray *row in md5Rows) {
+			NSString *name = SPPostgresRolesText([row firstObject]);
+			if (name) [md5Names addObject:name];
+		}
+	}
+
 	NSMutableArray *roles = [NSMutableArray arrayWithCapacity:[roleRows count]];
 	for (NSArray *row in roleRows) {
 		NSString *name = SPPostgresRolesText([row objectAtIndex:0]);
@@ -262,6 +279,7 @@ BOOL SPPostgresApplyInTransaction(PGPostgresConnection *connection, NSArray *sta
 		else if (validUntil) [role setValidUntil:[NSDate dateWithTimeIntervalSince1970:[validUntil doubleValue]]];
 		[role setMemberOf:[memberOf objectForKey:name] ?: @{}];
 		[role setMembers:[members objectForKey:name] ?: @{}];
+		[role setHasMD5Password:[md5Names containsObject:name]];
 		[roles addObject:role];
 	}
 	return roles;

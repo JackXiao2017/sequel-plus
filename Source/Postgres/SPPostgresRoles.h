@@ -28,6 +28,7 @@ __attribute__((visibility("default")))
 	NSDictionary *_memberOf;
 	NSDictionary *_members;
 	BOOL _markedForDeletion;
+	BOOL _hasMD5Password;
 }
 
 /// A new role (originalName nil) with the server's CREATE ROLE defaults: NOLOGIN INHERIT, every other attribute
@@ -59,6 +60,9 @@ __attribute__((visibility("default")))
 /// Member name → @(BOOL adminOption): the roles that are members of this role.
 @property (readwrite, copy) NSDictionary *members;
 @property (readwrite) BOOL markedForDeletion;
+/// YES when -[SPPostgresRoles roles:] found an MD5 password stored for the role (pg_authid.rolpassword). The server
+/// clears such a password when the role is renamed. NO when pg_authid can't be read, and for a new role.
+@property (readonly) BOOL hasMD5Password;
 
 /// YES for a role that can't log in.
 - (BOOL)isGroup;

@@ -13,6 +13,7 @@
 @class SPPostgresTriggersController;
 @class SPPostgresTableInfoController;
 @class SPPostgresSequenceController;
+@class SPPostgresUsersController;
 @class SPWindowController;
 
 /// The panes of a PostgreSQL tab's right side (-showPane:, -currentPane, and the tab's history entries).
@@ -100,6 +101,24 @@ __attribute__((visibility("default")))
 
 /// Shows the Query view, as MySQL's Query toolbar item and View > Custom Query.
 - (IBAction)viewQuery:(id)sender;
+
+/**
+ * The Users sheet (SPPostgresUsersController), as MySQL's Users toolbar item and Database > User Accounts…: the
+ * cluster's roles, edited on connections of the sheet's own (see usersConnectionProvider), never this tab's.
+ * Enabled while connected, not processing, and no sheet is attached.
+ */
+- (IBAction)showUserManager:(id)sender;
+
+/**
+ * Where the Users sheet gets its connections: called with a database name, it calls completion once with a
+ * connected connection of its own (or nil and an error). nil (the default) opens a new SPPostgresConnector for
+ * the favorite with that database, with the session's passwords and this window (as -switchToDatabase: does);
+ * the sheet keeps the connectors and disconnects them when it ends. Replaceable, e.g. by tests.
+ */
+@property (copy) void (^usersConnectionProvider)(NSString *database, void (^completion)(PGPostgresConnection *connection, NSError *error));
+
+/// The Users sheet's controller while it is shown (or connecting), else nil.
+@property (readonly) SPPostgresUsersController *usersController;
 
 /**
  * Shows the tab's alerts (catalog errors, a failed database switch). nil (the default) shows them as

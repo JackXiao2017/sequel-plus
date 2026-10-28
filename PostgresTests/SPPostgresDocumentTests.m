@@ -331,8 +331,8 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	XCTAssertEqualObjects([self.document toolbarDefaultItemIdentifiers:toolbar], expected);
 	XCTAssertEqualObjects([toolbar.items valueForKey:@"itemIdentifier"], expected);
 
-	// Everything but the database picker, Query and the console is present but disabled (Content until a table is selected)
-	NSArray *disabled = @[structure, content, relations, triggers, tableInfo, users, transfer, history];
+	// Everything but the database picker, Query, Users and the console is present but disabled (Content until a table is selected)
+	NSArray *disabled = @[structure, content, relations, triggers, tableInfo, transfer, history];
 	for (NSToolbarItem *item in toolbar.items) {
 		if ([disabled containsObject:item.itemIdentifier]) {
 			BOOL enabled = item.view ? [(NSControl *)item.view isEnabled] && item.isEnabled : [self.document validateToolbarItem:item];
@@ -345,6 +345,9 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	}
 	NSToolbarItem *queryItem = toolbar.items[[expected indexOfObject:query]];
 	XCTAssertTrue([self.document validateToolbarItem:queryItem]);
+	NSToolbarItem *usersItem = toolbar.items[[expected indexOfObject:users]];
+	XCTAssertTrue([self.document validateToolbarItem:usersItem]);
+	XCTAssertEqual(usersItem.action, NSSelectorFromString(@"showUserManager:"));
 	NSToolbarItem *consoleItem = toolbar.items.lastObject;
 	XCTAssertTrue([self.document validateToolbarItem:consoleItem]);
 	XCTAssertNotNil(consoleItem.image);
