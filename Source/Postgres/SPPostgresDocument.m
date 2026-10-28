@@ -11,6 +11,7 @@
 #import "SPPostgresInstallExtensionSheet.h"
 #import "SPPostgresUsersController.h"
 #import "SPPostgresExportController.h"
+#import "SPPostgresImportController.h"
 #import "SPPostgresBackgroundJob.h"
 #import "SPPostgresSequences.h"
 #import "SPPostgresTableStructure.h"
@@ -222,6 +223,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	/// The Users sheet while it is shown (or connecting)
 	SPPostgresUsersController *usersController;
 	SPPostgresExportController *exportController;
+	SPPostgresImportController *importController;
 
 	BOOL tornDown;
 }
@@ -244,6 +246,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 @synthesize connectionProvider;
 @synthesize usersController;
 @synthesize exportController;
+@synthesize importController;
 @synthesize currentDatabase;
 @synthesize isProcessing;
 @synthesize parentWindowController;
@@ -329,6 +332,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[connectionProvider release];
 	[usersController release];
 	[exportController release];
+	[importController release];
 
 	[super dealloc];
 }
@@ -1443,6 +1447,9 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	// The Export sheet ends; an export running is cancelled (it deletes what it wrote)
 	[exportController cancel:nil];
 
+	// The Import panel or sheets end; an import running is cancelled (rolled back)
+	[importController cancel];
+
 	// A Duplicate Table sheet still up (its completion sees tornDown)
 	if (duplicateSheet) [[duplicateSheet sheetParent] endSheet:duplicateSheet returnCode:NSModalResponseCancel];
 
@@ -2416,6 +2423,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 	if (action == @selector(showUserManager:)) return [self _canShowUsers];
 	if (action == @selector(export:)) return [self _canRunSheetJob];
+	if (action == @selector(import:)) return [self _canRunSheetJob];
 
 	// View > Back/Forward In History (tags 0 and 1), as MySQL's
 	if (action == @selector(backForwardInHistory:)) {
@@ -2616,7 +2624,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// attached, and no other job's sheet pending.
 - (BOOL)_canRunSheetJob
 {
-	return !tornDown && !isProcessing && !confirmingSwitch && !usersController && !exportController && [connection isConnected] && parentWindow && ![parentWindow attachedSheet];
+	return !tornDown && !isProcessing && !confirmingSwitch && !usersController && !exportController && !importController && [connection isConnected] && parentWindow && ![parentWindow attachedSheet];
 }
 
 /**
@@ -2732,6 +2740,45 @@ NSString * const SPPostgresPaneExtension = @"extension";
 		}
 	}];
 	[controller beginSheet];
+}
+
+#pragma mark - Import
+
+- (IBAction)import:(id)sender
+{
+	if (![self _canRunSheetJob] || ![currentDatabase length]) return;
+
+	SPPostgresImportController *controller = [[SPPostgresImportController alloc] initWithDocument:self];
+	importController = controller; // released when it ends
+	[controller setDidEnd:^{
+		if (importController == controller) {
+			importController = nil;
+			[controller autorelease];
+		}
+	}];
+	[controller beginImport];
+}
+
+- (void)importDidChangeDatabase
+{
+	if (tornDown) return;
+	contentNeedsReset = YES;
+	structureNeedsReset = YES;
+	relationsNeedReset = YES;
+	triggersNeedReset = YES;
+	infoNeedsReset = YES;
+	sequenceNeedsReset = YES;
+	extensionNeedsReset = YES;
+
+	// Inside the tab's aborted transaction the catalog can't be read: the lists wait for the Query view's next run
+	listsNeedReload = YES;
+	if ([connection transactionStatus] != PGPostgresTransactionInError) {
+		listsNeedReload = NO;
+		[self _reloadSidebarKeepingSelection];
+		[self _reloadDatabasePopup];
+		[self updateWindowTitle:self];
+	}
+	[self _refreshCurrentPaneIfStale];
 }
 
 - (void)unavailableInThisVersion:(id)sender
