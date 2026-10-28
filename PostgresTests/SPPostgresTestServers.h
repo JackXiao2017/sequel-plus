@@ -38,4 +38,8 @@
 /// Drops what -loadStructureFixtureOnPort: built.
 + (void)dropStructureFixtureOnPort:(NSUInteger)port;
 
+/// Drops every role named sp_t4_% (roles are cluster-wide on the shared servers), after DROP OWNED BY them in
+/// pgkit_test and pgkit_nopublic (when it exists). Test-only cleanup: app code never uses DROP OWNED.
++ (void)dropTestRolesOnPort:(NSUInteger)port;
+
 @end

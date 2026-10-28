@@ -145,4 +145,12 @@ PGPostgresTransactionStatus;
 
 - (BOOL)cancelCurrentQuery:(NSError **)error;
 
+/**
+ * The password hashed for role by libpq (PQencryptPasswordConn with the server's password_encryption, e.g.
+ * "SCRAM-SHA-256$…" or "md5…"), for ALTER/CREATE ROLE … PASSWORD, so the plain password is never sent. libpq
+ * may run SHOW password_encryption on the connection to choose the algorithm (not reported to the delegate).
+ * nil when not connected or when hashing fails.
+ */
+- (NSString *)encryptedPassword:(NSString *)password forRole:(NSString *)role;
+
 @end
