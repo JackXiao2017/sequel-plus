@@ -6,6 +6,7 @@
 #import "SPPostgresTriggersController.h"
 #import "SPPostgresTableInfoController.h"
 #import "SPPostgresSequenceController.h"
+#import "SPPostgresUsersController.h"
 #import "SPPostgresSequences.h"
 #import "SPPostgresTableStructure.h"
 #import "SPPostgresQueryController.h"
@@ -199,6 +200,9 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 	/// An alert that came up while the tab couldn't show it (presented once the tab is active in a visible window)
 	NSAlert *pendingAlert;
 
+	/// The Users sheet while it is shown (or connecting)
+	SPPostgresUsersController *usersController;
+
 	BOOL tornDown;
 }
 
@@ -216,6 +220,8 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 @synthesize favorite;
 @synthesize alertPresenter;
 @synthesize confirmationPresenter;
+@synthesize usersConnectionProvider;
+@synthesize usersController;
 @synthesize isProcessing;
 @synthesize parentWindowController;
 @synthesize parentWindow;
@@ -294,6 +300,8 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 	[pendingAlert release];
 	[alertPresenter release];
 	[confirmationPresenter release];
+	[usersConnectionProvider release];
+	[usersController release];
 
 	[super dealloc];
 }
@@ -1318,6 +1326,9 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 	[pendingHistoryEntry release];
 	pendingHistoryEntry = nil;
 
+	// The Users sheet (or its connecting): ended as Cancel, its connections closed
+	[usersController endSheet];
+
 	// A Duplicate Table sheet still up (its completion sees tornDown)
 	if (duplicateSheet) [[duplicateSheet sheetParent] endSheet:duplicateSheet returnCode:NSModalResponseCancel];
 
@@ -2153,6 +2164,8 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 	if (action == @selector(viewTriggers:)) return [self _canShowPane:SPPostgresPaneTriggers];
 	if (action == @selector(viewStatus:)) return [self _canShowPane:SPPostgresPaneInfo];
 
+	if (action == @selector(showUserManager:)) return [self _canShowUsers];
+
 	// View > Back/Forward In History (tags 0 and 1), as MySQL's
 	if (action == @selector(backForwardInHistory:)) {
 		if (isProcessing) return NO;
@@ -2189,7 +2202,8 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 - (NSArray *)_availableToolbarItemIdentifiers
 {
 	return @[SPMainToolbarDatabaseSelection, SPMainToolbarHistoryNavigation, SPMainToolbarShowConsole, SPMainToolbarTableStructure,
-			 SPMainToolbarTableContent, SPMainToolbarTableRelations, SPMainToolbarTableTriggers, SPMainToolbarTableInfo, SPMainToolbarCustomQuery];
+			 SPMainToolbarTableContent, SPMainToolbarTableRelations, SPMainToolbarTableTriggers, SPMainToolbarTableInfo, SPMainToolbarCustomQuery,
+			 SPMainToolbarUserManager];
 }
 
 - (NSToolbarItem *)toolbar:(NSToolbar *)theToolbar itemForItemIdentifier:(NSString *)identifier willBeInsertedIntoToolbar:(BOOL)flag
@@ -2243,6 +2257,9 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 	else if ([identifier isEqualToString:SPMainToolbarCustomQuery]) {
 		action = @selector(viewQuery:);
 	}
+	else if ([identifier isEqualToString:SPMainToolbarUserManager]) {
+		action = @selector(showUserManager:);
+	}
 	else if ([identifier isEqualToString:SPMainToolbarClearConsole]) {
 		[item setToolTip:NSLocalizedString(@"Clear the console which shows all PostgreSQL commands performed by Sequel Pro", @"PostgreSQL toolbar: clear console tooltip")];
 	}
@@ -2271,6 +2288,8 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 		[item setImage:SPCompactToolbarImage([NSImage imageNamed:[consoleWindow isVisible] ? @"showconsole" : @"hideconsole"])];
 		return ![consoleWindow isKeyWindow];
 	}
+
+	if ([identifier isEqualToString:SPMainToolbarUserManager]) return [self _canShowUsers];
 
 	// The pane items: see -_canShowPane:
 	NSString *pane = [self _paneForToolbarIdentifier:identifier];
@@ -2332,6 +2351,50 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 - (IBAction)viewQuery:(id)sender
 {
 	[self _viewPane:SPPostgresPaneQuery];
+}
+
+#pragma mark - Users
+
+/// The Users sheet can open: connected, not processing (a database switch), and no sheet is attached.
+- (BOOL)_canShowUsers
+{
+	return !tornDown && !isProcessing && !confirmingSwitch && !usersController && [connection isConnected] && parentWindow && ![parentWindow attachedSheet];
+}
+
+- (IBAction)showUserManager:(id)sender
+{
+	if (![self _canShowUsers] || ![currentDatabase length]) return;
+
+	void (^provider)(NSString *, void (^)(PGPostgresConnection *, NSError *)) = usersConnectionProvider;
+	__block SPPostgresUsersController *owner = nil; // not retained by the block (MRC __block)
+	if (!provider) {
+		// As -_switchToDatabase:forHistory:: the same favorite and the passwords this session was opened with
+		SPPostgresFavorite *base = [[favorite copy] autorelease];
+		NSString *thePassword = [connector password] ?: [connection password];
+		NSString *theSSHPassword = [connector sshPassword];
+		NSWindow *window = parentWindow;
+		provider = ^(NSString *database, void (^completion)(PGPostgresConnection *, NSError *)) {
+			SPPostgresFavorite *target = [[base copy] autorelease];
+			[target setDatabase:database];
+			SPPostgresConnector *usersConnector = [[[SPPostgresConnector alloc] initWithFavorite:target password:thePassword sshPassword:theSSHPassword parentWindow:window] autorelease];
+			[owner adoptConnector:usersConnector]; // keeps it until the sheet ends
+			[usersConnector connectWithCompletion:completion];
+		};
+	}
+
+	SPPostgresUsersController *controller = [[SPPostgresUsersController alloc] initWithDatabase:currentDatabase connectionProvider:provider];
+	owner = controller;
+	usersController = controller; // released when the sheet ends
+	if (alertPresenter) [controller setAlertPresenter:alertPresenter];
+
+	[self retain]; // until the sheet ends
+	[controller beginSheetForWindow:parentWindow completion:^(BOOL applied) {
+		if (usersController == controller) {
+			usersController = nil;
+			[controller autorelease];
+		}
+		[self autorelease];
+	}];
 }
 
 - (void)unavailableInThisVersion:(id)sender
