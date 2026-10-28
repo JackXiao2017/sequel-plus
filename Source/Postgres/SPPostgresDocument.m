@@ -2367,6 +2367,7 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 
 	void (^provider)(NSString *, void (^)(PGPostgresConnection *, NSError *)) = usersConnectionProvider;
 	__block SPPostgresUsersController *owner = nil; // not retained by the block (MRC __block)
+	NSString *connectionName = [self _connectionName];
 	if (!provider) {
 		// As -_switchToDatabase:forHistory:: the same favorite and the passwords this session was opened with
 		SPPostgresFavorite *base = [[favorite copy] autorelease];
@@ -2376,9 +2377,19 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 		provider = ^(NSString *database, void (^completion)(PGPostgresConnection *, NSError *)) {
 			SPPostgresFavorite *target = [[base copy] autorelease];
 			[target setDatabase:database];
-			SPPostgresConnector *usersConnector = [[[SPPostgresConnector alloc] initWithFavorite:target password:thePassword sshPassword:theSSHPassword parentWindow:window] autorelease];
+			// Once the Users sheet is up, the SSH tunnel's sheets (passphrase, host key) can only attach to it
+			NSWindow *host = [owner windowForConnectorSheets] ?: window;
+			SPPostgresConnector *usersConnector = [[[SPPostgresConnector alloc] initWithFavorite:target password:thePassword sshPassword:theSSHPassword parentWindow:host] autorelease];
 			[owner adoptConnector:usersConnector]; // keeps it until the sheet ends
-			[usersConnector connectWithCompletion:completion];
+			void (^done)(PGPostgresConnection *, NSError *) = [[completion copy] autorelease];
+			[usersConnector connectWithCompletion:^(PGPostgresConnection *theConnection, NSError *error) {
+				// The sheet's statements go to the Console as this tab's do (passwords only as verifiers)
+				if (theConnection) {
+					SPPostgresConsoleLogger *usersLogger = [[[SPPostgresConsoleLogger alloc] initWithConnectionName:connectionName database:database] autorelease];
+					[usersLogger attachToConnection:theConnection];
+				}
+				done(theConnection, error);
+			}];
 		};
 	}
 
@@ -2386,6 +2397,14 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 	owner = controller;
 	usersController = controller; // released when the sheet ends
 	if (alertPresenter) [controller setAlertPresenter:alertPresenter];
+	[controller setServerName:connectionName];
+
+	// The roles load asynchronously: only attach the sheet if this tab is still the one its window shows
+	__block SPPostgresDocument *document = self; // retained until the sheet ends (below)
+	NSWindow *window = parentWindow;
+	[controller setCanPresent:^BOOL{
+		return !document->tornDown && [document parentWindow] == window && [document _isSelectedTab];
+	}];
 
 	[self retain]; // until the sheet ends
 	[controller beginSheetForWindow:parentWindow completion:^(BOOL applied) {

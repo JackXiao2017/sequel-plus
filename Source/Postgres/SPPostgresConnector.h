@@ -44,6 +44,9 @@ __attribute__((visibility("default")))
 
 @property (readonly) SPSSHTunnel *tunnel;
 
+/// The window the SSH tunnel's sheets are shown on while connecting (nil once the attempt is over).
+@property (readonly) NSWindow *parentWindow;
+
 /// The database and SSH passwords this connector was given (nil if none), e.g. to open another
 /// session for the same favorite without asking again.
 @property (readonly, copy) NSString *password;

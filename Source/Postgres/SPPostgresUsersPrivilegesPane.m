@@ -102,6 +102,8 @@ static NSArray *SPPostgresPrivilegesNames(PGPostgresConnection *connection, NSSt
 	NSArray *rowsShown;
 
 	NSMutableArray *pending;
+	/// Creators (as the pop-up lists them: server names) renamed in the draft, to their draft names
+	NSMutableDictionary *creatorDraftNames;
 }
 
 @synthesize databasePopup, schemaPopup, creatorPopup, privilegesTable, superuserNote, progressIndicator, rowsShown;
@@ -113,6 +115,7 @@ static NSArray *SPPostgresPrivilegesNames(PGPostgresConnection *connection, NSSt
 		readRows = [@[] retain];
 		rowsShown = [@[] retain];
 		pending = [[NSMutableArray alloc] init];
+		creatorDraftNames = [[NSMutableDictionary alloc] init];
 	}
 	return self;
 }
@@ -138,6 +141,7 @@ static NSArray *SPPostgresPrivilegesNames(PGPostgresConnection *connection, NSSt
 	[readRows release];
 	[rowsShown release];
 	[pending release];
+	[creatorDraftNames release];
 	[super dealloc];
 }
 
@@ -302,7 +306,7 @@ static void SPPostgresPrivilegesFill(NSPopUpButton *popup, NSArray *titles, NSSt
 	return YES;
 }
 
-/// Shows schema, with its owner as the creator for the default-privilege rows.
+/// Shows schema, with its owner (or, for pg_database_owner, the database's owner) as the creator for the default rows.
 - (void)_showSchema:(NSString *)schema
 {
 	[schemaName release];
@@ -314,12 +318,31 @@ static void SPPostgresPrivilegesFill(NSPopUpButton *popup, NSArray *titles, NSSt
 		owner = [[[[SPPostgresPrivileges alloc] initWithConnection:connection] autorelease] ownerOfSchema:schema error:&error];
 		if (!owner) [delegate privilegesPane:self showErrorTitle:NSLocalizedString(@"Could not read the privileges", @"Postgres users: privileges read failed title") message:[error localizedDescription] ?: @""];
 	}
-	// The owner may be a predefined role (pg_database_owner owns public on PostgreSQL 15+)
+	// The owner may be a predefined role (pg_database_owner owns public on PostgreSQL 15+): listed, but nobody
+	// creates objects as pg_database_owner, so default privileges for it never apply. The database's owner (whom
+	// it stands for) is the creator offered first then.
 	if (owner && ![creatorPopup itemWithTitle:owner]) {
 		[creatorPopup addItemWithTitle:@""];
 		[[creatorPopup lastItem] setTitle:owner];
 	}
-	[self _setCreator:owner ?: [creatorPopup titleOfSelectedItem]];
+	NSString *creator = owner;
+	if ([owner isEqualToString:@"pg_database_owner"]) {
+		NSError *error = nil;
+		NSArray *databaseOwner = SPPostgresPrivilegesNames(connection,
+			@"SELECT pg_catalog.pg_get_userbyid(datdba)::text FROM pg_catalog.pg_database WHERE datname = pg_catalog.current_database()", &error);
+		NSString *name = [databaseOwner firstObject];
+		if ([name length]) {
+			if (![creatorPopup itemWithTitle:name]) {
+				[creatorPopup addItemWithTitle:@""];
+				[[creatorPopup lastItem] setTitle:name];
+			}
+			creator = name;
+		}
+		else if (!databaseOwner) {
+			NSLog(@"Postgres users: could not read the database's owner: %@", [error localizedDescription]);
+		}
+	}
+	[self _setCreator:creator ?: [creatorPopup titleOfSelectedItem]];
 	[self _reloadRows];
 }
 
@@ -373,6 +396,8 @@ static void SPPostgresPrivilegesFill(NSPopUpButton *popup, NSArray *titles, NSSt
 - (void)reload
 {
 	if (!connection || !databaseName) return;
+	// The roles were re-read: renamed creators now have their new names on the server (and in the pop-up)
+	[creatorDraftNames removeAllObjects];
 	NSString *schema = [[schemaName copy] autorelease];
 	NSString *creator = [[creatorName copy] autorelease];
 	NSError *error = nil;
@@ -448,10 +473,11 @@ static void SPPostgresPrivilegesFill(NSPopUpButton *popup, NSArray *titles, NSSt
 	[privilegesTable reloadData];
 }
 
-/// The creator an object's pending edit is kept under: the shown creator for a default row, else nil.
+/// The creator an object's pending edit is kept under: the shown creator's draft name for a default row, else nil.
 - (NSString *)_creatorFor:(SPPostgresPrivilegeObject *)object
 {
-	return SPPostgresPrivilegesIsDefaultKind([object kind]) ? creatorName : nil;
+	if (!SPPostgresPrivilegesIsDefaultKind([object kind]) || !creatorName) return nil;
+	return [creatorDraftNames objectForKey:creatorName] ?: creatorName;
 }
 
 - (SPPostgresUsersPendingPrivilege *)_pendingFor:(SPPostgresPrivilegeObject *)object
@@ -508,19 +534,37 @@ static void SPPostgresPrivilegesFill(NSPopUpButton *popup, NSArray *titles, NSSt
 
 - (void)renameRole:(NSString *)from to:(NSString *)to
 {
+	if (!from || !to) return;
 	for (SPPostgresUsersPendingPrivilege *entry in pending) {
 		if (SPPostgresPrivilegesSame(entry->role, from)) {
 			[entry->role release];
 			entry->role = [to copy];
 		}
+		// Default privileges set for objects the renamed role creates: they are applied after the rename
+		if (SPPostgresPrivilegesSame(entry->creator, from)) {
+			[entry->creator release];
+			entry->creator = [to copy];
+		}
 	}
+
+	// The pop-up keeps the server name; its edits are kept (and found) under the draft name
+	BOOL known = NO;
+	for (NSString *serverName in [creatorDraftNames allKeys]) {
+		if ([[creatorDraftNames objectForKey:serverName] isEqualToString:from]) {
+			[creatorDraftNames setObject:to forKey:serverName];
+			known = YES;
+		}
+	}
+	if (!known && ![creatorDraftNames objectForKey:from]) [creatorDraftNames setObject:to forKey:from];
+	[self _refreshShownRows];
 }
 
 - (void)dropEditsForRole:(NSString *)roleName
 {
 	NSMutableIndexSet *gone = [NSMutableIndexSet indexSet];
 	[pending enumerateObjectsUsingBlock:^(SPPostgresUsersPendingPrivilege *entry, NSUInteger index, BOOL *stop) {
-		if (SPPostgresPrivilegesSame(entry->role, roleName)) [gone addIndex:index];
+		// Its own edits, and the default privileges for objects it would create
+		if (SPPostgresPrivilegesSame(entry->role, roleName) || SPPostgresPrivilegesSame(entry->creator, roleName)) [gone addIndex:index];
 	}];
 	[pending removeObjectsAtIndexes:gone];
 	[self _refreshShownRows];

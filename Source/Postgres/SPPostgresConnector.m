@@ -116,6 +116,7 @@ static char SPPostgresConnectorProxyKey;
 @synthesize tunnel;
 @synthesize password;
 @synthesize sshPassword;
+@synthesize parentWindow;
 
 - (instancetype)initWithFavorite:(SPPostgresFavorite *)theFavorite password:(NSString *)thePassword sshPassword:(NSString *)theSSHPassword parentWindow:(NSWindow *)theParentWindow
 {
