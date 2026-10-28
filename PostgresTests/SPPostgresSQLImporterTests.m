@@ -202,6 +202,110 @@
 	}
 }
 
+- (void)testPerStatementSkipsDataOfFailedCopy
+{
+	NSMutableString *text = [NSMutableString stringWithString:@"COPY public.missing FROM stdin;\n"];
+	for (NSUInteger i = 0; i < 2000; i++) [text appendFormat:@"%lu\n", (unsigned long)i];
+	[text appendString:@"\\.\nCREATE TABLE b(i int);\n"];
+	NSString *path = [self writeText:text named:@"missing.sql"];
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *destination = [SPPostgresTestServers ioConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_io_dst"];
+		SPPostgresSQLImporter *importer = [self importerForPath:path connection:destination chunkSize:128];
+		importer.singleTransaction = NO;
+		__block NSMutableArray *asked = [NSMutableArray array];
+		importer.errorHandler = ^SPPostgresImportErrorChoice(NSError *error, SPPostgresDumpItem *item) {
+			[asked addObject:@(item.line)];
+			return SPPostgresImportIgnore;
+		};
+		NSError *error = nil;
+		XCTAssertTrue([importer run:&error], @"%@", error);
+		XCTAssertEqualObjects(asked, @[@1]);
+		XCTAssertEqual(importer.errorsIgnored, 1u);
+		XCTAssertEqual(importer.statementsRun, 1u);
+		XCTAssertTrue([self table:@"public.b" existsOn:destination]);
+		[destination disconnect];
+	}
+}
+
+- (void)testDumpEndingTheTransactionFails
+{
+	NSString *path = [self writeText:@"CREATE TABLE a(i int);\nROLLBACK;\nCREATE TABLE b(i int);\n" named:@"rollback.sql"];
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *destination = [SPPostgresTestServers ioConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_io_dst"];
+		NSError *error = nil;
+		XCTAssertFalse([[self importerForPath:path connection:destination] run:&error]);
+		XCTAssertEqualObjects(error.localizedDescription, @"Line 2: the file ends the transaction itself; import it with “Run in a single transaction” off.");
+		XCTAssertEqual(destination.transactionStatus, PGPostgresTransactionIdle);
+		XCTAssertFalse([self table:@"public.a" existsOn:destination]);
+		XCTAssertFalse([self table:@"public.b" existsOn:destination]);
+		[destination disconnect];
+	}
+}
+
+/// text written compressed (1 gzip, 2 bzip2) with the app's SPFileHandle; its bytes.
+- (NSData *)compress:(NSString *)text format:(int)format path:(NSString *)path
+{
+	Class handleClass = NSClassFromString(@"SPFileHandle");
+	[[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
+	id handle = [handleClass performSelector:@selector(fileHandleForWritingAtPath:) withObject:path];
+	XCTAssertNotNil(handle);
+	NSMethodSignature *signature = [handle methodSignatureForSelector:@selector(setCompressionFormat:)];
+	NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
+	invocation.selector = @selector(setCompressionFormat:);
+	[invocation setArgument:&format atIndex:2];
+	[invocation invokeWithTarget:handle];
+	[handle performSelector:@selector(writeData:) withObject:[text dataUsingEncoding:NSUTF8StringEncoding]];
+	[handle performSelector:@selector(closeFile)];
+	return [NSData dataWithContentsOfFile:path];
+}
+
+- (void)testDamagedOrTruncatedCompressedFilesFail
+{
+	NSMutableString *text = [NSMutableString stringWithString:@"CREATE TABLE a(i int, t text);\nCOPY a FROM stdin;\n"];
+	for (NSUInteger i = 0; i < 3000; i++) [text appendFormat:@"%lu\trow %lu %@\n", (unsigned long)i, (unsigned long)(i * 7919 % 10007), [[NSUUID UUID] UUIDString]];
+	[text appendString:@"\\.\nCREATE TABLE b(i int);\n"];
+
+	NSString *gzPath = [self.directory stringByAppendingPathComponent:@"whole.sql.gz"];
+	NSString *bzPath = [self.directory stringByAppendingPathComponent:@"whole.sql.bz2"];
+	NSData *gz = [self compress:text format:1 path:gzPath];
+	NSData *bz = [self compress:text format:2 path:bzPath];
+
+	NSMutableDictionary *damaged = [NSMutableDictionary dictionary];
+	damaged[@"half.sql.gz"] = [gz subdataWithRange:NSMakeRange(0, gz.length / 2)];
+	damaged[@"half.sql.bz2"] = [bz subdataWithRange:NSMakeRange(0, bz.length / 2)];
+	NSMutableData *flipped = [gz mutableCopy];
+	unsigned char *bytes = flipped.mutableBytes;
+	for (NSUInteger k = flipped.length - 8; k < flipped.length - 4; k++) bytes[k] ^= 0xFF; // the CRC
+	damaged[@"crc.sql.gz"] = flipped;
+
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		// The intact files import
+		for (NSString *path in @[gzPath, bzPath]) {
+			PGPostgresConnection *destination = [SPPostgresTestServers ioConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_io_dst"];
+			NSError *error = nil;
+			XCTAssertTrue([[self importerForPath:path connection:destination chunkSize:512] run:&error], @"%@: %@", path, error);
+			XCTAssertEqualObjects([[destination execute:@"SELECT count(*)::text FROM public.a"] textValueAtRow:0 column:0], @"3000");
+			[destination disconnect];
+		}
+
+		for (NSString *name in damaged) {
+			NSString *path = [self.directory stringByAppendingPathComponent:name];
+			XCTAssertTrue([damaged[name] writeToFile:path atomically:YES]);
+			for (NSNumber *chunkSize in @[@0, @512]) {
+				PGPostgresConnection *destination = [SPPostgresTestServers ioConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_io_dst"];
+				NSError *error = nil;
+				SPPostgresSQLImporter *importer = [self importerForPath:path connection:destination chunkSize:chunkSize.unsignedIntegerValue];
+				XCTAssertFalse([importer run:&error], @"%@", name);
+				XCTAssertTrue([error.localizedDescription hasPrefix:@"The file is damaged or truncated (near line "], @"%@ (%@): %@", name, chunkSize, error.localizedDescription);
+				XCTAssertEqual(destination.transactionStatus, PGPostgresTransactionIdle);
+				XCTAssertFalse([self table:@"public.a" existsOn:destination], @"%@ (%@)", name, chunkSize);
+				XCTAssertFalse([self table:@"public.b" existsOn:destination], @"%@ (%@)", name, chunkSize);
+				[destination disconnect];
+			}
+		}
+	}
+}
+
 - (void)testUnsupportedMetaCommandStops
 {
 	NSString *path = [self writeText:@"CREATE TABLE a(i int);\n\\connect other\nCREATE TABLE b(i int);\n" named:@"meta.sql"];

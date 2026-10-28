@@ -38,4 +38,11 @@ __attribute__((visibility("default")))
  */
 + (NSUInteger)lengthOfFirstStatementInCharacters:(const unichar *)characters length:(NSUInteger)length;
 
+/**
+ * The statement with everything but its top-level code replaced by spaces (same length): comments, '…' / E'…'
+ * strings, "…" identifiers, dollar-quoted bodies, and parentheses with all they hold. For telling what kind of
+ * statement it is without being fooled by text inside them, e.g. COPY (SELECT 'from stdin') TO STDOUT.
+ */
++ (NSString *)topLevelCodeOfStatement:(NSString *)sql;
+
 @end

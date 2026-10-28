@@ -285,6 +285,103 @@ static BOOL SPLexSegments(const unichar *chars, NSUInteger length, BOOL stopAtFi
 	return ((const SPPostgresSegment *)[data bytes])->end;
 }
 
++ (NSString *)topLevelCodeOfStatement:(NSString *)sql
+{
+	NSUInteger length = [sql length];
+	if (!length) return @"";
+
+	unichar *chars = malloc(sizeof(unichar) * length);
+	if (!chars) return @"";
+	[sql getCharacters:chars range:NSMakeRange(0, length)];
+
+	NSUInteger depth = 0;
+	NSUInteger i = 0;
+	while (i < length) {
+		unichar c = chars[i];
+		unichar next = (i + 1 < length) ? chars[i + 1] : 0;
+		NSUInteger j = i + 1;
+		BOOL blank = depth > 0;
+
+		if (c == '-' && next == '-') {
+			j = i + 2;
+			while (j < length && chars[j] != '\n' && chars[j] != '\r') j++;
+			blank = YES;
+		}
+		else if (c == '/' && next == '*') {
+			NSUInteger nesting = 1;
+			j = i + 2;
+			while (j < length && nesting > 0) {
+				if (chars[j] == '/' && j + 1 < length && chars[j + 1] == '*') { nesting++; j += 2; }
+				else if (chars[j] == '*' && j + 1 < length && chars[j + 1] == '/') { nesting--; j += 2; }
+				else j++;
+			}
+			blank = YES;
+		}
+		else if (c == '\'') {
+			BOOL escapes = i > 0 && (chars[i - 1] == 'E' || chars[i - 1] == 'e') && !(i > 1 && SPIsIdentifierCharacter(chars[i - 2]));
+			j = i + 1;
+			while (j < length) {
+				if (escapes && chars[j] == '\\') { j += 2; continue; }
+				if (chars[j] == '\'') {
+					if (j + 1 < length && chars[j + 1] == '\'') { j += 2; continue; }
+					j++;
+					break;
+				}
+				j++;
+			}
+			blank = YES;
+		}
+		else if (c == '"') {
+			j = i + 1;
+			while (j < length) {
+				if (chars[j] == '"') {
+					if (j + 1 < length && chars[j + 1] == '"') { j += 2; continue; }
+					j++;
+					break;
+				}
+				j++;
+			}
+			blank = YES;
+		}
+		else if (c == '$' && !(i > 0 && SPIsIdentifierCharacter(chars[i - 1]))) {
+			NSUInteger k = i + 1;
+			if (k < length && SPIsIdentifierStart(chars[k])) {
+				k++;
+				while (k < length && SPIsTagCharacter(chars[k])) k++;
+			}
+			if (k < length && chars[k] == '$') {
+				NSUInteger tagLength = k + 1 - i;
+				j = length;
+				for (NSUInteger m = k + 1; m + tagLength <= length; m++) {
+					if (chars[m] == '$' && memcmp(chars + m, chars + i, tagLength * sizeof(unichar)) == 0) {
+						j = m + tagLength;
+						break;
+					}
+				}
+				blank = YES;
+			}
+		}
+		else if (c == '(') {
+			depth++;
+			blank = YES;
+		}
+		else if (c == ')') {
+			if (depth > 0) depth--;
+			blank = YES;
+		}
+
+		j = MIN(j, length);
+		if (blank) {
+			for (NSUInteger k = i; k < j; k++) chars[k] = ' ';
+		}
+		i = j;
+	}
+
+	NSString *code = [NSString stringWithCharacters:chars length:length];
+	free(chars);
+	return code;
+}
+
 + (NSArray *)statementsInSQL:(NSString *)sql
 {
 	if (![sql length]) return @[];

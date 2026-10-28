@@ -176,6 +176,15 @@ static BOOL SPIsTransactionControl(NSString *sql)
 			}
 		}
 
+		// In one transaction, nothing in the file may end it (ROLLBACK, ABORT, COMMIT AND NO CHAIN…): what follows
+		// would commit statement by statement, unnoticed
+		if (singleTransaction && !stop && !itemFailure && [item kind] != SPPostgresDumpItemMetaCommand
+			&& [connection transactionStatus] == PGPostgresTransactionIdle) {
+			NSString *message = [NSString stringWithFormat:NSLocalizedString(@"Line %lu: the file ends the transaction itself; import it with “Run in a single transaction” off.", @"Postgres import: the file ends the import's transaction"), (unsigned long)[item line]];
+			failure = [SPPostgresMakeError(SPPostgresErrorQueryFailed, message, nil) retain];
+			stop = YES;
+		}
+
 		if (itemFailure && !stop) {
 			NSString *message = [NSString stringWithFormat:NSLocalizedString(@"Line %lu: %@", @"Postgres import: error at a line of the file"), (unsigned long)[item line], itemFailure];
 			NSError *itemError = SPPostgresMakeError(SPPostgresErrorQueryFailed, message, nil);

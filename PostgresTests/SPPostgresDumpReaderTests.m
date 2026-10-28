@@ -165,6 +165,38 @@
 		XCTAssertNotNil(error);
 		XCTAssertTrue([error.localizedDescription containsString:@"line 3"], @"%@", error.localizedDescription);
 	}
+
+	// The error outlives the reader
+	NSError *kept = nil;
+	@autoreleasepool {
+		SPPostgresDumpReader *reader = [[SPPostgresDumpReader alloc] initWithPath:path error:NULL];
+		while ([reader nextItem:&kept]) { while ([reader nextCopyData:&kept]) {} }
+		reader = nil;
+	}
+	XCTAssertTrue([kept.localizedDescription containsString:@"line 3"], @"%@", kept.localizedDescription);
+}
+
+- (void)testCopyDetectionLooksOnlyAtTopLevelCode
+{
+	NSString *text = @"COPY (SELECT 'x from stdin') TO STDOUT;\n"
+		@"COPY t -- from stdin\n TO stdout;\n"
+		@"COPY \"from stdin\" (a) TO stdout;\n"
+		@"COPY (SELECT a FROM stdin) TO stdout;\n"
+		@"copy t (a, b) from STDIN with (format text);\n"
+		@"1\t2\n"
+		@"\\.\n";
+	NSArray *expected = @[
+		@"0|1|COPY (SELECT 'x from stdin') TO STDOUT",
+		@"0|2|COPY t -- from stdin\n TO stdout",
+		@"0|4|COPY \"from stdin\" (a) TO stdout",
+		@"0|5|COPY (SELECT a FROM stdin) TO stdout",
+		@"1|6|copy t (a, b) from STDIN with (format text)",
+		@"data|1\t2\n",
+	];
+	XCTAssertEqualObjects([self itemsAtPath:[self writeText:text named:@"copyto.sql"] chunkSize:0 error:NULL], expected);
+	NSString *statement = @"COPY (a) 'b' \"c\" $$d$$ -- e";
+	NSString *code = [@"COPY" stringByPaddingToLength:statement.length withString:@" " startingAtIndex:0];
+	XCTAssertEqualObjects([SPPostgresStatementSplitter topLevelCodeOfStatement:statement], code);
 }
 
 - (void)testReadsGzipAndBOM
@@ -195,6 +227,18 @@
 	XCTAssertEqual(reader.fileSize, (unsigned long long)gz.length, @"the compressed size");
 	while ([reader nextItem:NULL]) { while ([reader nextCopyData:NULL]) {} }
 	XCTAssertEqual(reader.bytesRead, (unsigned long long)gz.length);
+
+	// bzip2, written with the app's SPFileHandle
+	NSString *bzPath = [self.directory stringByAppendingPathComponent:@"dump.sql.bz2"];
+	[[NSFileManager defaultManager] createFileAtPath:bzPath contents:nil attributes:nil];
+	id<SPTestFileHandle> bzHandle = [(id)handleClass fileHandleForWritingAtPath:bzPath];
+	[bzHandle setCompressionFormat:2]; // SPBzip2Compression
+	[bzHandle writeData:[text dataUsingEncoding:NSUTF8StringEncoding]];
+	[bzHandle closeFile];
+	NSData *bz = [NSData dataWithContentsOfFile:bzPath];
+	XCTAssertTrue(bz.length > 3 && memcmp(bz.bytes, "BZh", 3) == 0, @"bzip2 data");
+	XCTAssertEqualObjects([self itemsAtPath:bzPath chunkSize:0 error:NULL], expected);
+	XCTAssertEqualObjects([self itemsAtPath:bzPath chunkSize:3 error:NULL], expected);
 
 	// A byte order mark is skipped
 	NSString *bomPath = [self writeText:[@"\uFEFF" stringByAppendingString:text] named:@"bom.sql"];

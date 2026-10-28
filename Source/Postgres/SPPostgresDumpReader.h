@@ -28,19 +28,22 @@ __attribute__((visibility("default")))
 
 @end
 
-@class SPFileHandle;
-
 /**
  * Reads a SQL dump (plain pg_dump output, or our own) item by item, in chunks, so files of any size can be run:
  * statements are split with SPPostgresStatementSplitter's lexer, a statement or dollar-quoted body spanning chunks is
  * read whole, COPY … FROM stdin data is handed out in chunks through -nextCopyData:, and psql meta-commands between
- * statements are items of their own. The file is read through SPFileHandle (gzip and bzip2 transparently), decoded
- * as UTF-8, a leading BOM skipped. Not thread-safe: use it from one thread at a time.
+ * statements are items of their own. gzip and bzip2 files (told by their first bytes) are read transparently, with
+ * every read checked: a damaged or truncated compressed file is an error ("The file is damaged or truncated (near
+ * line N)."), never a silent end. The text is decoded as UTF-8, a leading BOM skipped. Not thread-safe: use it from one thread at a time.
  */
 __attribute__((visibility("default")))
 @interface SPPostgresDumpReader : NSObject
 {
-	SPFileHandle *fileHandle;
+	FILE *file;              // plain and bzip2 files
+	void *gzipFile;          // gzFile, for gzip files
+	void *bzipFile;          // BZFILE, for bzip2 files (on file)
+	NSInteger format;        // plain, gzip or bzip2 (from the first bytes)
+	unsigned long long offset; // compressed bytes consumed so far
 	NSUInteger chunkSize;
 	unsigned long long fileSize;
 
