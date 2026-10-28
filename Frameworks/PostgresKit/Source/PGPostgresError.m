@@ -43,6 +43,7 @@
 @synthesize errorPrimaryMessage = _errorPrimaryMessage;
 @synthesize errorDetailMessage = _errorDetailMessage;
 @synthesize errorMessageHint = _errorMessageHint;
+@synthesize errorContext = _errorContext;
 @synthesize errorStatementPosition = _errorStatementPosition;
 
 #pragma mark -
@@ -64,6 +65,7 @@
 		_errorPrimaryMessage = nil;
 		_errorDetailMessage = nil;
 		_errorMessageHint = nil;
+		_errorContext = nil;
 		_errorStatementPosition = -1;
 		
 		if (result) [self _extractErrorDetailsFromResult:(const PGresult *)result];
@@ -96,6 +98,7 @@
 	_errorPrimaryMessage = [[self _extractErrorField:PG_DIAG_MESSAGE_PRIMARY fromResult:result] retain];
 	_errorDetailMessage = [[self _extractErrorField:PG_DIAG_MESSAGE_DETAIL fromResult:result] retain];
 	_errorMessageHint = [[self _extractErrorField:PG_DIAG_MESSAGE_HINT fromResult:result] retain];
+	_errorContext = [[self _extractErrorField:PG_DIAG_CONTEXT fromResult:result] retain];
 	_errorStatementPosition = [[self _extractErrorField:PG_DIAG_STATEMENT_POSITION fromResult:result] integerValue];
 }
 
@@ -123,6 +126,7 @@
 	if (_errorPrimaryMessage) [_errorPrimaryMessage release], _errorPrimaryMessage = nil;
 	if (_errorDetailMessage) [_errorDetailMessage release], _errorDetailMessage = nil;
 	if (_errorMessageHint) [_errorMessageHint release], _errorMessageHint = nil;
+	if (_errorContext) [_errorContext release], _errorContext = nil;
 	
 	[super dealloc];
 }

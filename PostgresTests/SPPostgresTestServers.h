@@ -20,9 +20,17 @@
 + (PGPostgresConnection *)connectedConnectionOnPort:(NSUInteger)port database:(NSString *)database
 										   delegate:(NSObject<PGPostgresConnectionDelegate> *)delegate;
 
+/// The path of PostgresTests/Fixtures/<fileName> (fileName with its extension).
++ (NSString *)fixturePathNamed:(NSString *)fileName;
+
 /// Runs PostgresTests/Fixtures/<name>.sql on the server at port (see catalog.sql for its "-- @@" format),
-/// failing the current test if a statement fails.
+/// failing the current test if a statement fails. "-- @@ minversion <n>" runs its chunk only when the server's
+/// server_version_num is at least n.
 + (void)loadFixtureNamed:(NSString *)name onPort:(NSUInteger)port;
+
+/// Returns a connection to database name, pgkit_io_src or pgkit_io_dst (created when missing), after emptying it:
+/// every non-system schema dropped (test code only: CASCADE) and public recreated. Fails the current test otherwise.
++ (PGPostgresConnection *)ioConnectionOnPort:(NSUInteger)port database:(NSString *)name;
 
 /**
  * The Structure fixture (schema structure_test: table t with odd columns, indexes, a check, view t_view and table

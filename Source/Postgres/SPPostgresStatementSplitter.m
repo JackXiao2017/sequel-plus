@@ -70,18 +70,14 @@ static NSUInteger SPSkipWhitespaceAndComments(const unichar *chars, NSUInteger l
 	return MIN(i, length);
 }
 
-@implementation SPPostgresStatementSplitter
-
-/// Every segment of sql, in order, covering it without gaps (at least one).
-+ (NSData *)_segmentsInSQL:(NSString *)sql
+/**
+ * Appends the segments of chars[0..<length] to segments, in order, covering it without gaps (at least one).
+ * With stopAtFirst, stops after the first segment that ends at a semicolon (appending only that one), so the cost
+ * is the length of that statement; when there is none, the whole text is one segment ending at length.
+ * Returns YES if it stopped at a semicolon (only with stopAtFirst).
+ */
+static BOOL SPLexSegments(const unichar *chars, NSUInteger length, BOOL stopAtFirst, NSMutableData *segments)
 {
-	NSUInteger length = [sql length];
-	NSMutableData *segments = [NSMutableData data];
-
-	unichar *chars = length ? malloc(sizeof(unichar) * length) : NULL;
-	if (length && !chars) return segments;
-	if (length) [sql getCharacters:chars range:NSMakeRange(0, length)];
-
 	SPPostgresSegment segment = {0, 0, NSNotFound, 0, NO};
 
 	// Inside a SQL-standard function body (BEGIN ATOMIC … END, PostgreSQL 14+), semicolons end its statements,
@@ -104,6 +100,7 @@ static NSUInteger SPSkipWhitespaceAndComments(const unichar *chars, NSUInteger l
 		if (c == ';' && atomicDepth == 0) {
 			segment.end = i + 1;
 			[segments appendBytes:&segment length:sizeof(segment)];
+			if (stopAtFirst) return YES;
 			segment = (SPPostgresSegment){i + 1, i + 1, NSNotFound, 0, NO};
 			i++;
 			continue;
@@ -200,9 +197,14 @@ static NSUInteger SPSkipWhitespaceAndComments(const unichar *chars, NSUInteger l
 				while (j < length && SPIsTagCharacter(chars[j])) j++;
 			}
 			if (j < length && chars[j] == '$') {
-				NSRange tag = NSMakeRange(i, j + 1 - i);
-				NSRange close = [sql rangeOfString:[sql substringWithRange:tag] options:NSLiteralSearch range:NSMakeRange(NSMaxRange(tag), length - NSMaxRange(tag))];
-				NSUInteger end = (close.location == NSNotFound) ? length : NSMaxRange(close);
+				NSUInteger tagLength = j + 1 - i;
+				NSUInteger end = length;
+				for (NSUInteger k = j + 1; k + tagLength <= length; k++) {
+					if (chars[k] == '$' && memcmp(chars + k, chars + i, tagLength * sizeof(unichar)) == 0) {
+						end = k + tagLength;
+						break;
+					}
+				}
 				SP_NOTE_TOKEN(i, end, YES);
 				i = end;
 				continue;
@@ -240,10 +242,47 @@ static NSUInteger SPSkipWhitespaceAndComments(const unichar *chars, NSUInteger l
 
 	segment.end = length;
 	[segments appendBytes:&segment length:sizeof(segment)];
+	return NO;
+}
+
+@implementation SPPostgresStatementSplitter
+
+/// Every segment of sql, in order, covering it without gaps (at least one).
++ (NSData *)_segmentsInSQL:(NSString *)sql
+{
+	NSUInteger length = [sql length];
+	NSMutableData *segments = [NSMutableData data];
+
+	unichar *chars = length ? malloc(sizeof(unichar) * length) : NULL;
+	if (length && !chars) return segments;
+	if (length) [sql getCharacters:chars range:NSMakeRange(0, length)];
+
+	SPLexSegments(chars, length, NO, segments);
 
 	free(chars);
 
 	return segments;
+}
+
++ (NSUInteger)lengthOfCompleteStatementsInSQL:(NSString *)sql
+{
+	if (![sql length]) return 0;
+
+	NSData *data = [self _segmentsInSQL:sql];
+	const SPPostgresSegment *segments = [data bytes];
+	NSUInteger count = [data length] / sizeof(SPPostgresSegment);
+
+	// Every segment but the last ends at a top-level semicolon; the last one runs to the end of the text
+	return (count >= 2) ? segments[count - 2].end : 0;
+}
+
++ (NSUInteger)lengthOfFirstStatementInCharacters:(const unichar *)characters length:(NSUInteger)length
+{
+	if (!characters || !length) return 0;
+
+	NSMutableData *data = [NSMutableData dataWithCapacity:sizeof(SPPostgresSegment)];
+	if (!SPLexSegments(characters, length, YES, data)) return 0;
+	return ((const SPPostgresSegment *)[data bytes])->end;
 }
 
 + (NSArray *)statementsInSQL:(NSString *)sql
