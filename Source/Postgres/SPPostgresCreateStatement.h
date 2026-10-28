@@ -2,6 +2,12 @@
 
 @class PGPostgresConnection;
 
+/// Keys of +partsForTable:inSchema:connection:error:'s dictionary.
+extern NSString * const SPPostgresCreatePartTable __attribute__((visibility("default")));
+extern NSString * const SPPostgresCreatePartIndexes __attribute__((visibility("default")));
+extern NSString * const SPPostgresCreatePartForeignKeys __attribute__((visibility("default")));
+extern NSString * const SPPostgresCreatePartTriggers __attribute__((visibility("default")));
+
 /**
  * The SQL that creates a table or view as it is now, as the Table Info view's "Create syntax" shows it (MySQL's
  * SHOW CREATE TABLE has no PostgreSQL counterpart). Statements end with `;` and are separated by blank lines.
@@ -51,5 +57,22 @@ __attribute__((visibility("default")))
 
 /// The statement, or nil on failure (SPPostgresErrorDomain; e.g. no such table, or not a table or view).
 + (NSString *)createStatementForTable:(NSString *)table inSchema:(NSString *)schema connection:(PGPostgresConnection *)connection error:(NSError **)error;
+
+/**
+ * The same statements split for a dump, under the keys below; each value is an NSString of `;`-terminated
+ * statements separated by blank lines, @"" when there are none. nil on failure, as above.
+ *   SPPostgresCreatePartTable: the CREATE statement without its FOREIGN KEY constraint lines, then the table's and
+ *     columns' comments (a view: CREATE VIEW and its comments);
+ *   SPPostgresCreatePartIndexes: the index statements;
+ *   SPPostgresCreatePartForeignKeys: ALTER TABLE … ADD CONSTRAINT "n" <def> per foreign key, then every constraint
+ *     that isn't validated (ALTER TABLE … ADD CONSTRAINT … NOT VALID, NOT NULL included): those are checked on new
+ *     rows all the same, so a dump adds them after the data;
+ *   SPPostgresCreatePartTriggers: the trigger statements and their ENABLE / DISABLE statements.
+ */
++ (NSDictionary *)partsForTable:(NSString *)table inSchema:(NSString *)schema connection:(PGPostgresConnection *)connection error:(NSError **)error;
+
+/// As above; with noData YES a populated materialized view is created WITH NO DATA too (a dump refreshes it after
+/// the data).
++ (NSDictionary *)partsForTable:(NSString *)table inSchema:(NSString *)schema materializedViewWithNoData:(BOOL)noData connection:(PGPostgresConnection *)connection error:(NSError **)error;
 
 @end

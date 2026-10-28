@@ -56,13 +56,50 @@ static NSString *SPPostgresCreateWithoutTerminator(NSString *text)
 	return [text substringToIndex:end];
 }
 
+/// The statements, each ended by `;`, separated by blank lines; @"" for none.
+static NSString *SPPostgresCreateJoined(NSArray *statements)
+{
+	if (![statements count]) return @"";
+	return [[statements componentsJoinedByString:@";\n\n"] stringByAppendingString:@";\n"];
+}
+
+NSString * const SPPostgresCreatePartTable = @"SPPostgresCreatePartTable";
+NSString * const SPPostgresCreatePartIndexes = @"SPPostgresCreatePartIndexes";
+NSString * const SPPostgresCreatePartForeignKeys = @"SPPostgresCreatePartForeignKeys";
+NSString * const SPPostgresCreatePartTriggers = @"SPPostgresCreatePartTriggers";
+
 @implementation SPPostgresCreateStatement
 
 + (NSString *)createStatementForTable:(NSString *)table inSchema:(NSString *)schema connection:(PGPostgresConnection *)connection error:(NSError **)error
 {
+	NSDictionary *parts = [self _partsForTable:table inSchema:schema materializedViewWithNoData:NO connection:connection error:error];
+	return parts ? SPPostgresCreateJoined(parts[@"all"]) : nil;
+}
+
++ (NSDictionary *)partsForTable:(NSString *)table inSchema:(NSString *)schema connection:(PGPostgresConnection *)connection error:(NSError **)error
+{
+	return [self partsForTable:table inSchema:schema materializedViewWithNoData:NO connection:connection error:error];
+}
+
++ (NSDictionary *)partsForTable:(NSString *)table inSchema:(NSString *)schema materializedViewWithNoData:(BOOL)noData connection:(PGPostgresConnection *)connection error:(NSError **)error
+{
+	NSDictionary *parts = [self _partsForTable:table inSchema:schema materializedViewWithNoData:noData connection:connection error:error];
+	if (!parts) return nil;
+	return @{
+		SPPostgresCreatePartTable: SPPostgresCreateJoined(parts[SPPostgresCreatePartTable]),
+		SPPostgresCreatePartIndexes: SPPostgresCreateJoined(parts[SPPostgresCreatePartIndexes]),
+		SPPostgresCreatePartForeignKeys: SPPostgresCreateJoined(parts[SPPostgresCreatePartForeignKeys]),
+		SPPostgresCreatePartTriggers: SPPostgresCreateJoined(parts[SPPostgresCreatePartTriggers])
+	};
+}
+
+/// @"all" (every statement, in createStatementForTable:'s order) and the four parts, as arrays of statements
+/// without their `;`; nil on failure.
++ (NSDictionary *)_partsForTable:(NSString *)table inSchema:(NSString *)schema materializedViewWithNoData:(BOOL)noData connection:(PGPostgresConnection *)connection error:(NSError **)error
+{
 	NSString *aborted = NSLocalizedString(@"The current transaction is aborted, so the CREATE statement can't be read. Roll it back first (ROLLBACK in the Query view).", @"Postgres create statement: inside an aborted transaction");
 
-	__block NSString *statement = nil;
+	__block NSDictionary *statement = nil;
 	BOOL read = SPPostgresRunAtomically(connection, @"sp_create_statement", aborted, ^BOOL(NSError **bodyError) {
 		// An empty search_path (as pg_dump's) has the server qualify every name outside pg_catalog. It is set with
 		// SET LOCAL and back to its previous value before the end (inside the user's transaction it would last to
@@ -73,7 +110,7 @@ static NSString *SPPostgresCreateWithoutTerminator(NSString *text)
 
 		NSString *set = @"SELECT pg_catalog.set_config('search_path', $1::text, true)";
 		if (!SPPostgresExecute(connection, set, @[@""], bodyError)) return NO;
-		NSString *result = [self _statementForTable:table inSchema:schema connection:connection error:bodyError];
+		NSDictionary *result = [self _statementForTable:table inSchema:schema materializedViewWithNoData:noData connection:connection error:bodyError];
 		if (!result) return NO;
 		if (!SPPostgresExecute(connection, set, @[previousValue], bodyError)) return NO;
 		statement = result; // autoreleased in this pool, which outlives the block
@@ -83,7 +120,7 @@ static NSString *SPPostgresCreateWithoutTerminator(NSString *text)
 	return read ? statement : nil;
 }
 
-+ (NSString *)_statementForTable:(NSString *)table inSchema:(NSString *)schema connection:(PGPostgresConnection *)connection error:(NSError **)error
++ (NSDictionary *)_statementForTable:(NSString *)table inSchema:(NSString *)schema materializedViewWithNoData:(BOOL)noData connection:(PGPostgresConnection *)connection error:(NSError **)error
 {
 	NSArray *rows = SPPostgresCreateRows(connection,
 		@"SELECT c.oid::text, c.relkind::text, c.relpersistence::text, c.relispartition::text,"
@@ -131,7 +168,11 @@ static NSString *SPPostgresCreateWithoutTerminator(NSString *text)
 	}
 
 	NSString *name = SPPostgresCreateQualified(schema, table);
-	NSMutableArray *statements = [NSMutableArray array];
+	NSMutableArray *statements = [NSMutableArray array]; // everything, in createStatementForTable:'s order
+	NSMutableArray *tablePart = [NSMutableArray array];
+	NSMutableArray *indexPart = [NSMutableArray array];
+	NSMutableArray *foreignKeyPart = [NSMutableArray array];
+	NSMutableArray *triggerPart = [NSMutableArray array];
 
 	// The columns (also for views: their comments)
 	NSArray *columns = SPPostgresCreateRows(connection,
@@ -162,10 +203,12 @@ static NSString *SPPostgresCreateWithoutTerminator(NSString *text)
 		if (checkOption) [create appendFormat:@"\nWITH %@ CHECK OPTION", checkOption];
 		if ([relkind isEqualToString:@"m"] && !populated) [create appendString:@"\nWITH NO DATA"];
 		[statements addObject:create];
+		if ([relkind isEqualToString:@"m"] && populated && noData) [tablePart addObject:[create stringByAppendingString:@"\nWITH NO DATA"]];
+		else [tablePart addObject:create];
 	}
 	else {
 		NSArray *constraints = SPPostgresCreateRows(connection,
-			@"SELECT con.conname::text, pg_catalog.pg_get_constraintdef(con.oid)::text, con.convalidated::text"
+			@"SELECT con.conname::text, pg_catalog.pg_get_constraintdef(con.oid)::text, con.convalidated::text, con.contype::text"
 			" FROM pg_catalog.pg_constraint con WHERE con.conrelid = $1::oid AND con.contype IN ('p', 'u', 'c', 'f', 'x') AND con.conislocal"
 			" ORDER BY CASE con.contype WHEN 'p' THEN 0 WHEN 'u' THEN 1 WHEN 'c' THEN 2 WHEN 'x' THEN 3 ELSE 4 END, con.conname COLLATE \"C\"",
 			@[oid], error);
@@ -183,6 +226,7 @@ static NSString *SPPostgresCreateWithoutTerminator(NSString *text)
 		}
 
 		NSMutableArray *lines = [NSMutableArray array];
+		NSMutableArray *linesWithoutForeignKeys = [NSMutableArray array];
 		NSMutableArray *notValid = [NSMutableArray array];
 
 		// A partition's columns are its parent's; an inheritance child's inherited ones, its parents'
@@ -224,41 +268,52 @@ static NSString *SPPostgresCreateWithoutTerminator(NSString *text)
 				}
 				else if (SPPostgresCreateIsTrue(column[2])) [line appendString:@" NOT NULL"];
 				[lines addObject:line];
+				[linesWithoutForeignKeys addObject:line];
 			}
 		}
 
 		for (NSArray *constraint in constraints) {
 			NSString *line = [NSString stringWithFormat:@"CONSTRAINT %@ %@", SPPostgresQuoteIdentifier(SPPostgresCreateText(constraint[0]) ?: @""), SPPostgresCreateText(constraint[1]) ?: @""];
 			// NOT VALID is for ALTER TABLE … ADD CONSTRAINT only
-			if (SPPostgresCreateIsTrue(constraint[2])) [lines addObject:line];
+			if (SPPostgresCreateIsTrue(constraint[2])) {
+				[lines addObject:line];
+				if ([SPPostgresCreateText(constraint[3]) isEqualToString:@"f"]) [foreignKeyPart addObject:[NSString stringWithFormat:@"ALTER TABLE %@ ADD %@", name, line]];
+				else [linesWithoutForeignKeys addObject:line];
+			}
 			else [notValid addObject:[NSString stringWithFormat:@"ALTER TABLE %@ ADD %@", name, line]];
 		}
 
-		NSMutableString *create = [NSMutableString stringWithFormat:@"CREATE %@%@ %@", unlogged ? @"UNLOGGED " : @"", keyword, name];
-		if (isPartition && [parents count]) {
-			NSArray *parent = [parents firstObject];
-			[create appendFormat:@" PARTITION OF %@", SPPostgresCreateQualified([parent firstObject], [parent lastObject])];
-			if ([lines count]) [create appendFormat:@" (\n    %@\n)", [lines componentsJoinedByString:@",\n    "]];
-			[create appendFormat:@"\n%@", partitionBound ?: @"DEFAULT"];
-		}
-		else {
-			[create appendString:@" ("];
-			if ([lines count]) [create appendFormat:@"\n    %@", [lines componentsJoinedByString:@",\n    "]];
-			[create appendString:@"\n)"];
-			if ([parents count]) {
-				NSMutableArray *names = [NSMutableArray array];
-				for (NSArray *parent in parents) [names addObject:SPPostgresCreateQualified([parent firstObject], [parent lastObject])];
-				[create appendFormat:@"\nINHERITS (%@)", [names componentsJoinedByString:@", "]];
+		NSString *(^createWithLines)(NSArray *) = ^NSString *(NSArray *columnLines) {
+			NSMutableString *create = [NSMutableString stringWithFormat:@"CREATE %@%@ %@", unlogged ? @"UNLOGGED " : @"", keyword, name];
+			if (isPartition && [parents count]) {
+				NSArray *parent = [parents firstObject];
+				[create appendFormat:@" PARTITION OF %@", SPPostgresCreateQualified([parent firstObject], [parent lastObject])];
+				if ([columnLines count]) [create appendFormat:@" (\n    %@\n)", [columnLines componentsJoinedByString:@",\n    "]];
+				[create appendFormat:@"\n%@", partitionBound ?: @"DEFAULT"];
 			}
-		}
-		if (partitionKey) [create appendFormat:@"\nPARTITION BY %@", partitionKey];
-		if (foreignServer) {
-			[create appendFormat:@"\nSERVER %@", SPPostgresQuoteIdentifier(foreignServer)];
-			if ([foreignOptions count]) [create appendFormat:@"\nOPTIONS (%@)", [foreignOptions componentsJoinedByString:@", "]];
-		}
-		if ([options length]) [create appendFormat:@"\nWITH (%@)", options];
-		[statements addObject:create];
+			else {
+				[create appendString:@" ("];
+				if ([columnLines count]) [create appendFormat:@"\n    %@", [columnLines componentsJoinedByString:@",\n    "]];
+				[create appendString:@"\n)"];
+				if ([parents count]) {
+					NSMutableArray *names = [NSMutableArray array];
+					for (NSArray *parent in parents) [names addObject:SPPostgresCreateQualified([parent firstObject], [parent lastObject])];
+					[create appendFormat:@"\nINHERITS (%@)", [names componentsJoinedByString:@", "]];
+				}
+			}
+			if (partitionKey) [create appendFormat:@"\nPARTITION BY %@", partitionKey];
+			if (foreignServer) {
+				[create appendFormat:@"\nSERVER %@", SPPostgresQuoteIdentifier(foreignServer)];
+				if ([foreignOptions count]) [create appendFormat:@"\nOPTIONS (%@)", [foreignOptions componentsJoinedByString:@", "]];
+			}
+			if ([options length]) [create appendFormat:@"\nWITH (%@)", options];
+			return create;
+		};
+		[statements addObject:createWithLines(lines)];
 		[statements addObjectsFromArray:notValid];
+		[tablePart addObject:createWithLines(linesWithoutForeignKeys)];
+		// A constraint that isn't validated is still checked on new rows, so a dump adds it after the data
+		[foreignKeyPart addObjectsFromArray:notValid];
 	}
 
 	// Indexes backing no constraint; a partition's copies of its parent's indexes come with PARTITION OF
@@ -281,16 +336,20 @@ static NSString *SPPostgresCreateWithoutTerminator(NSString *text)
 				definition = [definition stringByReplacingCharactersInRange:range withString:[NSString stringWithFormat:@"INDEX %@ ON ", SPPostgresCreateText(index[1]) ?: @""]];
 			}
 			[statements addObject:definition];
+			[indexPart addObject:definition];
 		}
 	}
 
 	// Comments
-	if (tableComment) [statements addObject:[NSString stringWithFormat:@"COMMENT ON %@ %@ IS %@", keyword, name, SPPostgresQuoteLiteral(tableComment)]];
+	NSMutableArray *comments = [NSMutableArray array];
+	if (tableComment) [comments addObject:[NSString stringWithFormat:@"COMMENT ON %@ %@ IS %@", keyword, name, SPPostgresQuoteLiteral(tableComment)]];
 	for (NSArray *column in columns) {
 		NSString *comment = SPPostgresCreateText(column[8]);
 		if (!comment) continue;
-		[statements addObject:[NSString stringWithFormat:@"COMMENT ON COLUMN %@.%@ IS %@", name, SPPostgresQuoteIdentifier(SPPostgresCreateText(column[0]) ?: @""), SPPostgresQuoteLiteral(comment)]];
+		[comments addObject:[NSString stringWithFormat:@"COMMENT ON COLUMN %@.%@ IS %@", name, SPPostgresQuoteIdentifier(SPPostgresCreateText(column[0]) ?: @""), SPPostgresQuoteLiteral(comment)]];
 	}
+	[statements addObjectsFromArray:comments];
+	[tablePart addObjectsFromArray:comments];
 
 	// Triggers: not the internal ones (a foreign key's), nor, from PostgreSQL 13 (tgparentid), a partition's
 	// copies of its parent's (internal before 15)
@@ -305,11 +364,17 @@ static NSString *SPPostgresCreateWithoutTerminator(NSString *text)
 	NSDictionary *states = @{@"D": @"DISABLE TRIGGER", @"R": @"ENABLE REPLICA TRIGGER", @"A": @"ENABLE ALWAYS TRIGGER"};
 	for (NSArray *trigger in triggers) {
 		[statements addObject:SPPostgresCreateText(trigger[0]) ?: @""];
+		[triggerPart addObject:SPPostgresCreateText(trigger[0]) ?: @""];
 		NSString *state = states[SPPostgresCreateText(trigger[1]) ?: @""];
-		if (state) [statements addObject:[NSString stringWithFormat:@"ALTER %@ %@ %@ %@", alterKeyword, name, state, SPPostgresQuoteIdentifier(SPPostgresCreateText(trigger[2]) ?: @"")]];
+		if (state) {
+			NSString *alter = [NSString stringWithFormat:@"ALTER %@ %@ %@ %@", alterKeyword, name, state, SPPostgresQuoteIdentifier(SPPostgresCreateText(trigger[2]) ?: @"")];
+			[statements addObject:alter];
+			[triggerPart addObject:alter];
+		}
 	}
 
-	return [[statements componentsJoinedByString:@";\n\n"] stringByAppendingString:@";\n"];
+	return @{@"all": statements, SPPostgresCreatePartTable: tablePart, SPPostgresCreatePartIndexes: indexPart,
+			 SPPostgresCreatePartForeignKeys: foreignKeyPart, SPPostgresCreatePartTriggers: triggerPart};
 }
 
 @end
