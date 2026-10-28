@@ -4,17 +4,10 @@
 #import "SPPostgresErrors.h"
 #import <PostgresKit/PostgresKit.h>
 
-static NSError *SPPostgresStructureError(NSInteger code, NSString *message, NSDictionary *extra)
-{
-	NSMutableDictionary *userInfo = [NSMutableDictionary dictionaryWithDictionary:extra ?: @{}];
-	userInfo[NSLocalizedDescriptionKey] = message;
-	return [NSError errorWithDomain:SPPostgresErrorDomain code:code userInfo:userInfo];
-}
-
 /// Fails with message (SPPostgresErrorQueryFailed) for a value refused before anything is sent.
 static BOOL SPPostgresStructureRefuse(NSString *message, NSError **error)
 {
-	if (error) *error = SPPostgresStructureError(SPPostgresErrorQueryFailed, message, nil);
+	if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, message, nil);
 	return NO;
 }
 
@@ -293,11 +286,30 @@ BOOL SPPostgresRunStructureChange(PGPostgresConnection *connection, NSTimeInterv
 	return [NSString stringWithFormat:@"%@.%@", SPPostgresQuoteIdentifier(_schema), SPPostgresQuoteIdentifier(_table)];
 }
 
+/// Fails with "There is no table …": the relation is gone (dropped, renamed elsewhere, or a rename rolled back).
+- (void)noSuchRelation:(NSError **)error
+{
+	SPPostgresStructureRefuse([NSString stringWithFormat:NSLocalizedString(@"There is no table “%@” in schema “%@”.", @"Postgres structure: no such relation"), _table, _schema], error);
+}
+
+/// The rows of sql, run after the CTE `rel` ($1 schema, $2 table; values are $3…), or nil on failure. Every read
+/// goes through here: an empty result is checked against the relation's existence, so a missing relation fails
+/// with -noSuchRelation: instead of reading as an empty one.
 - (NSArray *)rows:(NSString *)sql values:(NSArray *)values error:(NSError **)error
 {
 	NSMutableArray *all = [NSMutableArray arrayWithObjects:_schema ?: @"", _table ?: @"", nil];
 	[all addObjectsFromArray:values ?: @[]];
-	return SPPostgresStructureRows(_connection, [SPPostgresStructureRelation stringByAppendingString:sql], all, error);
+	NSArray *rows = SPPostgresStructureRows(_connection, [SPPostgresStructureRelation stringByAppendingString:sql], all, error);
+	if (!rows || [rows count]) return rows;
+
+	NSArray *exists = SPPostgresStructureRows(_connection, [SPPostgresStructureRelation stringByAppendingString:@"SELECT 1::text FROM rel"],
+											  [all subarrayWithRange:NSMakeRange(0, 2)], error);
+	if (!exists) return nil;
+	if (![exists count]) {
+		[self noSuchRelation:error];
+		return nil;
+	}
+	return rows;
 }
 
 /// Runs one DDL statement, reporting the server's message with its DETAIL and HINT.
@@ -369,11 +381,7 @@ BOOL SPPostgresRunStructureChange(PGPostgresConnection *connection, NSTimeInterv
 - (NSString *)relationKind:(NSError **)error
 {
 	NSArray *rows = [self rows:@"SELECT relkind::text FROM rel" values:nil error:error];
-	if (!rows) return nil;
-	if (![rows count]) {
-		SPPostgresStructureRefuse([NSString stringWithFormat:NSLocalizedString(@"There is no table “%@” in schema “%@”.", @"Postgres structure: no such relation"), _table, _schema], error);
-		return nil;
-	}
+	if (!rows) return nil; // a missing relation fails in -rows:…
 	NSDictionary *kinds = @{@"r": @"table", @"p": @"partitioned table", @"v": @"view", @"m": @"materialized view", @"f": @"foreign table"};
 	NSString *kind = kinds[SPPostgresStructureText(rows[0][0]) ?: @""];
 	if (!kind) {
@@ -503,7 +511,7 @@ BOOL SPPostgresRunStructureChange(PGPostgresConnection *connection, NSTimeInterv
 - (NSString *)tableComment:(NSError **)error
 {
 	NSArray *rows = [self rows:@"SELECT pg_catalog.obj_description(rel.oid, 'pg_class')::text FROM rel" values:nil error:error];
-	if (![rows count]) return nil;
+	if (!rows) return nil; // a missing relation fails in -rows:…
 	return SPPostgresStructureText(rows[0][0]);
 }
 
@@ -628,13 +636,16 @@ BOOL SPPostgresRunStructureChange(PGPostgresConnection *connection, NSTimeInterv
 {
 	// PostgreSQL would drop the column's indexes and constraints with it, unasked: check first, in the same
 	// transaction as the drop.
+	// ACCESS EXCLUSIVE first (under lock_timeout): no other session can add an index, view or constraint on the
+	// column between the check and the drop, which PostgreSQL would otherwise drop with it unasked.
 	return [self change:^BOOL(NSError **bodyError) {
+		if (![self run:[NSString stringWithFormat:@"LOCK TABLE %@ IN ACCESS EXCLUSIVE MODE", [self qualifiedName]] error:bodyError]) return NO;
 		NSArray *dependents = [self dependentsOfColumn:column error:bodyError];
 		if (!dependents) return NO;
 		if ([dependents count]) {
 			if (bodyError) {
 				NSString *message = [NSString stringWithFormat:NSLocalizedString(@"\"%@\" can't be deleted because other objects depend on it.", @"Postgres structure: column has dependents"), column];
-				*bodyError = SPPostgresStructureError(SPPostgresErrorHasDependents, message, @{SPPostgresDependentsErrorKey: dependents});
+				*bodyError = SPPostgresMakeError(SPPostgresErrorHasDependents, message, @{SPPostgresDependentsErrorKey: dependents});
 			}
 			return NO;
 		}
@@ -746,8 +757,10 @@ BOOL SPPostgresRunStructureChange(PGPostgresConnection *connection, NSTimeInterv
 	} error:error];
 	if (renamed) {
 		NSString *table = [newName copy];
+		[self willChangeValueForKey:@"table"];
 		[_table release];
 		_table = table;
+		[self didChangeValueForKey:@"table"];
 	}
 	return renamed;
 }

@@ -6,11 +6,6 @@
 /// PostgreSQL's identifier limit (NAMEDATALEN - 1), in bytes
 static const NSUInteger SPPostgresMaximumIdentifierLength = 63;
 
-static NSError *SPPostgresDuplicatorError(NSString *message)
-{
-	return [NSError errorWithDomain:SPPostgresErrorDomain code:SPPostgresErrorQueryFailed userInfo:@{NSLocalizedDescriptionKey: message}];
-}
-
 /// YES for an optionally signed run of digits (a catalog number put into DDL, which takes no parameters).
 static BOOL SPPostgresIsInteger(id value)
 {
@@ -81,7 +76,7 @@ static BOOL SPPostgresIsInteger(id value)
 		if (!existing) return nil;
 		if (![existing count]) return candidate;
 	}
-	if (error) *error = SPPostgresDuplicatorError(NSLocalizedString(@"Could not find a free name for the copy's sequence.", @"Postgres duplicate table: no free sequence name"));
+	if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, NSLocalizedString(@"Could not find a free name for the copy's sequence.", @"Postgres duplicate table: no free sequence name"), nil);
 	return nil;
 }
 
@@ -96,11 +91,11 @@ static BOOL SPPostgresIsInteger(id value)
 			connection:(PGPostgresConnection *)connection error:(NSError **)error
 {
 	if (![table length] || ![schema length] || ![newName length]) {
-		if (error) *error = SPPostgresDuplicatorError(NSLocalizedString(@"The table and the new name must not be empty.", @"Postgres duplicate table: empty name"));
+		if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, NSLocalizedString(@"The table and the new name must not be empty.", @"Postgres duplicate table: empty name"), nil);
 		return NO;
 	}
 	if (![self isValidTableName:newName]) {
-		if (error) *error = SPPostgresDuplicatorError([NSString stringWithFormat:NSLocalizedString(@"The name “%@” is too long: PostgreSQL names can be at most 63 bytes.", @"Postgres duplicate table: name too long"), newName]);
+		if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, [NSString stringWithFormat:NSLocalizedString(@"The name “%@” is too long: PostgreSQL names can be at most 63 bytes.", @"Postgres duplicate table: name too long"), newName], nil);
 		return NO;
 	}
 
@@ -118,18 +113,18 @@ static BOOL SPPostgresIsInteger(id value)
 	NSArray *source = [self relation:table inSchema:schema connection:connection error:error];
 	if (!source) return NO;
 	if (![source count]) {
-		if (error) *error = SPPostgresDuplicatorError([NSString stringWithFormat:NSLocalizedString(@"There is no table “%@” in schema “%@”.", @"Postgres duplicate table: no such table"), table, schema]);
+		if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, [NSString stringWithFormat:NSLocalizedString(@"There is no table “%@” in schema “%@”.", @"Postgres duplicate table: no such table"), table, schema], nil);
 		return NO;
 	}
 	NSString *sourceOid = [source objectAtIndex:0];
 	NSString *kind = [source objectAtIndex:1];
 	if ([kind isEqualToString:@"p"]) {
 		// LIKE would make an ordinary, empty-partitioned table of it, losing the partitioning
-		if (error) *error = SPPostgresDuplicatorError([NSString stringWithFormat:NSLocalizedString(@"“%@” is a partitioned table. Duplicating partitioned tables is not supported.", @"Postgres duplicate table: partitioned table"), table]);
+		if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, [NSString stringWithFormat:NSLocalizedString(@"“%@” is a partitioned table. Duplicating partitioned tables is not supported.", @"Postgres duplicate table: partitioned table"), table], nil);
 		return NO;
 	}
 	if (![kind isEqualToString:@"r"]) {
-		if (error) *error = SPPostgresDuplicatorError([NSString stringWithFormat:NSLocalizedString(@"“%@” is not a table. Only tables can be duplicated.", @"Postgres duplicate table: not a table"), table]);
+		if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, [NSString stringWithFormat:NSLocalizedString(@"“%@” is not a table. Only tables can be duplicated.", @"Postgres duplicate table: not a table"), table], nil);
 		return NO;
 	}
 
@@ -178,7 +173,7 @@ static BOOL SPPostgresIsInteger(id value)
 	if (!targetRows) return NO;
 	NSString *targetOid = [[targetRows firstObject] firstObject];
 	if (![targetOid isKindOfClass:[NSString class]] || ![targetOid length]) {
-		if (error) *error = SPPostgresDuplicatorError([NSString stringWithFormat:NSLocalizedString(@"The new table “%@” could not be found after it was created.", @"Postgres duplicate table: copy not found"), newName]);
+		if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, [NSString stringWithFormat:NSLocalizedString(@"The new table “%@” could not be found after it was created.", @"Postgres duplicate table: copy not found"), newName], nil);
 		return NO;
 	}
 

@@ -7,11 +7,6 @@ NSString *SPPostgresQuoteIdentifier(NSString *identifier)
 	return [NSString stringWithFormat:@"\"%@\"", [identifier ?: @"" stringByReplacingOccurrencesOfString:@"\"" withString:@"\"\""]];
 }
 
-static NSError *SPPostgresTableDataError(NSInteger code, NSString *message)
-{
-	return [NSError errorWithDomain:SPPostgresErrorDomain code:code userInfo:@{NSLocalizedDescriptionKey: message}];
-}
-
 NSString *SPPostgresQuoteLiteral(NSString *value)
 {
 	NSString *quoted = [value ?: @"" stringByReplacingOccurrencesOfString:@"'" withString:@"''"];
@@ -45,7 +40,7 @@ static PGPostgresResult *SPPostgresExecuteReporting(PGPostgresConnection *connec
 			message = [connection libpqErrorMessage];
 			if (![message length]) message = NSLocalizedString(@"There is no connection to the server.", @"Postgres content query without a connection");
 		}
-		*error = SPPostgresTableDataError(SPPostgresErrorQueryFailed, message);
+		*error = SPPostgresMakeError(SPPostgresErrorQueryFailed, message, nil);
 	}
 	return result;
 }
@@ -86,11 +81,11 @@ static BOOL SPPostgresRunGuarded(PGPostgresConnection *connection, SPPostgresGua
 			if (mode == SPPostgresGuardRead) {
 				if (body(error)) return YES;
 				if (error && [connection transactionStatus] == PGPostgresTransactionInError) {
-					*error = SPPostgresTableDataError(SPPostgresErrorQueryFailed, abortedMessage);
+					*error = SPPostgresMakeError(SPPostgresErrorQueryFailed, abortedMessage, nil);
 				}
 				return NO;
 			}
-			if (error) *error = SPPostgresTableDataError(SPPostgresErrorQueryFailed, abortedMessage);
+			if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, abortedMessage, nil);
 			return NO;
 		case PGPostgresTransactionInTransaction:
 			begin = [NSString stringWithFormat:@"SAVEPOINT %@", savepoint];
@@ -286,8 +281,8 @@ BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoi
 
 	if ([result numberOfRows] == 0) {
 		if (error) {
-			*error = SPPostgresTableDataError(SPPostgresErrorQueryFailed,
-				[NSString stringWithFormat:NSLocalizedString(@"The table %@ was not found.", @"Postgres content: table missing"), [self qualifiedName]]);
+			*error = SPPostgresMakeError(SPPostgresErrorQueryFailed,
+				[NSString stringWithFormat:NSLocalizedString(@"The table %@ was not found.", @"Postgres content: table missing"), [self qualifiedName]], nil);
 		}
 		return NO;
 	}
@@ -324,8 +319,8 @@ BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoi
 		if ([[column name] isEqualToString:name]) return column;
 	}
 	if (error) {
-		*error = SPPostgresTableDataError(SPPostgresErrorQueryFailed,
-			[NSString stringWithFormat:NSLocalizedString(@"There is no column named %@.", @"Postgres content: unknown column"), SPPostgresQuoteIdentifier(name)]);
+		*error = SPPostgresMakeError(SPPostgresErrorQueryFailed,
+			[NSString stringWithFormat:NSLocalizedString(@"There is no column named %@.", @"Postgres content: unknown column"), SPPostgresQuoteIdentifier(name)], nil);
 	}
 	return nil;
 }
@@ -373,7 +368,7 @@ BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoi
 	NSString *quoted = SPPostgresQuoteIdentifier([column name]);
 	NSString *op = [filter comparison];
 	if (![op length]) {
-		if (error) *error = SPPostgresTableDataError(SPPostgresErrorQueryFailed, NSLocalizedString(@"No filter operator was chosen.", @"Postgres content: missing filter operator"));
+		if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, NSLocalizedString(@"No filter operator was chosen.", @"Postgres content: missing filter operator"), nil);
 		return nil;
 	}
 	NSString *value = [filter value] ?: @"";
@@ -397,7 +392,7 @@ BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoi
 			[placeholders addObject:[NSString stringWithFormat:@"$%lu::%@", (unsigned long)[values count], [column castTypeName]]];
 		}
 		if (![placeholders count]) {
-			if (error) *error = SPPostgresTableDataError(SPPostgresErrorQueryFailed, NSLocalizedString(@"Enter at least one value for IN, separated by commas.", @"Postgres content: empty IN list"));
+			if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, NSLocalizedString(@"Enter at least one value for IN, separated by commas.", @"Postgres content: empty IN list"), nil);
 			return nil;
 		}
 		return [NSString stringWithFormat:@" WHERE %@ IN (%@)", quoted, [placeholders componentsJoinedByString:@", "]];
@@ -408,8 +403,8 @@ BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoi
 	NSString *sqlOperator = [comparisons objectForKey:op];
 	if (!sqlOperator) {
 		if (error) {
-			*error = SPPostgresTableDataError(SPPostgresErrorQueryFailed,
-				[NSString stringWithFormat:NSLocalizedString(@"The filter operator “%@” is not supported.", @"Postgres content: unknown filter operator"), op]);
+			*error = SPPostgresMakeError(SPPostgresErrorQueryFailed,
+				[NSString stringWithFormat:NSLocalizedString(@"The filter operator “%@” is not supported.", @"Postgres content: unknown filter operator"), op], nil);
 		}
 		return nil;
 	}
@@ -423,8 +418,8 @@ BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoi
 	NSArray *keys = [self primaryKeyColumns];
 	if (![keys count] || [row count] != [_columns count]) {
 		if (error) {
-			*error = SPPostgresTableDataError(SPPostgresErrorQueryFailed,
-				NSLocalizedString(@"The row doesn't match the table's columns, so it can't be identified.", @"Postgres content: row shape mismatch"));
+			*error = SPPostgresMakeError(SPPostgresErrorQueryFailed,
+				NSLocalizedString(@"The row doesn't match the table's columns, so it can't be identified.", @"Postgres content: row shape mismatch"), nil);
 		}
 		return nil;
 	}
@@ -442,15 +437,15 @@ BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoi
 {
 	if (![self loadMetadata:error]) return NO;
 	if ([self isEditable]) return YES;
-	if (error) *error = SPPostgresTableDataError(SPPostgresErrorNotEditable, [self readOnlyReason]);
+	if (error) *error = SPPostgresMakeError(SPPostgresErrorNotEditable, [self readOnlyReason], nil);
 	return NO;
 }
 
 - (NSError *)rowChangedError
 {
-	return SPPostgresTableDataError(SPPostgresErrorRowChanged,
+	return SPPostgresMakeError(SPPostgresErrorRowChanged,
 		NSLocalizedString(@"The row was changed or deleted by someone else since it was loaded, so it wasn't changed. Reload the table to see its current contents.",
-						  @"Postgres content: edit affected no rows"));
+						  @"Postgres content: edit affected no rows"), nil);
 }
 
 #pragma mark - Public API
@@ -546,7 +541,7 @@ BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoi
 	SPPostgresColumn *target = [self columnNamed:column error:error];
 	if (!target) return NO;
 	if (![value isKindOfClass:[NSString class]] && ![value isKindOfClass:[NSNull class]]) {
-		if (error) *error = SPPostgresTableDataError(SPPostgresErrorQueryFailed, NSLocalizedString(@"The value must be text or NULL.", @"Postgres content: bad value class"));
+		if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, NSLocalizedString(@"The value must be text or NULL.", @"Postgres content: bad value class"), nil);
 		return NO;
 	}
 
@@ -584,7 +579,7 @@ BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoi
 		id value = [valuesByColumn objectForKey:[column name]];
 		if (!value) continue;
 		if (![value isKindOfClass:[NSString class]] && ![value isKindOfClass:[NSNull class]]) {
-			if (error) *error = SPPostgresTableDataError(SPPostgresErrorQueryFailed, NSLocalizedString(@"The value must be text or NULL.", @"Postgres content: bad value class"));
+			if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, NSLocalizedString(@"The value must be text or NULL.", @"Postgres content: bad value class"), nil);
 			return nil;
 		}
 		[values addObject:value];
