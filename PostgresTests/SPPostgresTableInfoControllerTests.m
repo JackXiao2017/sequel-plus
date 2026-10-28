@@ -303,6 +303,72 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	XCTAssertEqual(self.alerts.count, 3u);
 }
 
+/// The console's messages so far that contain text (test-only read of SPQueryController's storage).
+- (NSArray *)loggedMessagesContaining:(NSString *)text
+{
+	[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.2]];
+	id console = [(id)NSClassFromString(@"SPQueryController") valueForKey:@"sharedQueryController"];
+	NSMutableArray *found = [NSMutableArray array];
+	for (id message in [[console valueForKey:@"messagesFullSet"] copy]) {
+		NSString *logged = [message valueForKey:@"message"];
+		if ([logged containsString:text]) [found addObject:logged];
+	}
+	return found;
+}
+
+/// A comment with surrounding whitespace (as SQL can set it) is not an edit just because Info shows it.
+- (void)testViewingPaddedCommentIsNotAnEdit
+{
+	[self overridePrefs:@{@"ConsoleEnableLogging": @YES, @"ConsoleEnableInterfaceLogging": @YES, @"ConsoleEnableCustomQueryLogging": @YES, @"ConsoleEnableErrorLogging": @YES}];
+	NSString *marker = [NSString stringWithFormat:@"padded-%u", arc4random()];
+	[self serverRun:[NSString stringWithFormat:@"COMMENT ON TABLE structure_test.t IS E' %@\\n'", marker]];
+	NSString *padded = [NSString stringWithFormat:@" %@\n", marker];
+
+	[self showInfoOf:@"t"];
+	SPPostgresTableInfoController *info = self.info;
+	XCTAssertEqualObjects([info.commentView string], padded);
+	XCTAssertFalse(info.hasPendingComment, @"only viewed");
+	XCTAssertTrue([[info.commentView window] makeFirstResponder:info.commentView], @"focused, not edited");
+	[self.document viewContent:nil];
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneContent);
+	NSPredicate *commentOn = [NSPredicate predicateWithFormat:@"SELF CONTAINS 'COMMENT ON'"];
+	XCTAssertEqualObjects([[self loggedMessagesContaining:marker] filteredArrayUsingPredicate:commentOn], @[], @"no COMMENT ON was sent");
+	XCTAssertEqualObjects([self serverValue:@"SELECT obj_description('structure_test.t'::regclass, 'pg_class')"], padded);
+
+	// While another session holds a lock COMMENT ON would wait for: leaving is still free
+	info.lockTimeout = 0.5;
+	[self serverRun:@"BEGIN"];
+	[self serverRun:@"LOCK TABLE structure_test.t IN SHARE MODE"];
+	[self.document viewStatus:nil];
+	XCTAssertEqualObjects([info.commentView string], padded);
+	XCTAssertTrue([[info.commentView window] makeFirstResponder:info.commentView]);
+	[self.document viewStructure:nil];
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure, @"not vetoed");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+
+	// A real edit that fails vetoes leaving; Escape gives it up, and then leaving works
+	[self.document viewStatus:nil];
+	[self typeComment:@"changed"];
+	XCTAssertTrue(info.hasPendingComment);
+	[self.document viewContent:nil];
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneInfo, @"vetoed");
+	XCTAssertEqual(self.alerts.count, 1u);
+	[info.commentView doCommandBySelector:@selector(cancelOperation:)];
+	XCTAssertEqualObjects([info.commentView string], padded);
+	XCTAssertFalse(info.hasPendingComment);
+	[self.document viewContent:nil];
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneContent);
+	XCTAssertEqual(self.alerts.count, 1u);
+	[self serverRun:@"ROLLBACK"];
+	XCTAssertEqualObjects([self serverValue:@"SELECT obj_description('structure_test.t'::regclass, 'pg_class')"], padded);
+
+	// A real edit is sent (and logged)
+	[self.document viewStatus:nil];
+	[self typeComment:[marker stringByAppendingString:@" edited"]];
+	[self.document viewContent:nil];
+	XCTAssertEqual([[[self loggedMessagesContaining:[marker stringByAppendingString:@" edited"]] filteredArrayUsingPredicate:commentOn] count], 1u, @"the log does show COMMENT ON");
+}
+
 - (void)testCreateSyntaxShown
 {
 	NSFont *font = [NSFont fontWithName:@"Menlo" size:15];
