@@ -491,4 +491,50 @@
 	}
 }
 
+#pragma mark - Stage 7: statements before the import
+
+- (void)testStatementsBeforeImportRunFirstInTheTransaction
+{
+	NSString *path = [self writeText:@"INSERT INTO public.first VALUES (2);\n" named:@"after-first.sql"];
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *destination = [SPPostgresTestServers ioConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_io_dst"];
+		XCTAssertNotNil([destination execute:@"CREATE TABLE public.gone (i int)"]);
+		SPPostgresSQLImporter *importer = [self importerForPath:path connection:destination];
+		importer.statementsBeforeImport = @[@"DROP TABLE public.gone", @"CREATE TABLE public.first (i int)", @"INSERT INTO public.first VALUES (1)"];
+		NSError *error = nil;
+		XCTAssertTrue([importer run:&error], @"%@", error.localizedDescription);
+		XCTAssertEqual(importer.statementsRun, 4u);
+		XCTAssertFalse([self table:@"public.gone" existsOn:destination]);
+		XCTAssertEqualObjects([[destination execute:@"SELECT string_agg(i::text, ',' ORDER BY i) FROM public.first"] textValueAtRow:0 column:0], @"1,2");
+		[destination disconnect];
+	}
+}
+
+- (void)testFailedStatementBeforeImportRollsBackWithoutLineNumber
+{
+	NSString *path = [self writeText:@"CREATE TABLE public.never (i int);\n" named:@"never.sql"];
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *destination = [SPPostgresTestServers ioConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_io_dst"];
+		XCTAssertNotNil([destination execute:@"CREATE TABLE public.kept (i int)"]);
+		XCTAssertNotNil([destination execute:@"CREATE VIEW public.kept_view AS SELECT i FROM public.kept"]);
+		SPPostgresSQLImporter *importer = [self importerForPath:path connection:destination];
+		importer.statementsBeforeImport = @[@"CREATE TABLE public.early (i int)", @"DROP TABLE public.kept"];
+		NSError *error = nil;
+		XCTAssertFalse([importer run:&error]);
+		XCTAssertEqualObjects(error.domain, SPPostgresErrorDomain);
+		XCTAssertEqual(error.code, SPPostgresErrorQueryFailed);
+		XCTAssertEqualObjects(error.userInfo[SPPostgresSQLStateErrorKey], @"2BP01");
+		NSArray *lines = [error.localizedDescription componentsSeparatedByString:@"\n"];
+		XCTAssertFalse([lines.firstObject hasPrefix:@"Line "], @"%@", error.localizedDescription);
+		XCTAssertTrue([lines.firstObject containsString:@"cannot drop table"], @"%@", error.localizedDescription);
+		XCTAssertTrue([lines containsObject:@"DETAIL: view kept_view depends on table kept"], @"%@", lines);
+		XCTAssertTrue([lines.lastObject hasPrefix:@"HINT: "], @"%@", lines);
+		XCTAssertEqual(destination.transactionStatus, PGPostgresTransactionIdle);
+		XCTAssertFalse([self table:@"public.early" existsOn:destination], @"rolled back");
+		XCTAssertFalse([self table:@"public.never" existsOn:destination], @"the file never ran");
+		XCTAssertTrue([self table:@"public.kept" existsOn:destination]);
+		[destination disconnect];
+	}
+}
+
 @end

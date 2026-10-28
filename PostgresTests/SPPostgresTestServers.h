@@ -33,6 +33,17 @@
 + (PGPostgresConnection *)ioConnectionOnPort:(NSUInteger)port database:(NSString *)name;
 
 /**
+ * Everything the import/export round trips compare in connection's database, keyed by what it is: "columns",
+ * "constraints", "indexes", "triggers", "views", "populated", "functions", "enums", "comments", "extensions", then
+ * "rows <relation>" (count and md5 of every table's and populated materialized view's rows) and
+ * "sequence <sequence>" (last_value and is_called). Fails the current test if a query fails.
+ */
++ (NSDictionary *)describeDatabase:(PGPostgresConnection *)connection;
+
+/// Asserts every key of either description has the same value in both (context names the comparison).
++ (void)assertDescription:(NSDictionary *)actual equals:(NSDictionary *)expected context:(NSString *)context;
+
+/**
  * The Structure fixture (schema structure_test: table t with odd columns, indexes, a check, view t_view and table
  * child referencing t; trigger function touch() with triggers t_touch (BEFORE UPDATE OF code, row, WHEN) and
  * t_audit (AFTER INSERT OR DELETE, statement, disabled) on t; sequences seq_free (increment 5, start 100, comment

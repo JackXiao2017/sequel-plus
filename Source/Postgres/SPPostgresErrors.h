@@ -25,11 +25,18 @@ typedef NS_ENUM(NSInteger, SPPostgresErrorCode) {
 	/// An object (a column, a sequence, an extension, …) was not dropped because other objects depend on it.
 	/// Nothing was changed: either the dependents were found first and nothing was sent, or the DROP was sent and
 	/// rolled back (an extension: the server's DETAIL). The dependents are listed under SPPostgresDependentsErrorKey.
-	SPPostgresErrorHasDependents = 9
+	SPPostgresErrorHasDependents = 9,
+	/// A transfer (SPPostgresTransfer) refused to start, before changing anything: the localized description says why
+	/// (the target is the database being copied, or extensions the copy needs aren't available on the target); the
+	/// objects concerned, if any, are listed under SPPostgresObjectsErrorKey.
+	SPPostgresErrorTransferRefused = 10
 };
 
 /// userInfo key of SPPostgresErrorHasDependents: an NSArray of NSString, one description per dependent object.
 extern NSString * const SPPostgresDependentsErrorKey __attribute__((visibility("default")));
+
+/// userInfo key of SPPostgresErrorTransferRefused: an NSArray of NSString, the objects concerned (e.g. extension names).
+extern NSString * const SPPostgresObjectsErrorKey __attribute__((visibility("default")));
 
 /// userInfo key of an SPPostgresErrorQueryFailed error the server reported: its SQLSTATE (NSString, e.g. @"42804").
 extern NSString * const SPPostgresSQLStateErrorKey __attribute__((visibility("default")));

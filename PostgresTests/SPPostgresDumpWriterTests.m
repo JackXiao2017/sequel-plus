@@ -131,68 +131,6 @@
 	[self run:@"CREATE FUNCTION public.audit_row() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END; $$" on:connection];
 }
 
-static NSString * const SPUserSchemas = @"nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema'";
-
-/// Everything the round trip compares, keyed by what it is.
-- (NSDictionary *)describe:(PGPostgresConnection *)connection
-{
-	NSMutableDictionary *description = [NSMutableDictionary dictionary];
-	NSString *(^aggregate)(NSString *) = ^NSString *(NSString *rowsSQL) {
-		return [self text:[NSString stringWithFormat:@"SELECT coalesce(string_agg(x, E'\\n' ORDER BY x COLLATE \"C\"), '') FROM (%@) s(x)", rowsSQL] on:connection];
-	};
-
-	description[@"columns"] = aggregate([NSString stringWithFormat:
-		@"SELECT format('%%I.%%I.%%I %%s notnull=%%s default=%%s identity=%%s generated=%%s', n.nspname, c.relname, a.attname,"
-		" format_type(a.atttypid, a.atttypmod), a.attnotnull, coalesce(pg_get_expr(d.adbin, d.adrelid), '-'), a.attidentity, a.attgenerated)"
-		" FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace"
-		" LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum"
-		" WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND a.attnum > 0 AND NOT a.attisdropped AND %@", SPUserSchemas]);
-	description[@"constraints"] = aggregate([NSString stringWithFormat:
-		@"SELECT CASE WHEN con.conrelid <> 0 THEN con.conrelid::regclass::text ELSE con.contypid::regtype::text END"
-		" || ' ' || con.conname || ' ' || pg_get_constraintdef(con.oid) || ' validated=' || con.convalidated"
-		" FROM pg_constraint con JOIN pg_namespace n ON n.oid = con.connamespace WHERE %@", SPUserSchemas]);
-	description[@"indexes"] = aggregate(@"SELECT indexdef FROM pg_indexes WHERE schemaname NOT LIKE 'pg\\_%' AND schemaname <> 'information_schema'");
-	description[@"triggers"] = aggregate(@"SELECT pg_get_triggerdef(t.oid) || ' enabled=' || t.tgenabled::text FROM pg_trigger t WHERE NOT t.tgisinternal");
-	description[@"views"] = aggregate([NSString stringWithFormat:
-		@"SELECT c.oid::regclass::text || ' ' || c.relkind::text || ' ' || pg_get_viewdef(c.oid)"
-		" FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('v', 'm') AND %@", SPUserSchemas]);
-	description[@"populated"] = aggregate([NSString stringWithFormat:
-		@"SELECT c.oid::regclass::text || ' ' || c.relispopulated"
-		" FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'm' AND %@", SPUserSchemas]);
-	description[@"functions"] = aggregate([NSString stringWithFormat:
-		@"SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace"
-		" WHERE p.prokind IN ('f', 'p') AND %@ AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')", SPUserSchemas]);
-	description[@"enums"] = aggregate(@"SELECT t.typname || ': ' || string_agg(e.enumlabel, ', ' ORDER BY e.enumsortorder) FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid GROUP BY t.typname");
-	description[@"comments"] = aggregate(@"SELECT pg_describe_object(classoid, objoid, objsubid) || ' = ' || description FROM pg_description WHERE objoid >= 16384");
-	description[@"extensions"] = aggregate(@"SELECT extname || ' ' || extnamespace::regnamespace::text FROM pg_extension");
-
-	// Rows of every table and populated materialized view
-	NSArray *relations = [self rows:[NSString stringWithFormat:
-		@"SELECT format('%%I.%%I', n.nspname, c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
-		" WHERE (c.relkind IN ('r', 'p') OR (c.relkind = 'm' AND c.relispopulated)) AND %@ ORDER BY 1", SPUserSchemas] on:connection];
-	for (NSArray *relation in relations) {
-		NSString *sql = [NSString stringWithFormat:@"SELECT count(*) || ' ' || coalesce(md5(string_agg(t::text, '|' ORDER BY t::text)), '-') FROM %@ t", relation[0]];
-		description[[@"rows " stringByAppendingString:relation[0]]] = [self text:sql on:connection];
-	}
-
-	// Sequences
-	NSArray *sequences = [self rows:@"SELECT format('%I.%I', schemaname, sequencename) FROM pg_sequences ORDER BY 1" on:connection];
-	for (NSArray *sequence in sequences) {
-		NSString *sql = [NSString stringWithFormat:@"SELECT last_value || ' ' || is_called FROM %@", sequence[0]];
-		description[[@"sequence " stringByAppendingString:sequence[0]]] = [self text:sql on:connection];
-	}
-	return description;
-}
-
-- (void)assertDescription:(NSDictionary *)actual equals:(NSDictionary *)expected context:(NSString *)context
-{
-	NSMutableSet *keys = [NSMutableSet setWithArray:expected.allKeys];
-	[keys addObjectsFromArray:actual.allKeys];
-	for (NSString *key in [keys.allObjects sortedArrayUsingSelector:@selector(compare:)]) {
-		XCTAssertEqualObjects(actual[key], expected[key], @"%@: %@", context, key);
-	}
-}
-
 #pragma mark - Tests
 
 - (void)testRoundTripMatchesSource
@@ -218,17 +156,17 @@ static NSString * const SPUserSchemas = @"nspname NOT LIKE 'pg\\_%' AND nspname 
 		XCTAssertEqualObjects([self text:@"SELECT count(*)::text FROM public.audit" on:destination], @"7");
 		XCTAssertEqualObjects([self text:@"SELECT relispopulated::text FROM pg_class WHERE oid = '\"Sales Data\".mv_unpopulated'::regclass" on:destination], @"false");
 
-		NSDictionary *expected = [self describe:source];
-		NSDictionary *actual = [self describe:destination];
+		NSDictionary *expected = [SPPostgresTestServers describeDatabase:source];
+		NSDictionary *actual = [SPPostgresTestServers describeDatabase:destination];
 		XCTAssertEqualObjects(expected[@"rows public.audit"], actual[@"rows public.audit"]);
 		XCTAssertEqualObjects(expected[@"sequence public.counter"], @"42 true");
-		[self assertDescription:actual equals:expected context:[NSString stringWithFormat:@"port %@", port]];
+		[SPPostgresTestServers assertDescription:actual equals:expected context:[NSString stringWithFormat:@"port %@", port]];
 
 		// Materialized views compared once both are populated
 		for (PGPostgresConnection *connection in @[source, destination]) {
 			[self run:@"REFRESH MATERIALIZED VIEW \"Sales Data\".mv_unpopulated" on:connection];
 		}
-		[self assertDescription:[self describe:destination] equals:[self describe:source] context:[NSString stringWithFormat:@"port %@, refreshed", port]];
+		[SPPostgresTestServers assertDescription:[SPPostgresTestServers describeDatabase:destination] equals:[SPPostgresTestServers describeDatabase:source] context:[NSString stringWithFormat:@"port %@, refreshed", port]];
 
 		// The foreign keys hold and the sequences continue where the source's do
 		XCTAssertNil([destination execute:@"INSERT INTO \"Sales Data\".order_lines (order_id, item) VALUES (999, 'none')"]);
@@ -245,7 +183,7 @@ static NSString * const SPUserSchemas = @"nspname NOT LIKE 'pg\\_%' AND nspname 
 {
 	for (NSNumber *port in [SPPostgresTestServers ports]) {
 		PGPostgresConnection *source = [self sourceOn:port];
-		NSDictionary *expected = [self describe:source];
+		NSDictionary *expected = [SPPostgresTestServers describeDatabase:source];
 
 		// Schema "Sales Data" only
 		PGPostgresConnection *destination = [self destinationOn:port];
@@ -261,7 +199,7 @@ static NSString * const SPUserSchemas = @"nspname NOT LIKE 'pg\\_%' AND nspname 
 		[self import:path into:destination];
 
 		XCTAssertEqualObjects([self text:@"SELECT count(*)::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')" on:destination], @"0");
-		NSDictionary *actual = [self describe:destination];
+		NSDictionary *actual = [SPPostgresTestServers describeDatabase:destination];
 		for (NSString *key in @[@"rows \"Sales Data\".\"Orders 2026\"", @"rows \"Sales Data\".order_lines", @"rows \"Sales Data\".mv_by_feeling",
 								@"sequence \"Sales Data\".\"Orders 2026_id_seq\"", @"sequence \"Sales Data\".\"Orders 2026_seq_seq\"", @"sequence \"Sales Data\".order_lines_id_seq"]) {
 			XCTAssertNotNil(expected[key], @"%@", key);
@@ -284,7 +222,7 @@ static NSString * const SPUserSchemas = @"nspname NOT LIKE 'pg\\_%' AND nspname 
 		XCTAssertFalse([dump containsString:@"public.counter"]);
 		[self import:path into:destination];
 
-		actual = [self describe:destination];
+		actual = [SPPostgresTestServers describeDatabase:destination];
 		for (NSString *key in @[@"rows \"Sales Data\".\"Orders 2026\"", @"sequence \"Sales Data\".\"Orders 2026_id_seq\"", @"sequence \"Sales Data\".\"Orders 2026_seq_seq\""]) {
 			XCTAssertEqualObjects(actual[key], expected[key], @"port %@: %@", port, key);
 		}
@@ -324,8 +262,8 @@ static NSString * const SPUserSchemas = @"nspname NOT LIKE 'pg\\_%' AND nspname 
 		[self import:dataPath into:destination];
 
 		// The data loads into the structure: triggers didn't fire, foreign keys held, sequences match
-		NSDictionary *expected = [self describe:source];
-		NSDictionary *actual = [self describe:destination];
+		NSDictionary *expected = [SPPostgresTestServers describeDatabase:source];
+		NSDictionary *actual = [SPPostgresTestServers describeDatabase:destination];
 		XCTAssertEqualObjects([self text:@"SELECT count(*)::text FROM public.audit" on:destination], @"7");
 		for (NSString *key in expected) {
 			if ([key hasPrefix:@"rows "] && [key containsString:@"mv_"]) continue; // refreshed by the structure dump while empty
@@ -351,8 +289,8 @@ static NSString * const SPUserSchemas = @"nspname NOT LIKE 'pg\\_%' AND nspname 
 
 		PGPostgresConnection *destination = [self destinationOn:port];
 		[self import:path into:destination];
-		NSDictionary *expected = [self describe:source];
-		NSDictionary *actual = [self describe:destination];
+		NSDictionary *expected = [SPPostgresTestServers describeDatabase:source];
+		NSDictionary *actual = [SPPostgresTestServers describeDatabase:destination];
 		XCTAssertEqualObjects(actual[@"rows \"Sales Data\".\"Orders 2026\""], expected[@"rows \"Sales Data\".\"Orders 2026\""]);
 		XCTAssertEqualObjects(actual[@"rows public.events"], expected[@"rows public.events"]);
 		XCTAssertEqualObjects(actual[@"sequence public.counter"], @"42 true");
@@ -783,14 +721,14 @@ static SPPostgresDumpObject *SPObject(NSString *kind, NSString *schema, NSString
 {
 	for (NSNumber *port in [SPPostgresTestServers ports]) {
 		PGPostgresConnection *source = [self sourceOn:port];
-		NSDictionary *expected = [self describe:source];
+		NSDictionary *expected = [SPPostgresTestServers describeDatabase:source];
 		NSString *path = [self dumpFrom:source named:@"dependencies.sql" configure:^(SPPostgresDumpWriter *writer) {
 			writer.tables = @[@[@"Sales Data", @"Orders 2026"], @[@"Sales Data", @"order_lines"], @[@"public", @"audit"]];
 			writer.includeDependencies = YES;
 		}];
 		PGPostgresConnection *destination = [self destinationOn:port];
 		[self import:path into:destination];
-		NSDictionary *actual = [self describe:destination];
+		NSDictionary *actual = [SPPostgresTestServers describeDatabase:destination];
 		for (NSString *key in @[@"rows \"Sales Data\".\"Orders 2026\"", @"rows \"Sales Data\".order_lines", @"rows public.audit"]) {
 			XCTAssertNotNil(expected[key], @"%@", key);
 			XCTAssertEqualObjects(actual[key], expected[key], @"port %@: %@", port, key);

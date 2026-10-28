@@ -19,6 +19,7 @@
 @synthesize statementsRun;
 @synthesize errorsIgnored;
 @synthesize settingsSkipped;
+@synthesize statementsBeforeImport;
 
 - (instancetype)initWithConnection:(PGPostgresConnection *)theConnection reader:(SPPostgresDumpReader *)theReader
 {
@@ -37,6 +38,7 @@
 	[errorHandler release];
 	[progress release];
 	[skippedSettings release];
+	[statementsBeforeImport release];
 	[super dealloc];
 }
 
@@ -174,6 +176,31 @@ static NSString *SPConfigurationParameterSetBy(NSString *sql)
 		if (!self->progress) return YES;
 		return self->progress([self->reader bytesRead], [self->reader fileSize]);
 	};
+
+	// The caller's statements first (in the transaction, when there is one): a failure is the server's message with
+	// its DETAIL and HINT, as there is no line of the file to name
+	for (NSString *sql in statementsBeforeImport) {
+		NSError *statementError = nil;
+		if (SPPostgresExecuteWithDetails(connection, sql, nil, &statementError)) {
+			statementsRun++;
+			if (stillGoing()) continue;
+			cancelled = YES;
+		}
+		else if (!stillGoing()) {
+			cancelled = YES;
+		}
+		else {
+			[self _rollBackIfInTransaction];
+			if (error) *error = statementError;
+			return NO;
+		}
+		break;
+	}
+	if (cancelled) {
+		[self _rollBackIfInTransaction];
+		if (error) *error = SPPostgresMakeError(SPPostgresErrorCancelled, NSLocalizedString(@"The import was cancelled.", @"Postgres import: cancelled"), nil);
+		return NO;
+	}
 
 	for (;;) {
 		NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
