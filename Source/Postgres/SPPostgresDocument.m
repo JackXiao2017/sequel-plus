@@ -68,6 +68,8 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 - (void)_installQueryController;
 - (void)_queryRunChangedSchema:(BOOL)schemaChanged data:(BOOL)dataChanged;
 - (void)_structureDidChange:(BOOL)columnsChanged;
+- (void)_reloadSidebarKeepingSelection;
+- (void)_reloadDeferredSidebar;
 - (void)_relationsDidChange;
 - (void)_tableInfoDidChange;
 - (void)_refreshContentIfStale;
@@ -161,6 +163,17 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 	BOOL infoNeedsReset;
 	/// The same for the Sequence view (the selected sequence), which also reads again each time it is shown
 	BOOL sequenceNeedsReset;
+
+	/// Inside the sidebar's should-change callback (the outline has already taken the row the user clicked or moved
+	/// to): the sidebar isn't reloaded meanwhile, which would put another item at that row. The reload waits until
+	/// the selection has changed (-_reloadDeferredSidebar).
+	BOOL deferringSidebarReloads;
+	/// A reload waits (see deferringSidebarReloads)
+	BOOL sidebarReloadDeferred;
+	/// The sequence renamed meanwhile, its old and new names: if the old name is still the selection when the reload
+	/// comes, the new name is selected
+	NSString *deferredRenameFrom;
+	NSString *deferredRenameTo;
 
 	/// The Add Sequence sheet while it is shown
 	NSWindow *addSequenceSheet;
@@ -261,6 +274,8 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 	[currentPane release];
 	[paneBeforeSequence release];
 	[addSequenceSheet release];
+	[deferredRenameFrom release];
+	[deferredRenameTo release];
 	[renameSheet release];
 	[renameNameField release];
 	[renameButton release];
@@ -821,6 +836,47 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 	relationsNeedReset = YES;
 	triggersNeedReset = YES;
 	infoNeedsReset = YES;
+
+	// A serial or identity column added brings a sequence, and one dropped takes its owned sequence with it: the
+	// SEQUENCES list follows (the selection and pane stay)
+	if (columnsChanged) [self _reloadSidebarKeepingSelection];
+}
+
+/// Lists the schema's relations again, keeping the selection, the pane and History as they are; inside the sidebar's
+/// should-change callback, once the selection has changed (see deferringSidebarReloads).
+- (void)_reloadSidebarKeepingSelection
+{
+	if (tornDown) return;
+	if (deferringSidebarReloads) {
+		sidebarReloadDeferred = YES;
+		return;
+	}
+
+	BOOL wasRestoring = restoringHistory;
+	restoringHistory = YES; // not a place the user went to
+	[sidebar reloadKeepingSelection];
+	restoringHistory = wasRestoring;
+}
+
+/// The sidebar reload that waited for the selection change (see deferringSidebarReloads): the item the user went
+/// to stays selected; a renamed sequence still selected is selected under its new name.
+- (void)_reloadDeferredSidebar
+{
+	[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(_reloadDeferredSidebar) object:nil];
+	if (tornDown || !sidebarReloadDeferred || deferringSidebarReloads) return;
+	sidebarReloadDeferred = NO;
+
+	NSString *renamedFrom = [deferredRenameFrom autorelease];
+	NSString *renamedTo = [deferredRenameTo autorelease];
+	deferredRenameFrom = nil;
+	deferredRenameTo = nil;
+
+	if (renamedFrom && renamedTo && [renamedFrom isEqualToString:[sidebar selectedSequenceName]]) {
+		// As a rename applied without leaving (-_sequenceDidChange:)
+		[sidebar reloadSchema:[sidebar selectedSchema] selectingSequence:renamedTo];
+		return;
+	}
+	[self _reloadSidebarKeepingSelection];
 }
 
 /// The Relations view added or dropped a foreign key: the Structure view's constraints follow when it is next shown.
@@ -841,9 +897,23 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 	structureNeedsReset = YES;
 	infoNeedsReset = YES;
 
-	if (![name length] || [name isEqualToString:[sidebar selectedSequenceName]]) return;
+	NSString *oldName = [sidebar selectedSequenceName];
+	if (![name length] || [name isEqualToString:oldName]) return;
 
-	// Renamed: listed again, going straight from the old name to the new one (no other pane on the way)
+	// Renamed: History's entries for it name it by its new name (going back to them finds it, and the new name's
+	// entry isn't a place of its own)
+	[history renameTable:oldName to:name inDatabase:currentDatabase schema:[sidebar selectedSchema]];
+
+	// Inside the sidebar's should-change callback: listed again once the selection has changed
+	if (deferringSidebarReloads) {
+		sidebarReloadDeferred = YES;
+		if (!deferredRenameFrom) deferredRenameFrom = [oldName copy];
+		[deferredRenameTo release];
+		deferredRenameTo = [name copy];
+		return;
+	}
+
+	// Listed again, going straight from the old name to the new one (no other pane on the way)
 	[sidebar reloadSchema:[sidebar selectedSchema] selectingSequence:name];
 }
 
@@ -1235,6 +1305,10 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 	if (tornDown) return;
 	tornDown = YES;
 
+	// A deferred sidebar reload's fallback (it retains self)
+	[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(_reloadDeferredSidebar) object:nil];
+	sidebarReloadDeferred = NO;
+
 	// A pending database switch completes (cancelled) and lets go of its block, which retains self
 	SPPostgresConnector *pending = pendingConnector;
 	pendingConnector = nil;
@@ -1295,13 +1369,32 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 	[self _showSelectedTable];
 	[self updateWindowTitle:self];
 	[self _recordHistory];
+
+	// The lists the edits saved on leaving changed, now that the selection the user chose is made
+	[self _reloadDeferredSidebar];
 }
 
-/// Another table or schema only once an edit in progress (or a Structure draft column) is saved, as MySQL's.
+/**
+ * Another table or schema only once an edit in progress (or a Structure draft column) is saved, as MySQL's.
+ *
+ * The outline has already taken the row the user clicked (or moved to with the keyboard) when it asks: the sidebar
+ * isn't reloaded until the selection has changed (-sidebarSelectionDidChange:), or else the run loop's next turn if
+ * it doesn't change (e.g. the selected row clicked again).
+ */
 - (BOOL)sidebarShouldChangeSelection:(SPPostgresSidebarController *)theSidebar
 {
 	if (tornDown) return YES;
-	return [self _endPaneEditing];
+
+	BOOL wasDeferring = deferringSidebarReloads;
+	deferringSidebarReloads = YES;
+	BOOL ended = [self _endPaneEditing];
+	deferringSidebarReloads = wasDeferring;
+
+	if (sidebarReloadDeferred && !deferringSidebarReloads) {
+		[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(_reloadDeferredSidebar) object:nil];
+		[self performSelector:@selector(_reloadDeferredSidebar) withObject:nil afterDelay:0];
+	}
+	return ended;
 }
 
 - (void)sidebar:(SPPostgresSidebarController *)theSidebar didFailToLoadWithError:(NSError *)error
@@ -1979,11 +2072,18 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 	NSString *selected = [[[sidebar selectedTableName] copy] autorelease];
 	NSString *selectedSequence = [[[sidebar selectedSequenceName] copy] autorelease];
 	NSString *reselect = [selected isEqualToString:table] ? newName : selected;
+	if (!reselect && selectedSequence) {
+		// Straight back to the sequence (no empty selection, so no other pane, on the way), not recorded
+		BOOL wasRestoring = restoringHistory;
+		restoringHistory = YES;
+		[sidebar reloadSchema:schema selectingSequence:selectedSequence];
+		restoringHistory = wasRestoring;
+		return;
+	}
 	restoringHistory = YES;
 	[sidebar reloadSchema:schema];
 	restoringHistory = NO;
 	if (reselect) [sidebar selectTableNamed:reselect];
-	else if (selectedSequence) [sidebar selectSequenceNamed:selectedSequence];
 }
 
 #pragma mark - Split view

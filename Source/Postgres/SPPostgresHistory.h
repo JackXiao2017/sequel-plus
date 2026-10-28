@@ -14,6 +14,10 @@ __attribute__((visibility("default")))
 
 - (void)recordDatabase:(NSString *)db schema:(NSString *)schema table:(NSString *)table pane:(NSString *)pane;
 
+/// A relation was renamed: the entries naming it (in that database and schema) name it by its new name, so going
+/// back to them finds it.
+- (void)renameTable:(NSString *)oldName to:(NSString *)newName inDatabase:(NSString *)db schema:(NSString *)schema;
+
 /// Moves back one entry and returns it, or returns nil (staying put) at the oldest entry.
 - (NSDictionary *)goBack;
 

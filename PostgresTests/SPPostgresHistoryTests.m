@@ -102,6 +102,25 @@ static NSDictionary *SPHistoryEntry(NSString *db, NSString *schema, NSString *ta
 	XCTAssertEqualObjects([history goBack], SPHistoryEntry(@"db", @"s", @"a", @"content"));
 }
 
+- (void)testRenameRewritesMatchingEntriesOnly
+{
+	SPPostgresHistory *history = [[SPPostgresHistory alloc] init];
+	[history recordDatabase:@"db" schema:@"public" table:@"seq" pane:@"sequence"];
+	[history recordDatabase:@"db" schema:@"other" table:@"seq" pane:@"sequence"];
+	[history recordDatabase:@"db2" schema:@"public" table:@"seq" pane:@"sequence"];
+	[history recordDatabase:@"db" schema:@"public" table:@"t" pane:@"content"];
+
+	[history renameTable:@"seq" to:@"seq2" inDatabase:@"db" schema:@"public"];
+	XCTAssertEqualObjects(history.currentEntry, SPHistoryEntry(@"db", @"public", @"t", @"content"));
+	XCTAssertEqualObjects([history goBack], SPHistoryEntry(@"db2", @"public", @"seq", @"sequence"), @"another database");
+	XCTAssertEqualObjects([history goBack], SPHistoryEntry(@"db", @"other", @"seq", @"sequence"), @"another schema");
+	XCTAssertEqualObjects([history goBack], SPHistoryEntry(@"db", @"public", @"seq2", @"sequence"));
+
+	// The new name's entry is the current one: recording it again adds nothing
+	[history recordDatabase:@"db" schema:@"public" table:@"seq2" pane:@"sequence"];
+	XCTAssertTrue(history.canGoForward);
+}
+
 - (void)testHistoryIsCappedAtFiftyEntries
 {
 	SPPostgresHistory *history = [[SPPostgresHistory alloc] init];
