@@ -505,16 +505,57 @@ static void SPPostgresTriggerParse(NSString *definition, NSString *quotedName, N
 
 #pragma mark - Reading
 
-- (NSString *)relationKind:(NSError **)error
+/// The kind's name for a relkind (see -relationKind:), or nil (with an error) for one that isn't a table or view.
+- (NSString *)kindForRelkind:(id)relkind error:(NSError **)error
 {
-	NSArray *rows = [self rows:@"SELECT relkind::text FROM rel" values:nil error:error];
-	if (!rows) return nil; // a missing relation fails in -rows:…
 	NSDictionary *kinds = @{@"r": @"table", @"p": @"partitioned table", @"v": @"view", @"m": @"materialized view", @"f": @"foreign table"};
-	NSString *kind = kinds[SPPostgresStructureText(rows[0][0]) ?: @""];
+	NSString *kind = kinds[SPPostgresStructureText(relkind) ?: @""];
 	if (!kind) {
 		SPPostgresStructureRefuse([NSString stringWithFormat:NSLocalizedString(@"“%@” is not a table or view.", @"Postgres structure: unsupported relation kind"), _table], error);
 	}
 	return kind;
+}
+
+- (NSString *)relationKind:(NSError **)error
+{
+	NSArray *rows = [self rows:@"SELECT relkind::text FROM rel" values:nil error:error];
+	if (!rows) return nil; // a missing relation fails in -rows:…
+	return [self kindForRelkind:rows[0][0] error:error];
+}
+
+- (NSDictionary *)tableInfo:(NSError **)error
+{
+	// reltuples is -1 for "never vacuumed or analyzed" from PostgreSQL 14; before, it is 0 then (as for an empty
+	// table that was), so 0 with no pages and nothing on record counts as no estimate too
+	NSArray *rows = [self rows:
+		@"SELECT rel.relkind::text, pg_catalog.pg_get_userbyid(c.relowner)::text,"
+		" CASE WHEN rel.relkind = 'v' OR c.reltuples < 0 THEN NULL"
+		"  WHEN c.reltuples = 0 AND c.relpages = 0 AND s.last_vacuum IS NULL AND s.last_autovacuum IS NULL"
+		"   AND s.last_analyze IS NULL AND s.last_autoanalyze IS NULL THEN NULL"
+		"  ELSE pg_catalog.round(c.reltuples::numeric) END::text,"
+		" pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid))::text,"
+		" pg_catalog.pg_size_pretty(pg_catalog.pg_indexes_size(c.oid))::text,"
+		" pg_catalog.pg_size_pretty(pg_catalog.pg_total_relation_size(c.oid))::text,"
+		" pg_catalog.obj_description(c.oid, 'pg_class')::text"
+		" FROM rel JOIN pg_catalog.pg_class c ON c.oid = rel.oid"
+		" LEFT JOIN pg_catalog.pg_stat_all_tables s ON s.relid = c.oid" values:nil error:error];
+	if (!rows) return nil; // a missing relation fails in -rows:…
+
+	NSArray *row = rows[0];
+	NSString *kind = [self kindForRelkind:row[0] error:error];
+	if (!kind) return nil;
+
+	NSString *estimate = SPPostgresStructureText(row[2]);
+	NSNull *none = [NSNull null];
+	return @{
+		@"kind": kind,
+		@"owner": SPPostgresStructureText(row[1]) ?: @"",
+		@"rowEstimate": estimate ? (id)@([estimate longLongValue]) : none,
+		@"tableSize": SPPostgresStructureText(row[3]) ?: @"",
+		@"indexSize": SPPostgresStructureText(row[4]) ?: @"",
+		@"totalSize": SPPostgresStructureText(row[5]) ?: @"",
+		@"comment": SPPostgresStructureText(row[6]) ?: (id)none,
+	};
 }
 
 - (NSArray *)columns:(NSError **)error

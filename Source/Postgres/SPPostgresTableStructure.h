@@ -238,6 +238,18 @@ __attribute__((visibility("default")))
 - (NSString *)tableComment:(NSError **)error;
 /// @"table", @"partitioned table", @"view", @"materialized view" or @"foreign table"; nil on failure.
 - (NSString *)relationKind:(NSError **)error;
+/**
+ * What the Table Info view shows, or nil on failure:
+ * - @"kind": as -relationKind:;
+ * - @"owner": the owning role's name;
+ * - @"rowEstimate": an NSNumber, pg_class.reltuples rounded, or NSNull when there is no estimate (reltuples -1,
+ *   PostgreSQL 14+'s "never vacuumed or analyzed"; before 14, 0 with no pages and no vacuum or analyze on
+ *   record; always for a view, which holds no rows);
+ * - @"tableSize", @"indexSize", @"totalSize": pg_size_pretty of pg_table_size, pg_indexes_size and
+ *   pg_total_relation_size (e.g. @"16 kB");
+ * - @"comment": the table's comment, or NSNull.
+ */
+- (NSDictionary *)tableInfo:(NSError **)error;
 
 /// ADD COLUMN, then COMMENT ON COLUMN when a comment is given. serial needs an integer type (integer, bigint,
 /// smallint), which becomes serial / bigserial / smallserial.
@@ -282,7 +294,8 @@ __attribute__((visibility("default")))
 - (BOOL)addTriggerNamed:(NSString *)name timing:(NSString *)timing events:(NSArray *)events updateColumns:(NSArray *)columns level:(NSString *)level function:(NSString *)qualifiedFunction condition:(NSString *)condition error:(NSError **)error;
 /// DROP TRIGGER name ON the table (never CASCADE).
 - (BOOL)dropTriggerNamed:(NSString *)name error:(NSError **)error;
-/// ALTER TABLE … ENABLE | DISABLE TRIGGER name.
+/// ALTER TABLE … ENABLE | DISABLE TRIGGER name. Enabling a trigger set to fire only as replica (tgenabled 'R') or
+/// always ('A') makes it fire as origin ('O'), the default, again.
 - (BOOL)setTrigger:(NSString *)name enabled:(BOOL)enabled error:(NSError **)error;
 
 - (BOOL)renameTableTo:(NSString *)newName error:(NSError **)error;

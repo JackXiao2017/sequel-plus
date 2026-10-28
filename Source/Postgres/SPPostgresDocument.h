@@ -11,6 +11,7 @@
 @class SPPostgresStructureController;
 @class SPPostgresRelationsController;
 @class SPPostgresTriggersController;
+@class SPPostgresTableInfoController;
 @class SPWindowController;
 
 /// The panes of a PostgreSQL tab's right side (-showPane:, -currentPane, and the tab's history entries).
@@ -116,6 +117,8 @@ __attribute__((visibility("default")))
 @property (readonly) SPPostgresRelationsController *relationsController;
 /// The right pane: the Triggers view of the table selected in the sidebar.
 @property (readonly) SPPostgresTriggersController *triggersController;
+/// The right pane: the Table Info view of the table or view selected in the sidebar.
+@property (readonly) SPPostgresTableInfoController *infoController;
 /// The right pane: the Content view of the table or view selected in the sidebar.
 @property (readonly) SPPostgresContentController *contentController;
 /// The right pane: the Query view. Its editor's text is kept for the tab's session (also across database switches).
