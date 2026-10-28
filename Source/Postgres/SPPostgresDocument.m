@@ -8,6 +8,7 @@
 #import "SPPostgresSequenceController.h"
 #import "SPPostgresExtensionController.h"
 #import "SPPostgresExtensions.h"
+#import "SPPostgresInstallExtensionSheet.h"
 #import "SPPostgresUsersController.h"
 #import "SPPostgresSequences.h"
 #import "SPPostgresTableStructure.h"
@@ -73,6 +74,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 - (void)_refreshExtensionIfStale;
 - (void)_extensionsDidChange;
 - (void)_dropExtension:(NSString *)name;
+- (void)_extensionInstalled:(NSString *)name;
 - (void)_installQueryController;
 - (void)_queryRunChangedSchema:(BOOL)schemaChanged data:(BOOL)dataChanged;
 - (void)_structureDidChange:(BOOL)columnsChanged;
@@ -192,6 +194,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 	/// The Add Sequence sheet while it is shown
 	NSWindow *addSequenceSheet;
+	NSWindow *installExtensionSheet;
 
 	/// The Duplicate Table sheet while it is shown, and its controls
 	NSWindow *duplicateSheet;
@@ -297,6 +300,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[paneBeforeSequence release];
 	[paneBeforeExtension release];
 	[addSequenceSheet release];
+	[installExtensionSheet release];
 	[deferredRenameFrom release];
 	[deferredRenameTo release];
 	[renameSheet release];
@@ -1440,6 +1444,11 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	if (renameSheet) [[renameSheet sheetParent] endSheet:renameSheet returnCode:NSModalResponseCancel];
 	// An Add Sequence sheet still up (its completion sees tornDown)
 	if (addSequenceSheet) [[addSequenceSheet sheetParent] endSheet:addSequenceSheet returnCode:NSModalResponseCancel];
+	// An Install Extension sheet still up (an alert on it first; its completion sees tornDown)
+	if (installExtensionSheet) {
+		if ([installExtensionSheet attachedSheet]) [installExtensionSheet endSheet:[installExtensionSheet attachedSheet]];
+		[[installExtensionSheet sheetParent] endSheet:installExtensionSheet returnCode:NSModalResponseCancel];
+	}
 
 	[contentController invalidate];
 	[structureController invalidate];
@@ -1618,9 +1627,32 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 #pragma mark - Extensions
 
-/// The Install Extension sheet (Stage 5 Task 3).
+/// "Install Extension…": the sheet (after the shown pane's edits are applied), its install schema starting at the
+/// schema selected in the left panel; on Install, the lists reload and the new extension is selected.
 - (IBAction)showInstallExtensionSheet:(id)sender
 {
+	if (tornDown || installExtensionSheet || addSequenceSheet || duplicateSheet || renameSheet || !parentWindow || isProcessing || [parentWindow attachedSheet]) return;
+	if (![self _endPaneEditing] || ![parentWindow makeFirstResponder:nil]) return;
+
+	[SPPostgresInstallExtensionSheet beginWithConnection:connection schema:[sidebar selectedSchema] window:parentWindow completion:^(NSString *name) {
+		[installExtensionSheet release];
+		installExtensionSheet = nil;
+		if (name && !tornDown) [self _extensionInstalled:name];
+	}];
+	NSWindow *sheet = [parentWindow attachedSheet];
+	if (!sheet) return;
+	[installExtensionSheet release];
+	installExtensionSheet = [sheet retain];
+	// The tab's alerts go where its other alerts go (tests)
+	if (alertPresenter) [[SPPostgresInstallExtensionSheet currentSheet] setAlertPresenter:alertPresenter];
+}
+
+/// After an install: the lists reload (it may have brought tables, views, types), and the new extension is selected
+/// and shown.
+- (void)_extensionInstalled:(NSString *)name
+{
+	[self _extensionsDidChange];
+	[sidebar selectExtensionNamed:name];
 }
 
 /// "Install Extension…" in the sidebar's menu.

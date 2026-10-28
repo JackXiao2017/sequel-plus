@@ -107,7 +107,8 @@ __attribute__((visibility("default")))
 /// Shows the Query view, as MySQL's Query toolbar item and View > Custom Query.
 - (IBAction)viewQuery:(id)sender;
 
-/// The Install Extension sheet, from the sidebar's "Install Extension…" (Stage 5 Task 3; does nothing yet).
+/// The Install Extension sheet (SPPostgresInstallExtensionSheet), from the sidebar's "Install Extension…": on Install the
+/// sidebar reloads and the new extension is selected, its pane shown. Does nothing while a sheet is attached.
 - (IBAction)showInstallExtensionSheet:(id)sender;
 
 /**
