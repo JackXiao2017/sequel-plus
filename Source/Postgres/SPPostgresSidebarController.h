@@ -21,6 +21,10 @@
 - (void)sidebar:(SPPostgresSidebarController *)sidebar addSequenceInSchema:(NSString *)schema;
 /// "Delete Sequence…" was chosen in the outline's menu for `sequence`, a sequence of the selected schema.
 - (void)sidebar:(SPPostgresSidebarController *)sidebar deleteSequenceNamed:(NSString *)sequence;
+/// "Install Extension…" was chosen in the outline's menu.
+- (void)sidebarInstallExtension:(SPPostgresSidebarController *)sidebar;
+/// "Drop Extension…" was chosen in the outline's menu for `name`, an installed extension.
+- (void)sidebar:(SPPostgresSidebarController *)sidebar dropExtensionNamed:(NSString *)name;
 @end
 
 /**
@@ -54,7 +58,7 @@ __attribute__((visibility("default")))
 
 /**
  * Reloads the schemas, the extensions and the shown schema's tables, views and sequences (after the Query view
- * changed them), keeping the selected table or sequence if it is still listed. A schema that is gone gives way to the default one.
+ * changed them), keeping the selected table, sequence or extension if it is still listed. A schema that is gone gives way to the default one.
  * The delegate hears of a selection change only if the selection ends up different.
  */
 - (void)reloadKeepingSelection;
@@ -71,6 +75,9 @@ __attribute__((visibility("default")))
 /// Selects a sequence of the selected schema in the outline; NO if it is not listed. nil clears the selection.
 - (BOOL)selectSequenceNamed:(NSString *)name;
 
+/// Selects an installed extension in the outline; NO if it is not listed. nil clears the selection.
+- (BOOL)selectExtensionNamed:(NSString *)name;
+
 /**
  * The outline's right-click menu: "Duplicate Table…" and "Rename Table…", enabled on a table (not a view or
  * extension). They act on the row that was right-clicked, or else on the selected one, through the delegate.
@@ -84,17 +91,28 @@ __attribute__((visibility("default")))
  */
 @property (readonly) NSMenu *sequenceMenu;
 
-/// The right-click menu for a row of the outline (-1: empty space): sequenceMenu on a sequence, the SEQUENCES
-/// header or empty space, else tableMenu.
+/**
+ * The outline's right-click menu on an extension, the EXTENSIONS header or empty space below it: "Install
+ * Extension…" (always) and "Drop Extension…" (on an extension only: the row that was right-clicked, or else the
+ * selected one; hidden elsewhere), through the delegate.
+ */
+@property (readonly) NSMenu *extensionMenu;
+
+/// The right-click menu for a row of the outline (-1: empty space, which is below EXTENSIONS, the last section):
+/// sequenceMenu on a sequence or the SEQUENCES header, extensionMenu on an extension, the EXTENSIONS header or
+/// empty space, else tableMenu.
 - (NSMenu *)menuForRow:(NSInteger)row;
 
 @property (readonly) NSString *selectedSchema;
 
-/// The selected table or view of the selected schema, or nil (also while a sequence is selected).
+/// The selected table or view of the selected schema, or nil (also while a sequence or extension is selected).
 @property (readonly) NSString *selectedTableName;
 
-/// The selected sequence of the selected schema, or nil (also while a table or view is selected).
+/// The selected sequence of the selected schema, or nil (also while a table, view or extension is selected).
 @property (readonly) NSString *selectedSequenceName;
+
+/// The selected extension, or nil (also while a table, view or sequence is selected).
+@property (readonly) NSString *selectedExtensionName;
 
 /// The selection is listed under TABLES (a table or partitioned table), not VIEWS.
 @property (readonly) BOOL selectionIsTable;

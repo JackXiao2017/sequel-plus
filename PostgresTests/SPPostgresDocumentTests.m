@@ -11,6 +11,7 @@
 #import "../Source/Postgres/SPPostgresQueryController.h"
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
+#import "../Source/Postgres/SPPostgresExtensionController.h"
 
 static const NSUInteger SPPostgresDocumentTestPort = 55418;
 
@@ -21,6 +22,8 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 - (void)_applyHistoryEntry:(NSDictionary *)entry;
 - (IBAction)backForwardInHistory:(id)sender;
 - (void)closeRenameTableSheet:(id)sender;
+- (BOOL)sidebarShouldChangeSelection:(SPPostgresSidebarController *)sidebar;
+- (void)sidebar:(SPPostgresSidebarController *)sidebar dropExtensionNamed:(NSString *)name;
 @end
 
 @interface SPWindowController (SPPostgresDocumentTests)
@@ -37,6 +40,10 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 @property (strong) SPPostgresDocument *document;
 @property (strong) PGPostgresConnection *connection;
 @property (strong) SPPostgresFavorite *favorite;
+/// What the pgkit_ext documents (see -extensionDocumentOnPort:installing:) were asked and shown
+@property (strong) NSMutableArray<NSAlert *> *extensionAlerts;
+@property (strong) NSMutableArray<NSAlert *> *extensionConfirmations;
+@property (assign) BOOL extensionConfirmAnswer;
 @end
 
 @implementation SPPostgresDocumentTests
@@ -1077,6 +1084,238 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	XCTAssertEqualObjects(pending.password, @"pgkit");
 	XCTAssertEqualObjects(pending.sshPassword, @"ssh secret");
 	XCTAssertTrue([self spinUntil:^BOOL{ return [[document windowTitleString] hasSuffix:@"/pgkit_test"]; } timeout:20]);
+}
+
+#pragma mark - Extensions
+
+// MySQL's identifiers (the app's constants aren't exported to the test bundle)
+static NSString * const SPDocumentTestToolbarStructure = @"SwitchToTableStructureToolbarItemIdentifier";
+static NSString * const SPDocumentTestToolbarContent = @"SwitchToTableContentToolbarItemIdentifier";
+static NSString * const SPDocumentTestToolbarRelations = @"SwitchToTableRelationsToolbarItemIdentifier";
+static NSString * const SPDocumentTestToolbarTriggers = @"SwitchToTableTriggersToolbarItemIdentifier";
+static NSString * const SPDocumentTestToolbarInfo = @"SwitchToTableInfoToolbarItemIdentifier";
+static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarItemIdentifier";
+
+/**
+ * A document on database pgkit_ext (prepared by extensionTestConnectionOnPort:, then `sql` run there), in a new
+ * tab of the window, selected; its alerts and confirmations are recorded (extensionAlerts, extensionConfirmations,
+ * answered with extensionConfirmAnswer).
+ */
+- (SPPostgresDocument *)extensionDocumentOnPort:(NSUInteger)port running:(NSArray<NSString *> *)sql
+{
+	PGPostgresConnection *prepare = [SPPostgresTestServers extensionTestConnectionOnPort:port];
+	XCTAssertNotNil(prepare);
+	for (NSString *statement in sql) XCTAssertNotNil([prepare execute:statement], @"%@: %@", statement, prepare.lastError.errorPrimaryMessage);
+	[prepare disconnect];
+	[self addTeardownBlock:^{ [[SPPostgresTestServers extensionTestConnectionOnPort:port] disconnect]; }];
+
+	SPPostgresFavorite *favorite = [self.favorite copy];
+	favorite.name = [NSString stringWithFormat:@"pg%lu extensions", (unsigned long)port];
+	favorite.port = port;
+	favorite.database = @"pgkit_ext";
+	PGPostgresConnection *connection = nil;
+	SPPostgresConnector *connector = [self connectorForFavorite:favorite sshPassword:nil connection:&connection];
+	SPPostgresDocument *document = [[SPPostgresDocument alloc] initWithConnection:connection connector:connector favorite:favorite];
+
+	if (!self.extensionAlerts) self.extensionAlerts = [NSMutableArray array];
+	if (!self.extensionConfirmations) self.extensionConfirmations = [NSMutableArray array];
+	[self.extensionAlerts removeAllObjects];
+	[self.extensionConfirmations removeAllObjects];
+	self.extensionConfirmAnswer = YES;
+	NSMutableArray *alerts = self.extensionAlerts;
+	NSMutableArray *confirmations = self.extensionConfirmations;
+	__weak SPPostgresDocumentTests *weakSelf = self;
+	document.alertPresenter = ^(NSAlert *alert) { [alerts addObject:alert]; };
+	document.confirmationPresenter = ^(NSAlert *alert, void (^completion)(BOOL)) {
+		[confirmations addObject:alert];
+		completion(weakSelf.extensionConfirmAnswer);
+	};
+	[self.controller addTabDocument:document atIndex:[[self tabView] numberOfTabViewItems] select:YES];
+	XCTAssertEqual([self.controller selectedDocument], document);
+	return document;
+}
+
+/// Selects an extension as a click would (asking the tab first).
+- (void)selectExtension:(NSString *)name in:(SPPostgresDocument *)document
+{
+	XCTAssertTrue([document sidebarShouldChangeSelection:document.sidebar]);
+	XCTAssertTrue([document.sidebar selectExtensionNamed:name], @"%@", name);
+}
+
+- (NSToolbarItem *)toolbarItem:(NSString *)identifier of:(SPPostgresDocument *)document
+{
+	for (NSToolbarItem *item in [[document toolbar] items]) {
+		if ([[item itemIdentifier] isEqualToString:identifier]) return item;
+	}
+	XCTFail(@"No toolbar item %@", identifier);
+	return nil;
+}
+
+- (NSMenuItem *)menuItem:(SEL)action key:(NSString *)key
+{
+	NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:NSStringFromSelector(action) action:action keyEquivalent:key];
+	[item setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+	return item;
+}
+
+- (NSInteger)rowTitled:(NSString *)title group:(BOOL)group in:(SPPostgresSidebarController *)sidebar
+{
+	NSOutlineView *outline = [self outlineOf:sidebar];
+	for (NSInteger row = 0; row < outline.numberOfRows; row++) {
+		id item = [outline itemAtRow:row];
+		if ([[item valueForKey:@"title"] isEqualToString:title] && [outline.delegate outlineView:outline isGroupItem:item] == group) return row;
+	}
+	XCTFail(@"No row %@", title);
+	return -1;
+}
+
+- (NSOutlineView *)outlineOf:(SPPostgresSidebarController *)sidebar
+{
+	NSMutableArray *queue = [NSMutableArray arrayWithObject:[sidebar view]];
+	while (queue.count) {
+		NSView *v = queue.firstObject; [queue removeObjectAtIndex:0];
+		if ([v isKindOfClass:[NSOutlineView class]]) return (NSOutlineView *)v;
+		[queue addObjectsFromArray:v.subviews];
+	}
+	return nil;
+}
+
+- (void)testSelectingExtensionShowsExtensionPane
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresDocument *document = [self extensionDocumentOnPort:port.unsignedIntegerValue running:@[@"CREATE EXTENSION citext", @"CREATE TABLE public.sp_t5_items (id int)"]];
+		SPPostgresSidebarController *sidebar = document.sidebar;
+		XCTAssertTrue([[sidebar itemTitlesInSection:@"EXTENSIONS"] containsObject:@"citext"], @"%@", port);
+		XCTAssertTrue([sidebar selectTableNamed:@"sp_t5_items"]);
+		[document viewStructure:nil];
+		NSDictionary *entry = document.history.currentEntry;
+
+		[self selectExtension:@"citext" in:document];
+		XCTAssertEqualObjects(sidebar.selectedExtensionName, @"citext");
+		XCTAssertNil(sidebar.selectedTableName);
+		XCTAssertNil(sidebar.selectedSequenceName);
+		XCTAssertEqualObjects(document.currentPane, SPPostgresPaneExtension);
+		XCTAssertNotNil([[document.extensionController view] window], @"in the window");
+		XCTAssertEqualObjects(document.extensionController.nameField.stringValue, @"citext");
+		XCTAssertEqualObjects(document.history.currentEntry, entry, @"not recorded in History");
+
+		// Only Query and the document's own items
+		for (NSString *identifier in @[SPDocumentTestToolbarStructure, SPDocumentTestToolbarContent, SPDocumentTestToolbarRelations, SPDocumentTestToolbarTriggers, SPDocumentTestToolbarInfo]) {
+			XCTAssertFalse([document validateToolbarItem:[self toolbarItem:identifier of:document]], @"%@", identifier);
+		}
+		XCTAssertTrue([document validateToolbarItem:[self toolbarItem:SPDocumentTestToolbarQuery of:document]]);
+		for (NSValue *selector in @[[NSValue valueWithPointer:@selector(viewContent:)], [NSValue valueWithPointer:@selector(viewRelations:)],
+									[NSValue valueWithPointer:@selector(viewTriggers:)], [NSValue valueWithPointer:@selector(viewStatus:)]]) {
+			NSMenuItem *item = [self menuItem:(SEL)[selector pointerValue] key:@""];
+			XCTAssertFalse([self.controller validateMenuItem:item], @"%@", item.title);
+		}
+		XCTAssertTrue([self.controller validateMenuItem:[self menuItem:@selector(viewQuery:) key:@"6"]]);
+
+		// ⌘1 goes back to the Extension pane from Query, as with sequences
+		[document viewQuery:nil];
+		XCTAssertEqualObjects(document.currentPane, SPPostgresPaneQuery);
+		NSMenuItem *structureItem = [self menuItem:@selector(viewStructure:) key:@"1"];
+		XCTAssertTrue([self.controller validateMenuItem:structureItem]);
+		[self.controller performSelector:@selector(viewStructure:) withObject:structureItem];
+		XCTAssertEqualObjects(document.currentPane, SPPostgresPaneExtension);
+		XCTAssertEqualObjects(document.history.currentEntry, entry, @"not recorded in History");
+
+		// Back to the table: the pane before the extension (Structure)
+		XCTAssertTrue([document sidebarShouldChangeSelection:sidebar]);
+		XCTAssertTrue([sidebar selectTableNamed:@"sp_t5_items"]);
+		XCTAssertNil(sidebar.selectedExtensionName);
+		XCTAssertEqualObjects(document.currentPane, SPPostgresPaneStructure);
+		XCTAssertEqual(self.extensionAlerts.count, 0u, @"%@", self.extensionAlerts.firstObject.informativeText);
+	}
+}
+
+- (void)testDropExtensionConfirmsAndDrops
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresDocument *document = [self extensionDocumentOnPort:port.unsignedIntegerValue running:@[@"CREATE EXTENSION citext"]];
+		SPPostgresSidebarController *sidebar = document.sidebar;
+		[self selectExtension:@"citext" in:document];
+
+		// From the sidebar's menu, answered Cancel: nothing happens
+		self.extensionConfirmAnswer = NO;
+		NSMenu *menu = sidebar.extensionMenu;
+		NSMenuItem *drop = [menu itemWithTitle:@"Drop Extension…"];
+		XCTAssertNotNil(drop);
+		[menu performActionForItemAtIndex:[menu indexOfItem:drop]];
+		XCTAssertEqual(self.extensionConfirmations.count, 1u, @"%@", port);
+		NSAlert *confirmation = self.extensionConfirmations.lastObject;
+		XCTAssertEqualObjects(confirmation.messageText, @"Drop extension “citext”?");
+		XCTAssertEqualObjects([confirmation.buttons valueForKey:@"title"], (@[@"Drop", @"Cancel"]));
+		XCTAssertTrue(confirmation.buttons.firstObject.hasDestructiveAction);
+		XCTAssertTrue([[sidebar itemTitlesInSection:@"EXTENSIONS"] containsObject:@"citext"]);
+		XCTAssertEqualObjects(sidebar.selectedExtensionName, @"citext");
+
+		// From the pane's button, answered Drop: dropped, unlisted, nothing selected
+		self.extensionConfirmAnswer = YES;
+		[document.extensionController.dropButton performClick:nil];
+		XCTAssertEqual(self.extensionConfirmations.count, 2u);
+		XCTAssertEqualObjects(self.extensionConfirmations.lastObject.messageText, @"Drop extension “citext”?");
+		XCTAssertEqual(self.extensionAlerts.count, 0u, @"%@", self.extensionAlerts.firstObject.informativeText);
+		XCTAssertFalse([[sidebar itemTitlesInSection:@"EXTENSIONS"] containsObject:@"citext"]);
+		XCTAssertNil(sidebar.selectedExtensionName);
+		XCTAssertNil(sidebar.selectedTableName);
+		XCTAssertNil(sidebar.selectedSequenceName);
+		XCTAssertNotEqualObjects(document.currentPane, SPPostgresPaneExtension);
+		XCTAssertEqual(document.connection.transactionStatus, PGPostgresTransactionIdle);
+	}
+}
+
+- (void)testDropWithDependentsShowsList
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresDocument *document = [self extensionDocumentOnPort:port.unsignedIntegerValue running:@[@"CREATE EXTENSION hstore", @"CREATE TABLE public.sp_t5_items (tags hstore)"]];
+		SPPostgresSidebarController *sidebar = document.sidebar;
+		[self selectExtension:@"hstore" in:document];
+
+		[document sidebar:sidebar dropExtensionNamed:@"hstore"];
+		XCTAssertEqual(self.extensionConfirmations.count, 1u, @"%@", port);
+		XCTAssertEqual(self.extensionAlerts.count, 1u);
+		NSAlert *alert = self.extensionAlerts.lastObject;
+		XCTAssertEqualObjects(alert.messageText, @"\"hstore\" can't be dropped because other objects depend on it.");
+		XCTAssertTrue([alert.informativeText containsString:@"sp_t5_items"], @"%@", alert.informativeText);
+		XCTAssertTrue([[sidebar itemTitlesInSection:@"EXTENSIONS"] containsObject:@"hstore"]);
+		XCTAssertEqualObjects(sidebar.selectedExtensionName, @"hstore");
+		XCTAssertEqualObjects(document.currentPane, SPPostgresPaneExtension);
+	}
+}
+
+- (void)testExtensionMenuItems
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresDocument *document = [self extensionDocumentOnPort:port.unsignedIntegerValue running:@[@"CREATE EXTENSION citext", @"CREATE TABLE public.sp_t5_items (id int)"]];
+		SPPostgresSidebarController *sidebar = document.sidebar;
+		[self selectExtension:@"citext" in:document];
+		NSMenu *menu = sidebar.extensionMenu;
+		XCTAssertEqualObjects([menu.itemArray valueForKey:@"title"], (@[@"Install Extension…", @"Drop Extension…"]), @"%@", port);
+
+		// On an extension: both, enabled
+		XCTAssertEqual([sidebar menuForRow:[self rowTitled:@"citext" group:NO in:sidebar]], menu);
+		for (NSMenuItem *item in menu.itemArray) {
+			XCTAssertFalse(item.hidden, @"%@", item.title);
+			XCTAssertTrue([(id<NSMenuItemValidation>)item.target validateMenuItem:item], @"%@", item.title);
+		}
+
+		// On the EXTENSIONS header (and empty space below it): Install only
+		XCTAssertEqual([sidebar menuForRow:[self rowTitled:@"EXTENSIONS" group:YES in:sidebar]], menu);
+		XCTAssertFalse([menu itemWithTitle:@"Install Extension…"].hidden);
+		XCTAssertTrue([menu itemWithTitle:@"Drop Extension…"].hidden);
+		XCTAssertEqual([sidebar menuForRow:-1], menu);
+		XCTAssertTrue([menu itemWithTitle:@"Drop Extension…"].hidden);
+
+		// On a table: the table menu, unchanged
+		XCTAssertEqual([sidebar menuForRow:[self rowTitled:@"sp_t5_items" group:NO in:sidebar]], sidebar.tableMenu);
+		XCTAssertEqualObjects([sidebar.tableMenu.itemArray valueForKey:@"title"], (@[@"Duplicate Table…", @"Rename Table…"]));
+
+		// Drop validates on an extension only
+		NSMenuItem *drop = [menu itemWithTitle:@"Drop Extension…"];
+		XCTAssertTrue([sidebar selectTableNamed:@"sp_t5_items"]);
+		XCTAssertFalse([(id<NSMenuItemValidation>)drop.target validateMenuItem:drop]);
+	}
 }
 
 @end

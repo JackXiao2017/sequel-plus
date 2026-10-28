@@ -72,6 +72,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 - (void)_reloadExtensions;
 - (void)_reloadOutline;
 - (void)_updateSelectionFromOutline;
+- (BOOL)_selectItemNamed:(NSString *)name inSection:(NSString *)sectionTitle;
 - (BOOL)_delegateAllowsSelectionChange;
 - (void)_rememberError:(NSError *)error;
 - (void)_beginReload;
@@ -93,6 +94,8 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	NSMenu *tableMenu;
 	NSMenu *sequenceMenu;
 	NSMenuItem *deleteSequenceItem; // not retained; sequenceMenu's
+	NSMenu *extensionMenu;
+	NSMenuItem *dropExtensionItem; // not retained; extensionMenu's
 
 	BOOL reloading;
 
@@ -108,6 +111,8 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 @synthesize selectedTableName;
 @synthesize selectedSequenceName;
 @synthesize sequenceMenu;
+@synthesize selectedExtensionName;
+@synthesize extensionMenu;
 @synthesize lastError;
 @synthesize delegate;
 @synthesize tableMenu;
@@ -139,9 +144,11 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[outlineView release];
 	[tableMenu release];
 	[sequenceMenu release];
+	[extensionMenu release];
 	[selectedSchema release];
 	[selectedTableName release];
 	[selectedSequenceName release];
+	[selectedExtensionName release];
 	[lastError release];
 
 	[super dealloc];
@@ -156,6 +163,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[schemaPopup setTarget:nil];
 	for (NSMenuItem *item in [tableMenu itemArray]) [item setTarget:nil];
 	for (NSMenuItem *item in [sequenceMenu itemArray]) [item setTarget:nil];
+	for (NSMenuItem *item in [extensionMenu itemArray]) [item setTarget:nil];
 }
 
 #pragma mark - View
@@ -247,6 +255,15 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[deleteSequenceItem setToolTip:NSLocalizedString(@"Delete the selected sequence", @"PostgreSQL sidebar: delete sequence menu item tooltip")];
 	[deleteSequenceItem setTarget:self];
 
+	// On an extension, the EXTENSIONS header or empty space below it (see -menuForRow:)
+	extensionMenu = [[NSMenu alloc] initWithTitle:@""];
+	NSMenuItem *installExtension = [extensionMenu addItemWithTitle:NSLocalizedString(@"Install Extension…", @"PostgreSQL sidebar: install extension menu item") action:@selector(installExtension:) keyEquivalent:@""];
+	[installExtension setToolTip:NSLocalizedString(@"Install an extension the server offers into this database", @"PostgreSQL sidebar: install extension menu item tooltip")];
+	[installExtension setTarget:self];
+	dropExtensionItem = [extensionMenu addItemWithTitle:NSLocalizedString(@"Drop Extension…", @"PostgreSQL sidebar: drop extension menu item") action:@selector(dropExtension:) keyEquivalent:@""];
+	[dropExtensionItem setToolTip:NSLocalizedString(@"Drop the selected extension", @"PostgreSQL sidebar: drop extension menu item tooltip")];
+	[dropExtensionItem setTarget:self];
+
 	[container addSubview:scrollView];
 }
 
@@ -285,6 +302,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	NSString *previousSchema = [[selectedSchema copy] autorelease];
 	NSString *table = [[selectedTableName copy] autorelease];
 	NSString *sequence = [[selectedSequenceName copy] autorelease];
+	NSString *extension = [[selectedExtensionName copy] autorelease];
 	NSString *schema = previousSchema;
 
 	[self _beginReload];
@@ -307,12 +325,15 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	// The same schema (not the default one standing in for a schema that is gone): its table or sequence again
 	if (table && [previousSchema isEqualToString:selectedSchema]) [self selectTableNamed:table];
 	if (sequence && [previousSchema isEqualToString:selectedSchema]) [self selectSequenceNamed:sequence];
+	// An extension is the database's, whatever the schema
+	if (extension) [self selectExtensionNamed:extension];
 	holdingSelectionChanges = NO;
 
 	BOOL sameSchema = (previousSchema == selectedSchema) || [previousSchema isEqualToString:selectedSchema];
 	BOOL sameTable = (table == selectedTableName) || [table isEqualToString:selectedTableName];
 	BOOL sameSequence = (sequence == selectedSequenceName) || [sequence isEqualToString:selectedSequenceName];
-	if (!sameSchema || !sameTable || !sameSequence) [delegate sidebarSelectionDidChange:self];
+	BOOL sameExtension = (extension == selectedExtensionName) || [extension isEqualToString:selectedExtensionName];
+	if (!sameSchema || !sameTable || !sameSequence || !sameExtension) [delegate sidebarSelectionDidChange:self];
 
 	[self _endReload];
 }
@@ -356,6 +377,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 		}
 		[selectedTableName release], selectedTableName = nil;
 		[selectedSequenceName release], selectedSequenceName = nil;
+		[selectedExtensionName release], selectedExtensionName = nil;
 
 		SPPostgresSidebarItem *tables = [self _sectionNamed:SPPostgresSidebarTables];
 		SPPostgresSidebarItem *views = [self _sectionNamed:SPPostgresSidebarViews];
@@ -384,6 +406,8 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 		[self _reloadSchemaPopup];
 		// An enclosing catalog reload may have reloaded the extensions: show them, leaving the table selection
 		[outlineView reloadItem:[self _sectionNamed:SPPostgresSidebarExtensions] reloadChildren:YES];
+		// Its rows are new: a selected extension still listed stays selected (else the selection follows the outline)
+		if (selectedExtensionName && ![self selectExtensionNamed:selectedExtensionName]) [self _updateSelectionFromOutline];
 	}
 
 	[self _endReload];
@@ -394,6 +418,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	NSString *previousSchema = [[selectedSchema copy] autorelease];
 	NSString *previousTable = [[selectedTableName copy] autorelease];
 	NSString *previousSequence = [[selectedSequenceName copy] autorelease];
+	NSString *previousExtension = [[selectedExtensionName copy] autorelease];
 
 	BOOL wasHolding = holdingSelectionChanges;
 	holdingSelectionChanges = YES;
@@ -405,7 +430,8 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	BOOL sameSchema = (previousSchema == selectedSchema) || [previousSchema isEqualToString:selectedSchema];
 	BOOL sameTable = (previousTable == selectedTableName) || [previousTable isEqualToString:selectedTableName];
 	BOOL sameSequence = (previousSequence == selectedSequenceName) || [previousSequence isEqualToString:selectedSequenceName];
-	if (!sameSchema || !sameTable || !sameSequence) [delegate sidebarSelectionDidChange:self];
+	BOOL sameExtension = (previousExtension == selectedExtensionName) || [previousExtension isEqualToString:selectedExtensionName];
+	if (!sameSchema || !sameTable || !sameSequence || !sameExtension) [delegate sidebarSelectionDidChange:self];
 }
 
 - (void)_reloadExtensions
@@ -522,8 +548,19 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 - (BOOL)selectSequenceNamed:(NSString *)name
 {
 	if (!name) return [self selectTableNamed:nil];
+	return [self _selectItemNamed:name inSection:SPPostgresSidebarSequences];
+}
 
-	for (SPPostgresSidebarItem *item in [[self _sectionNamed:SPPostgresSidebarSequences] children]) {
+- (BOOL)selectExtensionNamed:(NSString *)name
+{
+	if (!name) return [self selectTableNamed:nil];
+	return [self _selectItemNamed:name inSection:SPPostgresSidebarExtensions];
+}
+
+/// Selects the row of a section's item; NO if it isn't listed.
+- (BOOL)_selectItemNamed:(NSString *)name inSection:(NSString *)sectionTitle
+{
+	for (SPPostgresSidebarItem *item in [[self _sectionNamed:sectionTitle] children]) {
 		if (![[item title] isEqualToString:name]) continue;
 
 		NSInteger row = [outlineView rowForItem:item];
@@ -541,15 +578,19 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	SPPostgresSidebarItem *item = [outlineView selectedRow] >= 0 ? [outlineView itemAtRow:[outlineView selectedRow]] : nil;
 	NSString *name = ([item kind] == SPPostgresSidebarTable || [item kind] == SPPostgresSidebarView) ? [item title] : nil;
 	NSString *sequence = ([item kind] == SPPostgresSidebarSequence) ? [item title] : nil;
+	NSString *extension = ([item kind] == SPPostgresSidebarExtension) ? [item title] : nil;
 
 	BOOL sameTable = (name == selectedTableName || [name isEqualToString:selectedTableName]);
 	BOOL sameSequence = (sequence == selectedSequenceName || [sequence isEqualToString:selectedSequenceName]);
-	if (sameTable && sameSequence) return;
+	BOOL sameExtension = (extension == selectedExtensionName || [extension isEqualToString:selectedExtensionName]);
+	if (sameTable && sameSequence && sameExtension) return;
 
 	[selectedTableName release];
 	selectedTableName = [name copy];
 	[selectedSequenceName release];
 	selectedSequenceName = [sequence copy];
+	[selectedExtensionName release];
+	selectedExtensionName = [extension copy];
 
 	if (!holdingSelectionChanges) [delegate sidebarSelectionDidChange:self];
 }
@@ -591,12 +632,23 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	SPPostgresSidebarItem *item = (row >= 0 && row < [outlineView numberOfRows]) ? [outlineView itemAtRow:row] : nil;
 	BOOL onSequence = ([item kind] == SPPostgresSidebarSequence);
 	BOOL onSequencesHeader = ([item kind] == SPPostgresSidebarSection && [[self _sectionNamed:SPPostgresSidebarSequences] isEqual:item]);
+	BOOL onExtension = ([item kind] == SPPostgresSidebarExtension);
+	BOOL onExtensionsHeader = ([item kind] == SPPostgresSidebarSection && [[self _sectionNamed:SPPostgresSidebarExtensions] isEqual:item]);
 
-	if (item && !onSequence && !onSequencesHeader) return tableMenu;
+	if (onSequence || onSequencesHeader) {
+		// Delete acts on a sequence only
+		[deleteSequenceItem setHidden:!onSequence];
+		return sequenceMenu;
+	}
 
-	// Delete acts on a sequence only
-	[deleteSequenceItem setHidden:!onSequence];
-	return sequenceMenu;
+	// Empty space is below EXTENSIONS, the last section
+	if (!item || onExtension || onExtensionsHeader) {
+		// Drop acts on an extension only
+		[dropExtensionItem setHidden:!onExtension];
+		return extensionMenu;
+	}
+
+	return tableMenu;
 }
 
 - (BOOL)validateMenuItem:(NSMenuItem *)item
@@ -606,6 +658,12 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	}
 	if ([item action] == @selector(deleteSequence:)) {
 		return [[self _menuTargetItem] kind] == SPPostgresSidebarSequence && [delegate respondsToSelector:@selector(sidebar:deleteSequenceNamed:)];
+	}
+	if ([item action] == @selector(installExtension:)) {
+		return [delegate respondsToSelector:@selector(sidebarInstallExtension:)];
+	}
+	if ([item action] == @selector(dropExtension:)) {
+		return [[self _menuTargetItem] kind] == SPPostgresSidebarExtension && [delegate respondsToSelector:@selector(sidebar:dropExtensionNamed:)];
 	}
 	if ([item action] == @selector(duplicateTable:)) {
 		return [[self _menuTargetItem] kind] == SPPostgresSidebarTable && [delegate respondsToSelector:@selector(sidebar:duplicateTableNamed:)];
@@ -634,6 +692,18 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	SPPostgresSidebarItem *item = [self _menuTargetItem];
 	if ([item kind] != SPPostgresSidebarSequence) return;
 	if ([delegate respondsToSelector:@selector(sidebar:deleteSequenceNamed:)]) [delegate sidebar:self deleteSequenceNamed:[item title]];
+}
+
+- (void)installExtension:(id)sender
+{
+	if ([delegate respondsToSelector:@selector(sidebarInstallExtension:)]) [delegate sidebarInstallExtension:self];
+}
+
+- (void)dropExtension:(id)sender
+{
+	SPPostgresSidebarItem *item = [self _menuTargetItem];
+	if ([item kind] != SPPostgresSidebarExtension) return;
+	if ([delegate respondsToSelector:@selector(sidebar:dropExtensionNamed:)]) [delegate sidebar:self dropExtensionNamed:[item title]];
 }
 
 - (void)duplicateTable:(id)sender
@@ -790,7 +860,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 @synthesize menuSource;
 
-/// The menu for the row under the pointer (a sequence's, or a table's), as the menu source picks it.
+/// The menu for the row under the pointer (a sequence's, an extension's, or a table's), as the menu source picks it.
 - (NSMenu *)menuForEvent:(NSEvent *)event
 {
 	if (menuSource) {
