@@ -792,7 +792,7 @@ static NSString * const SPUsersTestToolbarUsers = @"SwitchToUserManagerToolbarIt
 
 	__block NSUInteger provided = 0;
 	void (^provider)(NSString *, void (^)(PGPostgresConnection *, NSError *)) = [self providerOn:@55418];
-	self.document.usersConnectionProvider = ^(NSString *database, void (^completion)(PGPostgresConnection *, NSError *)) {
+	self.document.connectionProvider = ^(NSString *database, void (^completion)(PGPostgresConnection *, NSError *)) {
 		provided++;
 		XCTAssertEqualObjects(database, @"pgkit_test");
 		provider(database, completion);

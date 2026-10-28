@@ -16,6 +16,14 @@
 @class SPPostgresExtensionController;
 @class SPPostgresUsersController;
 @class SPWindowController;
+@class SPPostgresExportController;
+
+/**
+ * Hands out a connection of its own to database: calls completion exactly once, on the main thread (synchronously or
+ * later), with a connected connection or nil and an error. Used by the Users sheet, Export and Import, which never use
+ * the tab's own connection.
+ */
+typedef void (^SPPostgresConnectionProvider)(NSString *database, void (^completion)(PGPostgresConnection *connection, NSError *error));
 
 /// The panes of a PostgreSQL tab's right side (-showPane:, -currentPane, and the tab's history entries).
 extern NSString * const SPPostgresPaneStructure __attribute__((visibility("default"))); // @"structure"
@@ -113,18 +121,34 @@ __attribute__((visibility("default")))
 
 /**
  * The Users sheet (SPPostgresUsersController), as MySQL's Users toolbar item and Database > User Accounts…: the
- * cluster's roles, edited on connections of the sheet's own (see usersConnectionProvider), never this tab's.
+ * cluster's roles, edited on connections of the sheet's own (see connectionProvider), never this tab's.
  * Enabled while connected, not processing, and no sheet is attached.
  */
 - (IBAction)showUserManager:(id)sender;
 
 /**
- * Where the Users sheet gets its connections: called with a database name, it calls completion once with a
- * connected connection of its own (or nil and an error). nil (the default) opens a new SPPostgresConnector for
- * the favorite with that database, with the session's passwords and this window (as -switchToDatabase: does);
- * the sheet keeps the connectors and disconnects them when it ends. Replaceable, e.g. by tests.
+ * Where the Users sheet, Export and Import get their connections (see SPPostgresConnectionProvider). nil (the default)
+ * opens a new SPPostgresConnector for the favorite with that database, with the session's passwords and this window
+ * (as -switchToDatabase: does), with the console logger attached; the Users sheet keeps its connectors and
+ * disconnects them when it ends, and a background job's connector is disconnected when the job ends (see
+ * SPPostgresBackgroundJob). Replaceable, e.g. by tests.
  */
-@property (copy) void (^usersConnectionProvider)(NSString *database, void (^completion)(PGPostgresConnection *connection, NSError *error));
+@property (copy) SPPostgresConnectionProvider connectionProvider;
+
+/// The provider jobs use: connectionProvider, or the default one described there.
+- (SPPostgresConnectionProvider)effectiveConnectionProvider;
+
+/**
+ * File ▸ Export…: the Export sheet (SPPostgresExportController). Enabled while connected, not processing and no sheet
+ * is attached.
+ */
+- (IBAction)export:(id)sender;
+
+/// The Export sheet's controller while it is shown or its export runs, else nil.
+@property (readonly) SPPostgresExportController *exportController;
+
+/// The database this tab is connected to.
+@property (readonly) NSString *currentDatabase;
 
 /// The Users sheet's controller while it is shown (or connecting), else nil.
 @property (readonly) SPPostgresUsersController *usersController;

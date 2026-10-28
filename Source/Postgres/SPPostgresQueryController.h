@@ -58,6 +58,12 @@ __attribute__((visibility("default")))
 
 @property (readonly) NSTextView *editor;
 @property (readonly) NSTableView *resultsView;
+/// The column names of the row set the grid shows, or nil when it shows none.
+- (NSArray *)lastResultColumnNames;
+
+/// The rows the grid shows, each an array of NSString (PostgreSQL's text format) or NSNull, or nil when it shows none.
+- (NSArray *)lastResultRows;
+
 /// The status line: @"" before the first run.
 @property (readonly, copy) NSString *statusText;
 

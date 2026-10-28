@@ -49,11 +49,34 @@ static char SPPostgresConsoleLoggerKey;
 	return [logger isKindOfClass:[SPPostgresConsoleLogger class]] ? logger : nil;
 }
 
+/**
+ * Adds a message to the console on the main thread: at once when called there, otherwise (a background job's
+ * connection) from a later turn of the main run loop, in the order the calls were made.
+ */
+- (void)_showInConsole:(NSString *)message isError:(BOOL)isError
+{
+	if ([NSThread isMainThread]) {
+		SPQueryController *console = [SPQueryController sharedQueryController];
+		if (isError) [console showErrorInConsole:message connection:connectionName database:database];
+		else [console showMessageInConsole:message connection:connectionName database:database];
+		return;
+	}
+
+	NSString *text = [[message copy] autorelease];
+	NSString *theConnectionName = [[connectionName copy] autorelease];
+	NSString *theDatabase = [[database copy] autorelease];
+	dispatch_async(dispatch_get_main_queue(), ^{
+		SPQueryController *console = [SPQueryController sharedQueryController];
+		if (isError) [console showErrorInConsole:text connection:theConnectionName database:theDatabase];
+		else [console showMessageInConsole:text connection:theConnectionName database:theDatabase];
+	});
+}
+
 - (void)logError:(NSString *)error
 {
 	NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
 	if ([error length] && [prefs boolForKey:SPConsoleEnableLogging] && [prefs boolForKey:SPConsoleEnableErrorLogging]) {
-		[[SPQueryController sharedQueryController] showErrorInConsole:error connection:connectionName database:database];
+		[self _showInConsole:error isError:YES];
 	}
 }
 
@@ -66,12 +89,12 @@ static char SPPostgresConsoleLoggerKey;
 	else if ([query isKindOfClass:[PGPostgresStatement class]]) text = [(PGPostgresStatement *)query statement];
 
 	// The same preferences as MySQL's logging: the user's statements from the Query view as custom queries,
-	// everything else as interface queries. SPQueryController's message list is lock-protected, so this is
-	// safe from any thread.
+	// everything else as interface queries. The console is updated on the main thread (a background job's
+	// connection calls this from its own thread).
 	NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
 	NSString *kindKey = loggingCustomQueries ? SPConsoleEnableCustomQueryLogging : SPConsoleEnableInterfaceLogging;
 	if ([text length] && [prefs boolForKey:SPConsoleEnableLogging] && [prefs boolForKey:kindKey]) {
-		[[SPQueryController sharedQueryController] showMessageInConsole:text connection:connectionName database:database];
+		[self _showInConsole:text isError:NO];
 	}
 
 	if ([nextDelegate respondsToSelector:@selector(connection:willExecute:withValues:)]) [nextDelegate connection:connection willExecute:query withValues:values];

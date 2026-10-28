@@ -636,6 +636,30 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	return [result textValueAtRow:(unsigned long long)rowIndex column:(NSUInteger)column];
 }
 
+- (NSArray *)lastResultColumnNames
+{
+	if (!result) return nil;
+	NSMutableArray *names = [NSMutableArray array];
+	for (id field in [result fields]) [names addObject:[field isKindOfClass:[NSString class]] ? field : @""];
+	return names;
+}
+
+- (NSArray *)lastResultRows
+{
+	if (!result) return nil;
+	NSUInteger columnCount = [[result fields] count];
+	NSMutableArray *rows = [NSMutableArray arrayWithCapacity:resultRowCount];
+	for (NSUInteger row = 0; row < resultRowCount; row++) {
+		NSMutableArray *values = [NSMutableArray arrayWithCapacity:columnCount];
+		for (NSUInteger column = 0; column < columnCount; column++) {
+			id value = [result textValueAtRow:row column:column];
+			[values addObject:[value isKindOfClass:[NSString class]] ? value : [NSNull null]];
+		}
+		[rows addObject:values];
+	}
+	return rows;
+}
+
 #pragma mark - Table view data source
 
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)theTableView
