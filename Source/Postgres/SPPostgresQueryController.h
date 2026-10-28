@@ -64,6 +64,9 @@ __attribute__((visibility("default")))
 /// The rows the grid shows, each an array of NSString (PostgreSQL's text format) or NSNull, or nil when it shows none.
 - (NSArray *)lastResultRows;
 
+/// How many rows the grid shows (0 when it shows none), without copying them.
+- (NSUInteger)lastResultRowCount;
+
 /// The status line: @"" before the first run.
 @property (readonly, copy) NSString *statusText;
 

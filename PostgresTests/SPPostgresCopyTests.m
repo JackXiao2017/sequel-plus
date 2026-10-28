@@ -232,4 +232,59 @@ static NSString * const SPCopyCSVBytes = @"id,a,b\n1,,plain\n2,tab\there,\"new\n
 	}
 }
 
+#pragma mark - Cancel token
+
+/// A cancel token taken from a connection interrupts the statement it runs on another thread (a lock wait), can be
+/// used from the main thread, and does nothing once invalidated.
+- (void)testCancelTokenInterruptsStatementOnAnotherThread
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *holder = [self connectOn:port];
+		PGPostgresConnection *worker = [self connectOn:port];
+		[self run:@"DROP TABLE IF EXISTS public.cancel_token_t" on:holder];
+		[self run:@"CREATE TABLE public.cancel_token_t (i int)" on:holder];
+		[self run:@"BEGIN" on:holder];
+		[self run:@"LOCK TABLE public.cancel_token_t IN ACCESS EXCLUSIVE MODE" on:holder];
+
+		// Taken on the thread that uses the connection (here, before handing it to the background)
+		PGPostgresCancelToken *token = [worker newCancelToken];
+		XCTAssertNotNil(token);
+
+		__block BOOL done = NO;
+		__block BOOL succeeded = YES;
+		__block NSString *state = nil;
+		dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+			succeeded = [worker execute:@"SELECT count(*) FROM public.cancel_token_t"] != nil;
+			state = worker.lastError.errorStateCode;
+			dispatch_async(dispatch_get_main_queue(), ^{ done = YES; });
+		});
+
+		// Wait until the worker waits on the lock, then cancel from the main thread
+		NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:20];
+		while (![[self value:@"SELECT count(*)::text FROM pg_catalog.pg_locks WHERE NOT granted AND relation = 'public.cancel_token_t'::regclass" on:holder] isEqualToString:@"1"]
+			   && [deadline timeIntervalSinceNow] > 0) {
+			[[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+		}
+		XCTAssertFalse(done, @"the statement waits on the lock");
+		NSDate *cancelled = [NSDate date];
+		XCTAssertTrue([token cancel]);
+		deadline = [NSDate dateWithTimeIntervalSinceNow:10];
+		while (!done && [deadline timeIntervalSinceNow] > 0) {
+			[[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+		}
+		XCTAssertTrue(done, @"the statement ended");
+		XCTAssertLessThan(-[cancelled timeIntervalSinceNow], 5.0);
+		XCTAssertFalse(succeeded);
+		XCTAssertEqualObjects(state, @"57014", @"query_canceled");
+
+		// Once invalidated it does nothing; the connection stays usable
+		[token invalidate];
+		XCTAssertFalse([token cancel]);
+		[token invalidate];
+		[self assertUsable:worker];
+		[self run:@"ROLLBACK" on:holder];
+		[self run:@"DROP TABLE public.cancel_token_t" on:holder];
+	}
+}
+
 @end

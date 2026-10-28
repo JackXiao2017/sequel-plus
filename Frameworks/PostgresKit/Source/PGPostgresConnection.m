@@ -51,6 +51,58 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 
 @end
 
+@implementation PGPostgresCancelToken
+
+- (id)initWithCancel:(PGcancel *)cancel
+{
+	if ((self = [super init])) {
+		_cancel = cancel;
+		pthread_mutex_init(&_lock, NULL);
+	}
+	
+	return self;
+}
+
+- (BOOL)cancel
+{
+	BOOL sent = NO;
+	
+	// The lock keeps -invalidate from freeing the handle while a request is being sent
+	pthread_mutex_lock(&_lock);
+	
+	if (_cancel) {
+		char errorBuf[256];
+		
+		sent = PQcancel((PGcancel *)_cancel, errorBuf, (int)sizeof(errorBuf)) == 1;
+	}
+	
+	pthread_mutex_unlock(&_lock);
+	
+	return sent;
+}
+
+- (void)invalidate
+{
+	pthread_mutex_lock(&_lock);
+	
+	if (_cancel) PQfreeCancel((PGcancel *)_cancel);
+	
+	_cancel = NULL;
+	
+	pthread_mutex_unlock(&_lock);
+}
+
+- (void)dealloc
+{
+	[self invalidate];
+	
+	pthread_mutex_destroy(&_lock);
+	
+	[super dealloc];
+}
+
+@end
+
 @implementation PGPostgresConnection
 
 @synthesize port = _port;
@@ -400,6 +452,17 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 	_lastQueryWasCancelled = YES;
 	
 	return YES;
+}
+
+- (PGPostgresCancelToken *)newCancelToken
+{
+	if (![self isConnected]) return nil;
+	
+	PGcancel *cancel = PQgetCancel(_connection);
+	
+	if (!cancel) return nil;
+	
+	return [[PGPostgresCancelToken alloc] initWithCancel:cancel];
 }
 
 - (NSString *)encryptedPassword:(NSString *)password forRole:(NSString *)role

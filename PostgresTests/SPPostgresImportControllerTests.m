@@ -472,6 +472,69 @@
 	}];
 }
 
+#pragma mark - Final fix wave
+
+/// The user's Query-view transaction holds an ACCESS EXCLUSIVE lock on a table the dump writes to: Cancel interrupts the
+/// statement waiting on it, so the import ends cancelled within seconds. In one transaction nothing stays; per
+/// statement, what committed before stays and nothing is asked.
+- (void)testCancelInterruptsImportWaitingOnALock
+{
+	[self onEachPortWithSetup:^(PGPostgresConnection *connection) {
+		[self run:@"CREATE TABLE public.locked (i int)" on:connection];
+	} body:^(NSNumber *port) {
+		PGPostgresConnection *mine = self.document.connection;
+		[self run:@"BEGIN" on:mine];
+		[self run:@"LOCK TABLE public.locked IN ACCESS EXCLUSIVE MODE" on:mine];
+		PGPostgresConnection *watcher = [self destinationOn:port];
+		NSString *path = [self write:@"CREATE TABLE public.before_lock (i int);\nINSERT INTO public.locked VALUES (1);\nCREATE TABLE public.after_lock (i int);\n" named:@"lock.sql"];
+
+		for (NSNumber *single in @[@YES, @NO]) {
+			SPPostgresImportController *controller = [self newController];
+			__block NSUInteger asked = 0;
+			controller.errorChoiceProvider = ^SPPostgresImportErrorChoice(NSError *error) {
+				asked++;
+				return SPPostgresImportIgnore;
+			};
+			controller.singleTransactionCheckbox.state = single.boolValue ? NSControlStateValueOn : NSControlStateValueOff;
+			[controller importPath:path format:@"sql"];
+			BOOL waiting = [self spinUntil:^BOOL{
+				return [[self value:@"SELECT count(*)::text FROM pg_catalog.pg_locks WHERE NOT granted AND relation = 'public.locked'::regclass" on:watcher] isEqualToString:@"1"];
+			} timeout:20];
+			XCTAssertTrue(waiting, @"the import waits on the lock");
+			NSDate *cancelled = [NSDate date];
+			[controller.progressSheet cancel:nil];
+			XCTAssertTrue([self waitForEnd]);
+			XCTAssertLessThan(-[cancelled timeIntervalSinceNow], 5.0, @"Cancel doesn't wait for the lock");
+			XCTAssertEqualObjects(controller.lastErrorMessage, @"The import was cancelled.");
+			XCTAssertEqual(asked, 0u, @"a cancel isn't an error to ask about");
+			XCTAssertEqual(self.alerts.count, 0u);
+			XCTAssertEqual([self table:@"public.before_lock" existsOn:watcher], !single.boolValue, @"single transaction %@", single);
+			XCTAssertFalse([self table:@"public.after_lock" existsOn:watcher]);
+			[self spinUntil:^BOOL{ return self.document.importController == nil && [self window].attachedSheet == nil; } timeout:10];
+		}
+		XCTAssertEqual(mine.transactionStatus, PGPostgresTransactionInTransaction, @"the user's transaction is untouched");
+		[self run:@"ROLLBACK" on:mine];
+		XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.locked" on:watcher], @"0");
+	}];
+}
+
+/// A SET naming a parameter this server doesn't know is skipped, and the import's completion says so.
+- (void)testUnknownSettingNamedOnCompletion
+{
+	[self onEachPortWithSetup:nil body:^(NSNumber *port) {
+		NSString *path = [self write:@"SET sp_no_such_setting = 0;\nCREATE TABLE public.after_setting (i int);\n" named:@"setting.sql"];
+		SPPostgresImportController *controller = [self newController];
+		[controller importPath:path format:@"sql"];
+		XCTAssertTrue([self waitForEnd]);
+		XCTAssertNil(controller.lastErrorMessage);
+		XCTAssertEqualObjects(controller.completionNote, @"1 setting this server doesn't know was skipped: sp_no_such_setting.");
+		XCTAssertEqual(self.alerts.count, 1u);
+		XCTAssertEqualObjects(self.alerts.firstObject.messageText, @"The import finished");
+		XCTAssertEqualObjects(self.alerts.firstObject.informativeText, controller.completionNote);
+		XCTAssertTrue([self table:@"public.after_setting" existsOn:[self destinationOn:port]]);
+	}];
+}
+
 #pragma mark - Menu
 
 - (void)testImportMenuValidation

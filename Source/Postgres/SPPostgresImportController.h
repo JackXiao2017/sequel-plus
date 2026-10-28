@@ -18,10 +18,11 @@
  *   +[SPPostgresCSV importPath:…] in one transaction.
  *
  * Each import runs as an SPPostgresBackgroundJob on a connection from the document's provider (never the tab's own),
- * under an SPPostgresProgressSheet showing the bytes read of the file's size. Cancel rolls back the open transaction
- * (in per-statement mode, what already committed stays). After an import that changed anything the document reloads
- * its sidebar keeping the selection and marks every pane stale. Errors (not cancels) are shown as alerts through the
- * document. Use on the main thread.
+ * under an SPPostgresProgressSheet showing the bytes read of the file's size. Cancel interrupts the running statement
+ * and rolls back the open transaction (in per-statement mode, what already committed stays). SET lines naming a
+ * parameter this server doesn't know are skipped, and the import's completion says so. After an import that changed
+ * anything the document reloads its sidebar keeping the selection and marks every pane stale. Errors (not cancels)
+ * are shown as alerts through the document. Use on the main thread.
  */
 __attribute__((visibility("default")))
 @interface SPPostgresImportController : NSObject <NSOpenSavePanelDelegate>
@@ -66,6 +67,10 @@ __attribute__((visibility("default")))
 
 /// The last import's error message (nil after a success); the cancel message after a cancel.
 @property (readonly, copy) NSString *lastErrorMessage;
+
+/// What a successful import had to say, also shown as an alert (e.g. "1 setting this server doesn't know was
+/// skipped: transaction_timeout."); nil when nothing.
+@property (readonly, copy) NSString *completionNote;
 
 /// The format an extension implies: @"csv" for .csv and .tsv (also under .gz or .bz2), else @"sql".
 + (NSString *)formatForPath:(NSString *)path;

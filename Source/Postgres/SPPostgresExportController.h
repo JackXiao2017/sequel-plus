@@ -17,8 +17,10 @@
  *   file (query-result.csv). CSV of the whole database or of schemas exports each of their tables.
  *
  * The export runs as an SPPostgresBackgroundJob on a connection from the document's provider, in one REPEATABLE READ
- * READ ONLY snapshot, under an SPPostgresProgressSheet ("Table 3 of 12: orders"). Cancel stops it and deletes the
- * files written. An error is shown as an alert (the document's alertPresenter when set). Use on the main thread.
+ * READ ONLY snapshot, under an SPPostgresProgressSheet ("Table 3 of 12: orders"). Cancel stops it, interrupting the
+ * statement running, and deletes the files it created (a CSV file that replaced an existing one stays). An error is
+ * shown as an alert (the document's alertPresenter when set). Foreign tables are left out of a SQL dump, and the
+ * completion says which. Use on the main thread.
  */
 __attribute__((visibility("default")))
 @interface SPPostgresExportController : NSObject <NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate>
@@ -86,5 +88,9 @@ __attribute__((visibility("default")))
 
 /// The last export's error message (nil after a success); the cancel message after a cancel.
 @property (readonly, copy) NSString *lastErrorMessage;
+
+/// What a successful export had to say, also shown as an alert (the foreign tables a SQL dump left out); nil when
+/// nothing.
+@property (readonly, copy) NSString *completionNote;
 
 @end
