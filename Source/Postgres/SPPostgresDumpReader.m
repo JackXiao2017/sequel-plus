@@ -1,14 +1,7 @@
 #import "SPPostgresDumpReader.h"
 #import "SPPostgresStatementSplitter.h"
 #import "SPPostgresErrors.h"
-#import <zlib.h>
-#import <bzlib.h>
-
-typedef NS_ENUM(NSInteger, SPDumpFileFormat) {
-	SPDumpFilePlain = 0,
-	SPDumpFileGzip = 1,
-	SPDumpFileBzip2 = 2
-};
+#import "SPPostgresCompressedFileReader.h"
 
 @implementation SPPostgresDumpItem
 
@@ -73,54 +66,15 @@ static NSUInteger SPCompleteUTF8Length(const unsigned char *bytes, NSUInteger co
 @implementation SPPostgresDumpReader
 
 @synthesize chunkSize;
-@synthesize fileSize;
 
 - (instancetype)initWithPath:(NSString *)path error:(NSError **)error
 {
 	if ((self = [super init])) {
-		const char *fsPath = [path fileSystemRepresentation];
-		file = fsPath ? fopen(fsPath, "rb") : NULL;
-		if (!file) {
-			if (error) {
-				NSString *message = [NSString stringWithFormat:NSLocalizedString(@"The file “%@” can't be opened.", @"Postgres import: file can't be opened"), [path lastPathComponent]];
-				*error = SPPostgresMakeError(SPPostgresErrorQueryFailed, message, nil);
-			}
+		source = [[SPPostgresCompressedFileReader alloc] initWithPath:path error:error];
+		if (!source) {
 			[self release];
 			return nil;
 		}
-
-		// The format, from the first bytes: gzip 1f 8b, bzip2 "BZh"
-		unsigned char magic[3] = {0, 0, 0};
-		size_t magicLength = fread(magic, 1, 3, file);
-		rewind(file);
-		if (magicLength >= 2 && magic[0] == 0x1f && magic[1] == 0x8b) format = SPDumpFileGzip;
-		else if (magicLength == 3 && magic[0] == 'B' && magic[1] == 'Z' && magic[2] == 'h') format = SPDumpFileBzip2;
-		else format = SPDumpFilePlain;
-
-		BOOL opened = YES;
-		if (format == SPDumpFileGzip) {
-			fclose(file);
-			file = NULL;
-			gzipFile = gzopen(fsPath, "rb");
-			opened = gzipFile != NULL;
-		}
-		else if (format == SPDumpFileBzip2) {
-			int bzError = BZ_OK;
-			bzipFile = BZ2_bzReadOpen(&bzError, file, 0, 0, NULL, 0);
-			if (bzError != BZ_OK) {
-				if (bzipFile) BZ2_bzReadClose(&bzError, bzipFile);
-				bzipFile = NULL;
-				opened = NO;
-			}
-		}
-		if (!opened) {
-			if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, [NSString stringWithFormat:NSLocalizedString(@"The file is damaged or truncated (near line %lu).", @"Postgres import: damaged or truncated file"), 1UL], nil);
-			[self release];
-			return nil;
-		}
-
-		NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
-		fileSize = [attributes fileSize];
 		chunkSize = 1024 * 1024;
 		pendingBytes = [[NSMutableData alloc] init];
 		currentLine = 1;
@@ -131,10 +85,7 @@ static NSUInteger SPCompleteUTF8Length(const unsigned char *bytes, NSUInteger co
 
 - (void)dealloc
 {
-	int bzError;
-	if (bzipFile) BZ2_bzReadClose(&bzError, bzipFile);
-	if (gzipFile) gzclose((gzFile)gzipFile);
-	if (file) fclose(file);
+	[source release];
 	[pendingBytes release];
 	[readError release];
 	if (characters) free(characters);
@@ -143,7 +94,12 @@ static NSUInteger SPCompleteUTF8Length(const unsigned char *bytes, NSUInteger co
 
 - (unsigned long long)bytesRead
 {
-	return offset;
+	return [source bytesRead];
+}
+
+- (unsigned long long)fileSize
+{
+	return [source fileSize];
 }
 
 /// Records error as the reader's error (returned again by later calls); NO.
@@ -165,73 +121,10 @@ static NSUInteger SPCompleteUTF8Length(const unsigned char *bytes, NSUInteger co
  */
 - (BOOL)_readBytes:(void *)bytes count:(NSUInteger)count read:(NSUInteger *)read
 {
-	*read = 0;
-	if (count > INT_MAX) count = INT_MAX;
-
-	switch ((SPDumpFileFormat)format) {
-		case SPDumpFilePlain: {
-			size_t n = fread(bytes, 1, count, file);
-			if (n == 0 && ferror(file)) return [self _fail:[NSString stringWithFormat:NSLocalizedString(@"The file can't be read (near line %lu).", @"Postgres import: file read error"), (unsigned long)currentLine]];
-			*read = n;
-			long position = ftell(file);
-			if (position >= 0) offset = (unsigned long long)position;
-			return YES;
-		}
-
-		case SPDumpFileGzip: {
-			int n = gzread((gzFile)gzipFile, bytes, (unsigned)count);
-			int gzError = Z_OK;
-			gzerror((gzFile)gzipFile, &gzError);
-			// zlib reports a stream cut short as Z_BUF_ERROR ("unexpected end of file"), returning what it decoded
-			if (n < 0 || (gzError != Z_OK && gzError != Z_STREAM_END)) return [self _failDamaged];
-			*read = (NSUInteger)n;
-			z_off_t position = gzoffset((gzFile)gzipFile);
-			if (position >= 0) offset = (unsigned long long)position;
-			return YES;
-		}
-
-		case SPDumpFileBzip2: {
-			while (bzipFile) {
-				int bzError = BZ_OK;
-				int n = BZ2_bzRead(&bzError, bzipFile, bytes, (int)count);
-				long position = ftell(file);
-				if (position >= 0) offset = (unsigned long long)position;
-				if (bzError == BZ_OK) {
-					*read = (NSUInteger)n;
-					return YES;
-				}
-				if (bzError != BZ_STREAM_END) return [self _failDamaged]; // BZ_UNEXPECTED_EOF, BZ_DATA_ERROR, …
-
-				// The end of a stream: another may follow (pbzip2 writes several)
-				void *unused = NULL;
-				int unusedCount = 0;
-				BZ2_bzReadGetUnused(&bzError, bzipFile, &unused, &unusedCount);
-				NSData *rest = (bzError == BZ_OK && unusedCount > 0) ? [NSData dataWithBytes:unused length:(NSUInteger)unusedCount] : nil;
-				BZ2_bzReadClose(&bzError, bzipFile);
-				bzipFile = NULL;
-
-				BOOL more = [rest length] > 0;
-				if (!more) {
-					int c = fgetc(file);
-					if (c != EOF) { ungetc(c, file); more = YES; }
-				}
-				if (more) {
-					bzipFile = BZ2_bzReadOpen(&bzError, file, 0, 0, (void *)[rest bytes], (int)[rest length]);
-					if (bzError != BZ_OK) {
-						if (bzipFile) BZ2_bzReadClose(&bzError, bzipFile);
-						bzipFile = NULL;
-						return [self _failDamaged];
-					}
-				}
-				if (n > 0) {
-					*read = (NSUInteger)n;
-					return YES;
-				}
-			}
-			return YES; // the end of the file
-		}
-	}
-	return YES;
+	BOOL damaged = NO;
+	if ([source readBytes:bytes count:count read:read damaged:&damaged]) return YES;
+	if (damaged) return [self _failDamaged];
+	return [self _fail:[NSString stringWithFormat:NSLocalizedString(@"The file can't be read (near line %lu).", @"Postgres import: file read error"), (unsigned long)currentLine]];
 }
 
 #pragma mark - Buffer

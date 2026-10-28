@@ -373,4 +373,127 @@
 	}
 }
 
+#pragma mark - Compressed files and row numbers
+
+/// text written compressed (1 gzip, 2 bzip2) with the app's SPFileHandle; its bytes.
+- (NSData *)compress:(NSString *)text format:(int)format path:(NSString *)path
+{
+	Class handleClass = NSClassFromString(@"SPFileHandle");
+	[[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
+	id handle = [handleClass performSelector:@selector(fileHandleForWritingAtPath:) withObject:path];
+	XCTAssertNotNil(handle);
+	NSMethodSignature *signature = [handle methodSignatureForSelector:@selector(setCompressionFormat:)];
+	NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
+	invocation.selector = @selector(setCompressionFormat:);
+	[invocation setArgument:&format atIndex:2];
+	[invocation invokeWithTarget:handle];
+	[handle performSelector:@selector(writeData:) withObject:[text dataUsingEncoding:NSUTF8StringEncoding]];
+	[handle performSelector:@selector(closeFile)];
+	return [NSData dataWithContentsOfFile:path];
+}
+
+/// R8: .csv.gz and .csv.bz2 preview, give their header and import as the plain file does; a truncated .csv.gz fails
+/// with the damaged/truncated message and imports nothing.
+- (void)testCompressedCSVPreviewAndImport
+{
+	NSMutableString *csv = [NSMutableString stringWithString:@"id,name\n"];
+	for (NSUInteger i = 1; i <= 5000; i++) [csv appendFormat:@"%lu,\"row %lu, %@\"\n", (unsigned long)i, (unsigned long)(i * 7919 % 10007), [[NSUUID UUID] UUIDString]];
+	NSString *gzPath = [self pathNamed:@"rows.csv.gz"];
+	NSString *bzPath = [self pathNamed:@"rows.csv.bz2"];
+	NSData *gz = [self compress:csv format:1 path:gzPath];
+	[self compress:csv format:2 path:bzPath];
+	NSString *halfPath = [self pathNamed:@"half.csv.gz"];
+	XCTAssertTrue([[gz subdataWithRange:NSMakeRange(0, gz.length / 2)] writeToFile:halfPath atomically:YES]);
+
+	SPPostgresCSVOptions *options = [SPPostgresCSVOptions new];
+	for (NSString *path in @[gzPath, bzPath]) {
+		NSError *error = nil;
+		XCTAssertEqualObjects([SPPostgresCSV headerAtPath:path options:options error:&error], (@[@"id", @"name"]), @"%@: %@", path, error);
+		NSArray *rows = [SPPostgresCSV previewRowsAtPath:path options:options limit:10 error:&error];
+		XCTAssertEqual(rows.count, 10u, @"%@: %@", path, error);
+		XCTAssertEqualObjects(rows.firstObject[0], @"1");
+		XCTAssertTrue([rows.firstObject[1] hasPrefix:@"row 7919, "], @"%@", rows.firstObject);
+	}
+
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *destination = [self database:@"pgkit_io_dst" on:port];
+		[self run:@"CREATE TABLE public.packed (id int, name text)" on:destination];
+		for (NSString *path in @[gzPath, bzPath]) {
+			[self run:@"TRUNCATE public.packed" on:destination];
+			NSError *error = nil;
+			__block unsigned long long lastRead = 0, lastSize = 0;
+			XCTAssertTrue(([SPPostgresCSV importPath:path options:options intoTable:@"packed" schema:@"public" columnMapping:@[@0, @1]
+										 connection:destination progress:^BOOL(unsigned long long bytesRead, unsigned long long fileSize) {
+				lastRead = bytesRead;
+				lastSize = fileSize;
+				return YES;
+			} error:&error]), @"%@: %@", path, error.localizedDescription);
+			XCTAssertEqualObjects([self text:@"SELECT count(*) || ':' || sum(id) FROM public.packed" on:destination], @"5000:12502500", @"%@", path);
+			XCTAssertEqual(lastSize, [[[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL] fileSize], @"the compressed size");
+			XCTAssertEqual(lastRead, lastSize, @"%@: progress counts compressed bytes", path);
+		}
+
+		[self run:@"TRUNCATE public.packed" on:destination];
+		NSError *error = nil;
+		XCTAssertFalse(([SPPostgresCSV importPath:halfPath options:options intoTable:@"packed" schema:@"public" columnMapping:@[@0, @1]
+									  connection:destination progress:nil error:&error]));
+		XCTAssertEqual(error.code, SPPostgresErrorQueryFailed);
+		XCTAssertTrue([error.localizedDescription hasPrefix:@"The file is damaged or truncated (near row "], @"%@", error.localizedDescription);
+		XCTAssertEqual(destination.transactionStatus, PGPostgresTransactionIdle);
+		XCTAssertEqualObjects([self text:@"SELECT count(*) FROM public.packed" on:destination], @"0");
+	}
+}
+
+/// R9: the unterminated-quote, invalid-UTF-8 and short-row messages count data rows (the header excluded), so they
+/// name the same number for the same row, in the preview and in the import, with or without a header.
+- (void)testRowNumbersCountDataRows
+{
+	NSData *(^bytes)(NSString *) = ^NSData *(NSString *text) { return [text dataUsingEncoding:NSUTF8StringEncoding]; };
+	NSMutableData *notUTF8 = [bytes(@"a,b,c\n1,x,y\n2,") mutableCopy];
+	[notUTF8 appendBytes:"\xff\xfe" length:2];
+	[notUTF8 appendData:bytes(@",z\n3,w,v\n")];
+	NSDictionary *files = @{
+		@"quote.csv": bytes(@"a,b,c\n1,x,y\n2,\"open,z\n3,w,v\n"),
+		@"utf8.csv": notUTF8,
+		@"short.csv": bytes(@"a,b,c\n1,x,y\n2,z\n3,w,v\n"),
+	};
+	NSDictionary *expected = @{
+		@"quote.csv": @"Row 2 has a quoted field that isn't closed.",
+		@"utf8.csv": @"Row 2 isn't valid UTF-8 text.",
+		@"short.csv": @"Row 2 has 2 fields; column “c” needs field 3.",
+	};
+	for (NSString *name in files) XCTAssertTrue([files[name] writeToFile:[self pathNamed:name] atomically:YES]);
+
+	SPPostgresCSVOptions *withHeader = [SPPostgresCSVOptions new];
+	SPPostgresCSVOptions *withoutHeader = [SPPostgresCSVOptions new];
+	withoutHeader.header = NO;
+
+	// The preview reports the first two
+	for (NSString *name in @[@"quote.csv", @"utf8.csv"]) {
+		NSError *error = nil;
+		XCTAssertNil([SPPostgresCSV previewRowsAtPath:[self pathNamed:name] options:withHeader limit:10 error:&error]);
+		XCTAssertEqualObjects(error.localizedDescription, expected[name]);
+		// Without a header, the first line is row 1
+		error = nil;
+		XCTAssertNil([SPPostgresCSV previewRowsAtPath:[self pathNamed:name] options:withoutHeader limit:10 error:&error]);
+		XCTAssertEqualObjects(error.localizedDescription, [expected[name] stringByReplacingOccurrencesOfString:@"Row 2" withString:@"Row 3"]);
+	}
+	NSError *headerError = nil;
+	XCTAssertNil([SPPostgresCSV headerAtPath:[self write:@"a,\"b\n" named:@"badheader.csv"] options:withHeader error:&headerError]);
+	XCTAssertEqualObjects(headerError.localizedDescription, @"The header row has a quoted field that isn't closed.");
+
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *destination = [self database:@"pgkit_io_dst" on:port];
+		[self run:@"CREATE TABLE public.numbered (a text, b text, c text)" on:destination];
+		for (NSString *name in files) {
+			NSError *error = nil;
+			XCTAssertFalse(([SPPostgresCSV importPath:[self pathNamed:name] options:withHeader intoTable:@"numbered" schema:@"public"
+										columnMapping:@[@0, @1, @2] connection:destination progress:nil error:&error]), @"%@", name);
+			XCTAssertEqualObjects(error.localizedDescription, expected[name], @"%@", name);
+			XCTAssertEqual(destination.transactionStatus, PGPostgresTransactionIdle);
+			XCTAssertEqualObjects([self text:@"SELECT count(*) FROM public.numbered" on:destination], @"0", @"%@", name);
+		}
+	}
+}
+
 @end

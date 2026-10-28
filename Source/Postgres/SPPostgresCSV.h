@@ -40,7 +40,11 @@ __attribute__((visibility("default")))
  * CSV is read as UTF-8 (a leading BOM skipped) by the rules of PostgreSQL's COPY FROM (FORMAT csv): a field is
  * quoted when it starts with the quote; inside quotes, delimiters and line breaks are data, and the escape followed
  * by the quote or the escape stands for that character; text after a closing quote continues the field; an unquoted
- * field equal to nullString is NULL; rows end with LF, CR LF or CR; an empty line is one empty field.
+ * field equal to nullString is NULL; rows end with LF, CR LF or CR; an empty line is one empty field. gzip and bzip2
+ * files are read transparently (SPPostgresCompressedFileReader); a damaged or truncated one fails with "The file is
+ * damaged or truncated (near row <n>).". Reading errors name data rows, counted from 1 after the header (the header
+ * itself is "the header row"), as the server's "COPY t, line N" does: "Row <n> has a quoted field that isn't
+ * closed.", "Row <n> isn't valid UTF-8 text." and the import's short-row message name the same n for the same row.
  */
 __attribute__((visibility("default")))
 @interface SPPostgresCSV : NSObject
