@@ -94,6 +94,9 @@ __attribute__((visibility("default")))
 @property (readonly, copy) NSString *noticeText;
 /// Shown instead of the grid when not empty (e.g. @"Triggers aren't available for views.").
 @property (nonatomic, copy) NSString *emptyStateText;
+/// Seconds a change waits for a lock held elsewhere before it fails (default 5), passed to the table's
+/// SPPostgresTableStructure.
+@property (nonatomic) NSTimeInterval lockTimeout;
 
 /// Shows errors. nil (the default) shows them as sheets on the view's window.
 @property (copy) void (^alertPresenter)(NSAlert *alert);

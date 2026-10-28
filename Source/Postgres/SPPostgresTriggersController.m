@@ -390,6 +390,7 @@ static const CGFloat SPPostgresTriggerSheetMargin = 20;
 	SPPostgresTableStructure *structure;
 	NSArray *triggers;      // SPPostgresTrigger
 	BOOL loaded;
+	NSTimeInterval lockTimeout;
 
 	NSView *view;
 	NSSplitView *split;     // the grid and its bar over the function source (hidden under an empty state)
@@ -424,6 +425,7 @@ static const CGFloat SPPostgresTriggerSheetMargin = 20;
 		triggers = [@[] retain];
 		noticeText = [@"" copy];
 		emptyStateText = [@"" copy];
+		lockTimeout = 5;
 		[self _buildView];
 		[self _updateButtons];
 	}
@@ -722,6 +724,7 @@ static const CGFloat SPPostgresTriggerSheetMargin = 20;
 	structure = nil;
 	if ([theTable length] && [theSchema length]) {
 		structure = [[SPPostgresTableStructure alloc] initWithConnection:connection schema:theSchema table:theTable];
+		[structure setLockTimeout:lockTimeout];
 	}
 	[triggersView deselectAll:nil];
 	[self _load];
@@ -738,8 +741,26 @@ static const CGFloat SPPostgresTriggerSheetMargin = 20;
 	[self reload];
 }
 
+- (NSTimeInterval)lockTimeout
+{
+	return lockTimeout;
+}
+
+- (void)setLockTimeout:(NSTimeInterval)timeout
+{
+	lockTimeout = timeout;
+	[structure setLockTimeout:timeout];
+}
+
 /// Reads the triggers, keeping the selected one selected; on failure the grid empties and the error is shown.
 - (void)_load
+{
+	[self _loadShowingError:YES];
+}
+
+/// As -_load; showError NO keeps a read failure to the bottom bar (used right after a failed change has already
+/// shown its alert, so one failure never gives two alerts).
+- (void)_loadShowingError:(BOOL)showError
 {
 	NSArray *newTriggers = nil;
 	NSError *error = nil;
@@ -770,7 +791,7 @@ static const CGFloat SPPostgresTriggerSheetMargin = 20;
 	[self _showSelectedSource];
 	[self _updateButtons];
 
-	if (structure && !loaded) {
+	if (structure && !loaded && showError) {
 		[self _presentError:error title:[NSString stringWithFormat:NSLocalizedString(@"Could not load the triggers of “%@”", @"Postgres triggers: load failed"), table]];
 	}
 }
@@ -826,7 +847,7 @@ static const CGFloat SPPostgresTriggerSheetMargin = 20;
 			}
 			else {
 				[self _presentError:addError title:NSLocalizedString(@"Could not add the trigger", @"Postgres triggers: add failed")];
-				[self _load];
+				[self _loadShowingError:NO];
 			}
 		}
 		[target release];
@@ -878,7 +899,7 @@ static const CGFloat SPPostgresTriggerSheetMargin = 20;
 			}
 			else {
 				[self _presentError:error title:[NSString stringWithFormat:NSLocalizedString(@"Could not delete the trigger “%@”", @"Postgres triggers: drop failed"), name]];
-				[self _load];
+				[self _loadShowingError:NO];
 			}
 		}
 		[name release];
@@ -894,10 +915,12 @@ static const CGFloat SPPostgresTriggerSheetMargin = 20;
 	if ([trigger enabled] == enabled) return;
 
 	NSError *error = nil;
-	if (![structure setTrigger:[trigger name] enabled:enabled error:&error]) {
+	BOOL changed = [structure setTrigger:[trigger name] enabled:enabled error:&error];
+	if (!changed) {
 		[self _presentError:error title:[NSString stringWithFormat:NSLocalizedString(@"Could not change the trigger “%@”", @"Postgres triggers: enable/disable failed"), [trigger name]]];
 	}
-	[self _load];
+	// After a failed change its alert is enough: a reload that fails too only updates the bottom bar
+	[self _loadShowingError:changed];
 }
 
 #pragma mark - Table view

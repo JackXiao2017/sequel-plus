@@ -336,6 +336,10 @@ static const CGFloat SPPostgresRelationsButtonWidth = 32;
 	}
 	loaded = (constraints != nil);
 
+	// The selection is kept by constraint name, not row: a key added or dropped elsewhere shifts the rows
+	NSInteger selectedRow = [relationsView selectedRow];
+	NSString *selectedName = (selectedRow >= 0 && selectedRow < (NSInteger)[foreignKeys count]) ? [[[[foreignKeys objectAtIndex:(NSUInteger)selectedRow] name] retain] autorelease] : nil;
+
 	NSMutableArray *keys = [NSMutableArray array];
 	for (SPPostgresConstraint *constraint in constraints) {
 		if ([[constraint kind] isEqualToString:@"FOREIGN KEY"]) [keys addObject:constraint];
@@ -356,9 +360,9 @@ static const CGFloat SPPostgresRelationsButtonWidth = 32;
 	[self setNoticeText:notice];
 	[noticeField setStringValue:notice];
 
-	NSInteger selected = [relationsView selectedRow];
 	[relationsView reloadData];
-	if (selected >= 0 && selected < [relationsView numberOfRows]) [relationsView selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)selected] byExtendingSelection:NO];
+	NSUInteger row = selectedName ? [[foreignKeys valueForKey:@"name"] indexOfObject:selectedName] : NSNotFound;
+	if (row != NSNotFound) [relationsView selectRowIndexes:[NSIndexSet indexSetWithIndex:row] byExtendingSelection:NO];
 	else [relationsView deselectAll:nil];
 	[self _updateButtons];
 

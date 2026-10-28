@@ -1,0 +1,392 @@
+#import "SPPostgresTableInfoController.h"
+#import "SPPostgresTableStructure.h"
+#import "SPPostgresCreateStatement.h"
+#import "SPPostgresQueryController.h"
+#import "SPConstants.h"
+#import <PostgresKit/PostgresKit.h>
+
+// MySQL's Table Info tab: right-aligned labels at x 20, values from x 128
+static const CGFloat SPPostgresInfoMargin = 20;
+static const CGFloat SPPostgresInfoValueX = 128;
+static const CGFloat SPPostgresInfoRowHeight = 22;
+static const CGFloat SPPostgresInfoCommentHeight = 70;
+static const CGFloat SPPostgresInfoNoticeHeight = 22;
+
+@interface SPPostgresTableInfoController ()
+
+@property (readwrite, copy) NSString *schema;
+@property (readwrite, copy) NSString *table;
+@property (readwrite, copy) NSString *noticeText;
+
+- (void)_buildView;
+- (void)_load;
+- (void)_showInfo:(NSDictionary *)info syntax:(NSString *)syntax;
+- (NSString *)_trimmedComment;
+
+@end
+
+@implementation SPPostgresTableInfoController
+{
+	PGPostgresConnection *connection;
+	SPPostgresTableStructure *structure;
+	NSString *savedComment; // what the server holds (@"" for none)
+	NSTimeInterval lockTimeout;
+
+	NSView *view;
+	NSTextField *typeField;
+	NSTextField *ownerField;
+	NSTextField *rowsField;
+	NSTextField *tableSizeField;
+	NSTextField *indexSizeField;
+	NSTextField *totalSizeField;
+	NSTextView *commentView;
+	NSTextView *createSyntaxView;
+	NSTextField *noticeField;
+
+	BOOL invalidated;
+}
+
+@synthesize schema;
+@synthesize table;
+@synthesize noticeText;
+@synthesize alertPresenter;
+@synthesize tableInfoDidChange;
+@synthesize typeField, ownerField, rowsField, tableSizeField, indexSizeField, totalSizeField;
+@synthesize commentView, createSyntaxView;
+
+#pragma mark - Setup
+
+- (instancetype)initWithConnection:(PGPostgresConnection *)theConnection
+{
+	if ((self = [super init])) {
+		connection = [theConnection retain];
+		savedComment = [@"" retain];
+		noticeText = [@"" copy];
+		lockTimeout = 5;
+		[self _buildView];
+	}
+	return self;
+}
+
+- (void)dealloc
+{
+	[self invalidate];
+
+	[connection release];
+	[structure release];
+	[savedComment release];
+	[schema release];
+	[table release];
+	[noticeText release];
+
+	[view release];
+	[typeField release];
+	[ownerField release];
+	[rowsField release];
+	[tableSizeField release];
+	[indexSizeField release];
+	[totalSizeField release];
+	[commentView release];
+	[createSyntaxView release];
+	[noticeField release];
+
+	[super dealloc];
+}
+
+- (void)invalidate
+{
+	if (invalidated) return;
+	invalidated = YES;
+
+	[commentView setDelegate:nil];
+
+	// The presenters may capture the tab
+	[alertPresenter release], alertPresenter = nil;
+	[tableInfoDidChange release], tableInfoDidChange = nil;
+}
+
+#pragma mark - View
+
+- (NSTextField *)_newLabel:(NSString *)text atY:(CGFloat)y
+{
+	NSTextField *label = [NSTextField labelWithString:text];
+	[label setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+	[label setAlignment:NSTextAlignmentRight];
+	[label setFrame:NSMakeRect(SPPostgresInfoMargin, y, SPPostgresInfoValueX - SPPostgresInfoMargin - 8, 17)];
+	[label setAutoresizingMask:NSViewMinYMargin];
+	return label;
+}
+
+/// A selectable, read-only value next to its label.
+- (NSTextField *)_newValueFieldAtY:(CGFloat)y width:(CGFloat)width
+{
+	NSTextField *field = [[NSTextField labelWithString:@""] retain];
+	[field setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+	[field setSelectable:YES];
+	[field setFrame:NSMakeRect(SPPostgresInfoValueX, y, width - SPPostgresInfoValueX - SPPostgresInfoMargin, 17)];
+	[field setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+	return field;
+}
+
+- (NSScrollView *)_newScrollViewWithTextView:(NSTextView *)textView frame:(NSRect)frame
+{
+	NSScrollView *scrollView = [[[NSScrollView alloc] initWithFrame:frame] autorelease];
+	[scrollView setHasVerticalScroller:YES];
+	[scrollView setAutohidesScrollers:YES];
+	[scrollView setBorderType:NSBezelBorder];
+
+	[textView setMinSize:NSMakeSize(0, NSHeight(frame))];
+	[textView setMaxSize:NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX)];
+	[textView setVerticallyResizable:YES];
+	[textView setHorizontallyResizable:NO];
+	[textView setAutoresizingMask:NSViewWidthSizable];
+	[[textView textContainer] setWidthTracksTextView:YES];
+	[[textView textContainer] setContainerSize:NSMakeSize(NSWidth(frame), CGFLOAT_MAX)];
+	[textView setRichText:NO];
+	[textView setAutomaticQuoteSubstitutionEnabled:NO];
+	[textView setAutomaticDashSubstitutionEnabled:NO];
+	[textView setAutomaticTextReplacementEnabled:NO];
+	[scrollView setDocumentView:textView];
+	return scrollView;
+}
+
+/// The labels, the comment box and the create syntax, from the top as MySQL's Table Info tab.
+- (void)_buildView
+{
+	NSRect frame = NSMakeRect(0, 0, 700, 500);
+	CGFloat width = NSWidth(frame);
+	CGFloat height = NSHeight(frame);
+	view = [[NSView alloc] initWithFrame:frame];
+	[view setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+
+	// Labels from the top
+	CGFloat y = height - SPPostgresInfoMargin - 17;
+	NSArray *titles = @[NSLocalizedString(@"Type:", @"Postgres table info: type label"),
+						NSLocalizedString(@"Owner:", @"Postgres table info: owner label"),
+						NSLocalizedString(@"Rows:", @"Postgres table info: row estimate label"),
+						NSLocalizedString(@"Table size:", @"Postgres table info: table size label"),
+						NSLocalizedString(@"Index size:", @"Postgres table info: index size label"),
+						NSLocalizedString(@"Total size:", @"Postgres table info: total size label")];
+	NSMutableArray *fields = [NSMutableArray array];
+	for (NSString *title in titles) {
+		[view addSubview:[self _newLabel:title atY:y]];
+		NSTextField *field = [self _newValueFieldAtY:y width:width];
+		[view addSubview:field];
+		[fields addObject:field];
+		[field release]; // the view holds it; the ivar below retains it again
+		y -= SPPostgresInfoRowHeight;
+	}
+	typeField = [[fields objectAtIndex:0] retain];
+	ownerField = [[fields objectAtIndex:1] retain];
+	rowsField = [[fields objectAtIndex:2] retain];
+	tableSizeField = [[fields objectAtIndex:3] retain];
+	indexSizeField = [[fields objectAtIndex:4] retain];
+	totalSizeField = [[fields objectAtIndex:5] retain];
+
+	// Comments
+	y -= 6;
+	CGFloat commentTop = y + 17;
+	[view addSubview:[self _newLabel:NSLocalizedString(@"Comments:", @"Postgres table info: comment label") atY:y]];
+	NSRect commentFrame = NSMakeRect(SPPostgresInfoValueX, commentTop - SPPostgresInfoCommentHeight, width - SPPostgresInfoValueX - SPPostgresInfoMargin, SPPostgresInfoCommentHeight);
+	commentView = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, NSWidth(commentFrame), SPPostgresInfoCommentHeight)];
+	[commentView setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+	[commentView setDelegate:self];
+	[commentView setEditable:NO];
+	NSScrollView *commentScroll = [self _newScrollViewWithTextView:commentView frame:commentFrame];
+	[commentScroll setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+	[view addSubview:commentScroll];
+
+	// Create syntax, to the bottom bar
+	CGFloat syntaxTop = NSMinY(commentFrame) - 14;
+	[view addSubview:[self _newLabel:NSLocalizedString(@"Create syntax:", @"Postgres table info: create syntax label") atY:syntaxTop - 17]];
+	NSRect syntaxFrame = NSMakeRect(SPPostgresInfoValueX, SPPostgresInfoNoticeHeight, width - SPPostgresInfoValueX - SPPostgresInfoMargin, syntaxTop - SPPostgresInfoNoticeHeight);
+	createSyntaxView = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, NSWidth(syntaxFrame), NSHeight(syntaxFrame))];
+	[createSyntaxView setEditable:NO];
+	[createSyntaxView setSelectable:YES];
+	NSScrollView *syntaxScroll = [self _newScrollViewWithTextView:createSyntaxView frame:syntaxFrame];
+	[syntaxScroll setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+	[view addSubview:syntaxScroll];
+
+	// The bottom line
+	noticeField = [[NSTextField labelWithString:@""] retain];
+	[noticeField setFrame:NSMakeRect(SPPostgresInfoMargin, 4, width - 2 * SPPostgresInfoMargin, 14)];
+	[noticeField setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+	[noticeField setTextColor:[NSColor secondaryLabelColor]];
+	[[noticeField cell] setLineBreakMode:NSLineBreakByTruncatingTail];
+	[noticeField setAutoresizingMask:NSViewWidthSizable | NSViewMaxYMargin];
+	[view addSubview:noticeField];
+}
+
+- (NSView *)view
+{
+	return view;
+}
+
+- (NSTimeInterval)lockTimeout
+{
+	return lockTimeout;
+}
+
+- (void)setLockTimeout:(NSTimeInterval)timeout
+{
+	lockTimeout = timeout;
+	[structure setLockTimeout:timeout];
+}
+
+#pragma mark - Alerts
+
+- (void)_presentError:(NSError *)error title:(NSString *)title
+{
+	if (invalidated) return;
+
+	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+	[alert setAlertStyle:NSAlertStyleWarning];
+	[alert setMessageText:title];
+	NSString *detail = [[error localizedDescription] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	[alert setInformativeText:[detail length] ? detail : NSLocalizedString(@"An unknown error occurred.", @"Postgres structure: unknown error")];
+
+	if (alertPresenter) {
+		alertPresenter(alert);
+		return;
+	}
+	NSWindow *window = [view window];
+	if (window && ![window attachedSheet]) [alert beginSheetModalForWindow:window completionHandler:nil];
+	else NSLog(@"%@: %@", [alert messageText], [alert informativeText]);
+}
+
+#pragma mark - Loading
+
+- (void)showTable:(NSString *)theTable inSchema:(NSString *)theSchema
+{
+	if (invalidated) return;
+
+	[self setTable:theTable];
+	[self setSchema:theSchema];
+	[structure release];
+	structure = nil;
+	if ([theTable length] && [theSchema length]) {
+		structure = [[SPPostgresTableStructure alloc] initWithConnection:connection schema:theSchema table:theTable];
+		[structure setLockTimeout:lockTimeout];
+	}
+	[self _load];
+}
+
+- (void)reload
+{
+	if (invalidated) return;
+	[self _load];
+}
+
+/// Reads the table's information and create syntax; on failure the view empties and the error is shown.
+- (void)_load
+{
+	NSDictionary *info = nil;
+	NSString *syntax = nil;
+	NSError *error = nil;
+	if (structure) {
+		info = [structure tableInfo:&error];
+		if (info) syntax = [SPPostgresCreateStatement createStatementForTable:table inSchema:schema connection:connection error:&error];
+		if (!syntax) info = nil;
+	}
+
+	[self _showInfo:info syntax:syntax];
+
+	if (structure && !info) {
+		NSString *message = [[[[error localizedDescription] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsSeparatedByString:@"\n"] firstObject];
+		if (![message length]) message = NSLocalizedString(@"An unknown error occurred.", @"Postgres structure: unknown error");
+		[self setNoticeText:[NSString stringWithFormat:NSLocalizedString(@"Could not load the information: %@", @"Postgres table info: bottom line on a read failure"), message]];
+		[noticeField setStringValue:noticeText];
+		[self _presentError:error title:[NSString stringWithFormat:NSLocalizedString(@"Could not load the information of “%@”", @"Postgres table info: load failed"), table]];
+	}
+	else {
+		[self setNoticeText:@""];
+		[noticeField setStringValue:@""];
+	}
+}
+
+- (void)_showInfo:(NSDictionary *)info syntax:(NSString *)syntax
+{
+	id rows = [info objectForKey:@"rowEstimate"];
+	NSString *rowsText = @"";
+	if (info) {
+		if ([rows isKindOfClass:[NSNumber class]]) {
+			NSNumberFormatter *formatter = [[[NSNumberFormatter alloc] init] autorelease];
+			[formatter setNumberStyle:NSNumberFormatterDecimalStyle];
+			rowsText = [@"~" stringByAppendingString:[formatter stringFromNumber:rows]];
+		}
+		else rowsText = NSLocalizedString(@"Unknown (not analyzed)", @"Postgres table info: no row estimate");
+	}
+	[typeField setStringValue:[info objectForKey:@"kind"] ?: @""];
+	[ownerField setStringValue:[info objectForKey:@"owner"] ?: @""];
+	[rowsField setStringValue:rowsText];
+	[tableSizeField setStringValue:[info objectForKey:@"tableSize"] ?: @""];
+	[indexSizeField setStringValue:[info objectForKey:@"indexSize"] ?: @""];
+	[totalSizeField setStringValue:[info objectForKey:@"totalSize"] ?: @""];
+
+	id comment = [info objectForKey:@"comment"];
+	NSString *commentText = [comment isKindOfClass:[NSString class]] ? comment : @"";
+	[savedComment release];
+	savedComment = [commentText copy];
+	[commentView setString:commentText];
+	[commentView setEditable:info != nil];
+
+	[createSyntaxView setFont:[SPPostgresQueryController editorFontFromPreferenceData:[[NSUserDefaults standardUserDefaults] dataForKey:SPCustomQueryEditorFont]]];
+	[createSyntaxView setString:syntax ?: @""];
+	[createSyntaxView scrollRangeToVisible:NSMakeRange(0, 0)];
+}
+
+#pragma mark - Comment
+
+- (NSString *)_trimmedComment
+{
+	return [[commentView string] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+- (BOOL)hasPendingComment
+{
+	return structure != nil && [commentView isEditable] && ![[self _trimmedComment] isEqualToString:savedComment];
+}
+
+- (BOOL)commitPendingEdits
+{
+	if (invalidated || ![self hasPendingComment]) return YES;
+
+	NSString *comment = [[[self _trimmedComment] copy] autorelease];
+	NSError *error = nil;
+	if (![structure setTableComment:comment error:&error]) {
+		[self _presentError:error title:[NSString stringWithFormat:NSLocalizedString(@"Could not change the comment of “%@”", @"Postgres table info: comment change failed"), table]];
+		return NO;
+	}
+
+	[savedComment release];
+	savedComment = [comment retain];
+	[commentView setString:comment];
+
+	// The create syntax follows (a failure to read it keeps the old text; the comment is saved)
+	NSString *syntax = [SPPostgresCreateStatement createStatementForTable:table inSchema:schema connection:connection error:NULL];
+	if (syntax) [createSyntaxView setString:syntax];
+
+	if (tableInfoDidChange) tableInfoDidChange();
+	return YES;
+}
+
+#pragma mark - Text view delegate
+
+/// The comment box keeps the focus (and its text) when the comment can't be saved.
+- (BOOL)textShouldEndEditing:(NSText *)textObject
+{
+	if (textObject != commentView) return YES;
+	return [self commitPendingEdits];
+}
+
+/// Escape puts the saved comment back.
+- (BOOL)textView:(NSTextView *)textView doCommandBySelector:(SEL)commandSelector
+{
+	if (textView == commentView && commandSelector == @selector(cancelOperation:)) {
+		[commentView setString:savedComment];
+		return YES;
+	}
+	return NO;
+}
+
+@end

@@ -435,6 +435,7 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 
 	// Another session holds a lock on t: the change times out, the alert says so, the checkbox shows the server's state
+	self.triggers.lockTimeout = 0.5;
 	XCTAssertNotNil([self.other execute:@"BEGIN"]);
 	XCTAssertNotNil([self.other execute:@"UPDATE structure_test.t SET qty = qty"]);
 	[self setValue:@YES in:grid row:touch column:@"enabled"];
@@ -608,8 +609,14 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 	XCTAssertEqualObjects(self.relations.emptyStateText, @"Relations aren't available for views.");
 	XCTAssertTrue([self.relations.relationsView isHiddenOrHasHiddenAncestor]);
 	XCTAssertEqual([self.relations.relationsView numberOfRows], 0);
+	XCTAssertEqualObjects(self.triggers.emptyStateText, @"Triggers aren't available for views.");
+	[self.document viewTriggers:nil];
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneRelations, @"Triggers is disabled for a view");
+	XCTAssertTrue([self.triggers.triggersView isHiddenOrHasHiddenAncestor]);
+	XCTAssertEqual([self.triggers.triggersView numberOfRows], 0);
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"t"]);
 	XCTAssertEqualObjects(self.relations.emptyStateText, @"");
+	XCTAssertEqualObjects(self.triggers.emptyStateText, @"");
 	XCTAssertFalse([self.relations.relationsView isHiddenOrHasHiddenAncestor]);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 }
@@ -670,6 +677,81 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 	[self.document parentTabDidClose];
 	XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet == nil; } timeout:5]);
 	XCTAssertNil([self.relations.relationsView dataSource]);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+}
+
+#pragma mark - Ruling R7
+
+/// A failed Enabled change whose reload fails too (the table is gone) shows one alert, not two.
+- (void)testFailedTriggerChangeWithFailedReloadShowsOneAlert
+{
+	XCTAssertNotNil([self.other execute:@"CREATE TABLE structure_test.t_gone (id int)"]);
+	XCTAssertNotNil([self.other execute:@"CREATE TRIGGER g_touch BEFORE INSERT ON structure_test.t_gone FOR EACH ROW EXECUTE FUNCTION structure_test.touch()"]);
+	[self showTriggersOf:@"t_gone"];
+	NSTableView *grid = self.triggers.triggersView;
+	XCTAssertEqual([grid numberOfRows], 1);
+
+	XCTAssertNotNil([self.other execute:@"DROP TABLE structure_test.t_gone"]);
+	[self setValue:@NO in:grid row:0 column:@"enabled"];
+	XCTAssertEqual(self.alerts.count, 1u, @"%@", [self.alerts valueForKey:@"messageText"]);
+	XCTAssertEqualObjects(self.alerts[0].messageText, @"Could not change the trigger “g_touch”");
+	XCTAssertTrue([self.triggers.noticeText hasPrefix:@"Could not load the triggers: "], @"%@", self.triggers.noticeText);
+	XCTAssertEqual([grid numberOfRows], 0);
+
+	// A refresh on its own still shows its alert
+	[self.triggers refresh:nil];
+	XCTAssertEqual(self.alerts.count, 2u);
+	XCTAssertEqualObjects(self.alerts[1].messageText, @"Could not load the triggers of “t_gone”");
+}
+
+/// Relations keeps the selected key by name when a reload shifts the rows.
+- (void)testRelationsSelectionKeptByName
+{
+	XCTAssertNotNil([self.other execute:@"ALTER TABLE structure_test.child ADD COLUMN u int, ADD CONSTRAINT zz_fk FOREIGN KEY (u) REFERENCES structure_test.t (id)"]);
+	[self showRelationsOf:@"child"];
+	NSTableView *grid = self.relations.relationsView;
+	XCTAssertEqualObjects([self valuesIn:grid column:@"name"], (@[@"child_t_id_fkey", @"zz_fk"]));
+	[self selectRow:1 in:grid];
+
+	XCTAssertNotNil([self.other execute:@"ALTER TABLE structure_test.child ADD CONSTRAINT aa_fk FOREIGN KEY (u) REFERENCES structure_test.t (id)"]);
+	[self.relations reload];
+	XCTAssertEqualObjects([self valuesIn:grid column:@"name"], (@[@"aa_fk", @"child_t_id_fkey", @"zz_fk"]));
+	XCTAssertEqual([grid selectedRow], 2, @"still zz_fk");
+
+	XCTAssertNotNil([self.other execute:@"ALTER TABLE structure_test.child DROP CONSTRAINT zz_fk"]);
+	[self.relations reload];
+	XCTAssertEqual([grid selectedRow], -1, @"gone: nothing selected");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+}
+
+/// A database switch replaces the Relations, Triggers and Info controllers with ones on the new session.
+- (void)testDatabaseSwitchRebuildsPanes
+{
+	[self showRelationsOf:@"child"];
+	SPPostgresRelationsController *oldRelations = self.relations;
+	SPPostgresTriggersController *oldTriggers = self.triggers;
+	id oldInfo = [self.document valueForKey:@"infoController"];
+	PGPostgresConnection *oldConnection = self.document.connection;
+
+	[self.document switchToDatabase:@"postgres"];
+	XCTAssertTrue([self spinUntil:^BOOL{ return self.document.connection != oldConnection && !self.document.isProcessing; } timeout:20]);
+	XCTAssertNotEqual(self.relations, oldRelations);
+	XCTAssertNotEqual(self.triggers, oldTriggers);
+	XCTAssertNotEqual([self.document valueForKey:@"infoController"], oldInfo);
+	XCTAssertNil([oldRelations.relationsView dataSource], @"the old one is invalidated");
+	XCTAssertNil([oldTriggers.triggersView dataSource]);
+	XCTAssertNil([oldRelations.relationsView window]);
+
+	// Back on pgkit_test: the new controllers read the new session
+	[self.document switchToDatabase:@"pgkit_test"];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [[self.document windowTitleString] containsString:@"/pgkit_test"] && !self.document.isProcessing; } timeout:20]);
+	[self select:@"child"];
+	[self.document viewRelations:nil];
+	XCTAssertNotNil([self.relations.relationsView window]);
+	XCTAssertEqual([self.relations.relationsView numberOfRows], 1);
+	[self.document viewTriggers:nil];
+	XCTAssertTrue([self.document.sidebar selectTableNamed:@"t"]);
+	XCTAssertEqual([self.triggers.triggersView numberOfRows], 2);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 }
 
