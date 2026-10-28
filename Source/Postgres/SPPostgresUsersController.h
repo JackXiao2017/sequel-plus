@@ -8,9 +8,11 @@
  * The Users sheet of a PostgreSQL tab, built in code: the cluster's roles (logins and groups, the predefined pg_*
  * roles hidden) on the left with +, − and duplicate; on the right a tab view with General (the role's name,
  * password, expiry, connection limit and attributes), Membership ("Member of:" and "Members of this role:") and
- * Privileges. Every edit is a draft until Apply, which sends them all in one transaction
- * (-[SPPostgresRoles statementsForOriginalRoles:edited:error:]); on failure the sheet stays open with the error and
- * every edit. Cancel discards everything.
+ * Privileges (per database and schema). Every edit is a draft until Apply, which sends the role changes and every
+ * database-level grant in one transaction on the document's database, then each database's other privilege changes
+ * in a transaction of their own on that database (the document's first, then the others by name). When everything
+ * succeeds the sheet closes; on a failure it stays open with the error and every edit not applied (after a failure
+ * in a later database it re-reads what was saved). Cancel discards everything.
  *
  * It never uses the document's connection: it asks `provider` for connections of its own (to the document's
  * database first), and disconnects them (and the connectors it adopted) when the sheet ends. Use on the main thread.
@@ -75,6 +77,19 @@ __attribute__((visibility("default")))
 /// The draft: the roles as listed (copies of the server's, plus new ones).
 @property (readonly) NSArray *editedRoles;
 @property (readonly) SPPostgresRole *selectedRole;
+/// The Privileges tab (SPPostgresUsersPrivilegesPane): the database, schema and default-privileges creator pop-ups,
+/// the grid and the note shown for a superuser (hidden otherwise).
+@property (readonly) NSPopUpButton *databasePopup;
+@property (readonly) NSPopUpButton *schemaPopup;
+@property (readonly) NSPopUpButton *creatorPopup;
+@property (readonly) NSTableView *privilegesTable;
+@property (readonly) NSTextField *superuserNote;
+/// The SPPostgresPrivilegeObjects in the grid, as shown (pending edits included): the database's row, then the
+/// schema's objects and its three default rows.
+- (NSArray *)privilegeRowsShown;
+/// The edited SPPostgresPrivilegeObjects still pending in a database, for every role.
+- (NSArray *)pendingPrivilegeEditsInDatabase:(NSString *)database;
+
 /// The last error shown (nil until one is).
 @property (readonly, copy) NSString *lastErrorMessage;
 

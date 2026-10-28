@@ -173,11 +173,15 @@
 	[connection disconnect];
 	if (!quoted.count) return;
 
-	NSString *owned = [NSString stringWithFormat:@"DROP OWNED BY %@", [quoted componentsJoinedByString:@", "]];
+	// One role at a time: DROP OWNED BY a, b fails ("could not find tuple for default ACL") when a's default
+	// privileges grant to b, as both try to remove the same pg_default_acl row.
 	PGPostgresConnection *last = nil;
 	for (NSString *database in names) {
 		PGPostgresConnection *databaseConnection = [self connectedConnectionOnPort:port database:database];
-		XCTAssertNotNil([databaseConnection execute:owned], @"%@ in %@: %@", owned, database, databaseConnection.lastError.errorPrimaryMessage);
+		for (NSString *role in quoted) {
+			NSString *owned = [NSString stringWithFormat:@"DROP OWNED BY %@", role];
+			XCTAssertNotNil([databaseConnection execute:owned], @"%@ in %@: %@", owned, database, databaseConnection.lastError.errorPrimaryMessage);
+		}
 		if (last) [last disconnect];
 		last = databaseConnection;
 	}

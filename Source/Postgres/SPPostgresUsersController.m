@@ -1,6 +1,7 @@
 #import "SPPostgresUsersController.h"
 #import "SPPostgresRoles.h"
 #import "SPPostgresConnector.h"
+#import "SPPostgresUsersPrivilegesPane.h"
 #import <PostgresKit/PostgresKit.h>
 
 static const CGFloat SPPostgresUsersSheetWidth = 760;
@@ -67,9 +68,13 @@ static BOOL SPPostgresUsersSameDate(NSDate *a, NSDate *b)
 
 @end
 
+@interface SPPostgresUsersController () <SPPostgresUsersPrivilegesPaneDelegate>
+@end
+
 @implementation SPPostgresUsersController
 {
 	SPPostgresUsersMembershipSource *membershipSource;
+	SPPostgresUsersPrivilegesPane *privilegesPane;
 
 	NSString *database;
 	void (^provider)(NSString *, void (^)(PGPostgresConnection *, NSError *));
@@ -98,6 +103,8 @@ static BOOL SPPostgresUsersSameDate(NSDate *a, NSDate *b)
 	BOOL began;
 	BOOL sheetOpen;
 	BOOL finished;
+	/// Between the first transaction of an Apply and its last database
+	BOOL applying;
 	/// What the sheet's end reports (set by Apply before ending it)
 	BOOL closingApplied;
 
@@ -148,6 +155,7 @@ static BOOL SPPostgresUsersSameDate(NSDate *a, NSDate *b)
 		memberOfCandidates = [@[] retain];
 		membersCandidates = [@[] retain];
 		membershipSource = [[SPPostgresUsersMembershipSource alloc] initWithOwner:self];
+		privilegesPane = [[SPPostgresUsersPrivilegesPane alloc] initWithDelegate:self];
 	}
 	return self;
 }
@@ -165,6 +173,7 @@ static BOOL SPPostgresUsersSameDate(NSDate *a, NSDate *b)
 	[connectionLimitField setDelegate:nil];
 	[tabView setDelegate:nil];
 	[membershipSource release];
+	[privilegesPane release];
 
 	[self _closeConnections];
 
@@ -578,6 +587,11 @@ static BOOL SPPostgresUsersSameDate(NSDate *a, NSDate *b)
 	[content addSubview:applyButton];
 	[sheet setDefaultButtonCell:[applyButton cell]];
 
+	NSError *privilegesError = nil;
+	if (![privilegesPane startWithDatabase:database connection:[connections objectForKey:database] error:&privilegesError]) {
+		[self _showErrorTitle:NSLocalizedString(@"Could not read the privileges", @"Postgres users: privileges read failed title") message:[privilegesError localizedDescription] ?: @""];
+	}
+
 	[rolesTable reloadData];
 	if ([editedRoles count]) [rolesTable selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
 	[self _selectionDidChange];
@@ -693,14 +707,8 @@ static BOOL SPPostgresUsersSameDate(NSDate *a, NSDate *b)
 
 - (void)_buildPrivilegesTab
 {
-	NSView *view = [self _tabContentView];
-	NSTextField *note = [NSTextField wrappingLabelWithString:NSLocalizedString(@"Privileges can't be edited here yet.", @"Postgres users: privileges placeholder")];
-	[note setTextColor:[NSColor secondaryLabelColor]];
-	[note setAlignment:NSTextAlignmentCenter];
-	[note setFrame:NSMakeRect(20, NSHeight([view frame]) / 2 - 10, NSWidth([view frame]) - 40, 20)];
-	[note setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin | NSViewMaxYMargin];
-	[view addSubview:note];
-
+	NSRect bounds = [tabView contentRect];
+	NSView *view = [privilegesPane viewWithFrame:NSMakeRect(0, 0, NSWidth(bounds), NSHeight(bounds))];
 	NSTabViewItem *item = [[[NSTabViewItem alloc] initWithIdentifier:@"privileges"] autorelease];
 	[item setLabel:NSLocalizedString(@"Privileges", @"Postgres users: privileges tab")];
 	[item setView:view];
@@ -762,6 +770,7 @@ static NSDictionary *SPPostgresUsersRemoveKey(NSDictionary *dictionary, NSString
 {
 	NSString *old = [[[role name] copy] autorelease];
 	[role setName:name];
+	[privilegesPane renameRole:old to:name];
 	for (SPPostgresRole *other in editedRoles) {
 		[other setMemberOf:SPPostgresUsersRenameKey([other memberOf], old, name)];
 		[other setMembers:SPPostgresUsersRenameKey([other members], old, name)];
@@ -831,7 +840,7 @@ static BOOL SPPostgresUsersParseLimit(NSString *text, NSInteger *limit)
 
 - (BOOL)_hasChanges
 {
-	if ([self _fieldsDiffer]) return YES;
+	if ([self _fieldsDiffer] || [privilegesPane hasPendingEdits]) return YES;
 	for (SPPostgresRole *role in editedRoles) {
 		if ([self _role:role differsFrom:[self _originalOf:role]]) return YES;
 	}
@@ -929,6 +938,7 @@ static BOOL SPPostgresUsersParseLimit(NSString *text, NSInteger *limit)
 	[validUntilPicker setEnabled:editable && [role validUntil] != nil];
 
 	[self _reloadMemberships];
+	[privilegesPane showRole:role];
 	[self _updateButtons];
 }
 
@@ -997,6 +1007,7 @@ static BOOL SPPostgresUsersParseLimit(NSString *text, NSInteger *limit)
 	[role setReplication:[replicationCheckbox state] == NSControlStateValueOn];
 	[role setBypassRLS:[bypassRLSCheckbox state] == NSControlStateValueOn];
 	[self _reloadRowOf:role]; // the subtitle and icon follow login and superuser
+	[privilegesPane roleAttributesChanged];
 	[self _updateButtons];
 }
 
@@ -1097,6 +1108,7 @@ static BOOL SPPostgresUsersParseLimit(NSString *text, NSInteger *limit)
 		NSString *name = [role name];
 		[[role retain] autorelease];
 		shownRole = nil;
+		[privilegesPane dropEditsForRole:name];
 		[editedRoles removeObject:role];
 		for (SPPostgresRole *other in editedRoles) {
 			[other setMemberOf:SPPostgresUsersRemoveKey([other memberOf], name)];
@@ -1110,8 +1122,9 @@ static BOOL SPPostgresUsersParseLimit(NSString *text, NSInteger *limit)
 		return;
 	}
 
-	// Marked (struck through) until Apply; − again unmarks it
+	// Marked (struck through) until Apply; − again unmarks it. Its privilege edits go either way.
 	[role setMarkedForDeletion:![role markedForDeletion]];
+	[privilegesPane dropEditsForRole:[role name]];
 	[self _reloadRowOf:role];
 	[self _showRole:role];
 }
@@ -1120,7 +1133,7 @@ static BOOL SPPostgresUsersParseLimit(NSString *text, NSInteger *limit)
 
 - (void)apply:(id)sender
 {
-	if (!sheetOpen || finished) return;
+	if (!sheetOpen || finished || applying) return;
 	[lastErrorMessage release];
 	lastErrorMessage = nil;
 
@@ -1142,14 +1155,74 @@ static BOOL SPPostgresUsersParseLimit(NSString *text, NSInteger *limit)
 		}
 	}
 
+	// 1. The roles and every database-level grant (databases are shared objects), in one transaction
 	NSError *error = nil;
 	NSArray *statements = [rolesReader statementsForOriginalRoles:originalRoles edited:editedRoles error:&error];
+	if (statements) statements = [statements arrayByAddingObjectsFromArray:[privilegesPane databaseStatements]];
 	if (!statements || ![rolesReader applyStatements:statements error:&error]) {
 		[self _showErrorTitle:title message:[error localizedDescription] ?: @""];
 		return;
 	}
+	[privilegesPane forgetDatabaseEdits];
 
-	[self _close:YES];
+	// 2. Each database's other edits on its own connection: the document's database first, then the others by name
+	NSMutableArray *order = [[[privilegesPane databasesWithPendingStatements] mutableCopy] autorelease];
+	if ([order containsObject:database]) {
+		[order removeObject:database];
+		[order insertObject:database atIndex:0];
+	}
+	applying = YES;
+	[self _applyPrivilegesIn:order done:[NSMutableArray array]];
+}
+
+/// Applies the pending privilege edits of each of databases in turn (connecting when needed); closes the sheet once
+/// all are saved, or stops at the first failure.
+- (void)_applyPrivilegesIn:(NSArray *)databases done:(NSMutableArray *)done
+{
+	if (finished) return;
+	if (![databases count]) {
+		applying = NO;
+		[self _close:YES];
+		return;
+	}
+	NSString *name = [databases firstObject];
+	NSArray *rest = [databases subarrayWithRange:NSMakeRange(1, [databases count] - 1)];
+	[self _connectionForDatabase:name completion:^(PGPostgresConnection *connection, NSError *error) {
+		if (finished) return;
+		NSError *applyError = error;
+		if (connection && SPPostgresApplyInTransaction(connection, [privilegesPane statementsForDatabase:name], &applyError)) {
+			[privilegesPane forgetEditsInDatabase:name];
+			[done addObject:name];
+			[self _applyPrivilegesIn:rest done:done];
+			return;
+		}
+		applying = NO;
+		NSString *reason = [applyError localizedDescription] ?: NSLocalizedString(@"The connection failed.", @"Postgres users: connection failed, no reason");
+		NSString *message = [done count]
+			? [NSString stringWithFormat:NSLocalizedString(@"Roles and %@ were saved; changes in %@ were not: %@", @"Postgres users: apply failed in a later database"), [done componentsJoinedByString:@", "], name, reason]
+			: [NSString stringWithFormat:NSLocalizedString(@"Roles were saved; changes in %@ were not: %@", @"Postgres users: apply failed in the first database"), name, reason];
+		[self _reloadAfterPartialApply];
+		[self _showErrorTitle:NSLocalizedString(@"Not all changes were applied", @"Postgres users: partial apply title") message:message];
+		[self _updateButtons];
+	}];
+}
+
+/// Re-reads the roles (what the first transaction saved) and the privileges, keeping the edits still pending.
+- (void)_reloadAfterPartialApply
+{
+	NSString *selectedName = [[[[self selectedRole] name] copy] autorelease];
+	shownRole = nil;
+	NSError *error = nil;
+	PGPostgresConnection *connection = [connections objectForKey:database];
+	if (!connection || ![self _loadRolesFrom:connection error:&error]) {
+		NSLog(@"Postgres users: could not re-read the roles: %@", [error localizedDescription]);
+	}
+	[rolesTable reloadData];
+	[privilegesPane reload];
+	SPPostgresRole *role = selectedName ? [self _draftRoleNamed:selectedName] : nil;
+	if (!role && [editedRoles count]) role = [editedRoles firstObject];
+	if (role) [self _selectRole:role];
+	else [self _showRole:nil];
 }
 
 #pragma mark - Tables
@@ -1273,6 +1346,41 @@ static BOOL SPPostgresUsersParseLimit(NSString *text, NSInteger *limit)
 {
 	if (table == rolesTable) return NO;
 	return shownRole && ![shownRole markedForDeletion] && ![[column identifier] isEqualToString:SPPostgresUsersNameColumn];
+}
+
+#pragma mark - Privileges
+
+- (NSPopUpButton *)databasePopup { return [privilegesPane databasePopup]; }
+- (NSPopUpButton *)schemaPopup { return [privilegesPane schemaPopup]; }
+- (NSPopUpButton *)creatorPopup { return [privilegesPane creatorPopup]; }
+- (NSTableView *)privilegesTable { return [privilegesPane privilegesTable]; }
+- (NSTextField *)superuserNote { return [privilegesPane superuserNote]; }
+- (NSArray *)privilegeRowsShown { return [privilegesPane rowsShown]; }
+
+- (NSArray *)pendingPrivilegeEditsInDatabase:(NSString *)theDatabase
+{
+	return [privilegesPane pendingEditsInDatabase:theDatabase];
+}
+
+- (void)privilegesPane:(SPPostgresUsersPrivilegesPane *)pane connectionForDatabase:(NSString *)theDatabase completion:(void (^)(PGPostgresConnection *, NSError *))done
+{
+	[self _connectionForDatabase:theDatabase completion:done];
+}
+
+- (void)privilegesPane:(SPPostgresUsersPrivilegesPane *)pane showErrorTitle:(NSString *)title message:(NSString *)message
+{
+	if (finished) return;
+	[self _showErrorTitle:title message:message];
+}
+
+- (void)privilegesPaneWillEdit:(SPPostgresUsersPrivilegesPane *)pane
+{
+	[self _commitFields];
+}
+
+- (void)privilegesPaneDidChange:(SPPostgresUsersPrivilegesPane *)pane
+{
+	[self _updateButtons];
 }
 
 #pragma mark - Tab view
