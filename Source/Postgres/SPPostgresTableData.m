@@ -12,7 +12,25 @@ static NSError *SPPostgresTableDataError(NSInteger code, NSString *message)
 	return [NSError errorWithDomain:SPPostgresErrorDomain code:code userInfo:@{NSLocalizedDescriptionKey: message}];
 }
 
-PGPostgresResult *SPPostgresExecute(PGPostgresConnection *connection, NSString *sql, NSArray *values, NSError **error)
+NSString *SPPostgresQuoteLiteral(NSString *value)
+{
+	NSString *quoted = [value ?: @"" stringByReplacingOccurrencesOfString:@"'" withString:@"''"];
+	if ([quoted rangeOfString:@"\\"].location == NSNotFound) return [NSString stringWithFormat:@"'%@'", quoted];
+	return [NSString stringWithFormat:@"E'%@'", [quoted stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"]];
+}
+
+NSString *SPPostgresErrorDetailLines(PGPostgresError *error)
+{
+	NSCharacterSet *whitespace = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+	NSString *detail = [[error errorDetailMessage] stringByTrimmingCharactersInSet:whitespace];
+	NSString *hint = [[error errorMessageHint] stringByTrimmingCharactersInSet:whitespace];
+	NSMutableString *lines = [NSMutableString string];
+	if ([detail length]) [lines appendFormat:@"\n%@ %@", NSLocalizedString(@"DETAIL:", @"Postgres query: error detail label"), detail];
+	if ([hint length]) [lines appendFormat:@"\n%@ %@", NSLocalizedString(@"HINT:", @"Postgres query: error hint label"), hint];
+	return lines;
+}
+
+static PGPostgresResult *SPPostgresExecuteReporting(PGPostgresConnection *connection, NSString *sql, NSArray *values, BOOL withDetails, NSError **error)
 {
 	PGPostgresResult *result = [connection execute:sql values:values ?: @[]];
 	if (!result && error) {
@@ -20,6 +38,7 @@ PGPostgresResult *SPPostgresExecute(PGPostgresConnection *connection, NSString *
 		if ([connection isConnected]) {
 			message = [[connection lastError] errorPrimaryMessage];
 			if (![message length]) message = NSLocalizedString(@"The query failed.", @"Postgres content query failure");
+			if (withDetails) message = [message stringByAppendingString:SPPostgresErrorDetailLines([connection lastError])];
 		}
 		else {
 			// The connection is gone: libpq's message says why. The last query error may be older than that.
@@ -29,6 +48,16 @@ PGPostgresResult *SPPostgresExecute(PGPostgresConnection *connection, NSString *
 		*error = SPPostgresTableDataError(SPPostgresErrorQueryFailed, message);
 	}
 	return result;
+}
+
+PGPostgresResult *SPPostgresExecute(PGPostgresConnection *connection, NSString *sql, NSArray *values, NSError **error)
+{
+	return SPPostgresExecuteReporting(connection, sql, values, NO, error);
+}
+
+PGPostgresResult *SPPostgresExecuteWithDetails(PGPostgresConnection *connection, NSString *sql, NSArray *values, NSError **error)
+{
+	return SPPostgresExecuteReporting(connection, sql, values, YES, error);
 }
 
 /// How SPPostgresRunGuarded protects the user's transaction around body.

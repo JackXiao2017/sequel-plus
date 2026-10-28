@@ -1,6 +1,7 @@
 #import "SPPostgresQueryController.h"
 #import "SPPostgresStatementSplitter.h"
 #import "SPPostgresConsoleLogger.h"
+#import "SPPostgresTableData.h"
 #import "SPTableView.h"
 #import "SPButtonBar.h"
 #import "SPConstants.h"
@@ -471,10 +472,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 		[text appendString:NSLocalizedString(@" – the current transaction is aborted; ROLLBACK to continue", @"Postgres query: aborted transaction note")];
 	}
 
-	NSString *detail = [[error errorDetailMessage] stringByTrimmingCharactersInSet:whitespace];
-	NSString *hint = [[error errorMessageHint] stringByTrimmingCharactersInSet:whitespace];
-	if ([detail length]) [text appendFormat:@"\n%@ %@", NSLocalizedString(@"DETAIL:", @"Postgres query: error detail label"), detail];
-	if ([hint length]) [text appendFormat:@"\n%@ %@", NSLocalizedString(@"HINT:", @"Postgres query: error hint label"), hint];
+	[text appendString:SPPostgresErrorDetailLines(error)];
 
 	return text;
 }

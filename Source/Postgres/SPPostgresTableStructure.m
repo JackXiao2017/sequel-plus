@@ -1,0 +1,765 @@
+#import "SPPostgresTableStructure.h"
+#import "SPPostgresTableData.h"
+#import "SPPostgresTableDuplicator.h"
+#import "SPPostgresErrors.h"
+#import <PostgresKit/PostgresKit.h>
+
+static NSError *SPPostgresStructureError(NSInteger code, NSString *message, NSDictionary *extra)
+{
+	NSMutableDictionary *userInfo = [NSMutableDictionary dictionaryWithDictionary:extra ?: @{}];
+	userInfo[NSLocalizedDescriptionKey] = message;
+	return [NSError errorWithDomain:SPPostgresErrorDomain code:code userInfo:userInfo];
+}
+
+/// Fails with message (SPPostgresErrorQueryFailed) for a value refused before anything is sent.
+static BOOL SPPostgresStructureRefuse(NSString *message, NSError **error)
+{
+	if (error) *error = SPPostgresStructureError(SPPostgresErrorQueryFailed, message, nil);
+	return NO;
+}
+
+/// The value as an NSString, or nil for NULL.
+static NSString *SPPostgresStructureText(id value)
+{
+	return [value isKindOfClass:[NSString class]] ? value : nil;
+}
+
+/// A json_agg of strings as an NSArray (empty for NULL).
+static NSArray *SPPostgresStructureJSONArray(id value)
+{
+	NSString *text = SPPostgresStructureText(value);
+	if (!text) return @[];
+	id array = [NSJSONSerialization JSONObjectWithData:[text dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];
+	return [array isKindOfClass:[NSArray class]] ? array : @[];
+}
+
+static BOOL SPPostgresStructureIsTrue(id value)
+{
+	return [SPPostgresStructureText(value) isEqualToString:@"true"];
+}
+
+/// Every row of the query as arrays of NSString / NSNull (the query selects text), or nil on failure.
+static NSArray *SPPostgresStructureRows(PGPostgresConnection *connection, NSString *sql, NSArray *values, NSError **error)
+{
+	PGPostgresResult *result = SPPostgresExecuteWithDetails(connection, sql, values, error);
+	if (!result) return nil;
+
+	NSMutableArray *rows = [NSMutableArray arrayWithCapacity:(NSUInteger)[result numberOfRows]];
+	for (unsigned long long row = 0; row < [result numberOfRows]; row++) {
+		NSMutableArray *fields = [NSMutableArray arrayWithCapacity:[result numberOfFields]];
+		for (NSUInteger column = 0; column < [result numberOfFields]; column++) {
+			id value = [result textValueAtRow:row column:column];
+			[fields addObject:[value isKindOfClass:[NSString class]] ? value : [NSNull null]];
+		}
+		[rows addObject:fields];
+	}
+	return rows;
+}
+
+/// The relation ($1 schema, $2 name) as a CTE `rel` (oid, relkind); no row when there is no such relation.
+static NSString * const SPPostgresStructureRelation =
+	@"WITH rel AS (SELECT c.oid, c.relkind FROM pg_catalog.pg_class c "
+	"JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1::text AND c.relname = $2::text) ";
+
+BOOL SPPostgresRunStructureChange(PGPostgresConnection *connection, NSTimeInterval lockTimeout, BOOL (^body)(NSError **error), NSError **error)
+{
+	NSString *aborted = NSLocalizedString(@"The current transaction is aborted, so the change was not made. Roll it back first (ROLLBACK in the Query view).", @"Postgres structure: change inside an aborted transaction");
+
+	// Milliseconds; 0 means no limit
+	double milliseconds = lockTimeout > 0 ? MIN(ceil(lockTimeout * 1000.0), (double)INT32_MAX) : 0;
+	NSString *timeout = [NSString stringWithFormat:@"%.0f", milliseconds];
+
+	return SPPostgresRunAtomically(connection, @"sp_structure", aborted, ^BOOL(NSError **bodyError) {
+		// set_config(…, true) is SET LOCAL: inside our own transaction it ends with it; inside the user's it would
+		// last to the end of theirs, so it is set back to the previous value (which may itself be the user's SET
+		// LOCAL) before a successful finish. On failure the rollback (to the savepoint) undoes it. Either way the
+		// session value is never touched.
+		PGPostgresResult *previous = SPPostgresExecute(connection, @"SELECT pg_catalog.current_setting('lock_timeout')::text", nil, bodyError);
+		if (!previous) return NO;
+		NSString *previousValue = SPPostgresStructureText([previous textValueAtRow:0 column:0]) ?: @"0";
+
+		NSString *set = @"SELECT pg_catalog.set_config('lock_timeout', $1::text, true)";
+		if (!SPPostgresExecute(connection, set, @[timeout], bodyError)) return NO;
+		if (!body(bodyError)) return NO;
+		return SPPostgresExecute(connection, set, @[previousValue], bodyError) != nil;
+	}, error);
+}
+
+#pragma mark - Model objects
+
+@interface SPPostgresStructureColumn ()
+@property (readwrite, copy) NSString *name;
+@property (readwrite, copy) NSString *typeName;
+@property (readwrite) BOOL nullable;
+@property (readwrite, copy) NSString *defaultExpression;
+@property (readwrite, copy) NSString *autoKind;
+@property (readwrite, copy) NSString *generationExpression;
+@property (readwrite, copy) NSString *comment;
+@property (readwrite) NSInteger attnum;
+@end
+
+@implementation SPPostgresStructureColumn
+
+@synthesize name = _name;
+@synthesize typeName = _typeName;
+@synthesize nullable = _nullable;
+@synthesize defaultExpression = _defaultExpression;
+@synthesize autoKind = _autoKind;
+@synthesize generationExpression = _generationExpression;
+@synthesize comment = _comment;
+@synthesize attnum = _attnum;
+
+- (void)dealloc
+{
+	[_name release];
+	[_typeName release];
+	[_defaultExpression release];
+	[_autoKind release];
+	[_generationExpression release];
+	[_comment release];
+	[super dealloc];
+}
+
+- (NSString *)description
+{
+	return [NSString stringWithFormat:@"<%@ %@ %@%@>", [self class], _name, _typeName, [_autoKind length] ? [@" " stringByAppendingString:_autoKind] : @""];
+}
+
+@end
+
+@interface SPPostgresIndex ()
+@property (readwrite, copy) NSString *name;
+@property (readwrite, copy) NSString *definition;
+@property (readwrite, copy) NSArray *columns;
+@property (readwrite, copy) NSString *method;
+@property (readwrite) BOOL isUnique;
+@property (readwrite) BOOL isPrimary;
+@property (readwrite, copy) NSString *constraintName;
+@end
+
+@implementation SPPostgresIndex
+
+@synthesize name = _name;
+@synthesize definition = _definition;
+@synthesize columns = _columns;
+@synthesize method = _method;
+@synthesize isUnique = _isUnique;
+@synthesize isPrimary = _isPrimary;
+@synthesize constraintName = _constraintName;
+
+- (void)dealloc
+{
+	[_name release];
+	[_definition release];
+	[_columns release];
+	[_method release];
+	[_constraintName release];
+	[super dealloc];
+}
+
+- (NSString *)description
+{
+	return [NSString stringWithFormat:@"<%@ %@>", [self class], _definition];
+}
+
+@end
+
+@interface SPPostgresConstraint ()
+@property (readwrite, copy) NSString *name;
+@property (readwrite, copy) NSString *kind;
+@property (readwrite, copy) NSString *definition;
+@property (readwrite, copy) NSArray *columns;
+@property (readwrite, copy) NSString *referencedSchema;
+@property (readwrite, copy) NSString *referencedTable;
+@property (readwrite, copy) NSArray *referencedColumns;
+@property (readwrite, copy) NSString *onUpdate;
+@property (readwrite, copy) NSString *onDelete;
+@end
+
+@implementation SPPostgresConstraint
+
+@synthesize name = _name;
+@synthesize kind = _kind;
+@synthesize definition = _definition;
+@synthesize columns = _columns;
+@synthesize referencedSchema = _referencedSchema;
+@synthesize referencedTable = _referencedTable;
+@synthesize referencedColumns = _referencedColumns;
+@synthesize onUpdate = _onUpdate;
+@synthesize onDelete = _onDelete;
+
+- (void)dealloc
+{
+	[_name release];
+	[_kind release];
+	[_definition release];
+	[_columns release];
+	[_referencedSchema release];
+	[_referencedTable release];
+	[_referencedColumns release];
+	[_onUpdate release];
+	[_onDelete release];
+	[super dealloc];
+}
+
+- (NSString *)description
+{
+	return [NSString stringWithFormat:@"<%@ %@ %@>", [self class], _name, _definition];
+}
+
+@end
+
+@implementation SPPostgresColumnDefinition
+
+@synthesize name = _name;
+@synthesize typeName = _typeName;
+@synthesize defaultExpression = _defaultExpression;
+@synthesize notNull = _notNull;
+@synthesize autoKind = _autoKind;
+@synthesize comment = _comment;
+
+- (void)dealloc
+{
+	[_name release];
+	[_typeName release];
+	[_defaultExpression release];
+	[_autoKind release];
+	[_comment release];
+	[super dealloc];
+}
+
+@end
+
+@implementation SPPostgresConstraintDefinition
+
+@synthesize kind = _kind;
+@synthesize name = _name;
+@synthesize columns = _columns;
+@synthesize checkExpression = _checkExpression;
+@synthesize referencedSchema = _referencedSchema;
+@synthesize referencedTable = _referencedTable;
+@synthesize referencedColumns = _referencedColumns;
+@synthesize onUpdate = _onUpdate;
+@synthesize onDelete = _onDelete;
+
+- (void)dealloc
+{
+	[_kind release];
+	[_name release];
+	[_columns release];
+	[_checkExpression release];
+	[_referencedSchema release];
+	[_referencedTable release];
+	[_referencedColumns release];
+	[_onUpdate release];
+	[_onDelete release];
+	[super dealloc];
+}
+
+@end
+
+#pragma mark - SPPostgresTableStructure
+
+@implementation SPPostgresTableStructure
+
+@synthesize schema = _schema;
+@synthesize table = _table;
+@synthesize lockTimeout = _lockTimeout;
+
+- (instancetype)initWithConnection:(PGPostgresConnection *)connection schema:(NSString *)schema table:(NSString *)table
+{
+	if ((self = [super init])) {
+		_connection = [connection retain];
+		_schema = [schema copy];
+		_table = [table copy];
+		_lockTimeout = 5;
+	}
+	return self;
+}
+
+- (void)dealloc
+{
+	[_connection release];
+	[_schema release];
+	[_table release];
+	[super dealloc];
+}
+
+#pragma mark - Helpers
+
+/// "schema"."table"
+- (NSString *)qualifiedName
+{
+	return [NSString stringWithFormat:@"%@.%@", SPPostgresQuoteIdentifier(_schema), SPPostgresQuoteIdentifier(_table)];
+}
+
+- (NSArray *)rows:(NSString *)sql values:(NSArray *)values error:(NSError **)error
+{
+	NSMutableArray *all = [NSMutableArray arrayWithObjects:_schema ?: @"", _table ?: @"", nil];
+	[all addObjectsFromArray:values ?: @[]];
+	return SPPostgresStructureRows(_connection, [SPPostgresStructureRelation stringByAppendingString:sql], all, error);
+}
+
+/// Runs one DDL statement, reporting the server's message with its DETAIL and HINT.
+- (BOOL)run:(NSString *)sql error:(NSError **)error
+{
+	return SPPostgresExecuteWithDetails(_connection, sql, nil, error) != nil;
+}
+
+/// Runs body as one structure change (see SPPostgresRunStructureChange).
+- (BOOL)change:(BOOL (^)(NSError **error))body error:(NSError **)error
+{
+	return SPPostgresRunStructureChange(_connection, _lockTimeout, body, error);
+}
+
+/// Runs the statements, in order, as one structure change.
+- (BOOL)changeWith:(NSArray *)statements error:(NSError **)error
+{
+	return [self change:^BOOL(NSError **bodyError) {
+		for (NSString *sql in statements) {
+			if (![self run:sql error:bodyError]) return NO;
+		}
+		return YES;
+	} error:error];
+}
+
+/// NO (with an error) for a name PostgreSQL wouldn't keep as given: empty, or over 63 bytes.
+- (BOOL)checkName:(NSString *)name error:(NSError **)error
+{
+	if (![name length]) {
+		return SPPostgresStructureRefuse(NSLocalizedString(@"The name must not be empty.", @"Postgres structure: empty name"), error);
+	}
+	if (![SPPostgresTableDuplicator isValidTableName:name]) {
+		return SPPostgresStructureRefuse([NSString stringWithFormat:NSLocalizedString(@"The name “%@” is too long: PostgreSQL names can be at most 63 bytes.", @"Postgres structure: name too long"), name], error);
+	}
+	return YES;
+}
+
+/// ("a", "b"), or nil (with an error) when columns is empty or holds an empty name.
+- (NSString *)columnList:(NSArray *)columns error:(NSError **)error
+{
+	NSMutableArray *quoted = [NSMutableArray arrayWithCapacity:[columns count]];
+	for (id column in columns) {
+		if (![column isKindOfClass:[NSString class]] || ![column length]) {
+			SPPostgresStructureRefuse(NSLocalizedString(@"A column name must not be empty.", @"Postgres structure: empty column name"), error);
+			return nil;
+		}
+		[quoted addObject:SPPostgresQuoteIdentifier(column)];
+	}
+	if (![quoted count]) {
+		SPPostgresStructureRefuse(NSLocalizedString(@"Choose at least one column.", @"Postgres structure: no columns"), error);
+		return nil;
+	}
+	return [NSString stringWithFormat:@"(%@)", [quoted componentsJoinedByString:@", "]];
+}
+
+/// The keyword for COMMENT ON / ALTER … RENAME: TABLE, VIEW, MATERIALIZED VIEW or FOREIGN TABLE; nil on failure.
+- (NSString *)objectKeyword:(NSError **)error
+{
+	NSString *kind = [self relationKind:error];
+	if (!kind) return nil;
+	if ([kind isEqualToString:@"view"]) return @"VIEW";
+	if ([kind isEqualToString:@"materialized view"]) return @"MATERIALIZED VIEW";
+	if ([kind isEqualToString:@"foreign table"]) return @"FOREIGN TABLE";
+	return @"TABLE";
+}
+
+#pragma mark - Reading
+
+- (NSString *)relationKind:(NSError **)error
+{
+	NSArray *rows = [self rows:@"SELECT relkind::text FROM rel" values:nil error:error];
+	if (!rows) return nil;
+	if (![rows count]) {
+		SPPostgresStructureRefuse([NSString stringWithFormat:NSLocalizedString(@"There is no table “%@” in schema “%@”.", @"Postgres structure: no such relation"), _table, _schema], error);
+		return nil;
+	}
+	NSDictionary *kinds = @{@"r": @"table", @"p": @"partitioned table", @"v": @"view", @"m": @"materialized view", @"f": @"foreign table"};
+	NSString *kind = kinds[SPPostgresStructureText(rows[0][0]) ?: @""];
+	if (!kind) {
+		SPPostgresStructureRefuse([NSString stringWithFormat:NSLocalizedString(@"“%@” is not a table or view.", @"Postgres structure: unsupported relation kind"), _table], error);
+	}
+	return kind;
+}
+
+- (NSArray *)columns:(NSError **)error
+{
+	// serial: the default depends on a sequence that the column owns (deptype 'a', as CREATE … serial makes it)
+	NSArray *rows = [self rows:
+		@"SELECT a.attname::text, pg_catalog.format_type(a.atttypid, a.atttypmod)::text, (NOT a.attnotnull)::text,"
+		" pg_catalog.pg_get_expr(d.adbin, d.adrelid)::text, a.attidentity::text, a.attgenerated::text,"
+		" pg_catalog.col_description(a.attrelid, a.attnum)::text, a.attnum::text,"
+		" EXISTS (SELECT 1 FROM pg_catalog.pg_depend dd"
+		"   JOIN pg_catalog.pg_class s ON s.oid = dd.refobjid AND s.relkind = 'S'"
+		"   JOIN pg_catalog.pg_depend od ON od.classid = 'pg_catalog.pg_class'::regclass AND od.objid = s.oid"
+		"     AND od.refclassid = 'pg_catalog.pg_class'::regclass AND od.refobjid = a.attrelid AND od.refobjsubid = a.attnum AND od.deptype = 'a'"
+		"   WHERE dd.classid = 'pg_catalog.pg_attrdef'::regclass AND dd.objid = d.oid AND dd.refclassid = 'pg_catalog.pg_class'::regclass)::text"
+		" FROM rel JOIN pg_catalog.pg_attribute a ON a.attrelid = rel.oid"
+		" LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum"
+		" WHERE a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum" values:nil error:error];
+	if (!rows) return nil;
+
+	NSMutableArray *columns = [NSMutableArray arrayWithCapacity:[rows count]];
+	for (NSArray *row in rows) {
+		SPPostgresStructureColumn *column = [[[SPPostgresStructureColumn alloc] init] autorelease];
+		column.name = SPPostgresStructureText(row[0]);
+		column.typeName = SPPostgresStructureText(row[1]);
+		column.nullable = SPPostgresStructureIsTrue(row[2]);
+		NSString *expression = SPPostgresStructureText(row[3]);
+		NSString *identity = SPPostgresStructureText(row[4]) ?: @"";
+		NSString *generated = SPPostgresStructureText(row[5]) ?: @"";
+		column.comment = SPPostgresStructureText(row[6]);
+		column.attnum = [SPPostgresStructureText(row[7]) integerValue];
+
+		if ([generated length]) { // 's' stored, or (PG 18) 'v' virtual
+			column.autoKind = @"generated";
+			column.generationExpression = expression;
+		}
+		else {
+			column.defaultExpression = expression;
+			if ([identity isEqualToString:@"a"]) column.autoKind = @"identity always";
+			else if ([identity isEqualToString:@"d"]) column.autoKind = @"identity";
+			else if (SPPostgresStructureIsTrue(row[8]) && [expression hasPrefix:@"nextval("]) column.autoKind = @"serial";
+			else column.autoKind = @"";
+		}
+		[columns addObject:column];
+	}
+	return columns;
+}
+
+- (NSArray *)indexes:(NSError **)error
+{
+	NSArray *rows = [self rows:
+		@"SELECT ic.relname::text, pg_catalog.pg_get_indexdef(i.indexrelid)::text, am.amname::text,"
+		" i.indisunique::text, i.indisprimary::text, con.conname::text,"
+		" (SELECT pg_catalog.json_agg(CASE WHEN k.attnum <> 0 THEN att.attname::text"
+		"     ELSE pg_catalog.pg_get_indexdef(i.indexrelid, k.n::int, true) END ORDER BY k.n)"
+		"   FROM unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, n)"
+		"   LEFT JOIN pg_catalog.pg_attribute att ON att.attrelid = i.indrelid AND att.attnum = k.attnum"
+		"   WHERE k.n <= i.indnkeyatts)::text"
+		" FROM rel JOIN pg_catalog.pg_index i ON i.indrelid = rel.oid"
+		" JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid"
+		" JOIN pg_catalog.pg_am am ON am.oid = ic.relam"
+		" LEFT JOIN pg_catalog.pg_constraint con ON con.conindid = i.indexrelid AND con.conrelid = i.indrelid AND con.contype IN ('p', 'u', 'x')"
+		" WHERE rel.relkind NOT IN ('v', 'm')"
+		" ORDER BY ic.relname COLLATE \"C\"" values:nil error:error];
+	if (!rows) return nil;
+
+	NSMutableArray *indexes = [NSMutableArray arrayWithCapacity:[rows count]];
+	for (NSArray *row in rows) {
+		SPPostgresIndex *index = [[[SPPostgresIndex alloc] init] autorelease];
+		index.name = SPPostgresStructureText(row[0]);
+		index.definition = SPPostgresStructureText(row[1]);
+		index.method = SPPostgresStructureText(row[2]);
+		index.isUnique = SPPostgresStructureIsTrue(row[3]);
+		index.isPrimary = SPPostgresStructureIsTrue(row[4]);
+		index.constraintName = SPPostgresStructureText(row[5]);
+		index.columns = SPPostgresStructureJSONArray(row[6]);
+		[indexes addObject:index];
+	}
+	return indexes;
+}
+
+- (NSArray *)constraints:(NSError **)error
+{
+	// contype 'n' (PG 18's NOT NULL) and 't' (constraint triggers) are left out
+	NSArray *rows = [self rows:
+		@"SELECT con.conname::text, con.contype::text, pg_catalog.pg_get_constraintdef(con.oid)::text,"
+		" (SELECT pg_catalog.json_agg(att.attname::text ORDER BY k.n) FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, n)"
+		"   JOIN pg_catalog.pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = k.attnum)::text,"
+		" fn.nspname::text, fc.relname::text,"
+		" (SELECT pg_catalog.json_agg(att.attname::text ORDER BY k.n) FROM unnest(con.confkey) WITH ORDINALITY AS k(attnum, n)"
+		"   JOIN pg_catalog.pg_attribute att ON att.attrelid = con.confrelid AND att.attnum = k.attnum)::text,"
+		" con.confupdtype::text, con.confdeltype::text"
+		" FROM rel JOIN pg_catalog.pg_constraint con ON con.conrelid = rel.oid"
+		" LEFT JOIN pg_catalog.pg_class fc ON con.contype = 'f' AND fc.oid = con.confrelid"
+		" LEFT JOIN pg_catalog.pg_namespace fn ON fn.oid = fc.relnamespace"
+		" WHERE con.contype IN ('p', 'u', 'c', 'f', 'x') AND rel.relkind NOT IN ('v', 'm')"
+		" ORDER BY con.conname COLLATE \"C\"" values:nil error:error];
+	if (!rows) return nil;
+
+	NSDictionary *kinds = @{@"p": @"PRIMARY KEY", @"u": @"UNIQUE", @"c": @"CHECK", @"f": @"FOREIGN KEY", @"x": @"EXCLUDE"};
+	NSDictionary *actions = @{@"a": @"NO ACTION", @"r": @"RESTRICT", @"c": @"CASCADE", @"n": @"SET NULL", @"d": @"SET DEFAULT"};
+	NSMutableArray *constraints = [NSMutableArray arrayWithCapacity:[rows count]];
+	for (NSArray *row in rows) {
+		SPPostgresConstraint *constraint = [[[SPPostgresConstraint alloc] init] autorelease];
+		NSString *type = SPPostgresStructureText(row[1]) ?: @"";
+		constraint.name = SPPostgresStructureText(row[0]);
+		constraint.kind = kinds[type];
+		constraint.definition = SPPostgresStructureText(row[2]);
+		constraint.columns = SPPostgresStructureJSONArray(row[3]);
+		if ([type isEqualToString:@"f"]) {
+			constraint.referencedSchema = SPPostgresStructureText(row[4]);
+			constraint.referencedTable = SPPostgresStructureText(row[5]);
+			constraint.referencedColumns = SPPostgresStructureJSONArray(row[6]);
+			constraint.onUpdate = actions[SPPostgresStructureText(row[7]) ?: @""];
+			constraint.onDelete = actions[SPPostgresStructureText(row[8]) ?: @""];
+		}
+		[constraints addObject:constraint];
+	}
+	return constraints;
+}
+
+- (NSString *)tableComment:(NSError **)error
+{
+	NSArray *rows = [self rows:@"SELECT pg_catalog.obj_description(rel.oid, 'pg_class')::text FROM rel" values:nil error:error];
+	if (![rows count]) return nil;
+	return SPPostgresStructureText(rows[0][0]);
+}
+
+#pragma mark - Columns
+
+- (BOOL)addColumn:(SPPostgresColumnDefinition *)definition error:(NSError **)error
+{
+	NSString *name = [definition name];
+	if (![self checkName:name error:error]) return NO;
+
+	NSCharacterSet *whitespace = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+	NSString *type = [[definition typeName] stringByTrimmingCharactersInSet:whitespace];
+	if (![type length]) return SPPostgresStructureRefuse(NSLocalizedString(@"The column type must not be empty.", @"Postgres structure: empty column type"), error);
+
+	NSString *autoKind = [definition autoKind] ?: @"";
+	NSString *identity = @"";
+	if ([autoKind isEqualToString:@"serial"]) {
+		NSDictionary *serials = @{@"integer": @"serial", @"int": @"serial", @"int4": @"serial",
+								  @"bigint": @"bigserial", @"int8": @"bigserial",
+								  @"smallint": @"smallserial", @"int2": @"smallserial"};
+		NSString *serial = serials[[type lowercaseString]];
+		if (!serial) return SPPostgresStructureRefuse(NSLocalizedString(@"Only integer columns can be serial.", @"Postgres structure: serial on a non-integer type"), error);
+		type = serial;
+	}
+	else if ([autoKind isEqualToString:@"identity"]) identity = @" GENERATED BY DEFAULT AS IDENTITY";
+	else if ([autoKind isEqualToString:@"identity always"]) identity = @" GENERATED ALWAYS AS IDENTITY";
+	else if ([autoKind length]) {
+		return SPPostgresStructureRefuse([NSString stringWithFormat:NSLocalizedString(@"“%@” is not a kind of column that can be added.", @"Postgres structure: unknown auto kind"), autoKind], error);
+	}
+
+	NSString *column = SPPostgresQuoteIdentifier(name);
+	NSMutableString *sql = [NSMutableString stringWithFormat:@"ALTER TABLE %@ ADD COLUMN %@ %@", [self qualifiedName], column, type];
+	NSString *defaultExpression = [[definition defaultExpression] stringByTrimmingCharactersInSet:whitespace];
+	if ([defaultExpression length]) [sql appendFormat:@" DEFAULT %@", defaultExpression];
+	if ([definition notNull]) [sql appendString:@" NOT NULL"];
+	[sql appendString:identity];
+
+	NSMutableArray *statements = [NSMutableArray arrayWithObject:sql];
+	if ([[definition comment] length]) {
+		[statements addObject:[NSString stringWithFormat:@"COMMENT ON COLUMN %@.%@ IS %@", [self qualifiedName], column, SPPostgresQuoteLiteral([definition comment])]];
+	}
+	return [self changeWith:statements error:error];
+}
+
+- (BOOL)renameColumn:(NSString *)column to:(NSString *)newName error:(NSError **)error
+{
+	if (![self checkName:newName error:error]) return NO;
+	return [self changeWith:@[[NSString stringWithFormat:@"ALTER TABLE %@ RENAME COLUMN %@ TO %@", [self qualifiedName],
+							   SPPostgresQuoteIdentifier(column), SPPostgresQuoteIdentifier(newName)]] error:error];
+}
+
+- (BOOL)changeColumn:(NSString *)column toType:(NSString *)typeName using:(NSString *)usingExpression error:(NSError **)error
+{
+	NSCharacterSet *whitespace = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+	NSString *type = [typeName stringByTrimmingCharactersInSet:whitespace];
+	if (![type length]) return SPPostgresStructureRefuse(NSLocalizedString(@"The column type must not be empty.", @"Postgres structure: empty column type"), error);
+
+	NSMutableString *sql = [NSMutableString stringWithFormat:@"ALTER TABLE %@ ALTER COLUMN %@ TYPE %@", [self qualifiedName], SPPostgresQuoteIdentifier(column), type];
+	NSString *usingText = [usingExpression stringByTrimmingCharactersInSet:whitespace];
+	if ([usingText length]) [sql appendFormat:@" USING %@", usingText];
+	return [self changeWith:@[sql] error:error];
+}
+
+- (BOOL)setDefault:(NSString *)expression forColumn:(NSString *)column error:(NSError **)error
+{
+	NSString *trimmed = [expression stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	NSString *action = [trimmed length] ? [NSString stringWithFormat:@"SET DEFAULT %@", trimmed] : @"DROP DEFAULT";
+	return [self changeWith:@[[NSString stringWithFormat:@"ALTER TABLE %@ ALTER COLUMN %@ %@", [self qualifiedName], SPPostgresQuoteIdentifier(column), action]] error:error];
+}
+
+- (BOOL)setNullable:(BOOL)nullable forColumn:(NSString *)column error:(NSError **)error
+{
+	return [self changeWith:@[[NSString stringWithFormat:@"ALTER TABLE %@ ALTER COLUMN %@ %@", [self qualifiedName], SPPostgresQuoteIdentifier(column),
+							   nullable ? @"DROP NOT NULL" : @"SET NOT NULL"]] error:error];
+}
+
+- (BOOL)setComment:(NSString *)comment forColumn:(NSString *)column error:(NSError **)error
+{
+	NSString *value = [comment length] ? SPPostgresQuoteLiteral(comment) : @"NULL";
+	return [self changeWith:@[[NSString stringWithFormat:@"COMMENT ON COLUMN %@.%@ IS %@", [self qualifiedName], SPPostgresQuoteIdentifier(column), value]] error:error];
+}
+
+- (NSArray *)dependentsOfColumn:(NSString *)column error:(NSError **)error
+{
+	// Everything pg_depend has on the column, but its own default and the sequence it owns (serial, identity),
+	// which go with it, and PG 18's NOT NULL constraint, which is the column's own. A view's rule is described
+	// as the view; another column's default (a generation expression on PG 18) as that column. Foreign keys of
+	// other tables are added from confkey too.
+	NSArray *rows = [self rows:
+		@", col AS (SELECT a.attrelid AS relid, a.attnum FROM rel JOIN pg_catalog.pg_attribute a ON a.attrelid = rel.oid"
+		"   WHERE a.attname = $3::text AND a.attnum > 0 AND NOT a.attisdropped)"
+		" SELECT s.description::text FROM ("
+		"  SELECT CASE"
+		"    WHEN r.oid IS NOT NULL AND vc.relkind IN ('v', 'm') THEN pg_catalog.pg_describe_object('pg_catalog.pg_class'::regclass, r.ev_class, 0)"
+		"    WHEN ad.oid IS NOT NULL THEN pg_catalog.pg_describe_object('pg_catalog.pg_class'::regclass, ad.adrelid, ad.adnum)"
+		"    ELSE pg_catalog.pg_describe_object(d.classid, d.objid, d.objsubid) END AS description"
+		"  FROM col JOIN pg_catalog.pg_depend d ON d.refclassid = 'pg_catalog.pg_class'::regclass AND d.refobjid = col.relid AND d.refobjsubid = col.attnum"
+		"  LEFT JOIN pg_catalog.pg_rewrite r ON d.classid = 'pg_catalog.pg_rewrite'::regclass AND r.oid = d.objid"
+		"  LEFT JOIN pg_catalog.pg_class vc ON vc.oid = r.ev_class"
+		"  LEFT JOIN pg_catalog.pg_attrdef ad ON d.classid = 'pg_catalog.pg_attrdef'::regclass AND ad.oid = d.objid"
+		"  LEFT JOIN pg_catalog.pg_class sq ON d.classid = 'pg_catalog.pg_class'::regclass AND sq.oid = d.objid"
+		"  LEFT JOIN pg_catalog.pg_constraint nn ON d.classid = 'pg_catalog.pg_constraint'::regclass AND nn.oid = d.objid"
+		"  WHERE NOT (ad.oid IS NOT NULL AND ad.adrelid = col.relid AND ad.adnum = col.attnum)"
+		"    AND NOT (sq.oid IS NOT NULL AND sq.relkind = 'S' AND d.deptype IN ('a', 'i'))"
+		"    AND NOT (nn.oid IS NOT NULL AND nn.contype = 'n')"
+		"    AND NOT (d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = col.relid AND d.objsubid = col.attnum)"
+		"  UNION"
+		"  SELECT pg_catalog.pg_describe_object('pg_catalog.pg_constraint'::regclass, fk.oid, 0)"
+		"  FROM col JOIN pg_catalog.pg_constraint fk ON fk.contype = 'f' AND fk.confrelid = col.relid AND col.attnum = ANY (fk.confkey)"
+		" ) s WHERE s.description IS NOT NULL GROUP BY s.description ORDER BY s.description COLLATE \"C\"" values:@[column ?: @""] error:error];
+	if (!rows) return nil;
+
+	NSMutableArray *dependents = [NSMutableArray arrayWithCapacity:[rows count]];
+	for (NSArray *row in rows) {
+		NSString *description = SPPostgresStructureText(row[0]);
+		if (description) [dependents addObject:description];
+	}
+	return dependents;
+}
+
+- (BOOL)dropColumn:(NSString *)column error:(NSError **)error
+{
+	// PostgreSQL would drop the column's indexes and constraints with it, unasked: check first, in the same
+	// transaction as the drop.
+	return [self change:^BOOL(NSError **bodyError) {
+		NSArray *dependents = [self dependentsOfColumn:column error:bodyError];
+		if (!dependents) return NO;
+		if ([dependents count]) {
+			if (bodyError) {
+				NSString *message = [NSString stringWithFormat:NSLocalizedString(@"\"%@\" can't be deleted because other objects depend on it.", @"Postgres structure: column has dependents"), column];
+				*bodyError = SPPostgresStructureError(SPPostgresErrorHasDependents, message, @{SPPostgresDependentsErrorKey: dependents});
+			}
+			return NO;
+		}
+		return [self run:[NSString stringWithFormat:@"ALTER TABLE %@ DROP COLUMN %@", [self qualifiedName], SPPostgresQuoteIdentifier(column)] error:bodyError];
+	} error:error];
+}
+
+#pragma mark - Indexes and constraints
+
+- (BOOL)addIndexNamed:(NSString *)name columns:(NSArray *)columns unique:(BOOL)unique method:(NSString *)method error:(NSError **)error
+{
+	if (name && ![self checkName:name error:error]) return NO;
+
+	NSString *accessMethod = [method length] ? [method lowercaseString] : @"btree";
+	if (![@[@"btree", @"hash", @"gist", @"gin", @"brin"] containsObject:accessMethod]) {
+		return SPPostgresStructureRefuse([NSString stringWithFormat:NSLocalizedString(@"“%@” is not an index method (btree, hash, gist, gin or brin).", @"Postgres structure: unknown index method"), method], error);
+	}
+	NSString *list = [self columnList:columns error:error];
+	if (!list) return NO;
+
+	// Not CONCURRENTLY: that can't run inside a transaction
+	NSString *sql = [NSString stringWithFormat:@"CREATE %@INDEX %@ON %@ USING %@ %@", unique ? @"UNIQUE " : @"",
+					 name ? [SPPostgresQuoteIdentifier(name) stringByAppendingString:@" "] : @"", [self qualifiedName], accessMethod, list];
+	return [self changeWith:@[sql] error:error];
+}
+
+- (BOOL)dropIndexNamed:(NSString *)name error:(NSError **)error
+{
+	return [self change:^BOOL(NSError **bodyError) {
+		NSArray *rows = [self rows:
+			@"SELECT con.conname::text FROM rel JOIN pg_catalog.pg_index i ON i.indrelid = rel.oid"
+			" JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid"
+			" LEFT JOIN pg_catalog.pg_constraint con ON con.conindid = i.indexrelid AND con.conrelid = i.indrelid AND con.contype IN ('p', 'u', 'x')"
+			" WHERE ic.relname = $3::text" values:@[name ?: @""] error:bodyError];
+		if (!rows) return NO;
+		if (![rows count]) {
+			return SPPostgresStructureRefuse([NSString stringWithFormat:NSLocalizedString(@"There is no index “%@” on this table.", @"Postgres structure: no such index"), name], bodyError);
+		}
+		NSString *constraint = SPPostgresStructureText(rows[0][0]);
+		NSString *sql = constraint
+			? [NSString stringWithFormat:@"ALTER TABLE %@ DROP CONSTRAINT %@", [self qualifiedName], SPPostgresQuoteIdentifier(constraint)]
+			: [NSString stringWithFormat:@"DROP INDEX %@.%@", SPPostgresQuoteIdentifier(self->_schema), SPPostgresQuoteIdentifier(name)];
+		return [self run:sql error:bodyError];
+	} error:error];
+}
+
+- (BOOL)addConstraint:(SPPostgresConstraintDefinition *)definition error:(NSError **)error
+{
+	NSString *kind = [definition kind] ?: @"";
+	if (![@[@"PRIMARY KEY", @"UNIQUE", @"CHECK", @"FOREIGN KEY"] containsObject:kind]) {
+		return SPPostgresStructureRefuse([NSString stringWithFormat:NSLocalizedString(@"“%@” is not a kind of constraint that can be added.", @"Postgres structure: unknown constraint kind"), kind], error);
+	}
+	NSString *name = [definition name];
+	if (name && ![self checkName:name error:error]) return NO;
+
+	NSMutableString *sql = [NSMutableString stringWithFormat:@"ALTER TABLE %@ ADD ", [self qualifiedName]];
+	if (name) [sql appendFormat:@"CONSTRAINT %@ ", SPPostgresQuoteIdentifier(name)];
+
+	if ([kind isEqualToString:@"CHECK"]) {
+		NSString *expression = [[definition checkExpression] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+		if (![expression length]) return SPPostgresStructureRefuse(NSLocalizedString(@"The check expression must not be empty.", @"Postgres structure: empty check"), error);
+		[sql appendFormat:@"CHECK (%@)", expression];
+	}
+	else {
+		NSString *list = [self columnList:[definition columns] error:error];
+		if (!list) return NO;
+		[sql appendFormat:@"%@ %@", kind, list];
+
+		if ([kind isEqualToString:@"FOREIGN KEY"]) {
+			if (![[definition referencedTable] length]) {
+				return SPPostgresStructureRefuse(NSLocalizedString(@"Choose the table the foreign key references.", @"Postgres structure: no referenced table"), error);
+			}
+			NSString *schema = [[definition referencedSchema] length] ? [definition referencedSchema] : _schema;
+			[sql appendFormat:@" REFERENCES %@.%@", SPPostgresQuoteIdentifier(schema), SPPostgresQuoteIdentifier([definition referencedTable])];
+			if ([[definition referencedColumns] count]) {
+				NSString *referenced = [self columnList:[definition referencedColumns] error:error];
+				if (!referenced) return NO;
+				[sql appendFormat:@" %@", referenced];
+			}
+			NSArray *actions = @[@"NO ACTION", @"RESTRICT", @"CASCADE", @"SET NULL", @"SET DEFAULT"];
+			for (NSString *clause in @[@"UPDATE", @"DELETE"]) {
+				NSString *action = [clause isEqualToString:@"UPDATE"] ? [definition onUpdate] : [definition onDelete];
+				if (![action length]) continue;
+				NSString *upper = [action uppercaseString];
+				if (![actions containsObject:upper]) {
+					return SPPostgresStructureRefuse([NSString stringWithFormat:NSLocalizedString(@"“%@” is not a foreign key action.", @"Postgres structure: unknown foreign key action"), action], error);
+				}
+				[sql appendFormat:@" ON %@ %@", clause, upper];
+			}
+		}
+	}
+	return [self changeWith:@[sql] error:error];
+}
+
+- (BOOL)dropConstraintNamed:(NSString *)name error:(NSError **)error
+{
+	return [self changeWith:@[[NSString stringWithFormat:@"ALTER TABLE %@ DROP CONSTRAINT %@", [self qualifiedName], SPPostgresQuoteIdentifier(name)]] error:error];
+}
+
+#pragma mark - Table
+
+- (BOOL)renameTableTo:(NSString *)newName error:(NSError **)error
+{
+	if (![self checkName:newName error:error]) return NO;
+	BOOL renamed = [self change:^BOOL(NSError **bodyError) {
+		NSString *keyword = [self objectKeyword:bodyError];
+		if (!keyword) return NO;
+		return [self run:[NSString stringWithFormat:@"ALTER %@ %@ RENAME TO %@", keyword, [self qualifiedName], SPPostgresQuoteIdentifier(newName)] error:bodyError];
+	} error:error];
+	if (renamed) {
+		NSString *table = [newName copy];
+		[_table release];
+		_table = table;
+	}
+	return renamed;
+}
+
+- (BOOL)setTableComment:(NSString *)comment error:(NSError **)error
+{
+	return [self change:^BOOL(NSError **bodyError) {
+		NSString *keyword = [self objectKeyword:bodyError];
+		if (!keyword) return NO;
+		NSString *value = [comment length] ? SPPostgresQuoteLiteral(comment) : @"NULL";
+		return [self run:[NSString stringWithFormat:@"COMMENT ON %@ %@ IS %@", keyword, [self qualifiedName], value] error:bodyError];
+	} error:error];
+}
+
+@end

@@ -11,14 +11,6 @@ static NSError *SPPostgresDuplicatorError(NSString *message)
 	return [NSError errorWithDomain:SPPostgresErrorDomain code:SPPostgresErrorQueryFailed userInfo:@{NSLocalizedDescriptionKey: message}];
 }
 
-/// A string literal for DDL, which takes no parameters: correct whatever standard_conforming_strings is.
-static NSString *SPPostgresQuoteLiteral(NSString *value)
-{
-	NSString *quoted = [value stringByReplacingOccurrencesOfString:@"'" withString:@"''"];
-	if ([quoted rangeOfString:@"\\"].location == NSNotFound) return [NSString stringWithFormat:@"'%@'", quoted];
-	return [NSString stringWithFormat:@"E'%@'", [quoted stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"]];
-}
-
 /// YES for an optionally signed run of digits (a catalog number put into DDL, which takes no parameters).
 static BOOL SPPostgresIsInteger(id value)
 {
