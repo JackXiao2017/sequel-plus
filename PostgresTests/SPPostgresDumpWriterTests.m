@@ -4,6 +4,7 @@
 #import <PostgresKit/PostgresKit.h>
 #import "SPPostgresTestServers.h"
 #import "../Source/Postgres/SPPostgresDumpWriter.h"
+#import "../Source/Postgres/SPPostgresDumpObject.h"
 #import "../Source/Postgres/SPPostgresDumpReader.h"
 #import "../Source/Postgres/SPPostgresSQLImporter.h"
 #import "../Source/Postgres/SPPostgresErrors.h"
@@ -644,6 +645,214 @@ static NSString * const SPUserSchemas = @"nspname NOT LIKE 'pg\\_%' AND nspname 
 		contents = [self contentsOf:path];
 		XCTAssertTrue([contents containsString:@"-- Foreign tables not exported: \"public\".\"remote\"\n"]);
 		XCTAssertTrue([contents containsString:@"CREATE TABLE \"public\".\"audit\""] || [contents containsString:@"CREATE TABLE public.audit"], @"%@", contents);
+	}
+}
+
+#pragma mark - Stage 7: scope objects and dependencies
+
+static SPPostgresDumpObject *SPObject(NSString *kind, NSString *schema, NSString *name)
+{
+	return [SPPostgresDumpObject objectWithKind:kind schema:schema name:name arguments:nil];
+}
+
+- (NSString *)namesOf:(NSArray<SPPostgresDumpObject *> *)objects
+{
+	return [[objects valueForKey:@"displayName"] componentsJoinedByString:@"\n"];
+}
+
+- (void)testDumpObjectDisplayNameAndEquality
+{
+	XCTAssertEqualObjects(SPObject(SPPostgresDumpObjectTable, @"Sales Data", @"Orders 2026").displayName, @"table \"Sales Data\".\"Orders 2026\"");
+	XCTAssertEqualObjects([SPPostgresDumpObject objectWithKind:SPPostgresDumpObjectRoutine schema:@"public" name:@"audit_row" arguments:@""].displayName, @"routine public.audit_row()");
+	XCTAssertEqualObjects(SPObject(SPPostgresDumpObjectExtension, @"public", @"citext").displayName, @"extension citext");
+	XCTAssertEqualObjects(SPObject(SPPostgresDumpObjectView, @"public", @"select").displayName, @"view public.\"select\"");
+	XCTAssertEqualObjects(SPObject(SPPostgresDumpObjectMaterializedView, @"Public", @"a\"b").displayName, @"materialized view \"Public\".\"a\"\"b\"");
+
+	SPPostgresDumpObject *mood = SPObject(SPPostgresDumpObjectType, @"public", @"mood");
+	XCTAssertEqualObjects(mood, SPObject(SPPostgresDumpObjectType, @"public", @"mood"));
+	XCTAssertEqual(mood.hash, SPObject(SPPostgresDumpObjectType, @"public", @"mood").hash);
+	XCTAssertEqualObjects([mood copy], mood);
+	XCTAssertNotEqualObjects(mood, SPObject(SPPostgresDumpObjectDomain, @"public", @"mood"));
+	XCTAssertNotEqualObjects(mood, SPObject(SPPostgresDumpObjectType, @"other", @"mood"));
+	XCTAssertNotEqualObjects([SPPostgresDumpObject objectWithKind:SPPostgresDumpObjectRoutine schema:@"public" name:@"f" arguments:@"integer"],
+							 [SPPostgresDumpObject objectWithKind:SPPostgresDumpObjectRoutine schema:@"public" name:@"f" arguments:@"text"]);
+	NSSet *set = [NSSet setWithObjects:mood, SPObject(SPPostgresDumpObjectType, @"public", @"mood"), nil];
+	XCTAssertEqual(set.count, 1u);
+}
+
+- (void)testObjectsInScopeWholeDatabase
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *source = [self sourceOn:port];
+		SPPostgresDumpWriter *writer = [[SPPostgresDumpWriter alloc] initWithConnection:source];
+		writer.wholeDatabase = YES;
+		NSError *error = nil;
+		NSArray<SPPostgresDumpObject *> *objects = [writer objectsInScope:&error];
+		XCTAssertNotNil(objects, @"%@", error.localizedDescription);
+		XCTAssertEqual(source.transactionStatus, PGPostgresTransactionIdle);
+		NSString *names = [self namesOf:objects];
+
+		NSMutableArray *expected = [@[
+			SPObject(SPPostgresDumpObjectTable, @"Sales Data", @"Orders 2026"), SPObject(SPPostgresDumpObjectTable, @"Sales Data", @"order_lines"),
+			SPObject(SPPostgresDumpObjectTable, @"public", @"audit"), SPObject(SPPostgresDumpObjectTable, @"public", @"events"),
+			SPObject(SPPostgresDumpObjectTable, @"public", @"events_2025"),
+			SPObject(SPPostgresDumpObjectView, @"Sales Data", @"v_orders"), SPObject(SPPostgresDumpObjectView, @"Sales Data", @"v_big_orders"),
+			SPObject(SPPostgresDumpObjectMaterializedView, @"Sales Data", @"mv_by_feeling"), SPObject(SPPostgresDumpObjectMaterializedView, @"Sales Data", @"mv_unpopulated"),
+			SPObject(SPPostgresDumpObjectSequence, @"public", @"counter"), SPObject(SPPostgresDumpObjectSequence, @"public", @"audit_id_seq"),
+			[SPPostgresDumpObject objectWithKind:SPPostgresDumpObjectRoutine schema:@"public" name:@"audit_row" arguments:@""],
+			SPObject(SPPostgresDumpObjectType, @"public", @"mood"), SPObject(SPPostgresDumpObjectType, @"public", @"address"),
+			SPObject(SPPostgresDumpObjectDomain, @"public", @"posint"), SPObject(SPPostgresDumpObjectExtension, @"public", @"citext"),
+		] mutableCopy];
+		if ([[self text:@"SELECT current_setting('server_version_num')" on:source] integerValue] >= 140000) {
+			[expected addObject:[SPPostgresDumpObject objectWithKind:SPPostgresDumpObjectRoutine schema:@"public" name:@"order_count" arguments:@""]];
+		}
+		for (SPPostgresDumpObject *object in expected) {
+			XCTAssertTrue([objects containsObject:object], @"port %@: %@ missing from\n%@", port, object.displayName, names);
+		}
+		for (SPPostgresDumpObject *object in objects) {
+			XCTAssertFalse([object.kind isEqualToString:SPPostgresDumpObjectExtension] && [object.name isEqualToString:@"plpgsql"], @"%@", names);
+			XCTAssertNotEqualObjects(object.name, @"Orders 2026_id_seq", @"identity sequences are created by their tables");
+			XCTAssertNotEqualObjects(object.kind, SPPostgresDumpObjectForeignTable);
+		}
+		NSArray *sorted = [objects sortedArrayUsingComparator:^NSComparisonResult(SPPostgresDumpObject *a, SPPostgresDumpObject *b) {
+			NSComparisonResult result = [a.kind compare:b.kind];
+			if (result == NSOrderedSame) result = [a.schema compare:b.schema];
+			if (result == NSOrderedSame) result = [a.name compare:b.name];
+			return result;
+		}];
+		XCTAssertEqualObjects(objects, sorted);
+		XCTAssertEqualObjects([writer dependenciesInScope:&error], @[]);
+	}
+}
+
+- (void)testDependenciesOfSelectedTables
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *source = [self sourceOn:port];
+		SPPostgresDumpWriter *writer = [[SPPostgresDumpWriter alloc] initWithConnection:source];
+		writer.tables = @[@[@"Sales Data", @"Orders 2026"]];
+		NSError *error = nil;
+		XCTAssertEqualObjects([writer dependenciesInScope:&error], @[], @"%@", error.localizedDescription);
+		NSArray *withoutDependencies = [writer objectsInScope:&error];
+		XCTAssertEqualObjects(withoutDependencies, (@[SPObject(SPPostgresDumpObjectSequence, @"Sales Data", @"Orders 2026_seq_seq"),
+													  SPObject(SPPostgresDumpObjectTable, @"Sales Data", @"Orders 2026")]), @"%@", [self namesOf:withoutDependencies]);
+
+		writer.includeDependencies = YES;
+		NSArray *dependencies = [writer dependenciesInScope:&error];
+		XCTAssertNotNil(dependencies, @"%@", error.localizedDescription);
+		XCTAssertEqual(source.transactionStatus, PGPostgresTransactionIdle);
+		NSSet *expected = [NSSet setWithArray:@[
+			SPObject(SPPostgresDumpObjectExtension, @"public", @"citext"), SPObject(SPPostgresDumpObjectType, @"public", @"mood"),
+			SPObject(SPPostgresDumpObjectType, @"public", @"address"), SPObject(SPPostgresDumpObjectDomain, @"public", @"posint"),
+			[SPPostgresDumpObject objectWithKind:SPPostgresDumpObjectRoutine schema:@"public" name:@"audit_row" arguments:@""]]];
+		XCTAssertEqualObjects([NSSet setWithArray:dependencies], expected, @"port %@:\n%@", port, [self namesOf:dependencies]);
+		XCTAssertEqual(dependencies.count, expected.count);
+		NSArray *objects = [writer objectsInScope:&error];
+		XCTAssertEqualObjects([NSSet setWithArray:objects], [expected setByAddingObjectsFromArray:withoutDependencies], @"%@", [self namesOf:objects]);
+	}
+}
+
+- (void)testDependenciesFollowNestedTypes
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *source = [self sourceOn:port];
+		[self run:@"CREATE DOMAIN public.mood_d AS public.mood" on:source];
+		[self run:@"CREATE TYPE public.wrap AS (m public.mood_d[])" on:source];
+		[self run:@"CREATE TABLE public.nested (w public.wrap)" on:source];
+		SPPostgresDumpWriter *writer = [[SPPostgresDumpWriter alloc] initWithConnection:source];
+		writer.tables = @[@[@"public", @"nested"]];
+		writer.includeDependencies = YES;
+		NSError *error = nil;
+		NSArray *dependencies = [writer dependenciesInScope:&error];
+		XCTAssertNotNil(dependencies, @"%@", error.localizedDescription);
+		XCTAssertEqualObjects([NSSet setWithArray:dependencies], ([NSSet setWithArray:@[SPObject(SPPostgresDumpObjectType, @"public", @"mood"),
+			SPObject(SPPostgresDumpObjectDomain, @"public", @"mood_d"), SPObject(SPPostgresDumpObjectType, @"public", @"wrap")]]), @"port %@:\n%@", port, [self namesOf:dependencies]);
+
+		// The dump creates them in order and loads
+		NSString *path = [self dumpFrom:source named:@"nested.sql" configure:^(SPPostgresDumpWriter *dump) {
+			dump.tables = @[@[@"public", @"nested"]];
+			dump.includeDependencies = YES;
+		}];
+		PGPostgresConnection *destination = [self destinationOn:port];
+		[self import:path into:destination];
+		XCTAssertEqualObjects([self text:@"SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'public.nested'::regclass AND attname = 'w'" on:destination], @"wrap");
+	}
+}
+
+- (void)testDependencyDumpLoadsIntoEmptyDatabase
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *source = [self sourceOn:port];
+		NSDictionary *expected = [self describe:source];
+		NSString *path = [self dumpFrom:source named:@"dependencies.sql" configure:^(SPPostgresDumpWriter *writer) {
+			writer.tables = @[@[@"Sales Data", @"Orders 2026"], @[@"Sales Data", @"order_lines"], @[@"public", @"audit"]];
+			writer.includeDependencies = YES;
+		}];
+		PGPostgresConnection *destination = [self destinationOn:port];
+		[self import:path into:destination];
+		NSDictionary *actual = [self describe:destination];
+		for (NSString *key in @[@"rows \"Sales Data\".\"Orders 2026\"", @"rows \"Sales Data\".order_lines", @"rows public.audit"]) {
+			XCTAssertNotNil(expected[key], @"%@", key);
+			XCTAssertEqualObjects(actual[key], expected[key], @"port %@: %@", port, key);
+		}
+		NSString *audited = [self text:@"SELECT count(*)::text FROM public.audit" on:destination];
+		[self run:@"INSERT INTO \"Sales Data\".\"Orders 2026\"(qty) VALUES (1)" on:destination];
+		XCTAssertEqual([[self text:@"SELECT count(*)::text FROM public.audit" on:destination] integerValue], audited.integerValue + 1, @"the trigger fires");
+	}
+}
+
+- (void)testSkippedDependenciesAreNotWritten
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *source = [self sourceOn:port];
+		NSArray *skipped = @[SPObject(SPPostgresDumpObjectType, @"public", @"mood"), SPObject(SPPostgresDumpObjectTable, @"Sales Data", @"order_lines")];
+		void (^configure)(SPPostgresDumpWriter *) = ^(SPPostgresDumpWriter *writer) {
+			writer.tables = @[@[@"Sales Data", @"Orders 2026"], @[@"Sales Data", @"order_lines"]];
+			writer.includeDependencies = YES;
+			writer.skippedObjects = skipped;
+		};
+		NSString *dump = [self contentsOf:[self dumpFrom:source named:@"skipped.sql" configure:configure]];
+		XCTAssertFalse([dump containsString:@"CREATE TYPE \"public\".\"mood\""], @"%@", dump);
+		XCTAssertFalse([dump containsString:@"CREATE TYPE public.mood"]);
+		XCTAssertTrue([dump containsString:@"CREATE TYPE \"public\".\"address\""], @"%@", dump);
+		XCTAssertTrue([dump containsString:@"COPY \"Sales Data\".\"order_lines\""], @"a table is never skipped");
+
+		SPPostgresDumpWriter *writer = [[SPPostgresDumpWriter alloc] initWithConnection:source];
+		configure(writer);
+		NSError *error = nil;
+		NSArray *objects = [writer objectsInScope:&error];
+		XCTAssertNotNil(objects, @"%@", error.localizedDescription);
+		XCTAssertFalse([objects containsObject:skipped[0]]);
+		XCTAssertTrue([objects containsObject:skipped[1]]);
+		XCTAssertFalse([[writer dependenciesInScope:&error] containsObject:skipped[0]]);
+		XCTAssertTrue([[writer dependenciesInScope:&error] containsObject:SPObject(SPPostgresDumpObjectType, @"public", @"address")]);
+	}
+}
+
+- (void)testDefaultSequenceDependency
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *source = [self sourceOn:port];
+		[self run:@"CREATE TABLE public.uses_counter (n bigint DEFAULT nextval('public.counter'))" on:source];
+		void (^configure)(SPPostgresDumpWriter *) = ^(SPPostgresDumpWriter *writer) {
+			writer.tables = @[@[@"public", @"uses_counter"]];
+			writer.includeDependencies = YES;
+		};
+		SPPostgresDumpWriter *writer = [[SPPostgresDumpWriter alloc] initWithConnection:source];
+		configure(writer);
+		NSError *error = nil;
+		NSArray *dependencies = [writer dependenciesInScope:&error];
+		XCTAssertEqualObjects(dependencies, @[SPObject(SPPostgresDumpObjectSequence, @"public", @"counter")], @"port %@: %@ %@", port, [self namesOf:dependencies], error.localizedDescription);
+
+		NSString *path = [self dumpFrom:source named:@"counter.sql" configure:configure];
+		NSString *dump = [self contentsOf:path];
+		XCTAssertTrue([dump containsString:@"CREATE SEQUENCE \"public\".\"counter\""], @"%@", dump);
+		XCTAssertTrue([dump containsString:@"\"public\".\"counter\"', 42, true);"], @"%@", dump);
+		PGPostgresConnection *destination = [self destinationOn:port];
+		[self import:path into:destination];
+		XCTAssertEqualObjects([self text:@"SELECT last_value::text FROM public.counter" on:destination], @"42");
+		[self run:@"INSERT INTO public.uses_counter DEFAULT VALUES" on:destination];
+		XCTAssertEqualObjects([self text:@"SELECT n::text FROM public.uses_counter" on:destination], @"43");
 	}
 }
 

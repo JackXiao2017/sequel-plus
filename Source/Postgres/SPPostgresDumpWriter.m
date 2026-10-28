@@ -1,4 +1,5 @@
 #import "SPPostgresDumpWriter.h"
+#import "SPPostgresDumpObject.h"
 #import "SPPostgresCreateStatement.h"
 #import "SPPostgresTableData.h"
 #import "SPPostgresErrors.h"
@@ -79,6 +80,79 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 }
 @end
 
+/// What a dump covers, as rows of the catalog: read by the same queries for -objectsInScope: and for the dump.
+@interface SPPostgresDumpScope : NSObject
+{
+@public
+	NSArray *schemaNames;    // the scope's schemas (a table scope: its tables' schemas)
+	NSArray *createdSchemas; // those, and the schemas of the dependencies written
+	NSArray *relationRows;   // oid, schema, name, relkind, relispopulated; foreign tables included
+	NSArray *relationOids;   // the relations that aren't foreign tables
+	NSArray *sequences;      // oid, schema, name, type, start, increment, min, max, cache, cycle, owner's deptype, owner,
+							 // owner's column, comment
+	NSArray *types;          // oid, schema, name, typtype
+	NSArray *routines;       // oid, schema, name, identity arguments
+	NSArray *extensions;     // name, schema
+	NSArray *dependencies;   // SPPostgresDumpObjects that includeDependencies adds (skippedObjects left out)
+}
+@end
+
+@implementation SPPostgresDumpScope
+- (void)dealloc
+{
+	[schemaNames release];
+	[createdSchemas release];
+	[relationRows release];
+	[relationOids release];
+	[sequences release];
+	[types release];
+	[routines release];
+	[extensions release];
+	[dependencies release];
+	[super dealloc];
+}
+@end
+
+static SPPostgresDumpObject *SPDumpSequenceObject(NSArray *row)
+{
+	return [SPPostgresDumpObject objectWithKind:SPPostgresDumpObjectSequence schema:SPDumpText(row[1]) name:SPDumpText(row[2]) arguments:nil];
+}
+
+static SPPostgresDumpObject *SPDumpTypeObject(NSArray *row)
+{
+	NSString *kind = [SPDumpText(row[3]) isEqualToString:@"d"] ? SPPostgresDumpObjectDomain : SPPostgresDumpObjectType;
+	return [SPPostgresDumpObject objectWithKind:kind schema:SPDumpText(row[1]) name:SPDumpText(row[2]) arguments:nil];
+}
+
+static SPPostgresDumpObject *SPDumpRoutineObject(NSArray *row)
+{
+	return [SPPostgresDumpObject objectWithKind:SPPostgresDumpObjectRoutine schema:SPDumpText(row[1]) name:SPDumpText(row[2]) arguments:SPDumpText(row[3]) ?: @""];
+}
+
+static SPPostgresDumpObject *SPDumpExtensionObject(NSArray *row)
+{
+	return [SPPostgresDumpObject objectWithKind:SPPostgresDumpObjectExtension schema:SPDumpText(row[1]) name:SPDumpText(row[0]) arguments:nil];
+}
+
+/// The object of a relation row (r, p: table; v: view; m: materialized view); nil for a foreign table.
+static SPPostgresDumpObject *SPDumpRelationObject(NSArray *row)
+{
+	NSString *kind = @{@"r": SPPostgresDumpObjectTable, @"p": SPPostgresDumpObjectTable, @"v": SPPostgresDumpObjectView,
+					   @"m": SPPostgresDumpObjectMaterializedView}[SPDumpText(row[3]) ?: @""];
+	return kind ? [SPPostgresDumpObject objectWithKind:kind schema:SPDumpText(row[1]) name:SPDumpText(row[2]) arguments:nil] : nil;
+}
+
+/// A condition on an object (classid, objid) that it isn't an extension's member.
+static NSString *const SPDumpNotExtensionMember = @"NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = '%@'::pg_catalog.regclass AND d.objid = %@ AND d.deptype = 'e')";
+
+static NSString *SPDumpNotMember(NSString *catalog, NSString *oid)
+{
+	return [NSString stringWithFormat:SPDumpNotExtensionMember, catalog, oid];
+}
+
+/// A condition on the namespace n that it is a user schema.
+static NSString *const SPDumpUserSchema = @"n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> 'information_schema'";
+
 @implementation SPPostgresDumpWriter
 
 @synthesize wholeDatabase;
@@ -89,6 +163,8 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 @synthesize compress;
 @synthesize progress;
 @synthesize foreignTablesSkipped;
+@synthesize includeDependencies;
+@synthesize skippedObjects;
 
 + (NSArray *)orderedExtensions:(NSArray *)names requirements:(NSDictionary *)requirements
 {
@@ -113,6 +189,7 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 	[progress release];
 	[writeError release];
 	[foreignTablesSkipped release];
+	[skippedObjects release];
 	[super dealloc];
 }
 
@@ -199,7 +276,8 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 
 #pragma mark - Writing
 
-- (BOOL)writeToPath:(NSString *)path error:(NSError **)error
+/// NO, with SPPostgresErrorInvalidSettings, for settings no dump can be written with.
+- (BOOL)_checkSettings:(NSError **)error
 {
 	NSUInteger scopes = (wholeDatabase ? 1 : 0) + (schemas ? 1 : 0) + (tables ? 1 : 0);
 	if (scopes != 1) {
@@ -214,10 +292,19 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 		if (error) *error = SPPostgresMakeError(SPPostgresErrorInvalidSettings, NSLocalizedString(@"Choose the structure, the data, or both to export.", @"Postgres export: neither structure nor data"), nil);
 		return NO;
 	}
-	if ([connection transactionStatus] != PGPostgresTransactionIdle) {
-		if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, NSLocalizedString(@"The export needs a connection with no transaction open.", @"Postgres export: connection busy"), nil);
-		return NO;
-	}
+	return YES;
+}
+
+- (BOOL)_checkIdle:(NSError **)error
+{
+	if ([connection transactionStatus] == PGPostgresTransactionIdle) return YES;
+	if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, NSLocalizedString(@"The export needs a connection with no transaction open.", @"Postgres export: connection busy"), nil);
+	return NO;
+}
+
+- (BOOL)writeToPath:(NSString *)path error:(NSError **)error
+{
+	if (![self _checkSettings:error] || ![self _checkIdle:error]) return NO;
 
 	[writeError release];
 	writeError = nil;
@@ -250,6 +337,63 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 	}
 	return written;
 }
+
+#pragma mark - Scope objects
+
+- (NSArray *)objectsInScope:(NSError **)error
+{
+	return [self _objectsInScopeDependenciesOnly:NO error:error];
+}
+
+- (NSArray *)dependenciesInScope:(NSError **)error
+{
+	return [self _objectsInScopeDependenciesOnly:YES error:error];
+}
+
+- (NSArray *)_objectsInScopeDependenciesOnly:(BOOL)dependenciesOnly error:(NSError **)error
+{
+	if (![self _checkSettings:error]) return nil;
+	if (!includeStructure) return @[];
+	if (![self _checkIdle:error]) return nil;
+
+	// The dump's own reading conditions: one snapshot, and an empty search_path (the identity arguments name types as
+	// the dump does)
+	NSError *failure = nil;
+	SPPostgresDumpScope *scope = nil;
+	if (SPPostgresExecute(connection, @"BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY", nil, &failure)
+		&& [self _rows:@"SELECT pg_catalog.set_config('search_path', '', true)" values:nil error:&failure]) {
+		scope = [self _scope:&failure];
+	}
+	if ([connection transactionStatus] != PGPostgresTransactionIdle) SPPostgresExecute(connection, @"ROLLBACK", nil, NULL);
+	if (!scope) {
+		if (error) *error = failure ?: SPPostgresMakeError(SPPostgresErrorQueryFailed, NSLocalizedString(@"The export failed.", @"Postgres export: unknown failure"), nil);
+		return nil;
+	}
+
+	NSMutableArray *objects = [NSMutableArray arrayWithArray:scope->dependencies];
+	if (!dependenciesOnly) {
+		[objects removeAllObjects];
+		for (NSArray *row in scope->relationRows) {
+			SPPostgresDumpObject *object = SPDumpRelationObject(row);
+			if (object) [objects addObject:object];
+		}
+		// Identity sequences are created by their tables
+		for (NSArray *row in scope->sequences) if (![SPDumpText(row[10]) isEqualToString:@"i"]) [objects addObject:SPDumpSequenceObject(row)];
+		for (NSArray *row in scope->types) [objects addObject:SPDumpTypeObject(row)];
+		for (NSArray *row in scope->routines) [objects addObject:SPDumpRoutineObject(row)];
+		for (NSArray *row in scope->extensions) [objects addObject:SPDumpExtensionObject(row)];
+	}
+	[objects sortUsingComparator:^NSComparisonResult(SPPostgresDumpObject *a, SPPostgresDumpObject *b) {
+		NSComparisonResult result = [[a kind] compare:[b kind]];
+		if (result == NSOrderedSame) result = [[a schema] ?: @"" compare:[b schema] ?: @""];
+		if (result == NSOrderedSame) result = [[a name] ?: @"" compare:[b name] ?: @""];
+		if (result == NSOrderedSame) result = [[a arguments] ?: @"" compare:[b arguments] ?: @""];
+		return result;
+	}];
+	return objects;
+}
+
+#pragma mark - Writing (continued)
 
 - (NSError *)_cancelledError
 {
@@ -301,70 +445,13 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 	// (written once the scope is known: it names the foreign tables left out)
 
 	// The scope
-	NSString *notExtensionMember = @"NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = '%@'::pg_catalog.regclass AND d.objid = %@ AND d.deptype = 'e')";
-	NSArray *schemaNames = nil;
-	NSArray *relationRows = nil;
-	NSString *relationColumns = @"SELECT c.oid::text, n.nspname::text, c.relname::text, c.relkind::text, c.relispopulated::text"
-								 " FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace";
-	NSString *relationOrder = @" ORDER BY n.nspname COLLATE \"C\", c.relname COLLATE \"C\"";
-	NSString *relationFilter = [NSString stringWithFormat:@" AND c.relkind IN ('r', 'p', 'f', 'v', 'm') AND c.relpersistence <> 't' AND %@",
-								[NSString stringWithFormat:notExtensionMember, @"pg_catalog.pg_class", @"c.oid"]];
-
-	if (tables) {
-		// A partitioned table brings its partitions, recursively (as pg_dump --table-and-children)
-		NSString *sql = [NSString stringWithFormat:@"%@ WHERE c.oid IN ("
-						 "SELECT g.oid FROM pg_catalog.pg_class g JOIN pg_catalog.pg_namespace gn ON gn.oid = g.relnamespace"
-						 " WHERE (gn.nspname, g.relname) IN (SELECT x->>0, x->>1 FROM pg_catalog.json_array_elements($1::json) x)"
-						 " UNION SELECT t.relid FROM pg_catalog.pg_class g JOIN pg_catalog.pg_namespace gn ON gn.oid = g.relnamespace,"
-						 " LATERAL pg_catalog.pg_partition_tree(g.oid) t"
-						 " WHERE g.relkind = 'p' AND (gn.nspname, g.relname) IN (SELECT x->>0, x->>1 FROM pg_catalog.json_array_elements($1::json) x))%@%@",
-						 relationColumns, relationFilter, relationOrder];
-		relationRows = [self _rows:sql values:@[SPDumpJSON(tables)] error:error];
-		if (!relationRows) return NO;
-		NSMutableSet *found = [NSMutableSet set];
-		NSMutableArray *names = [NSMutableArray array];
-		for (NSArray *row in relationRows) {
-			[found addObject:@[SPDumpText(row[1]) ?: @"", SPDumpText(row[2]) ?: @""]];
-			if (![names containsObject:SPDumpText(row[1]) ?: @""]) [names addObject:SPDumpText(row[1]) ?: @""];
-		}
-		for (NSArray *pair in tables) {
-			if (![pair isKindOfClass:[NSArray class]] || [pair count] != 2 || ![found containsObject:pair]) {
-				if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, [NSString stringWithFormat:NSLocalizedString(@"There is no table “%@” to export.", @"Postgres export: missing table"), [pair isKindOfClass:[NSArray class]] ? [pair componentsJoinedByString:@"."] : pair], nil);
-				return NO;
-			}
-		}
-		schemaNames = [names sortedArrayUsingSelector:@selector(compare:)];
-	}
-	else {
-		if (wholeDatabase) {
-			NSString *sql = [NSString stringWithFormat:@"SELECT n.nspname::text FROM pg_catalog.pg_namespace n WHERE n.nspname NOT LIKE 'pg\\_%%' AND n.nspname <> 'information_schema' AND %@ ORDER BY n.nspname COLLATE \"C\"",
-							 [NSString stringWithFormat:notExtensionMember, @"pg_catalog.pg_namespace", @"n.oid"]];
-			NSArray *rows = [self _rows:sql values:nil error:error];
-			if (!rows) return NO;
-			NSMutableArray *names = [NSMutableArray array];
-			for (NSArray *row in rows) [names addObject:SPDumpText(row[0]) ?: @""];
-			schemaNames = names;
-		}
-		else {
-			NSArray *rows = [self _rows:@"SELECT x FROM pg_catalog.json_array_elements_text($1::json) x WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n WHERE n.nspname = x)" values:@[SPDumpJSON(schemas)] error:error];
-			if (!rows) return NO;
-			if ([rows count]) {
-				if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, [NSString stringWithFormat:NSLocalizedString(@"There is no schema “%@” to export.", @"Postgres export: missing schema"), SPDumpText(rows[0][0])], nil);
-				return NO;
-			}
-			schemaNames = schemas;
-		}
-		NSString *sql = [NSString stringWithFormat:@"%@ WHERE n.nspname IN (SELECT pg_catalog.json_array_elements_text($1::json))%@%@", relationColumns, relationFilter, relationOrder];
-		relationRows = [self _rows:sql values:@[SPDumpJSON(schemaNames)] error:error];
-		if (!relationRows) return NO;
-	}
-	NSString *schemasJSON = SPDumpJSON(schemaNames);
-
+	SPPostgresDumpScope *scope = [self _scope:error];
+	if (!scope) return NO;
 	NSMutableArray *tableRelations = [NSMutableArray array];
 	NSMutableArray *viewRelations = [NSMutableArray array];
 	NSMutableDictionary *relationsByOid = [NSMutableDictionary dictionary];
 	NSMutableArray *foreignTables = [NSMutableArray array];
-	for (NSArray *row in relationRows) {
+	for (NSArray *row in scope->relationRows) {
 		// Foreign tables are left out (structure and data): without their server and user mapping, which aren't
 		// exported, creating them would fail the whole import
 		if ([SPDumpText(row[3]) isEqualToString:@"f"]) {
@@ -429,7 +516,120 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 		relation->parts = [parts retain];
 	}
 
-	// Sequences: every one in the schemas, or those of the selected tables; with what owns them
+	if (includeStructure) {
+		if (![self _writeStructureBeforeDataWithScope:scope relations:relationsByOid tables:orderedTables views:orderedViews versionNumber:versionNumber error:error]) return NO;
+	}
+
+	if (includeData) {
+		if (![self _writeDataForTables:orderedTables relations:relationsByOid relationsJSON:relationsJSON sequences:scope->sequences error:error]) return NO;
+	}
+	else if (!includeStructure) {
+		return YES;
+	}
+
+	if (includeStructure) {
+		if (![self _writeStructureAfterDataWithRelations:relationsByOid tables:orderedTables views:orderedViews error:error]) return NO;
+		if (![self _writeCommentsWithScope:scope error:error]) return NO;
+	}
+	return YES;
+}
+
+/// The scope's catalog rows; a table scope fails when a table is missing. Used inside the dump's transaction and by
+/// -objectsInScope:, both with an empty search_path.
+- (SPPostgresDumpScope *)_scope:(NSError **)error
+{
+	SPPostgresDumpScope *scope = [[[SPPostgresDumpScope alloc] init] autorelease];
+	NSArray *schemaNames = nil;
+	NSArray *relationRows = nil;
+	NSString *relationColumns = @"SELECT c.oid::text, n.nspname::text, c.relname::text, c.relkind::text, c.relispopulated::text"
+								 " FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace";
+	NSString *relationOrder = @" ORDER BY n.nspname COLLATE \"C\", c.relname COLLATE \"C\"";
+	NSString *relationFilter = [NSString stringWithFormat:@" AND c.relkind IN ('r', 'p', 'f', 'v', 'm') AND c.relpersistence <> 't' AND %@",
+								SPDumpNotMember(@"pg_catalog.pg_class", @"c.oid")];
+
+	if (tables) {
+		// A partitioned table brings its partitions, recursively (as pg_dump --table-and-children)
+		NSString *sql = [NSString stringWithFormat:@"%@ WHERE c.oid IN ("
+						 "SELECT g.oid FROM pg_catalog.pg_class g JOIN pg_catalog.pg_namespace gn ON gn.oid = g.relnamespace"
+						 " WHERE (gn.nspname, g.relname) IN (SELECT x->>0, x->>1 FROM pg_catalog.json_array_elements($1::json) x)"
+						 " UNION SELECT t.relid FROM pg_catalog.pg_class g JOIN pg_catalog.pg_namespace gn ON gn.oid = g.relnamespace,"
+						 " LATERAL pg_catalog.pg_partition_tree(g.oid) t"
+						 " WHERE g.relkind = 'p' AND (gn.nspname, g.relname) IN (SELECT x->>0, x->>1 FROM pg_catalog.json_array_elements($1::json) x))%@%@",
+						 relationColumns, relationFilter, relationOrder];
+		relationRows = [self _rows:sql values:@[SPDumpJSON(tables)] error:error];
+		if (!relationRows) return nil;
+		NSMutableSet *found = [NSMutableSet set];
+		NSMutableArray *names = [NSMutableArray array];
+		for (NSArray *row in relationRows) {
+			[found addObject:@[SPDumpText(row[1]) ?: @"", SPDumpText(row[2]) ?: @""]];
+			if (![names containsObject:SPDumpText(row[1]) ?: @""]) [names addObject:SPDumpText(row[1]) ?: @""];
+		}
+		for (NSArray *pair in tables) {
+			if (![pair isKindOfClass:[NSArray class]] || [pair count] != 2 || ![found containsObject:pair]) {
+				if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, [NSString stringWithFormat:NSLocalizedString(@"There is no table “%@” to export.", @"Postgres export: missing table"), [pair isKindOfClass:[NSArray class]] ? [pair componentsJoinedByString:@"."] : pair], nil);
+				return nil;
+			}
+		}
+		schemaNames = [names sortedArrayUsingSelector:@selector(compare:)];
+	}
+	else {
+		if (wholeDatabase) {
+			NSString *sql = [NSString stringWithFormat:@"SELECT n.nspname::text FROM pg_catalog.pg_namespace n WHERE %@ AND %@ ORDER BY n.nspname COLLATE \"C\"",
+							 SPDumpUserSchema, SPDumpNotMember(@"pg_catalog.pg_namespace", @"n.oid")];
+			NSArray *rows = [self _rows:sql values:nil error:error];
+			if (!rows) return nil;
+			NSMutableArray *names = [NSMutableArray array];
+			for (NSArray *row in rows) [names addObject:SPDumpText(row[0]) ?: @""];
+			schemaNames = names;
+		}
+		else {
+			NSArray *rows = [self _rows:@"SELECT x FROM pg_catalog.json_array_elements_text($1::json) x WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n WHERE n.nspname = x)" values:@[SPDumpJSON(schemas)] error:error];
+			if (!rows) return nil;
+			if ([rows count]) {
+				if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, [NSString stringWithFormat:NSLocalizedString(@"There is no schema “%@” to export.", @"Postgres export: missing schema"), SPDumpText(rows[0][0])], nil);
+				return nil;
+			}
+			schemaNames = schemas;
+		}
+		NSString *sql = [NSString stringWithFormat:@"%@ WHERE n.nspname IN (SELECT pg_catalog.json_array_elements_text($1::json))%@%@", relationColumns, relationFilter, relationOrder];
+		relationRows = [self _rows:sql values:@[SPDumpJSON(schemaNames)] error:error];
+		if (!relationRows) return nil;
+	}
+	NSMutableArray *relationOids = [NSMutableArray array];
+	for (NSArray *row in relationRows) {
+		if (![SPDumpText(row[3]) isEqualToString:@"f"]) [relationOids addObject:SPDumpText(row[0]) ?: @""];
+	}
+	scope->schemaNames = [schemaNames copy];
+	scope->relationRows = [relationRows retain];
+	scope->relationOids = [relationOids copy];
+
+	// Each query below takes $1: the relations (a table scope) or the schemas
+	NSArray *values = @[tables ? SPDumpJSON(relationOids) : SPDumpJSON(schemaNames)];
+	NSString *inSchemas = @"n.nspname IN (SELECT pg_catalog.json_array_elements_text($1::json))";
+	NSString *relations = @"(SELECT pg_catalog.json_array_elements_text($1::json)::oid)";
+	BOOL dependencies = tables && includeDependencies;
+
+	// A table scope's dependencies: the user types their columns use, followed through domains' base types, composite
+	// types' attributes, array element types and range subtypes (an extension's member is reached, not followed); the
+	// functions their triggers call; the sequences their column defaults call (nextval records the dependency)
+	NSString *usedTypes = [NSString stringWithFormat:
+		@"(WITH RECURSIVE used(oid) AS ("
+		"SELECT a.atttypid FROM pg_catalog.pg_attribute a WHERE a.attrelid IN %@ AND a.attnum > 0 AND NOT a.attisdropped"
+		" UNION SELECT x.oid FROM used u JOIN pg_catalog.pg_type t ON t.oid = u.oid JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace,"
+		" LATERAL (SELECT t.typbasetype WHERE t.typbasetype <> 0"
+		"  UNION ALL SELECT t.typelem WHERE t.typelem <> 0"
+		"  UNION ALL SELECT a.atttypid FROM pg_catalog.pg_class c JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid"
+		"   WHERE c.oid = t.typrelid AND c.relkind = 'c' AND a.attnum > 0 AND NOT a.attisdropped"
+		"  UNION ALL SELECT r.rngsubtype FROM pg_catalog.pg_range r WHERE r.rngtypid = t.oid) x(oid)"
+		" WHERE %@ AND %@"
+		") SELECT used.oid FROM used)", relations, SPDumpUserSchema, SPDumpNotMember(@"pg_catalog.pg_type", @"t.oid")];
+	NSString *triggerFunctions = [NSString stringWithFormat:@"(SELECT tg.tgfoid FROM pg_catalog.pg_trigger tg WHERE tg.tgrelid IN %@ AND NOT tg.tgisinternal)", relations];
+	NSString *defaultSequences = [NSString stringWithFormat:
+		@"(SELECT ad_d.refobjid FROM pg_catalog.pg_attrdef ad JOIN pg_catalog.pg_depend ad_d ON ad_d.classid = 'pg_catalog.pg_attrdef'::pg_catalog.regclass"
+		" AND ad_d.objid = ad.oid AND ad_d.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass WHERE ad.adrelid IN %@)", relations];
+
+	// Sequences: every one in the schemas, or those of the selected tables (and, with their dependencies, those their
+	// defaults call); with what owns them
 	NSString *sequenceSQL = [NSString stringWithFormat:
 		@"SELECT c.oid::text, n.nspname::text, c.relname::text, pg_catalog.format_type(s.seqtypid, NULL)::text, s.seqstart::text,"
 		" s.seqincrement::text, s.seqmin::text, s.seqmax::text, s.seqcache::text, s.seqcycle::text, d.deptype::text, d.refobjid::text,"
@@ -441,48 +641,116 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 		" LEFT JOIN pg_catalog.pg_attribute a ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid"
 		" WHERE c.relkind = 'S' AND %@ AND %@"
 		" ORDER BY n.nspname COLLATE \"C\", c.relname COLLATE \"C\"",
-		[NSString stringWithFormat:notExtensionMember, @"pg_catalog.pg_class", @"c.oid"],
-		tables ? @"d.refobjid IN (SELECT pg_catalog.json_array_elements_text($1::json)::oid)" : @"n.nspname IN (SELECT pg_catalog.json_array_elements_text($1::json))"];
-	NSArray *sequences = [self _rows:sequenceSQL values:@[tables ? relationsJSON : schemasJSON] error:error];
-	if (!sequences) return NO;
+		SPDumpNotMember(@"pg_catalog.pg_class", @"c.oid"),
+		!tables ? inSchemas : dependencies ? [NSString stringWithFormat:@"(d.refobjid IN %@ OR c.oid IN %@)", relations, defaultSequences]
+		: [NSString stringWithFormat:@"d.refobjid IN %@", relations]];
+	NSArray *sequences = [self _rows:sequenceSQL values:values error:error];
+	if (!sequences) return nil;
 
-	if (includeStructure) {
-		if (![self _writeStructureBeforeDataWithSchemas:schemaNames schemasJSON:schemasJSON relations:relationsByOid tables:orderedTables views:orderedViews sequences:sequences versionNumber:versionNumber notExtensionMember:notExtensionMember error:error]) return NO;
+	// Types: enums, standalone composites, ranges and domains
+	NSArray *types = @[];
+	if (!tables || dependencies) {
+		NSString *sql = [NSString stringWithFormat:
+			@"SELECT t.oid::text, n.nspname::text, t.typname::text, t.typtype::text"
+			" FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace"
+			" WHERE t.typtype IN ('e', 'c', 'r', 'd')"
+			" AND (t.typtype <> 'c' OR (SELECT c.relkind FROM pg_catalog.pg_class c WHERE c.oid = t.typrelid) = 'c') AND %@ AND %@"
+			" ORDER BY n.nspname COLLATE \"C\", t.typname COLLATE \"C\"", SPDumpNotMember(@"pg_catalog.pg_type", @"t.oid"),
+			tables ? [NSString stringWithFormat:@"t.oid IN %@ AND %@", usedTypes, SPDumpUserSchema] : inSchemas];
+		types = [self _rows:sql values:values error:error];
+		if (!types) return nil;
 	}
 
-	if (includeData) {
-		if (![self _writeDataForTables:orderedTables relations:relationsByOid relationsJSON:relationsJSON sequences:sequences error:error]) return NO;
-	}
-	else if (!includeStructure) {
-		return YES;
+	// Functions and procedures
+	NSArray *routines = @[];
+	if (!tables || dependencies) {
+		NSString *sql = [NSString stringWithFormat:
+			@"SELECT p.oid::text, n.nspname::text, p.proname::text, pg_catalog.pg_get_function_identity_arguments(p.oid)::text"
+			" FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace"
+			" WHERE p.prokind IN ('f', 'p') AND %@ AND %@"
+			" ORDER BY n.nspname COLLATE \"C\", p.proname COLLATE \"C\", pg_catalog.pg_get_function_identity_arguments(p.oid) COLLATE \"C\"",
+			SPDumpNotMember(@"pg_catalog.pg_proc", @"p.oid"),
+			tables ? [NSString stringWithFormat:@"p.oid IN %@ AND %@", triggerFunctions, SPDumpUserSchema] : inSchemas];
+		routines = [self _rows:sql values:values error:error];
+		if (!routines) return nil;
 	}
 
-	if (includeStructure) {
-		if (![self _writeStructureAfterDataWithRelations:relationsByOid tables:orderedTables views:orderedViews error:error]) return NO;
-		if (![self _writeCommentsWithSchemas:schemaNames schemasJSON:schemasJSON sequences:sequences notExtensionMember:notExtensionMember error:error]) return NO;
+	// Extensions: a database's every one but plpgsql, a schema's those installed in it, a table's those owning its
+	// types or trigger functions, with the extensions they require
+	NSArray *extensions = @[];
+	if (!tables || dependencies) {
+		NSString *condition = inSchemas;
+		if (wholeDatabase) condition = @"$1::text IS NOT NULL";
+		else if (tables) condition = [NSString stringWithFormat:
+			@"e.oid IN (WITH RECURSIVE needed(oid) AS ("
+			"SELECT d.refobjid FROM pg_catalog.pg_depend d WHERE d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype = 'e'"
+			" AND ((d.classid = 'pg_catalog.pg_type'::pg_catalog.regclass AND d.objid IN %@)"
+			"  OR (d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass AND d.objid IN %@))"
+			" UNION SELECT r.refobjid FROM needed JOIN pg_catalog.pg_depend r ON r.classid = 'pg_catalog.pg_extension'::pg_catalog.regclass"
+			"  AND r.objid = needed.oid AND r.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass"
+			") SELECT needed.oid FROM needed)", usedTypes, triggerFunctions];
+		NSString *sql = [NSString stringWithFormat:
+			@"SELECT e.extname::text, n.nspname::text FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace"
+			" WHERE %@ AND %@ ORDER BY e.extname COLLATE \"C\"", wholeDatabase || tables ? @"e.extname <> 'plpgsql'" : @"TRUE", condition];
+		extensions = [self _rows:sql values:values error:error];
+		if (!extensions) return nil;
 	}
-	return YES;
+
+	// The dependencies, less those skipped
+	NSMutableArray *createdSchemas = [NSMutableArray arrayWithArray:schemaNames];
+	NSMutableArray *dependencyObjects = [NSMutableArray array];
+	if (dependencies) {
+		NSSet *skipped = [NSSet setWithArray:skippedObjects ?: @[]];
+		BOOL (^add)(SPPostgresDumpObject *) = ^BOOL(SPPostgresDumpObject *dependency) {
+			if ([skipped containsObject:dependency]) return NO;
+			[dependencyObjects addObject:dependency];
+			if (![createdSchemas containsObject:[dependency schema] ?: @""]) [createdSchemas addObject:[dependency schema] ?: @""];
+			return YES;
+		};
+		NSArray *(^kept)(NSArray *, SPPostgresDumpObject *(*)(NSArray *)) = ^NSArray *(NSArray *rows, SPPostgresDumpObject *(*object)(NSArray *)) {
+			NSMutableArray *written = [NSMutableArray array];
+			for (NSArray *row in rows) if (add(object(row))) [written addObject:row];
+			return written;
+		};
+		// A sequence a table in scope owns isn't a dependency; an identity sequence of a table outside the scope can't
+		// be created on its own
+		NSSet *inScope = [NSSet setWithArray:relationOids];
+		NSMutableArray *written = [NSMutableArray array];
+		for (NSArray *row in sequences) {
+			if ([inScope containsObject:SPDumpText(row[11]) ?: @""]) [written addObject:row];
+			else if (![SPDumpText(row[10]) isEqualToString:@"i"] && add(SPDumpSequenceObject(row))) [written addObject:row];
+		}
+		sequences = written;
+		types = kept(types, SPDumpTypeObject);
+		routines = kept(routines, SPDumpRoutineObject);
+		extensions = kept(extensions, SPDumpExtensionObject);
+	}
+	scope->sequences = [sequences retain];
+	scope->types = [types retain];
+	scope->routines = [routines retain];
+	scope->extensions = [extensions retain];
+	scope->dependencies = [dependencyObjects copy];
+	scope->createdSchemas = [(tables ? [createdSchemas sortedArrayUsingSelector:@selector(compare:)] : schemaNames) copy];
+	return scope;
 }
 
 #pragma mark Structure before the data (2–8)
 
-- (BOOL)_writeStructureBeforeDataWithSchemas:(NSArray *)schemaNames schemasJSON:(NSString *)schemasJSON relations:(NSDictionary *)relations tables:(NSArray *)orderedTables views:(NSArray *)orderedViews sequences:(NSArray *)sequences versionNumber:(NSInteger)versionNumber notExtensionMember:(NSString *)notExtensionMember error:(NSError **)error
+- (BOOL)_writeStructureBeforeDataWithScope:(SPPostgresDumpScope *)scope relations:(NSDictionary *)relations tables:(NSArray *)orderedTables views:(NSArray *)orderedViews versionNumber:(NSInteger)versionNumber error:(NSError **)error
 {
+	NSArray *sequences = scope->sequences;
+
 	// 2. Schemas
 	NSMutableString *section = [NSMutableString string];
-	for (NSString *schema in schemaNames) {
+	for (NSString *schema in scope->createdSchemas) {
 		if ([schema isEqualToString:@"public"]) continue;
 		[section appendFormat:@"CREATE SCHEMA IF NOT EXISTS %@;\n", SPPostgresQuoteIdentifier(schema)];
 	}
 	if (![self _writeSection:section]) return NO;
 
 	// 3. Extensions
-	if (!tables) {
-		NSString *sql = wholeDatabase
-			? @"SELECT e.extname::text, n.nspname::text FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace WHERE e.extname <> 'plpgsql' AND $1::text IS NOT NULL ORDER BY e.extname COLLATE \"C\""
-			: @"SELECT e.extname::text, n.nspname::text FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace WHERE n.nspname IN (SELECT pg_catalog.json_array_elements_text($1::json)) ORDER BY e.extname COLLATE \"C\"";
-		NSArray *rows = [self _rows:sql values:@[schemasJSON] error:error];
-		if (!rows) return NO;
+	if ([scope->extensions count]) {
+		NSArray *rows = scope->extensions;
 		// Each after the extensions it requires (CREATE EXTENSION records them in pg_depend)
 		NSArray *requires = [self _rows:@"SELECT e.extname::text, r.extname::text FROM pg_catalog.pg_depend d"
 							 " JOIN pg_catalog.pg_extension e ON e.oid = d.objid JOIN pg_catalog.pg_extension r ON r.oid = d.refobjid"
@@ -510,11 +778,13 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 
 	// 4. Types (domains without their CHECK constraints: those come after the functions they may call)
 	NSMutableString *domainChecks = [NSMutableString string];
-	if (!tables && ![self _writeTypesWithSchemasJSON:schemasJSON versionNumber:versionNumber notExtensionMember:notExtensionMember domainChecks:domainChecks error:error]) return NO;
+	if (![self _writeTypes:scope->types versionNumber:versionNumber domainChecks:domainChecks error:error]) return NO;
 
 	// 5. Functions (some held back until after the views)
 	NSMutableArray *heldBack = [NSMutableArray array];
-	if (!tables) {
+	if ([scope->routines count]) {
+		NSMutableArray *oids = [NSMutableArray array];
+		for (NSArray *routine in scope->routines) [oids addObject:SPDumpText(routine[0]) ?: @""];
 		NSString *sql = [NSString stringWithFormat:
 			@"SELECT pg_catalog.pg_get_functiondef(p.oid)::text, %@,"
 			" EXISTS (SELECT 1 FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_type rt ON rt.oid = d.refobjid"
@@ -522,11 +792,10 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 			"   WHERE d.classid = 'pg_catalog.pg_proc'::pg_catalog.regclass AND d.objid = p.oid"
 			"   AND d.refclassid = 'pg_catalog.pg_type'::pg_catalog.regclass AND rc.relkind <> 'c')::text"
 			" FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace"
-			" WHERE p.prokind IN ('f', 'p') AND n.nspname IN (SELECT pg_catalog.json_array_elements_text($1::json)) AND %@"
+			" WHERE p.oid IN (SELECT pg_catalog.json_array_elements_text($1::json)::oid)"
 			" ORDER BY n.nspname COLLATE \"C\", p.proname COLLATE \"C\", pg_catalog.pg_get_function_identity_arguments(p.oid) COLLATE \"C\"",
-			versionNumber >= 140000 ? @"(p.prosqlbody IS NOT NULL)::text" : @"'false'::text",
-			[NSString stringWithFormat:notExtensionMember, @"pg_catalog.pg_proc", @"p.oid"]];
-		NSArray *rows = [self _rows:sql values:@[schemasJSON] error:error];
+			versionNumber >= 140000 ? @"(p.prosqlbody IS NOT NULL)::text" : @"'false'::text"];
+		NSArray *rows = [self _rows:sql values:@[SPDumpJSON(oids)] error:error];
 		if (!rows) return NO;
 		section = [NSMutableString string];
 		for (NSArray *row in rows) {
@@ -591,17 +860,9 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 	return [prefixed componentsJoinedByString:separator];
 }
 
-/// Writes the types; the domains' CHECK constraints are appended to domainChecks instead, for later.
-- (BOOL)_writeTypesWithSchemasJSON:(NSString *)schemasJSON versionNumber:(NSInteger)versionNumber notExtensionMember:(NSString *)notExtensionMember domainChecks:(NSMutableString *)domainChecks error:(NSError **)error
+/// Writes the types (the scope's rows); the domains' CHECK constraints are appended to domainChecks instead, for later.
+- (BOOL)_writeTypes:(NSArray *)types versionNumber:(NSInteger)versionNumber domainChecks:(NSMutableString *)domainChecks error:(NSError **)error
 {
-	NSString *typesSQL = [NSString stringWithFormat:
-		@"SELECT t.oid::text, n.nspname::text, t.typname::text, t.typtype::text"
-		" FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace"
-		" WHERE n.nspname IN (SELECT pg_catalog.json_array_elements_text($1::json)) AND t.typtype IN ('e', 'c', 'r', 'd')"
-		" AND (t.typtype <> 'c' OR (SELECT c.relkind FROM pg_catalog.pg_class c WHERE c.oid = t.typrelid) = 'c') AND %@"
-		" ORDER BY n.nspname COLLATE \"C\", t.typname COLLATE \"C\"", [NSString stringWithFormat:notExtensionMember, @"pg_catalog.pg_type", @"t.oid"]];
-	NSArray *types = [self _rows:typesSQL values:@[schemasJSON] error:error];
-	if (!types) return NO;
 	if (![types count]) return YES;
 
 	NSMutableArray *oids = [NSMutableArray array];
@@ -855,13 +1116,13 @@ static const NSUInteger SPDumpProgressInterval = 1024 * 1024;
 	return [self _writeSection:section];
 }
 
-- (BOOL)_writeCommentsWithSchemas:(NSArray *)schemaNames schemasJSON:(NSString *)schemasJSON sequences:(NSArray *)sequences notExtensionMember:(NSString *)notExtensionMember error:(NSError **)error
+- (BOOL)_writeCommentsWithScope:(SPPostgresDumpScope *)scope error:(NSError **)error
 {
 	NSMutableString *section = [NSMutableString string];
 
 	// Schemas (public's only when it isn't the server's own)
 	NSArray *rows = [self _rows:@"SELECT n.nspname::text, pg_catalog.obj_description(n.oid, 'pg_namespace')::text FROM pg_catalog.pg_namespace n"
-					 " WHERE n.nspname IN (SELECT pg_catalog.json_array_elements_text($1::json)) ORDER BY n.nspname COLLATE \"C\"" values:@[schemasJSON] error:error];
+					 " WHERE n.nspname IN (SELECT pg_catalog.json_array_elements_text($1::json)) ORDER BY n.nspname COLLATE \"C\"" values:@[SPDumpJSON(scope->schemaNames)] error:error];
 	if (!rows) return NO;
 	for (NSArray *row in rows) {
 		NSString *comment = SPDumpText(row[1]);
@@ -869,26 +1130,27 @@ static const NSUInteger SPDumpProgressInterval = 1024 * 1024;
 		[section appendFormat:@"COMMENT ON SCHEMA %@ IS %@;\n", SPPostgresQuoteIdentifier(SPDumpText(row[0]) ?: @""), SPPostgresQuoteLiteral(comment)];
 	}
 
-	if (!tables) {
+	if ([scope->types count] || [scope->routines count]) {
 		// Types and functions
-		NSString *sql = [NSString stringWithFormat:
+		NSMutableArray *typeOids = [NSMutableArray array];
+		for (NSArray *type in scope->types) [typeOids addObject:SPDumpText(type[0]) ?: @""];
+		NSMutableArray *routineOids = [NSMutableArray array];
+		for (NSArray *routine in scope->routines) [routineOids addObject:SPDumpText(routine[0]) ?: @""];
+		NSString *sql = 
 			@"SELECT kind, name, comment FROM (SELECT CASE t.typtype WHEN 'd' THEN 'DOMAIN' ELSE 'TYPE' END AS kind, pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(t.typname) AS name,"
 			"  pg_catalog.obj_description(t.oid, 'pg_type')::text AS comment"
 			" FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace"
-			" WHERE n.nspname IN (SELECT pg_catalog.json_array_elements_text($1::json)) AND t.typtype IN ('e', 'c', 'r', 'd')"
-			" AND (t.typtype <> 'c' OR (SELECT c.relkind FROM pg_catalog.pg_class c WHERE c.oid = t.typrelid) = 'c') AND %@"
+			" WHERE t.oid IN (SELECT pg_catalog.json_array_elements_text($1::json)::oid)"
 			" AND pg_catalog.obj_description(t.oid, 'pg_type') IS NOT NULL"
 			" UNION ALL"
 			" SELECT CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END,"
 			"  pg_catalog.quote_ident(n.nspname) || '.' || pg_catalog.quote_ident(p.proname) || '(' || pg_catalog.pg_get_function_identity_arguments(p.oid) || ')',"
 			"  pg_catalog.obj_description(p.oid, 'pg_proc')::text"
 			" FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace"
-			" WHERE n.nspname IN (SELECT pg_catalog.json_array_elements_text($1::json)) AND p.prokind IN ('f', 'p') AND %@"
+			" WHERE p.oid IN (SELECT pg_catalog.json_array_elements_text($2::json)::oid)"
 			" AND pg_catalog.obj_description(p.oid, 'pg_proc') IS NOT NULL"
-			") s ORDER BY name COLLATE \"C\"",
-			[NSString stringWithFormat:notExtensionMember, @"pg_catalog.pg_type", @"t.oid"],
-			[NSString stringWithFormat:notExtensionMember, @"pg_catalog.pg_proc", @"p.oid"]];
-		rows = [self _rows:sql values:@[schemasJSON] error:error];
+			") s ORDER BY name COLLATE \"C\"";
+		rows = [self _rows:sql values:@[SPDumpJSON(typeOids), SPDumpJSON(routineOids)] error:error];
 		if (!rows) return NO;
 		for (NSArray *row in rows) {
 			[section appendFormat:@"COMMENT ON %@ %@ IS %@;\n", SPDumpText(row[0]) ?: @"", SPDumpText(row[1]) ?: @"", SPPostgresQuoteLiteral(SPDumpText(row[2]))];
@@ -896,7 +1158,7 @@ static const NSUInteger SPDumpProgressInterval = 1024 * 1024;
 	}
 
 	// Sequences (not identity ones: the importing table names those itself)
-	for (NSArray *sequence in sequences) {
+	for (NSArray *sequence in scope->sequences) {
 		NSString *comment = SPDumpText(sequence[13]);
 		if (!comment || [SPDumpText(sequence[10]) isEqualToString:@"i"]) continue;
 		[section appendFormat:@"COMMENT ON SEQUENCE %@ IS %@;\n", SPDumpQualified(SPDumpText(sequence[1]), SPDumpText(sequence[2])), SPPostgresQuoteLiteral(comment)];

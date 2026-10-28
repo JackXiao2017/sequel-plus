@@ -10,11 +10,12 @@
  *      check_function_bodies and an empty search_path;
  *   2. CREATE SCHEMA IF NOT EXISTS for each schema (except public);
  *   3. CREATE EXTENSION IF NOT EXISTS (a database: every one but plpgsql; schemas: those installed in them; tables:
- *      none), each after the extensions it requires;
- *   4. enums, ranges, domains (without their CHECK constraints) and composite types, in dependency order (not for
- *      tables; extension members left out);
- *   5. functions and procedures (pg_get_functiondef); those with a SQL-standard body, or using a table's or view's
- *      row type, come after the views;
+ *      none, or with includeDependencies those the tables need), each after the extensions it requires;
+ *   4. enums, ranges, domains (without their CHECK constraints) and composite types, in dependency order (for tables,
+ *      only with includeDependencies; extension members left out);
+ *   5. functions and procedures (pg_get_functiondef; for tables, only their trigger functions with
+ *      includeDependencies); those with a SQL-standard body, or using a table's or view's row type, come after the
+ *      views;
  *   6. CREATE SEQUENCE with every option (identity columns' sequences are created by their tables);
  *   7. each table's own part (SPPostgresCreateStatement's SPPostgresCreatePartTable), parents before partitions
  *      and inheritance children, then the identity columns' sequence options and ALTER SEQUENCE … OWNED BY;
@@ -52,6 +53,8 @@ __attribute__((visibility("default")))
 	void *gzipFile;
 	NSError *writeError;
 	NSArray *foreignTablesSkipped;
+	BOOL includeDependencies;
+	NSArray *skippedObjects;
 }
 
 - (instancetype)initWithConnection:(PGPostgresConnection *)connection;
@@ -61,9 +64,21 @@ __attribute__((visibility("default")))
 /// Schema names.
 @property (copy) NSArray *schemas;
 /// @[schema, table] pairs. Only the tables (and views) themselves, their owned sequences, data, indexes, constraints
-/// and triggers are written: trigger functions and the types they use are not, as with pg_dump -t. A partitioned
-/// table brings its partitions, recursively (as pg_dump --table-and-children).
+/// and triggers are written: trigger functions and the types they use are not, as with pg_dump -t, unless
+/// includeDependencies. A partitioned table brings its partitions, recursively (as pg_dump --table-and-children).
 @property (copy) NSArray *tables;
+
+/**
+ * Default NO; only with tables. Also writes what the tables need to be usable, each in its usual section (and the
+ * schemas they're in): the user types their columns use, followed through domains' base types, composite types'
+ * attributes, array element types and range subtypes (4, domains' CHECKs in 8); the extensions owning any of those
+ * types or trigger functions, with the extensions they require (3); the functions their triggers call (5); the
+ * sequences their column defaults call with nextval that they don't own (6, with their setval in 10, and comments).
+ */
+@property BOOL includeDependencies;
+/// SPPostgresDumpObjects: dependencies (from includeDependencies) equal to one of these aren't written, as they exist
+/// where the dump will load. Every other object is written whatever this holds.
+@property (copy) NSArray *skippedObjects;
 
 /// Both default YES.
 @property BOOL includeStructure;
@@ -82,6 +97,19 @@ __attribute__((visibility("default")))
  * with an error in SPPostgresErrorDomain (SPPostgresErrorCancelled on cancel).
  */
 - (BOOL)writeToPath:(NSString *)path error:(NSError **)error;
+
+/**
+ * The objects -writeToPath:error: would create with the current settings, as SPPostgresDumpObjects sorted by kind,
+ * then schema, then name (then arguments): tables (partitions included), views, materialized views, sequences
+ * (standalone and serial ones, not identity ones), routines, types, domains and extensions (an empty list without
+ * includeStructure). Foreign tables aren't included (never written), nor are skippedObjects' dependencies. Reads in
+ * a READ ONLY transaction of its own (no DDL), on a connection with no transaction open, which it leaves idle; nil
+ * with an error as -writeToPath:error: (settings, missing tables, query failures).
+ */
+- (NSArray *)objectsInScope:(NSError **)error;
+
+/// The part of -objectsInScope: that includeDependencies adds (empty when it is NO).
+- (NSArray *)dependenciesInScope:(NSError **)error;
 
 /// The foreign tables in scope that the last -writeToPath:error: left out, as @[schema, table] pairs.
 @property (readonly) NSArray *foreignTablesSkipped;
