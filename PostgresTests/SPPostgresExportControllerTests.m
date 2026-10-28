@@ -11,6 +11,7 @@
 #import "../Source/Postgres/SPPostgresExportController.h"
 #import "../Source/Postgres/SPPostgresProgressSheet.h"
 #import "../Source/Postgres/SPPostgresBackgroundJob.h"
+#import "../Source/Postgres/SPPostgresErrors.h"
 
 /// The Export sheet (SPPostgresExportController), the progress sheet, the background job and File ▸ Export… on a
 /// Postgres tab connected to pgkit_io_src (io_source.sql), on PG 12 and 18. Files go to a temporary directory only.
@@ -501,6 +502,137 @@
 	XCTAssertEqual(dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)), 0);
 	XCTAssertFalse(logged(marker), @"appended on the main thread, not the caller's");
 	XCTAssertTrue([self spinUntil:^BOOL{ return logged(marker) && logged(errorMarker); } timeout:5]);
+}
+
+#pragma mark - Fix round 1
+
+/// The default provider's connector shows its SSH prompts on the progress sheet (the window has that sheet attached).
+- (void)testDefaultProviderConnectorHostsSheetsOnProgressSheet
+{
+	[self onEachPort:^(NSNumber *port) {
+		self.document.connectionProvider = nil;
+		SPPostgresExportController *controller = [self openExportSheet];
+		[controller export:nil];
+		XCTAssertNotNil(controller.progressSheet);
+		SPPostgresConnector *connector = controller.pendingConnector;
+		XCTAssertNotNil(connector, @"the default provider is connecting");
+		XCTAssertNotEqual(connector, (SPPostgresConnector *)[self.document valueForKey:@"connector"]);
+		XCTAssertEqual(connector.parentWindow, (NSWindow *)controller.progressSheet.panel);
+
+		XCTAssertTrue([self spinUntil:^BOOL{ return self.document.exportController == nil && [self window].attachedSheet == nil; } timeout:60]);
+		XCTAssertNil(controller.lastErrorMessage);
+		XCTAssertNil(controller.pendingConnector);
+		XCTAssertTrue([[self contentsOf:[self.directory stringByAppendingPathComponent:@"pgkit_io_src.sql"]] containsString:@"COPY \"Sales Data\".\"Orders 2026\""]);
+	}];
+}
+
+/// Cancel while the provider hasn't answered ends the export at once; a connection handed out later is closed unused.
+- (void)testCancelWhileConnectingEndsExport
+{
+	[self onEachPort:^(NSNumber *port) {
+		__block void (^held)(PGPostgresConnection *, NSError *) = nil;
+		self.document.connectionProvider = ^(NSString *database, void (^completion)(PGPostgresConnection *, NSError *)) {
+			held = [completion copy];
+		};
+		SPPostgresExportController *controller = [self openExportSheet];
+		[controller export:nil];
+		XCTAssertNotNil(held);
+		SPPostgresProgressSheet *progress = controller.progressSheet;
+		XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == progress.panel; } timeout:5]);
+
+		[progress.cancelButton performClick:nil];
+		XCTAssertTrue([self spinUntil:^BOOL{ return self.document.exportController == nil && [self window].attachedSheet == nil; } timeout:5], @"ends without the provider answering");
+		XCTAssertTrue(progress.cancelled);
+		XCTAssertEqual([[[NSFileManager defaultManager] contentsOfDirectoryAtPath:self.directory error:NULL] count], 0u);
+		XCTAssertEqual(self.alerts.count, 0u);
+
+		PGPostgresConnection *late = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_io_src"];
+		XCTAssertTrue(late.isConnected);
+		held(late, nil);
+		XCTAssertTrue([self spinUntil:^BOOL{ return !late.isConnected; } timeout:5], @"a late connection is closed unused");
+	}];
+}
+
+/// CSV of the whole database leaves partitioned parents out (their partitions export their own rows); ticked, one exports.
+- (void)testCSVWholeDatabaseSkipsPartitionedParents
+{
+	[self onEachPort:^(NSNumber *port) {
+		SPPostgresExportController *controller = [self openExportSheet];
+		[self chooseFormat:1 in:controller];
+		[self choose:0 inPopup:controller.sourcePopup];
+		[self exportWith:controller];
+		XCTAssertNil(controller.lastErrorMessage);
+		NSString *folder = [self.directory stringByAppendingPathComponent:@"folder"];
+		NSArray *files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:folder error:NULL];
+		XCTAssertTrue([files containsObject:@"public.events_2025.csv"], @"%@", files);
+		XCTAssertTrue([files containsObject:@"public.events_2026.csv"], @"%@", files);
+		XCTAssertFalse([files containsObject:@"public.events.csv"], @"no duplicated rows: %@", files);
+		XCTAssertTrue([files containsObject:@"Sales Data.Orders 2026.csv"]);
+		[[NSFileManager defaultManager] removeItemAtPath:folder error:NULL];
+
+		[self.suggestedNames removeAllObjects];
+		controller = [self openExportSheet];
+		[self chooseFormat:1 in:controller];
+		[self choose:2 inPopup:controller.sourcePopup];
+		for (NSArray *pair in controller.checkedTables) [controller setChecked:NO table:pair[1] schema:pair[0]];
+		[self check:@"events" schema:@"public" in:controller];
+		[self exportWith:controller];
+		XCTAssertEqualObjects(self.suggestedNames, @[@"public.events.csv"]);
+		NSString *events = [self contentsOf:[self.directory stringByAppendingPathComponent:@"public.events.csv"]];
+		XCTAssertEqual([[events componentsSeparatedByString:@"\n"] count], 5u, @"header, 3 rows, end: %@", events);
+	}];
+}
+
+/// An error alert is never dropped because a sheet is attached: it waits its turn.
+- (void)testErrorAlertWaitsForAttachedSheet
+{
+	[self onEachPort:^(NSNumber *port) {
+		self.document.alertPresenter = nil;
+		__block void (^held)(PGPostgresConnection *, NSError *) = nil;
+		self.document.connectionProvider = ^(NSString *database, void (^completion)(PGPostgresConnection *, NSError *)) {
+			held = [completion copy];
+		};
+		SPPostgresExportController *controller = [self openExportSheet];
+		[controller export:nil];
+		NSWindow *window = [self window];
+		XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet == controller.progressSheet.panel; } timeout:5]);
+
+		// Another sheet waits behind the progress sheet, then the job fails
+		NSPanel *other = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 200, 100) styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:YES];
+		other.releasedWhenClosed = NO;
+		[window beginSheet:other completionHandler:nil];
+		held(nil, SPPostgresMakeError(SPPostgresErrorConnectionFailed, @"no route to the server", nil));
+
+		XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet == other; } timeout:5], @"%@", window.attachedSheet);
+		XCTAssertEqualObjects(controller.lastErrorMessage, @"no route to the server");
+		XCTAssertNil(self.document.exportController);
+		[window endSheet:other];
+		[other orderOut:nil];
+		XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet != nil && window.attachedSheet != other; } timeout:5], @"the alert shows once the window is free");
+		NSWindow *alertWindow = window.attachedSheet;
+		XCTAssertTrue([[self textsIn:alertWindow.contentView] containsObject:@"no route to the server"], @"%@", [self textsIn:alertWindow.contentView]);
+		[window endSheet:alertWindow];
+		[alertWindow orderOut:nil];
+	}];
+}
+
+/// SPTestPrefsGuard turns Sparkle's automatic checks off for the run, without saving it.
+- (void)testSparkleChecksOffDuringTests
+{
+	NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+	XCTAssertEqualObjects([prefs volatileDomainForName:NSArgumentDomain][@"SUEnableAutomaticChecks"], @NO);
+	XCTAssertFalse([prefs boolForKey:@"SUEnableAutomaticChecks"]);
+	id updater = [NSClassFromString(@"SUUpdater") valueForKey:@"sharedUpdater"];
+	XCTAssertNotNil(updater);
+	XCTAssertFalse([[updater valueForKey:@"automaticallyChecksForUpdates"] boolValue]);
+}
+
+- (NSArray<NSString *> *)textsIn:(NSView *)view
+{
+	NSMutableArray *texts = [NSMutableArray array];
+	if ([view isKindOfClass:[NSTextField class]]) [texts addObject:[(NSTextField *)view stringValue]];
+	for (NSView *subview in view.subviews) [texts addObjectsFromArray:[self textsIn:subview]];
+	return texts;
 }
 
 @end

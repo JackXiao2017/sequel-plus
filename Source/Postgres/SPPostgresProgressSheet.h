@@ -24,6 +24,10 @@ __attribute__((visibility("default")))
 /// What Cancel does: sets cancelled (the job checks it and stops) and shows "Cancelling…". Thread-safe.
 - (IBAction)cancel:(id)sender;
 
+/// Called once on the main thread when Cancel is clicked (or -cancel: called from any thread), after cancelled is set:
+/// e.g. to stop a job still waiting for its connection. Cleared by -end.
+@property (copy) void (^cancelHandler)(void);
+
 /// Ends the sheet. Later status updates are ignored.
 - (void)end;
 

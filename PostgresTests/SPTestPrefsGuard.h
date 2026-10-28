@@ -8,6 +8,9 @@ extern NSString * const SPTestTransferAddedKey;
 extern NSString * const SPTestSelectLastFavoriteUsedKey;
 extern NSString * const SPTestDefaultFavoriteKey;
 
+/// Sparkle's SUEnableAutomaticChecks (forced to NO for the test run, so no update check fires during a test).
+extern NSString * const SPTestSparkleAutomaticChecksKey;
+
 @interface NSToolbar (SPTestPrefsGuard)
 /// The value last passed to -setAutosavesConfiguration: (which, in tests, always stores NO).
 - (BOOL)sp_requestedAutosave;

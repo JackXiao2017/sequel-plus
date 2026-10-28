@@ -25,6 +25,9 @@ static const NSTimeInterval SPPostgresProgressSheetUpdateInterval = 0.1;
 	NSString *pendingStatus;
 	double pendingFraction;
 	NSTimeInterval lastUpdate;
+
+	/// Main thread only
+	void (^cancelHandler)(void);
 }
 
 @synthesize panel;
@@ -32,6 +35,7 @@ static const NSTimeInterval SPPostgresProgressSheetUpdateInterval = 0.1;
 @synthesize statusField;
 @synthesize progressIndicator;
 @synthesize cancelButton;
+@synthesize cancelHandler;
 
 + (instancetype)beginOnWindow:(NSWindow *)window title:(NSString *)title
 {
@@ -60,6 +64,7 @@ static const NSTimeInterval SPPostgresProgressSheetUpdateInterval = 0.1;
 	[progressIndicator release];
 	[cancelButton release];
 	[pendingStatus release];
+	[cancelHandler release];
 	[lock release];
 	[super dealloc];
 }
@@ -189,6 +194,8 @@ static const NSTimeInterval SPPostgresProgressSheetUpdateInterval = 0.1;
 	void (^show)(void) = ^{
 		[cancelButton setEnabled:NO];
 		[statusField setStringValue:NSLocalizedString(@"Cancelling…", @"Postgres progress sheet: cancelling")];
+		void (^handler)(void) = [[cancelHandler retain] autorelease];
+		if (handler) handler();
 	};
 	if ([NSThread isMainThread]) show();
 	else {
@@ -209,6 +216,9 @@ static const NSTimeInterval SPPostgresProgressSheetUpdateInterval = 0.1;
 	ended = YES;
 	[lock unlock];
 	if (already) return;
+
+	[cancelHandler release];
+	cancelHandler = nil;
 
 	NSWindow *parent = [panel sheetParent];
 	if (parent) [parent endSheet:panel];

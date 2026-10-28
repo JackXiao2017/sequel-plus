@@ -6,6 +6,11 @@
 static char SPPostgresBackgroundJobOwnerKey;
 
 @implementation SPPostgresBackgroundJob
+{
+	/// Main thread only
+	BOOL answered;
+	void (^completion)(BOOL ok, NSError *error);
+}
 
 + (void)keepOwner:(id)owner untilJobEndsOnConnection:(PGPostgresConnection *)connection
 {
@@ -24,38 +29,76 @@ static char SPPostgresBackgroundJobOwnerKey;
 	[owner release];
 }
 
-+ (void)runOnDatabase:(NSString *)database
-			 provider:(SPPostgresConnectionProvider)provider
-				 work:(BOOL (^)(PGPostgresConnection *connection, NSError **error))work
-		   completion:(void (^)(BOOL ok, NSError *error))completion
+- (void)dealloc
 {
-	BOOL (^jobWork)(PGPostgresConnection *, NSError **) = [[work copy] autorelease];
-	void (^jobCompletion)(BOOL, NSError *) = [[completion copy] autorelease];
+	[completion release];
+	[super dealloc];
+}
 
-	// Called on the main thread, always from a later run loop turn
-	void (^finish)(BOOL, NSError *) = [[^(BOOL ok, NSError *error) {
-		NSError *theError = [error retain];
+- (BOOL)waitingForConnection
+{
+	return !answered;
+}
+
+/// Calls the completion once, on the main thread from a later run loop turn.
+- (void)_finishWithSuccess:(BOOL)ok error:(NSError *)error
+{
+	void (^theCompletion)(BOOL, NSError *) = completion;
+	completion = nil;
+	if (!theCompletion) return;
+	NSError *theError = [error retain];
+	dispatch_async(dispatch_get_main_queue(), ^{
+		theCompletion(ok, theError);
+		[theCompletion release];
+		[theError release];
+	});
+}
+
+/// Disconnects a connection no work will use, off the main thread, then lets go of its owner on the main thread.
++ (void)_discardConnection:(PGPostgresConnection *)connection
+{
+	[connection retain];
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+		[connection disconnect];
 		dispatch_async(dispatch_get_main_queue(), ^{
-			if (jobCompletion) jobCompletion(ok, theError);
-			[theError release];
+			[self _releaseOwnerOfConnection:connection];
+			[connection release];
 		});
-	} copy] autorelease];
+	});
+}
 
+- (void)cancel
+{
+	if (answered) return;
+	answered = YES;
+	[self _finishWithSuccess:NO error:SPPostgresMakeError(SPPostgresErrorCancelled, NSLocalizedString(@"The job was cancelled.", @"Postgres background job: cancelled while connecting"), nil)];
+}
+
+- (void)_startWithDatabase:(NSString *)database provider:(SPPostgresConnectionProvider)provider work:(BOOL (^)(PGPostgresConnection *, NSError **))work
+{
 	if (!provider) {
-		finish(NO, SPPostgresMakeError(SPPostgresErrorConnectionFailed, NSLocalizedString(@"No connection could be opened for this job.", @"Postgres background job: no connection provider"), nil));
+		answered = YES;
+		[self _finishWithSuccess:NO error:SPPostgresMakeError(SPPostgresErrorConnectionFailed, NSLocalizedString(@"No connection could be opened for this job.", @"Postgres background job: no connection provider"), nil)];
 		return;
 	}
 
-	__block BOOL answered = NO;
+	BOOL (^jobWork)(PGPostgresConnection *, NSError **) = [[work copy] autorelease];
+	SPPostgresBackgroundJob *job = self; // retained by the provider's copy of the block until it answers
 	provider(database, ^(PGPostgresConnection *connection, NSError *error) {
-		if (answered) return;
-		answered = YES;
+		if (job->answered) {
+			// Too late (cancelled, or a second answer): never used
+			if (connection) [SPPostgresBackgroundJob _discardConnection:connection];
+			return;
+		}
+		job->answered = YES;
 
 		if (!connection) {
-			finish(NO, error);
+			[job _finishWithSuccess:NO error:error];
 			return;
 		}
 
+		void (^theCompletion)(BOOL, NSError *) = job->completion;
+		job->completion = nil;
 		[connection retain];
 		dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
 			BOOL ok = NO;
@@ -68,13 +111,25 @@ static char SPPostgresBackgroundJobOwnerKey;
 				[connection disconnect];
 			}
 			dispatch_async(dispatch_get_main_queue(), ^{
-				[self _releaseOwnerOfConnection:connection];
+				[SPPostgresBackgroundJob _releaseOwnerOfConnection:connection];
 				[connection release];
-				if (jobCompletion) jobCompletion(ok, workError);
+				if (theCompletion) theCompletion(ok, workError);
+				[theCompletion release];
 				[workError release];
 			});
 		});
 	});
+}
+
++ (instancetype)runOnDatabase:(NSString *)database
+					 provider:(SPPostgresConnectionProvider)provider
+						 work:(BOOL (^)(PGPostgresConnection *connection, NSError **error))work
+				   completion:(void (^)(BOOL ok, NSError *error))theCompletion
+{
+	SPPostgresBackgroundJob *job = [[[self alloc] init] autorelease];
+	job->completion = [theCompletion copy];
+	[job _startWithDatabase:database provider:provider work:work];
+	return job;
 }
 
 @end

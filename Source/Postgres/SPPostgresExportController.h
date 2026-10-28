@@ -2,6 +2,7 @@
 
 @class SPPostgresDocument;
 @class SPPostgresProgressSheet;
+@class SPPostgresConnector;
 
 /**
  * The Export sheet of a PostgreSQL tab (File ▸ Export…), built in code.
@@ -72,6 +73,10 @@ __attribute__((visibility("default")))
 
 /// Test seam: called on the job's thread at every progress report, before the job checks for a cancel.
 @property (copy) void (^progressObserver)(SPPostgresProgressSheet *sheet);
+
+/// The connector the default connection provider is opening for the export (its parentWindow is the progress
+/// sheet, which hosts its SSH prompts), until it has connected; nil with another provider.
+@property (readonly) SPPostgresConnector *pendingConnector;
 
 /// The progress sheet while an export runs.
 @property (readonly) SPPostgresProgressSheet *progressSheet;
