@@ -31,6 +31,7 @@ __attribute__((visibility("default")))
 	BOOL (^progress)(unsigned long long bytesRead, unsigned long long fileSize);
 	NSUInteger statementsRun;
 	NSUInteger errorsIgnored;
+	NSMutableArray *skippedSettings;
 }
 
 - (instancetype)initWithConnection:(PGPostgresConnection *)connection reader:(SPPostgresDumpReader *)reader;
@@ -41,7 +42,8 @@ __attribute__((visibility("default")))
 /// Asked after a failed item when singleTransaction is NO (error as -run: would report it). nil means Stop.
 @property (copy) SPPostgresImportErrorChoice (^errorHandler)(NSError *error, SPPostgresDumpItem *item);
 
-/// Called after each item and each chunk of COPY data; returning NO cancels.
+/// Called after each item and each chunk of COPY data; returning NO cancels. Also asked after a failed item: NO then
+/// reports the cancel (e.g. a statement interrupted by the cancel) instead of the server's error.
 @property (copy) BOOL (^progress)(unsigned long long bytesRead, unsigned long long fileSize);
 
 /**
@@ -53,5 +55,14 @@ __attribute__((visibility("default")))
 /// Statements (and COPY blocks) that ran successfully, and failures the error handler chose to ignore.
 @property (readonly) NSUInteger statementsRun;
 @property (readonly) NSUInteger errorsIgnored;
+
+/**
+ * A top-level `SET name …` or `SELECT pg_catalog.set_config('name', …)` naming a configuration parameter this server
+ * doesn't know (SQLSTATE 42704, e.g. a newer pg_dump's `SET transaction_timeout = 0;` on PG 12–16) is skipped, not an
+ * error; inside a transaction it runs under a savepoint so the failure doesn't abort the transaction.
+ * settingsSkipped counts them; skippedSettings names them (each once, in file order).
+ */
+@property (readonly) NSUInteger settingsSkipped;
+@property (readonly) NSArray *skippedSettings;
 
 @end

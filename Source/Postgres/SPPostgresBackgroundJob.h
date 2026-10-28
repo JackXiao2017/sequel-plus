@@ -30,7 +30,12 @@ __attribute__((visibility("default")))
 /**
  * While the job waits for its connection: completion is called at once (from a later run loop turn) with NO and
  * SPPostgresErrorCancelled, work is never called, and a connection the provider hands out later is disconnected
- * unused (its owner released). Once work runs, this does nothing: work checks its own cancel. Main thread.
+ * unused (its owner released).
+ *
+ * Once work runs: the statement the job's connection is running is interrupted (PQcancel through a cancel token the
+ * job takes on its own thread before work starts), and the request is sent again every second until work returns,
+ * so a statement waiting on a lock, or a long one, ends. work still checks its own cancel flag (set it before calling
+ * this) and reports the cancel. Main thread.
  */
 - (void)cancel;
 

@@ -19,6 +19,7 @@
 //  the License.
 
 #import "PGPostgresConnectionDelegate.h"
+#import <pthread.h>
 
 /**
  * The connection's transaction state (libpq's PQtransactionStatus).
@@ -55,6 +56,31 @@ PGConnectionErrorCode;
 @class PGPostgresResult;
 @class PGPostgresStatement;
 @class PGPostgresConnectionParameters;
+
+/**
+ * A libpq cancel handle (PGcancel) for one connection, from -[PGPostgresConnection newCancelToken]: lets another
+ * thread interrupt the statement that connection is running (e.g. one waiting on a lock) without touching the
+ * connection itself.
+ */
+@interface PGPostgresCancelToken : NSObject
+{
+	void *_cancel;
+	pthread_mutex_t _lock;
+}
+
+/**
+ * Asks the server to cancel whatever the connection is running (PQcancel). Callable from any thread, also after
+ * -invalidate (it then does nothing). A request that reaches an idle connection is ignored by the server.
+ * Blocks while it connects to the server to send the request.
+ *
+ * @return YES when the request was sent; NO after -invalidate or when it couldn't be sent.
+ */
+- (BOOL)cancel;
+
+/// Frees the handle (PQfreeCancel); later -cancel calls do nothing. Callable from any thread, more than once.
+- (void)invalidate;
+
+@end
 
 @interface PGPostgresConnection : NSObject 
 {
@@ -162,6 +188,13 @@ PGConnectionErrorCode;
 - (NSUInteger)serverProcessId;
 
 - (BOOL)cancelCurrentQuery:(NSError **)error;
+
+/**
+ * A cancel token for this connection (PQgetCancel), retained (release it), or nil when not connected. Call on the
+ * thread that uses the connection; the token's -cancel may then be called from any thread while the connection runs
+ * a statement. Invalidate it when the work on the connection has ended.
+ */
+- (PGPostgresCancelToken *)newCancelToken;
 
 /**
  * The password hashed for role by libpq (PQencryptPasswordConn with the server's password_encryption, e.g.

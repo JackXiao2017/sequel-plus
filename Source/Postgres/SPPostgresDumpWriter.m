@@ -88,6 +88,12 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 @synthesize includeData;
 @synthesize compress;
 @synthesize progress;
+@synthesize foreignTablesSkipped;
+
++ (NSArray *)orderedExtensions:(NSArray *)names requirements:(NSDictionary *)requirements
+{
+	return SPDumpSorted(names ?: @[], requirements ?: @{});
+}
 
 - (instancetype)initWithConnection:(PGPostgresConnection *)aConnection
 {
@@ -106,6 +112,7 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 	[tables release];
 	[progress release];
 	[writeError release];
+	[foreignTablesSkipped release];
 	[super dealloc];
 }
 
@@ -290,10 +297,8 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 	[header appendString:@"--\n-- PostgreSQL database dump written by Sequel Pro\n"];
 	[header appendFormat:@"-- Server version: %@\n", oneLine(serverVersion)];
 	[header appendFormat:@"-- Database: %@\n", oneLine(database)];
-	[header appendFormat:@"-- Date: %@\n--\n\n", [formatter stringFromDate:[NSDate date]]];
-	[header appendString:@"SET client_encoding = 'UTF8';\nSET standard_conforming_strings = on;\nSET check_function_bodies = false;\n"
-						 "SELECT pg_catalog.set_config('search_path', '', false);\n\n"];
-	if (![self _write:header]) return NO;
+	[header appendFormat:@"-- Date: %@\n", [formatter stringFromDate:[NSDate date]]];
+	// (written once the scope is known: it names the foreign tables left out)
 
 	// The scope
 	NSString *notExtensionMember = @"NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = '%@'::pg_catalog.regclass AND d.objid = %@ AND d.deptype = 'e')";
@@ -358,7 +363,14 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 	NSMutableArray *tableRelations = [NSMutableArray array];
 	NSMutableArray *viewRelations = [NSMutableArray array];
 	NSMutableDictionary *relationsByOid = [NSMutableDictionary dictionary];
+	NSMutableArray *foreignTables = [NSMutableArray array];
 	for (NSArray *row in relationRows) {
+		// Foreign tables are left out (structure and data): without their server and user mapping, which aren't
+		// exported, creating them would fail the whole import
+		if ([SPDumpText(row[3]) isEqualToString:@"f"]) {
+			[foreignTables addObject:@[SPDumpText(row[1]) ?: @"", SPDumpText(row[2]) ?: @""]];
+			continue;
+		}
 		SPPostgresDumpRelation *relation = [[[SPPostgresDumpRelation alloc] init] autorelease];
 		relation->oid = [SPDumpText(row[0]) copy];
 		relation->schema = [SPDumpText(row[1]) copy];
@@ -370,6 +382,18 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 		else [tableRelations addObject:relation->oid];
 	}
 	NSString *relationsJSON = SPDumpJSON([relationsByOid allKeys]);
+	[foreignTablesSkipped release];
+	foreignTablesSkipped = [foreignTables copy];
+
+	// 1. Header (continued)
+	if ([foreignTables count]) {
+		NSMutableArray *names = [NSMutableArray array];
+		for (NSArray *pair in foreignTables) [names addObject:SPDumpQualified(pair[0], pair[1])];
+		[header appendFormat:@"-- Foreign tables not exported: %@\n", oneLine([names componentsJoinedByString:@", "])];
+	}
+	[header appendString:@"--\n\nSET client_encoding = 'UTF8';\nSET standard_conforming_strings = on;\nSET check_function_bodies = false;\n"
+						 "SELECT pg_catalog.set_config('search_path', '', false);\n\n"];
+	if (![self _write:header]) return NO;
 
 	// Tables: parents before their partitions and inheritance children
 	NSArray *inherits = [self _rows:@"SELECT i.inhrelid::text, i.inhparent::text FROM pg_catalog.pg_inherits i"
@@ -459,15 +483,34 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 			: @"SELECT e.extname::text, n.nspname::text FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace WHERE n.nspname IN (SELECT pg_catalog.json_array_elements_text($1::json)) ORDER BY e.extname COLLATE \"C\"";
 		NSArray *rows = [self _rows:sql values:@[schemasJSON] error:error];
 		if (!rows) return NO;
-		section = [NSMutableString string];
+		// Each after the extensions it requires (CREATE EXTENSION records them in pg_depend)
+		NSArray *requires = [self _rows:@"SELECT e.extname::text, r.extname::text FROM pg_catalog.pg_depend d"
+							 " JOIN pg_catalog.pg_extension e ON e.oid = d.objid JOIN pg_catalog.pg_extension r ON r.oid = d.refobjid"
+							 " WHERE d.classid = 'pg_catalog.pg_extension'::pg_catalog.regclass AND d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass" values:nil error:error];
+		if (!requires) return NO;
+		NSMutableDictionary *requirements = [NSMutableDictionary dictionary];
+		for (NSArray *row in requires) {
+			NSString *extension = SPDumpText(row[0]) ?: @"";
+			if (!requirements[extension]) requirements[extension] = [NSMutableSet set];
+			[requirements[extension] addObject:SPDumpText(row[1]) ?: @""];
+		}
+		NSMutableArray *names = [NSMutableArray array];
+		NSMutableDictionary *schemaOfExtension = [NSMutableDictionary dictionary];
 		for (NSArray *row in rows) {
-			[section appendFormat:@"CREATE EXTENSION IF NOT EXISTS %@ WITH SCHEMA %@;\n", SPPostgresQuoteIdentifier(SPDumpText(row[0]) ?: @""), SPPostgresQuoteIdentifier(SPDumpText(row[1]) ?: @"")];
+			NSString *extension = SPDumpText(row[0]) ?: @"";
+			[names addObject:extension];
+			schemaOfExtension[extension] = SPDumpText(row[1]) ?: @"";
+		}
+		section = [NSMutableString string];
+		for (NSString *extension in [[self class] orderedExtensions:names requirements:requirements]) {
+			[section appendFormat:@"CREATE EXTENSION IF NOT EXISTS %@ WITH SCHEMA %@;\n", SPPostgresQuoteIdentifier(extension), SPPostgresQuoteIdentifier(schemaOfExtension[extension])];
 		}
 		if (![self _writeSection:section]) return NO;
 	}
 
-	// 4. Types
-	if (!tables && ![self _writeTypesWithSchemasJSON:schemasJSON versionNumber:versionNumber notExtensionMember:notExtensionMember error:error]) return NO;
+	// 4. Types (domains without their CHECK constraints: those come after the functions they may call)
+	NSMutableString *domainChecks = [NSMutableString string];
+	if (!tables && ![self _writeTypesWithSchemasJSON:schemasJSON versionNumber:versionNumber notExtensionMember:notExtensionMember domainChecks:domainChecks error:error]) return NO;
 
 	// 5. Functions (some held back until after the views)
 	NSMutableArray *heldBack = [NSMutableArray array];
@@ -522,12 +565,14 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 	}
 	if (![self _writeSection:section]) return NO;
 
-	// 8. Views and materialized views, then the functions held back
+	// 8. Views and materialized views, then the functions held back, then the domains' CHECK constraints (which may
+	// call any of the functions; the tables using the domains are still empty)
 	for (NSString *oid in orderedViews) {
 		SPPostgresDumpRelation *relation = relations[oid];
 		if (![self _writeSection:relation->parts[SPPostgresCreatePartTable]]) return NO;
 	}
-	return [self _write:[heldBack componentsJoinedByString:@""]];
+	if (![self _write:[heldBack componentsJoinedByString:@""]]) return NO;
+	return [self _write:domainChecks];
 }
 
 /// INCREMENT BY … MINVALUE … MAXVALUE … START WITH … CACHE … [NO] CYCLE, each after prefix, joined by separator.
@@ -546,7 +591,8 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 	return [prefixed componentsJoinedByString:separator];
 }
 
-- (BOOL)_writeTypesWithSchemasJSON:(NSString *)schemasJSON versionNumber:(NSInteger)versionNumber notExtensionMember:(NSString *)notExtensionMember error:(NSError **)error
+/// Writes the types; the domains' CHECK constraints are appended to domainChecks instead, for later.
+- (BOOL)_writeTypesWithSchemasJSON:(NSString *)schemasJSON versionNumber:(NSInteger)versionNumber notExtensionMember:(NSString *)notExtensionMember domainChecks:(NSMutableString *)domainChecks error:(NSError **)error
 {
 	NSString *typesSQL = [NSString stringWithFormat:
 		@"SELECT t.oid::text, n.nspname::text, t.typname::text, t.typtype::text"
@@ -659,7 +705,7 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 							   " WHERE con.contypid = $1::oid AND con.contype = 'c' ORDER BY con.conname COLLATE \"C\"" values:@[oid] error:error];
 			if (!checks) return NO;
 			for (NSArray *check in checks) {
-				[section appendFormat:@"ALTER DOMAIN %@ ADD CONSTRAINT %@ %@;\n\n", name, SPPostgresQuoteIdentifier(SPDumpText(check[0]) ?: @""), SPDumpText(check[1]) ?: @""];
+				[domainChecks appendFormat:@"ALTER DOMAIN %@ ADD CONSTRAINT %@ %@;\n\n", name, SPPostgresQuoteIdentifier(SPDumpText(check[0]) ?: @""), SPDumpText(check[1]) ?: @""];
 			}
 		}
 	}

@@ -18,6 +18,7 @@
 @synthesize progress;
 @synthesize statementsRun;
 @synthesize errorsIgnored;
+@synthesize settingsSkipped;
 
 - (instancetype)initWithConnection:(PGPostgresConnection *)theConnection reader:(SPPostgresDumpReader *)theReader
 {
@@ -35,6 +36,7 @@
 	[reader release];
 	[errorHandler release];
 	[progress release];
+	[skippedSettings release];
 	[super dealloc];
 }
 
@@ -79,12 +81,83 @@ static BOOL SPIsTransactionControl(NSString *sql)
 	return [pattern firstMatchInString:sql options:0 range:NSMakeRange(0, [sql length])] != nil;
 }
 
+/**
+ * The configuration parameter a top-level `SET [SESSION | LOCAL] name {TO | =} …` or
+ * `SELECT [pg_catalog.]set_config('name', …)` sets, or nil for any other statement (SET ROLE, SET SESSION
+ * AUTHORIZATION, SET TRANSACTION, SET CONSTRAINTS and SET TIME ZONE name no parameter).
+ */
+static NSString *SPConfigurationParameterSetBy(NSString *sql)
+{
+	static NSRegularExpression *setPattern = nil, *setConfigPattern = nil;
+	static dispatch_once_t once;
+	dispatch_once(&once, ^{
+		setPattern = [[NSRegularExpression alloc] initWithPattern:@"\\A\\s*SET\\s+(?:(?:SESSION|LOCAL)\\s+)?(\"(?:[^\"]|\"\")+\"|[A-Za-z_][A-Za-z0-9_$]*(?:\\.[A-Za-z_][A-Za-z0-9_$]*)*)\\s*(?:=|\\bTO\\b)"
+														  options:NSRegularExpressionCaseInsensitive error:NULL];
+		setConfigPattern = [[NSRegularExpression alloc] initWithPattern:@"\\A\\s*SELECT\\s+(?:pg_catalog\\s*\\.\\s*)?set_config\\s*\\(\\s*'((?:[^']|'')*)'\\s*,"
+																options:NSRegularExpressionCaseInsensitive error:NULL];
+	});
+	NSRange all = NSMakeRange(0, [sql length]);
+	NSTextCheckingResult *match = [setPattern firstMatchInString:sql options:0 range:all];
+	if (match) {
+		NSString *name = [sql substringWithRange:[match rangeAtIndex:1]];
+		if ([name hasPrefix:@"\""]) return [[name substringWithRange:NSMakeRange(1, [name length] - 2)] stringByReplacingOccurrencesOfString:@"\"\"" withString:@"\""];
+		// (SET ROLE / SESSION AUTHORIZATION / TRANSACTION / CONSTRAINTS / TIME ZONE never take "=" or TO after one word)
+		return [name lowercaseString];
+	}
+	match = [setConfigPattern firstMatchInString:sql options:0 range:all];
+	if (match) return [[sql substringWithRange:[match rangeAtIndex:1]] stringByReplacingOccurrencesOfString:@"''" withString:@"'"];
+	return nil;
+}
+
+- (NSArray *)skippedSettings
+{
+	return skippedSettings ? [[skippedSettings copy] autorelease] : @[];
+}
+
+/**
+ * Runs a statement that sets a configuration parameter (named setting). YES when it ran, or when the server doesn't
+ * know the parameter (42704): then it is counted as skipped. Inside a transaction it runs under a savepoint, so that
+ * failure leaves the transaction usable. NO when it failed otherwise (the server's error is the connection's
+ * lastError, *error set).
+ */
+- (BOOL)_runSetting:(NSString *)setting statement:(NSString *)sql error:(NSError **)error
+{
+	BOOL savepoint = [connection transactionStatus] == PGPostgresTransactionInTransaction;
+	if (savepoint && !SPPostgresExecuteWithDetails(connection, @"SAVEPOINT sp_import_setting", nil, error)) return NO;
+
+	if (SPPostgresExecuteWithDetails(connection, sql, nil, error)) {
+		if (savepoint) SPPostgresExecuteWithDetails(connection, @"RELEASE SAVEPOINT sp_import_setting", nil, NULL);
+		statementsRun++;
+		return YES;
+	}
+
+	PGPostgresError *serverError = [connection isConnected] ? [connection lastError] : nil;
+	if (![[serverError errorStateCode] isEqualToString:@"42704"]) return NO;
+
+	// The server doesn't know the parameter: skipped
+	if (savepoint) {
+		NSError *undoError = nil;
+		if (!SPPostgresExecuteWithDetails(connection, @"ROLLBACK TO SAVEPOINT sp_import_setting", nil, &undoError)
+			|| !SPPostgresExecuteWithDetails(connection, @"RELEASE SAVEPOINT sp_import_setting", nil, &undoError)) {
+			if (error) *error = undoError;
+			return NO;
+		}
+	}
+	settingsSkipped++;
+	if (!skippedSettings) skippedSettings = [[NSMutableArray alloc] init];
+	if (![skippedSettings containsObject:setting]) [skippedSettings addObject:setting];
+	return YES;
+}
+
 #pragma mark - Running
 
 - (BOOL)run:(NSError **)error
 {
 	statementsRun = 0;
 	errorsIgnored = 0;
+	settingsSkipped = 0;
+	[skippedSettings release];
+	skippedSettings = nil;
 
 	NSError *failure = nil;
 	BOOL cancelled = NO;
@@ -129,7 +202,13 @@ static BOOL SPIsTransactionControl(NSString *sql)
 			case SPPostgresDumpItemStatement: {
 				if (singleTransaction && SPIsTransactionControl([item sql])) break;
 				NSError *executeError = nil;
-				if (SPPostgresExecuteWithDetails(connection, [item sql], nil, &executeError)) {
+				NSString *setting = SPConfigurationParameterSetBy([item sql]);
+				if (setting) {
+					if (![self _runSetting:setting statement:[item sql] error:&executeError]) {
+						itemFailure = [self _serverMessageFallingBackTo:[executeError localizedDescription]];
+					}
+				}
+				else if (SPPostgresExecuteWithDetails(connection, [item sql], nil, &executeError)) {
 					statementsRun++;
 				}
 				else {
@@ -185,6 +264,12 @@ static BOOL SPIsTransactionControl(NSString *sql)
 			stop = YES;
 		}
 
+		// A statement the cancel interrupted (or any failure after Cancel) is the cancel, not an error to report or ask about
+		if (itemFailure && !stop && !stillGoing()) {
+			cancelled = YES;
+			stop = YES;
+		}
+
 		if (itemFailure && !stop) {
 			NSString *message = [NSString stringWithFormat:NSLocalizedString(@"Line %lu: %@", @"Postgres import: error at a line of the file"), (unsigned long)[item line], itemFailure];
 			NSError *itemError = SPPostgresMakeError(SPPostgresErrorQueryFailed, message, nil);
@@ -233,6 +318,7 @@ static BOOL SPIsTransactionControl(NSString *sql)
 		NSError *commitError = nil;
 		if (!SPPostgresExecuteWithDetails(connection, @"COMMIT", nil, &commitError)) {
 			[self _rollBackIfInTransaction];
+			if (!stillGoing()) commitError = SPPostgresMakeError(SPPostgresErrorCancelled, NSLocalizedString(@"The import was cancelled.", @"Postgres import: cancelled"), nil);
 			if (error) *error = commitError;
 			return NO;
 		}

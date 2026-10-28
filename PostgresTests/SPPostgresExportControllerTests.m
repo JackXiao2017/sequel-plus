@@ -1,4 +1,5 @@
 #import <XCTest/XCTest.h>
+#import <objc/runtime.h>
 #import <PostgresKit/PostgresKit.h>
 #import "SPPostgresTestServers.h"
 #import "../Source/SPWindowController.h"
@@ -633,6 +634,133 @@
 	if ([view isKindOfClass:[NSTextField class]]) [texts addObject:[(NSTextField *)view stringValue]];
 	for (NSView *subview in view.subviews) [texts addObjectsFromArray:[self textsIn:subview]];
 	return texts;
+}
+
+#pragma mark - Final fix wave
+
+/// The user's Query-view transaction holds an ACCESS EXCLUSIVE lock on a table the export reads: Cancel interrupts the
+/// statement waiting on it, so the export ends cancelled within seconds and leaves no file.
+- (void)testCancelInterruptsExportWaitingOnALock
+{
+	[self onEachPort:^(NSNumber *port) {
+		PGPostgresConnection *mine = self.document.connection;
+		[self run:@"BEGIN" on:mine];
+		[self run:@"LOCK TABLE \"Sales Data\".order_lines IN ACCESS EXCLUSIVE MODE" on:mine];
+		PGPostgresConnection *watcher = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_io_src"];
+		XCTAssertNotNil(watcher);
+
+		SPPostgresExportController *controller = [self openExportSheet];
+		[controller export:nil];
+		BOOL waiting = [self spinUntil:^BOOL{
+			return [[self value:@"SELECT count(*)::text FROM pg_catalog.pg_locks WHERE NOT granted AND relation = '\"Sales Data\".order_lines'::regclass" on:watcher] isEqualToString:@"1"];
+		} timeout:20];
+		XCTAssertTrue(waiting, @"the export waits on the lock");
+		NSDate *cancelled = [NSDate date];
+		[controller.progressSheet cancel:nil];
+		XCTAssertTrue([self spinUntil:^BOOL{ return self.document.exportController == nil && [self window].attachedSheet == nil; } timeout:20]);
+		XCTAssertLessThan(-[cancelled timeIntervalSinceNow], 5.0, @"Cancel doesn't wait for the lock");
+		XCTAssertEqualObjects(controller.lastErrorMessage, @"The export was cancelled.");
+		XCTAssertEqual(self.alerts.count, 0u, @"a cancel isn't an error");
+		XCTAssertEqual([[[NSFileManager defaultManager] contentsOfDirectoryAtPath:self.directory error:NULL] count], 0u, @"no file remains");
+		XCTAssertEqual(mine.transactionStatus, PGPostgresTransactionInTransaction, @"the user's transaction is untouched");
+		[self run:@"ROLLBACK" on:mine];
+		[watcher disconnect];
+	}];
+}
+
+/// Foreign tables are left out of a SQL dump; the completion says which (an alert, and completionNote).
+- (void)testForeignTablesNamedOnCompletion
+{
+	[self onEachPort:^(NSNumber *port) {
+		PGPostgresConnection *mine = self.document.connection;
+		[self run:@"CREATE EXTENSION file_fdw WITH SCHEMA public" on:mine];
+		[self run:@"CREATE SERVER sp_files FOREIGN DATA WRAPPER file_fdw" on:mine];
+		[self run:@"CREATE FOREIGN TABLE public.remote (a integer) SERVER sp_files OPTIONS (filename '/dev/null')" on:mine];
+
+		SPPostgresExportController *controller = [self openExportSheet];
+		[self exportWith:controller];
+		XCTAssertNil(controller.lastErrorMessage);
+		XCTAssertTrue([controller.completionNote containsString:@"\"public\".\"remote\""], @"%@", controller.completionNote);
+		XCTAssertEqual(self.alerts.count, 1u);
+		XCTAssertEqualObjects(self.alerts.firstObject.messageText, @"The export finished");
+		XCTAssertEqualObjects(self.alerts.firstObject.informativeText, controller.completionNote);
+		NSString *contents = [self contentsOf:[self.directory stringByAppendingPathComponent:@"pgkit_io_src.sql"]];
+		XCTAssertTrue([contents containsString:@"-- Foreign tables not exported: \"public\".\"remote\"\n"]);
+	}];
+}
+
+/// Opening the sheet only reads whether the Query view holds a result and its row count; the rows are read when the
+/// query result is exported.
+- (void)testSheetReadsQueryRowsOnlyWhenExported
+{
+	Method method = class_getInstanceMethod([SPPostgresQueryController class], @selector(lastResultRows));
+	IMP original = method_getImplementation(method);
+	__block NSUInteger reads = 0;
+	IMP counting = imp_implementationWithBlock(^NSArray *(id me) {
+		reads++;
+		return ((NSArray *(*)(id, SEL))original)(me, @selector(lastResultRows));
+	});
+	method_setImplementation(method, counting);
+	@try {
+		[self onEachPort:^(NSNumber *port) {
+			SPPostgresQueryController *query = self.document.queryController;
+			[query.editor setString:@"SELECT g AS n FROM generate_series(1, 3) g"];
+			[query runAllQueries:nil];
+			XCTAssertEqual([query lastResultRowCount], 3u);
+			reads = 0;
+
+			SPPostgresExportController *controller = [self openExportSheet];
+			[self chooseFormat:1 in:controller];
+			[self choose:3 inPopup:controller.sourcePopup];
+			XCTAssertEqual(reads, 0u, @"the sheet doesn't copy the rows");
+			NSTextField *note = [controller valueForKey:@"sourceNote"];
+			XCTAssertTrue([note.stringValue containsString:@"3 rows"], @"%@", note.stringValue);
+
+			[self exportWith:controller];
+			XCTAssertNil(controller.lastErrorMessage);
+			XCTAssertEqual(reads, 1u, @"read once, for the export");
+			XCTAssertEqualObjects([self contentsOf:[self.directory stringByAppendingPathComponent:@"query-result.csv"]], @"n\n1\n2\n3\n");
+		}];
+	}
+	@finally {
+		method_setImplementation(method, original);
+	}
+}
+
+/// A cancelled CSV folder export leaves the files it replaced (they existed before), deleting only those it created.
+- (void)testCancelledCSVFolderExportKeepsReplacedFiles
+{
+	[self onEachPort:^(NSNumber *port) {
+		SPPostgresExportController *controller = [self openExportSheet];
+		[self chooseFormat:1 in:controller];
+		[self choose:0 inPopup:controller.sourcePopup];
+
+		// Every table's file but the first already exists, plus an unrelated file
+		NSString *folder = [self.directory stringByAppendingPathComponent:@"folder"];
+		[[NSFileManager defaultManager] createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:NULL];
+		NSArray *tables = [controller valueForKey:@"_csvTables"];
+		XCTAssertGreaterThan(tables.count, 3u);
+		NSMutableSet *existing = [NSMutableSet setWithObject:@"keep.txt"];
+		for (NSUInteger index = 1; index < tables.count; index++) {
+			NSString *name = [NSString stringWithFormat:@"%@.%@.csv", tables[index][0], tables[index][1]];
+			[existing addObject:name];
+			XCTAssertTrue([@"old\n" writeToFile:[folder stringByAppendingPathComponent:name] atomically:NO encoding:NSUTF8StringEncoding error:NULL]);
+		}
+		XCTAssertTrue([@"keep\n" writeToFile:[folder stringByAppendingPathComponent:@"keep.txt"] atomically:NO encoding:NSUTF8StringEncoding error:NULL]);
+
+		__block NSUInteger progressCalls = 0;
+		controller.progressObserver = ^(SPPostgresProgressSheet *sheet) {
+			if (++progressCalls == 3) [sheet cancel:nil];
+		};
+		[self exportWith:controller];
+		XCTAssertEqualObjects(controller.lastErrorMessage, @"The export was cancelled.");
+
+		NSSet *files = [NSSet setWithArray:[[NSFileManager defaultManager] contentsOfDirectoryAtPath:folder error:NULL]];
+		XCTAssertEqualObjects(files, existing, @"the first table's file (created by the export) is deleted; the others stay");
+		NSString *second = [NSString stringWithFormat:@"%@.%@.csv", tables[1][0], tables[1][1]];
+		XCTAssertNotEqualObjects([self contentsOf:[folder stringByAppendingPathComponent:second]], @"old\n", @"the second was replaced before the cancel");
+		XCTAssertEqualObjects([self contentsOf:[folder stringByAppendingPathComponent:@"keep.txt"]], @"keep\n");
+	}];
 }
 
 @end

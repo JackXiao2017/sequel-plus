@@ -4,12 +4,14 @@
 #import "SPPostgresSidebarController.h"
 #import "SPPostgresCatalog.h"
 #import "SPPostgresDumpWriter.h"
+#import "SPPostgresTableData.h"
 #import "SPPostgresCSV.h"
 #import "SPPostgresErrors.h"
 #import "SPPostgresProgressSheet.h"
 #import "SPPostgresBackgroundJob.h"
 #import "SPPostgresConnector.h"
 #import <PostgresKit/PostgresKit.h>
+#import <sys/stat.h>
 
 typedef NS_ENUM(NSInteger, SPPostgresExportFormat) {
 	SPPostgresExportFormatSQL = 0,
@@ -74,10 +76,11 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 	NSMutableArray *checkedTableList;
 
 	NSArray *queryColumnNames;
-	NSArray *queryRows;
+	NSUInteger queryRowCount;
 
 	SPPostgresProgressSheet *progressSheet;
 	NSString *lastErrorMessage;
+	NSString *completionNote;
 	BOOL began;
 	BOOL finished;
 	BOOL running;
@@ -112,6 +115,7 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 @synthesize progressObserver;
 @synthesize progressSheet;
 @synthesize lastErrorMessage;
+@synthesize completionNote;
 @synthesize pendingConnector;
 
 - (instancetype)initWithDocument:(SPPostgresDocument *)theDocument
@@ -163,12 +167,12 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 	[checkedSchemaList release];
 	[checkedTableList release];
 	[queryColumnNames release];
-	[queryRows release];
 	[progressSheet release];
 	[job release];
 	[pendingConnector release];
 	[partitionedTables release];
 	[lastErrorMessage release];
+	[completionNote release];
 	[database release];
 	[document release];
 	[super dealloc];
@@ -179,6 +183,13 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 	if (message == lastErrorMessage) return;
 	[lastErrorMessage release];
 	lastErrorMessage = [message copy];
+}
+
+- (void)_setCompletionNote:(NSString *)note
+{
+	if (note == completionNote) return;
+	[completionNote release];
+	completionNote = [note copy];
 }
 
 #pragma mark - Building
@@ -417,11 +428,11 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 	}
 	if (selectedSchema && [schemaNames containsObject:selectedSchema]) [checkedSchemaList addObject:selectedSchema];
 
+	// Only whether the Query view holds a result, and how many rows: the rows are read when the result is exported
 	SPPostgresQueryController *query = [document queryController];
 	[queryColumnNames release];
 	queryColumnNames = [[query lastResultColumnNames] copy];
-	[queryRows release];
-	queryRows = queryColumnNames ? [[query lastResultRows] copy] : nil;
+	queryRowCount = queryColumnNames ? [query lastResultRowCount] : 0;
 
 	[schemasTable reloadData];
 	[tablesTable reloadData];
@@ -629,7 +640,7 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 				   : NSLocalizedString(@"Every schema of the database.", @"Postgres export sheet: whole database SQL note");
 	}
 	else if (source == SPPostgresExportSourceQueryResult) {
-		note = [NSString stringWithFormat:NSLocalizedString(@"The %lu rows the Query view shows (the query isn't run again).", @"Postgres export sheet: query result note (row count)"), (unsigned long)[queryRows count]];
+		note = [NSString stringWithFormat:NSLocalizedString(@"The %lu rows the Query view shows (the query isn't run again).", @"Postgres export sheet: query result note (row count)"), (unsigned long)queryRowCount];
 	}
 	[sourceNote setStringValue:note];
 	[sourceNote setHidden:![note length]];
@@ -722,7 +733,7 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 		[panel setCanCreateDirectories:YES];
 		[panel setAllowsMultipleSelection:NO];
 		[panel setPrompt:NSLocalizedString(@"Export", @"Postgres export: folder panel prompt")];
-		[panel setMessage:NSLocalizedString(@"Choose the folder that receives one CSV file per table.", @"Postgres export: folder panel message")];
+		[panel setMessage:NSLocalizedString(@"Choose the folder that receives one CSV file per table. Files with the same names are replaced.", @"Postgres export: folder panel message")];
 		[panel beginSheetModalForWindow:window completionHandler:^(NSModalResponse response) {
 			done(response == NSModalResponseOK ? [[panel URL] path] : nil);
 		}];
@@ -742,6 +753,7 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 {
 	if (finished || running || ![self _canExport]) return;
 	[self _setLastErrorMessage:nil];
+	[self _setCompletionNote:nil];
 
 	SPPostgresExportFormat format = [self _format];
 	SPPostgresExportSource source = [self _source];
@@ -820,15 +832,21 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 	}];
 
 	[progress setCancelHandler:^{
-		if (![job waitingForConnection]) return; // the work checks the sheet itself
-		SPPostgresConnector *connecting = [[pendingConnector retain] autorelease];
+		// While connecting: the job ends at once. Once it runs: the work sees the sheet's flag, and the statement its
+		// connection is running is interrupted (a lock wait, a long statement)
+		SPPostgresConnector *connecting = [job waitingForConnection] ? [[pendingConnector retain] autorelease] : nil;
 		[job cancel];
 		[connecting cancel];
 	}];
 
 	[job release];
 	job = [[SPPostgresBackgroundJob runOnDatabase:database provider:provider work:work completion:^(BOOL ok, NSError *error) {
-		[self _jobEndedWithSuccess:ok error:error];
+		// Whatever failed after Cancel (e.g. the statement the cancel interrupted) is the cancel
+		NSError *outcome = error;
+		if (!ok && [progress cancelled] && !([[error domain] isEqualToString:SPPostgresErrorDomain] && [error code] == SPPostgresErrorCancelled)) {
+			outcome = SPPostgresMakeError(SPPostgresErrorCancelled, NSLocalizedString(@"The export was cancelled.", @"Postgres export: cancelled"), nil);
+		}
+		[self _jobEndedWithSuccess:ok error:outcome];
 	}] retain];
 }
 
@@ -867,7 +885,17 @@ static BOOL SPPostgresExportReport(SPPostgresProgressSheet *progress, void (^obs
 		[writer setProgress:^BOOL(NSUInteger index, NSUInteger count, NSString *table) {
 			return SPPostgresExportReport(progress, observer, index, count, table);
 		}];
-		return [writer writeToPath:path error:error];
+		BOOL ok = [writer writeToPath:path error:error];
+		if (ok && [[writer foreignTablesSkipped] count]) {
+			NSMutableArray *names = [NSMutableArray array];
+			for (NSArray *pair in [writer foreignTablesSkipped]) [names addObject:[NSString stringWithFormat:@"%@.%@", SPPostgresQuoteIdentifier([pair objectAtIndex:0]), SPPostgresQuoteIdentifier([pair objectAtIndex:1])]];
+			NSString *note = [NSString stringWithFormat:NSLocalizedString(@"Foreign tables aren't exported (nor their servers and user mappings): %@.", @"Postgres export: foreign tables left out (names)"), [names componentsJoinedByString:@", "]];
+			// Before the job's completion, which is queued after this on the main queue
+			dispatch_async(dispatch_get_main_queue(), ^{
+				[self _setCompletionNote:note];
+			});
+		}
+		return ok;
 	}];
 }
 
@@ -899,7 +927,10 @@ static BOOL SPPostgresExportReport(SPPostgresProgressSheet *progress, void (^obs
 					continue;
 				}
 				NSString *file = directory ? [path stringByAppendingPathComponent:SPPostgresExportCSVFileName(schema, table)] : path;
-				[written addObject:file];
+				// A file that was there before is replaced, and stays after a cancel or a failure: only the files this
+				// export created are deleted then
+				struct stat existing;
+				if (lstat([file fileSystemRepresentation], &existing) != 0) [written addObject:file];
 				NSError *tableError = nil;
 				ok = [SPPostgresCSV exportTable:table schema:schema connection:connection options:options toPath:file cancel:^BOOL{
 					return [progress cancelled];
@@ -915,7 +946,7 @@ static BOOL SPPostgresExportReport(SPPostgresProgressSheet *progress, void (^obs
 		if (!ok) {
 			// The connection is discarded after the job; a rollback leaves the server tidy meanwhile
 			if ([connection transactionStatus] != PGPostgresTransactionIdle) [connection execute:@"ROLLBACK"];
-			// Every file this export wrote goes, not only the one it was writing
+			// Every file this export created goes, not only the one it was writing
 			for (NSString *file in written) unlink([file fileSystemRepresentation]);
 			if (error) *error = [[failure retain] autorelease];
 		}
@@ -929,7 +960,8 @@ static BOOL SPPostgresExportReport(SPPostgresProgressSheet *progress, void (^obs
 	SPPostgresProgressSheet *progress = [self _beginProgress];
 	[progress setStatus:NSLocalizedString(@"Writing the query result…", @"Postgres export: progress status for a query result") fraction:0];
 	SPPostgresCSVOptions *options = [[[self _csvOptions] copy] autorelease];
-	NSArray *rows = [[queryRows retain] autorelease];
+	// The rows the Query view holds, read now that they are exported (the sheet only kept their count)
+	NSArray *rows = [[document queryController] lastResultRows];
 	NSArray *names = [[queryColumnNames retain] autorelease];
 	void (^observer)(SPPostgresProgressSheet *) = [[progressObserver copy] autorelease];
 
@@ -972,7 +1004,15 @@ static BOOL SPPostgresExportReport(SPPostgresProgressSheet *progress, void (^obs
 		BOOL cancelled = [[error domain] isEqualToString:SPPostgresErrorDomain] && [error code] == SPPostgresErrorCancelled;
 		NSString *message = [error localizedDescription] ?: NSLocalizedString(@"The export failed.", @"Postgres export: failed without a message");
 		[self _setLastErrorMessage:message];
+		[self _setCompletionNote:nil];
 		if (!cancelled) [self _presentError:message];
+	}
+	else if ([completionNote length]) {
+		NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+		[alert setMessageText:NSLocalizedString(@"The export finished", @"Postgres export: finished with a note title")];
+		[alert setInformativeText:completionNote];
+		[alert addButtonWithTitle:NSLocalizedString(@"OK", @"OK button")];
+		[document presentAlert:alert];
 	}
 	[self _finish];
 }

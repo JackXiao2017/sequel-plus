@@ -372,4 +372,123 @@
 	}
 }
 
+#pragma mark - Settings the server doesn't know (R11)
+
+/// A SET or set_config naming a parameter the server doesn't know (42704) is skipped and counted, in both modes; in
+/// a single transaction it doesn't abort the transaction. pg_dump 17+'s SET transaction_timeout on PG 12.
+- (void)testUnknownSettingsAreSkipped
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		for (NSNumber *single in @[@YES, @NO]) {
+			PGPostgresConnection *destination = [SPPostgresTestServers ioConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_io_dst"];
+			NSString *path = [self writeText:(@"SET statement_timeout = 0;\n"
+											  @"SET transaction_timeout = 0;\n"
+											  @"SET sp_no_such_setting = 0;\n"
+											  @"SET sp_no_such_setting TO 1;\n"
+											  @"SELECT pg_catalog.set_config('sp_no_such_other', '1', false);\n"
+											  @"CREATE TABLE public.after_settings (i int);\n"
+											  @"INSERT INTO public.after_settings VALUES (1);\n") named:@"settings.sql"];
+			SPPostgresSQLImporter *importer = [self importerForPath:path connection:destination];
+			importer.singleTransaction = single.boolValue;
+			__block NSUInteger asked = 0;
+			importer.errorHandler = ^SPPostgresImportErrorChoice(NSError *error, SPPostgresDumpItem *item) {
+				asked++;
+				return SPPostgresImportStop;
+			};
+			NSError *error = nil;
+			XCTAssertTrue([importer run:&error], @"port %@ single %@: %@", port, single, error.localizedDescription);
+			XCTAssertEqual(asked, 0u, @"no error to ask about");
+			BOOL knowsTransactionTimeout = destination.serverVersion >= 170000;
+			NSMutableArray *expected = [NSMutableArray array];
+			if (!knowsTransactionTimeout) [expected addObject:@"transaction_timeout"];
+			[expected addObjectsFromArray:@[@"sp_no_such_setting", @"sp_no_such_other"]];
+			XCTAssertEqualObjects(importer.skippedSettings, expected, @"port %@", port);
+			XCTAssertEqual(importer.settingsSkipped, expected.count + 1, @"each statement counted (the unknown one twice)");
+			XCTAssertEqual(destination.transactionStatus, PGPostgresTransactionIdle);
+			PGPostgresResult *rows = [destination execute:@"SELECT count(*)::text FROM public.after_settings"];
+			XCTAssertEqualObjects([rows textValueAtRow:0 column:0], @"1", @"what follows ran and committed");
+			[destination disconnect];
+		}
+	}
+}
+
+/// A SET that fails for another reason (a bad value) is still an error.
+- (void)testBadSettingValueStillFails
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *destination = [SPPostgresTestServers ioConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_io_dst"];
+		NSString *path = [self writeText:@"CREATE TABLE public.before_bad (i int);\nSET statement_timeout = 'not a number';\n" named:@"bad-setting.sql"];
+		SPPostgresSQLImporter *importer = [self importerForPath:path connection:destination];
+		NSError *error = nil;
+		XCTAssertFalse([importer run:&error]);
+		XCTAssertTrue([error.localizedDescription hasPrefix:@"Line 2:"], @"%@", error.localizedDescription);
+		XCTAssertEqual(importer.settingsSkipped, 0u);
+		XCTAssertFalse([self table:@"public.before_bad" existsOn:destination], @"rolled back");
+		[destination disconnect];
+	}
+}
+
+#pragma mark - A statement the cancel interrupts
+
+/// A statement waiting on a lock, interrupted through a cancel token after progress starts answering NO: the import
+/// reports the cancel (not the server's "canceling statement"), never asks about the error, and rolls back.
+- (void)testCancelledStatementReportsCancel
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		for (NSNumber *single in @[@YES, @NO]) {
+			PGPostgresConnection *holder = [SPPostgresTestServers ioConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_io_dst"];
+			XCTAssertNotNil([holder execute:@"CREATE TABLE public.locked (i int)"]);
+			XCTAssertNotNil([holder execute:@"BEGIN"]);
+			XCTAssertNotNil([holder execute:@"LOCK TABLE public.locked IN ACCESS EXCLUSIVE MODE"]);
+
+			PGPostgresConnection *destination = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_io_dst"];
+			NSString *path = [self writeText:@"CREATE TABLE public.before_lock (i int);\nINSERT INTO public.locked VALUES (1);\nCREATE TABLE public.after_lock (i int);\n" named:@"lock.sql"];
+			SPPostgresSQLImporter *importer = [self importerForPath:path connection:destination];
+			importer.singleTransaction = single.boolValue;
+			__block BOOL cancelFlag = NO;
+			__block NSUInteger asked = 0;
+			importer.progress = ^BOOL(unsigned long long bytesRead, unsigned long long fileSize) {
+				@synchronized(self) { return !cancelFlag; }
+			};
+			importer.errorHandler = ^SPPostgresImportErrorChoice(NSError *error, SPPostgresDumpItem *item) {
+				asked++;
+				return SPPostgresImportIgnore;
+			};
+			PGPostgresCancelToken *token = [destination newCancelToken];
+			__block BOOL done = NO, ok = YES;
+			__block NSError *runError = nil;
+			dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+				NSError *theError = nil;
+				ok = [importer run:&theError];
+				runError = theError;
+				dispatch_async(dispatch_get_main_queue(), ^{ done = YES; });
+			});
+			NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:20];
+			while (![[[holder execute:@"SELECT count(*)::text FROM pg_catalog.pg_locks WHERE NOT granted AND relation = 'public.locked'::regclass"] textValueAtRow:0 column:0] isEqualToString:@"1"]
+				   && [deadline timeIntervalSinceNow] > 0) {
+				[[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+			}
+			XCTAssertFalse(done, @"the import waits on the lock");
+			@synchronized(self) { cancelFlag = YES; }
+			XCTAssertTrue([token cancel]);
+			deadline = [NSDate dateWithTimeIntervalSinceNow:10];
+			while (!done && [deadline timeIntervalSinceNow] > 0) {
+				[[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+			}
+			XCTAssertTrue(done);
+			[token invalidate];
+			XCTAssertFalse(ok);
+			XCTAssertEqualObjects(runError.domain, SPPostgresErrorDomain);
+			XCTAssertEqual(runError.code, SPPostgresErrorCancelled, @"%@", runError.localizedDescription);
+			XCTAssertEqual(asked, 0u, @"a cancel isn't an error to ask about");
+			XCTAssertEqual(destination.transactionStatus, PGPostgresTransactionIdle);
+			XCTAssertNotNil([holder execute:@"ROLLBACK"]);
+			XCTAssertEqual([self table:@"public.before_lock" existsOn:holder], !single.boolValue, @"single transaction: rolled back; otherwise it stays");
+			XCTAssertFalse([self table:@"public.after_lock" existsOn:holder], @"nothing ran after the cancel");
+			[destination disconnect];
+			[holder disconnect];
+		}
+	}
+}
+
 @end

@@ -644,6 +644,11 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	return names;
 }
 
+- (NSUInteger)lastResultRowCount
+{
+	return result ? resultRowCount : 0;
+}
+
 - (NSArray *)lastResultRows
 {
 	if (!result) return nil;

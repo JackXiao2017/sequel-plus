@@ -547,4 +547,104 @@ static NSString * const SPUserSchemas = @"nspname NOT LIKE 'pg\\_%' AND nspname 
 	}
 }
 
+#pragma mark - Final fix wave
+
+/// Extensions are created after the ones they require: the ordering helper with a made-up requirement, then cube and
+/// earthdistance (which requires cube) on the servers.
+- (void)testExtensionsInDependencyOrder
+{
+	NSArray *ordered = [SPPostgresDumpWriter orderedExtensions:@[@"a_needs_z", @"m", @"z_base"] requirements:@{@"a_needs_z": [NSSet setWithObject:@"z_base"]}];
+	XCTAssertEqualObjects(ordered, (@[@"m", @"z_base", @"a_needs_z"]));
+	NSArray *unrelated = [SPPostgresDumpWriter orderedExtensions:@[@"b", @"a"] requirements:@{@"b": [NSSet setWithObject:@"not-exported"]}];
+	XCTAssertEqualObjects(unrelated, (@[@"b", @"a"]), @"requirements outside the list are ignored");
+
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *source = [self sourceOn:port];
+		[self run:@"CREATE EXTENSION cube WITH SCHEMA public" on:source];
+		[self run:@"CREATE EXTENSION earthdistance WITH SCHEMA public" on:source];
+		NSString *path = [self dumpFrom:source named:@"extensions.sql" configure:^(SPPostgresDumpWriter *writer) {
+			writer.wholeDatabase = YES;
+		}];
+		NSString *contents = [self contentsOf:path];
+		NSRange cube = [contents rangeOfString:@"CREATE EXTENSION IF NOT EXISTS \"cube\""];
+		NSRange earth = [contents rangeOfString:@"CREATE EXTENSION IF NOT EXISTS \"earthdistance\""];
+		XCTAssertNotEqual(cube.location, NSNotFound);
+		XCTAssertNotEqual(earth.location, NSNotFound);
+		XCTAssertLessThan(cube.location, earth.location, @"cube before earthdistance");
+		PGPostgresConnection *destination = [self destinationOn:port];
+		[self import:path into:destination];
+		XCTAssertEqualObjects([self text:@"SELECT string_agg(extname, ',' ORDER BY extname) FROM pg_extension WHERE extname IN ('cube', 'earthdistance')" on:destination], @"cube,earthdistance");
+	}
+}
+
+/// A domain whose CHECK calls a user function (sql and plpgsql): the CHECK is added after the functions, so the dump
+/// imports, and the constraint holds in the copy.
+- (void)testDomainCheckCallingFunction
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *source = [self sourceOn:port];
+		[self run:@"CREATE FUNCTION public.is_even(i integer) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT i % 2 = 0'" on:source];
+		[self run:@"CREATE FUNCTION public.is_small(i integer) RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$ BEGIN RETURN i < 100; END; $$" on:source];
+		[self run:@"CREATE DOMAIN public.even_int AS integer CONSTRAINT even_int_even CHECK (public.is_even(VALUE)) CONSTRAINT even_int_small CHECK (public.is_small(VALUE))" on:source];
+		[self run:@"CREATE TABLE public.evens (n public.even_int)" on:source];
+		[self run:@"INSERT INTO public.evens VALUES (2), (4)" on:source];
+		NSString *path = [self dumpFrom:source named:@"domain.sql" configure:^(SPPostgresDumpWriter *writer) {
+			writer.wholeDatabase = YES;
+		}];
+		NSString *contents = [self contentsOf:path];
+		NSRange function = [contents rangeOfString:@"FUNCTION public.is_even"];
+		NSRange check = [contents rangeOfString:@"ALTER DOMAIN \"public\".\"even_int\" ADD CONSTRAINT \"even_int_even\""];
+		NSRange domain = [contents rangeOfString:@"CREATE DOMAIN \"public\".\"even_int\" AS integer;"];
+		XCTAssertNotEqual(function.location, NSNotFound);
+		XCTAssertNotEqual(check.location, NSNotFound, @"%@", contents);
+		XCTAssertNotEqual(domain.location, NSNotFound, @"the domain is created without its CHECKs: %@", contents);
+		XCTAssertLessThan(function.location, check.location, @"the CHECK comes after the function");
+
+		PGPostgresConnection *destination = [self destinationOn:port];
+		[self import:path into:destination];
+		XCTAssertEqualObjects([self text:@"SELECT string_agg(n::text, ',' ORDER BY n) FROM public.evens" on:destination], @"2,4");
+		XCTAssertEqualObjects([self text:@"SELECT string_agg(conname, ',' ORDER BY conname) FROM pg_constraint WHERE contypid = 'public.even_int'::regtype" on:destination], @"even_int_even,even_int_small");
+		XCTAssertNil([destination execute:@"INSERT INTO public.evens VALUES (3)"], @"the CHECK holds");
+	}
+}
+
+/// Foreign tables (file_fdw) are left out of the dump, structure and data, and named in its header; the dump
+/// imports. Also when the table is selected by name.
+- (void)testForeignTablesLeftOutAndListed
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *source = [self sourceOn:port];
+		[self run:@"CREATE EXTENSION file_fdw WITH SCHEMA public" on:source];
+		[self run:@"CREATE SERVER sp_files FOREIGN DATA WRAPPER file_fdw" on:source];
+		[self run:@"CREATE FOREIGN TABLE public.remote (a integer) SERVER sp_files OPTIONS (filename '/dev/null')" on:source];
+		[self run:@"CREATE FOREIGN TABLE \"Sales Data\".\"remote\nlines\" (a integer) SERVER sp_files OPTIONS (filename '/dev/null')" on:source];
+
+		SPPostgresDumpWriter *writer = [[SPPostgresDumpWriter alloc] initWithConnection:source];
+		writer.wholeDatabase = YES;
+		NSString *path = [self pathNamed:@"foreign.sql"];
+		NSError *error = nil;
+		XCTAssertTrue([writer writeToPath:path error:&error], @"%@", error.localizedDescription);
+		XCTAssertEqualObjects(writer.foreignTablesSkipped, (@[@[@"Sales Data", @"remote\nlines"], @[@"public", @"remote"]]));
+		NSString *contents = [self contentsOf:path];
+		XCTAssertTrue([contents containsString:@"\n-- Foreign tables not exported: \"Sales Data\".\"remote lines\", \"public\".\"remote\"\n"], @"%@", [contents substringToIndex:MIN((NSUInteger)600, contents.length)]);
+		XCTAssertFalse([contents containsString:@"FOREIGN TABLE"]);
+		XCTAssertFalse([contents containsString:@"COPY \"public\".\"remote\""]);
+
+		PGPostgresConnection *destination = [self destinationOn:port];
+		[self import:path into:destination];
+		XCTAssertFalse([[self text:@"SELECT (to_regclass('public.remote') IS NOT NULL)::text" on:destination] isEqualToString:@"true"]);
+		XCTAssertEqualObjects([self text:@"SELECT count(*)::text FROM \"Sales Data\".\"Orders 2026\"" on:destination], @"7");
+
+		// Selected by name: no error, listed
+		writer = [[SPPostgresDumpWriter alloc] initWithConnection:source];
+		writer.tables = @[@[@"public", @"remote"], @[@"public", @"audit"]];
+		path = [self pathNamed:@"foreign-tables.sql"];
+		XCTAssertTrue([writer writeToPath:path error:&error], @"%@", error.localizedDescription);
+		XCTAssertEqualObjects(writer.foreignTablesSkipped, (@[@[@"public", @"remote"]]));
+		contents = [self contentsOf:path];
+		XCTAssertTrue([contents containsString:@"-- Foreign tables not exported: \"public\".\"remote\"\n"]);
+		XCTAssertTrue([contents containsString:@"CREATE TABLE \"public\".\"audit\""] || [contents containsString:@"CREATE TABLE public.audit"], @"%@", contents);
+	}
+}
+
 @end

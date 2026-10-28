@@ -52,6 +52,7 @@ static const NSUInteger SPImportPreviewRows = 10;
 	SPPostgresCSVOptions *csvOptions;
 	SPPostgresImportErrorChoice (^errorChoiceProvider)(NSError *);
 	NSString *lastErrorMessage;
+	NSString *completionNote;
 
 	BOOL kept;      // retained by -_keep until -_finish
 	BOOL finished;
@@ -69,6 +70,7 @@ static const NSUInteger SPImportPreviewRows = 10;
 @synthesize pendingConnector;
 @synthesize running;
 @synthesize lastErrorMessage;
+@synthesize completionNote;
 
 + (NSString *)formatForPath:(NSString *)path
 {
@@ -124,6 +126,7 @@ static const NSUInteger SPImportPreviewRows = 10;
 	[csvOptions release];
 	[errorChoiceProvider release];
 	[lastErrorMessage release];
+	[completionNote release];
 	[database release];
 	[document release];
 	[super dealloc];
@@ -342,6 +345,8 @@ static const NSUInteger SPImportPreviewRows = 10;
 	if (finished || running || mappingSheet) return;
 	[self _keep];
 	[self _setLastErrorMessage:nil];
+	[completionNote release];
+	completionNote = nil;
 	if (abandoned) {
 		[self _finish];
 		return;
@@ -477,13 +482,31 @@ static const NSUInteger SPImportPreviewRows = 10;
 	return progressSheet;
 }
 
-/// The job's progress report: bytes read of the file's size; whether to go on.
-static BOOL SPPostgresImportReport(SPPostgresProgressSheet *progress, unsigned long long bytesRead, unsigned long long fileSize)
+/// When the job last showed its progress (job thread only).
+typedef struct {
+	BOOL shown;
+	CFAbsoluteTime time;
+	unsigned long long bytesRead;
+} SPPostgresImportReportState;
+
+/**
+ * The job's progress report: bytes read of the file's size; whether to go on. The status is only formatted when
+ * 100 ms have passed or the bytes read moved 0.1% of the file since it was last shown (a report comes after every
+ * statement); the cancel is checked every time.
+ */
+static BOOL SPPostgresImportReport(SPPostgresProgressSheet *progress, SPPostgresImportReportState *state, unsigned long long bytesRead, unsigned long long fileSize)
 {
-	NSString *status = [NSString stringWithFormat:NSLocalizedString(@"%@ of %@", @"Postgres import: progress status (bytes read, file size)"),
-						[NSByteCountFormatter stringFromByteCount:(long long)bytesRead countStyle:NSByteCountFormatterCountStyleFile],
-						[NSByteCountFormatter stringFromByteCount:(long long)fileSize countStyle:NSByteCountFormatterCountStyleFile]];
-	[progress setStatus:status fraction:fileSize ? MIN(1.0, (double)bytesRead / (double)fileSize) : 0];
+	CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+	unsigned long long moved = bytesRead > state->bytesRead ? bytesRead - state->bytesRead : state->bytesRead - bytesRead;
+	if (!state->shown || now - state->time >= 0.1 || moved * 1000 >= fileSize) {
+		state->shown = YES;
+		state->time = now;
+		state->bytesRead = bytesRead;
+		NSString *status = [NSString stringWithFormat:NSLocalizedString(@"%@ of %@", @"Postgres import: progress status (bytes read, file size)"),
+							[NSByteCountFormatter stringFromByteCount:(long long)bytesRead countStyle:NSByteCountFormatterCountStyleFile],
+							[NSByteCountFormatter stringFromByteCount:(long long)fileSize countStyle:NSByteCountFormatterCountStyleFile]];
+		[progress setStatus:status fraction:fileSize ? MIN(1.0, (double)bytesRead / (double)fileSize) : 0];
+	}
 	return ![progress cancelled];
 }
 
@@ -510,8 +533,9 @@ static NSError *SPPostgresImportCancelledError(void)
 	}];
 
 	[progress setCancelHandler:^{
-		if (![job waitingForConnection]) return; // the work checks the sheet itself
-		SPPostgresConnector *connecting = [[pendingConnector retain] autorelease];
+		// While connecting: the job ends at once. Once it runs: the work sees the sheet's flag, and the statement its
+		// connection is running is interrupted (a lock wait, a long statement)
+		SPPostgresConnector *connecting = [job waitingForConnection] ? [[pendingConnector retain] autorelease] : nil;
 		[job cancel];
 		[connecting cancel];
 	}];
@@ -525,7 +549,10 @@ static NSError *SPPostgresImportCancelledError(void)
 		[pendingConnector release];
 		pendingConnector = nil;
 		running = NO;
-		done(ok, error);
+		// Whatever failed after Cancel (e.g. the statement the cancel interrupted) is the cancel
+		NSError *outcome = error;
+		if (!ok && [progress cancelled] && !([[error domain] isEqualToString:SPPostgresErrorDomain] && [error code] == SPPostgresErrorCancelled)) outcome = SPPostgresImportCancelledError();
+		done(ok, outcome);
 	}] retain];
 }
 
@@ -534,6 +561,13 @@ static NSError *SPPostgresImportCancelledError(void)
 - (void)_jobEndedWithSuccess:(BOOL)ok error:(NSError *)error changed:(BOOL)changed alreadyShown:(BOOL)alreadyShown
 {
 	if (changed) [document importDidChangeDatabase];
+	if (ok && [completionNote length]) {
+		NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+		[alert setMessageText:NSLocalizedString(@"The import finished", @"Postgres import: finished with a note title")];
+		[alert setInformativeText:completionNote];
+		[alert addButtonWithTitle:NSLocalizedString(@"OK", @"OK button")];
+		[document presentAlert:alert];
+	}
 	if (!ok) {
 		BOOL cancelled = [[error domain] isEqualToString:SPPostgresErrorDomain] && [error code] == SPPostgresErrorCancelled;
 		[self _setLastErrorMessage:[error localizedDescription] ?: NSLocalizedString(@"The import failed.", @"Postgres import: failed without a message")];
@@ -595,6 +629,7 @@ static NSError *SPPostgresImportCancelledError(void)
 	BOOL singleTransaction = [singleTransactionCheckbox state] == NSControlStateValueOn;
 	__block NSUInteger statementsRun = 0;
 	__block BOOL userStopped = NO;
+	__block NSArray *skippedSettings = nil; // retained by the work
 
 	[self _runJobWithProgress:progress work:^BOOL(PGPostgresConnection *connection, NSError **error) {
 		if ([progress cancelled]) {
@@ -605,16 +640,28 @@ static NSError *SPPostgresImportCancelledError(void)
 		if (!reader) return NO;
 		SPPostgresSQLImporter *importer = [[[SPPostgresSQLImporter alloc] initWithConnection:connection reader:reader] autorelease];
 		[importer setSingleTransaction:singleTransaction];
+		__block SPPostgresImportReportState reportState = {NO, 0, 0};
 		[importer setProgress:^BOOL(unsigned long long bytesRead, unsigned long long fileSize) {
-			return SPPostgresImportReport(progress, bytesRead, fileSize);
+			return SPPostgresImportReport(progress, &reportState, bytesRead, fileSize);
 		}];
 		[importer setErrorHandler:^SPPostgresImportErrorChoice(NSError *statementError, SPPostgresDumpItem *item) {
 			return [self _choiceForError:statementError progress:progress userStopped:&userStopped];
 		}];
 		BOOL ok = [importer run:error];
 		statementsRun = [importer statementsRun];
+		skippedSettings = [[importer skippedSettings] retain];
 		return ok;
 	} completion:^(BOOL ok, NSError *error) {
+		NSArray *skipped = [skippedSettings autorelease];
+		skippedSettings = nil;
+		if (ok && [skipped count]) {
+			NSString *names = [skipped componentsJoinedByString:@", "];
+			NSString *note = [skipped count] == 1
+				? [NSString stringWithFormat:NSLocalizedString(@"1 setting this server doesn't know was skipped: %@.", @"Postgres import: one unknown SET skipped (name)"), names]
+				: [NSString stringWithFormat:NSLocalizedString(@"%lu settings this server doesn't know were skipped: %@.", @"Postgres import: unknown SETs skipped (count, names)"), (unsigned long)[skipped count], names];
+			[completionNote release];
+			completionNote = [note copy];
+		}
 		// In per-statement mode what ran stays committed, even after an error or a cancel
 		BOOL changed = ok || (!singleTransaction && statementsRun > 0);
 		[self _jobEndedWithSuccess:ok error:error changed:changed alreadyShown:userStopped];
@@ -629,9 +676,10 @@ static NSError *SPPostgresImportCancelledError(void)
 			if (error) *error = SPPostgresImportCancelledError();
 			return NO;
 		}
+		__block SPPostgresImportReportState reportState = {NO, 0, 0};
 		return [SPPostgresCSV importPath:path options:options intoTable:table schema:schema columnMapping:mapping connection:connection
 								progress:^BOOL(unsigned long long bytesRead, unsigned long long fileSize) {
-			return SPPostgresImportReport(progress, bytesRead, fileSize);
+			return SPPostgresImportReport(progress, &reportState, bytesRead, fileSize);
 		} error:error];
 	} completion:^(BOOL ok, NSError *error) {
 		[self _jobEndedWithSuccess:ok error:error changed:ok alreadyShown:NO];
