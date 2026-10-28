@@ -27,9 +27,11 @@
 /**
  * The Structure fixture (schema structure_test: table t with odd columns, indexes, a check, view t_view and table
  * child referencing t; trigger function touch() with triggers t_touch (BEFORE UPDATE OF code, row, WHEN) and
- * t_audit (AFTER INSERT OR DELETE, statement, disabled) on t; and "Sales Data"."Mixed Case"), dropped and rebuilt on the server at port, failing the
- * current test if a statement fails. "Sales Data" belongs to the catalog fixture, so only its "Mixed Case" table
- * is dropped and rebuilt.
+ * t_audit (AFTER INSERT OR DELETE, statement, disabled) on t; sequences seq_free (increment 5, start 100, comment
+ * "free") and seq_used (the default of used_t.n), next to t's own t_id_seq (serial) and t_ident_seq (identity); and
+ * "Sales Data"."Mixed Case" and the sequence "Sales Data"."Odd ""Seq"""), dropped and rebuilt on the server at port,
+ * failing the current test if a statement fails. "Sales Data" belongs to the catalog fixture, so only its "Mixed
+ * Case" table and "Odd ""Seq""" sequence are dropped and rebuilt.
  */
 + (void)loadStructureFixtureOnPort:(NSUInteger)port;
 

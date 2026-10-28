@@ -31,6 +31,9 @@ __attribute__((visibility("default")))
 /// Views and materialized views (relkind v, m) in the schema, sorted.
 - (NSArray *)viewNamesInSchema:(NSString *)schema error:(NSError **)error;
 
+/// Sequences (relkind S) in the schema, sorted.
+- (NSArray *)sequenceNamesInSchema:(NSString *)schema error:(NSError **)error;
+
 /// Installed extensions as dictionaries with @"name" and @"version", sorted by name.
 - (NSArray *)installedExtensions:(NSError **)error;
 

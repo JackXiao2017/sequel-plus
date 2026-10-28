@@ -12,6 +12,7 @@
 @class SPPostgresRelationsController;
 @class SPPostgresTriggersController;
 @class SPPostgresTableInfoController;
+@class SPPostgresSequenceController;
 @class SPWindowController;
 
 /// The panes of a PostgreSQL tab's right side (-showPane:, -currentPane, and the tab's history entries).
@@ -21,12 +22,16 @@ extern NSString * const SPPostgresPaneRelations __attribute__((visibility("defau
 extern NSString * const SPPostgresPaneTriggers __attribute__((visibility("default")));  // @"triggers"
 extern NSString * const SPPostgresPaneInfo __attribute__((visibility("default")));      // @"info"
 extern NSString * const SPPostgresPaneQuery __attribute__((visibility("default")));     // @"query"
+/// Shown whenever a sequence is selected in the sidebar (it has no toolbar item; Query stays available).
+extern NSString * const SPPostgresPaneSequence __attribute__((visibility("default")));  // @"sequence"
 
 /**
  * A PostgreSQL connection hosted as a tab of an SPWindowController window: the left panel (schema
- * picker, tables, views, extensions), in the right pane one of the named panes (see -showPane:): the Structure
- * view of the selected table or view (SPPostgresStructureController), its Content view
- * (SPPostgresContentController), Relations, Triggers, Table Info, or the Query view (SPPostgresQueryController),
+ * picker, tables, views, sequences, extensions), in the right pane one of the named panes (see -showPane:): the
+ * Structure view of the selected table or view (SPPostgresStructureController), its Content view
+ * (SPPostgresContentController), Relations, Triggers, Table Info, the Sequence view of a selected sequence
+ * (SPPostgresSequenceController; no toolbar item: while a sequence is selected only Query is enabled), or the Query
+ * view (SPPostgresQueryController),
  * switched by the toolbar items and View menu items (⌘1–⌘6) as on MySQL tabs, the database picker and the
  * console logger. Built in code. Use on the main thread.
  *
@@ -72,7 +77,8 @@ __attribute__((visibility("default")))
  * Shows a pane (one of the SPPostgresPane… names) in the right pane, as MySQL's tab view does: the other panes
  * are taken out of the window, keeping their state. An edit in progress in the pane being left is ended (saved)
  * first; if it can't be, nothing changes. A pane the Query view may have made stale reloads as it is shown.
- * Unknown names show Content.
+ * Unknown names show Content. While a sequence is selected, any pane but Query shows the Sequence pane; without
+ * one, the Sequence pane gives way to the pane shown before it.
  */
 - (void)showPane:(NSString *)pane;
 
@@ -119,6 +125,8 @@ __attribute__((visibility("default")))
 @property (readonly) SPPostgresTriggersController *triggersController;
 /// The right pane: the Table Info view of the table or view selected in the sidebar.
 @property (readonly) SPPostgresTableInfoController *infoController;
+/// The right pane: the Sequence view of the sequence selected in the sidebar.
+@property (readonly) SPPostgresSequenceController *sequenceController;
 /// The right pane: the Content view of the table or view selected in the sidebar.
 @property (readonly) SPPostgresContentController *contentController;
 /// The right pane: the Query view. Its editor's text is kept for the tab's session (also across database switches).

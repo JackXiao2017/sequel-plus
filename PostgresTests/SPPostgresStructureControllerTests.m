@@ -650,7 +650,7 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	XCTAssertTrue(!method || method.isHidden, @"no index options in FK mode");
 	XCTAssertTrue([[schemas itemTitles] containsObject:@"structure_test"]);
 	XCTAssertEqualObjects([schemas titleOfSelectedItem], @"structure_test");
-	XCTAssertEqualObjects([tables itemTitles], (@[@"child", @"t"]));
+	XCTAssertEqualObjects([tables itemTitles], (@[@"child", @"t", @"used_t"]));
 	XCTAssertFalse([add isEnabled], @"no column chosen yet");
 
 	[tables selectItemWithTitle:@"t"];
