@@ -155,4 +155,37 @@
 	[connection disconnect];
 }
 
+#pragma mark - Test roles
+
++ (void)dropTestRolesOnPort:(NSUInteger)port
+{
+	PGPostgresConnection *connection = [self connectedConnectionOnPort:port];
+	if (!connection) return;
+	PGPostgresResult *result = [connection execute:@"SELECT rolname::text FROM pg_catalog.pg_roles WHERE left(rolname, 6) = 'sp_t4_' ORDER BY 1"];
+	NSMutableArray *quoted = [NSMutableArray array];
+	for (unsigned long long row = 0; row < result.numberOfRows; row++) {
+		NSString *name = [result textValueAtRow:row column:0];
+		[quoted addObject:[NSString stringWithFormat:@"\"%@\"", [name stringByReplacingOccurrencesOfString:@"\"" withString:@"\"\""]]];
+	}
+	PGPostgresResult *databases = [connection execute:@"SELECT datname::text FROM pg_catalog.pg_database WHERE datname IN ('pgkit_test', 'pgkit_nopublic') ORDER BY 1"];
+	NSMutableArray *names = [NSMutableArray array];
+	for (unsigned long long row = 0; row < databases.numberOfRows; row++) [names addObject:[databases textValueAtRow:row column:0]];
+	[connection disconnect];
+	if (!quoted.count) return;
+
+	NSString *owned = [NSString stringWithFormat:@"DROP OWNED BY %@", [quoted componentsJoinedByString:@", "]];
+	PGPostgresConnection *last = nil;
+	for (NSString *database in names) {
+		PGPostgresConnection *databaseConnection = [self connectedConnectionOnPort:port database:database];
+		XCTAssertNotNil([databaseConnection execute:owned], @"%@ in %@: %@", owned, database, databaseConnection.lastError.errorPrimaryMessage);
+		if (last) [last disconnect];
+		last = databaseConnection;
+	}
+	for (NSString *role in quoted) {
+		NSString *drop = [NSString stringWithFormat:@"DROP ROLE IF EXISTS %@", role];
+		XCTAssertNotNil([last execute:drop], @"%@: %@", drop, last.lastError.errorPrimaryMessage);
+	}
+	[last disconnect];
+}
+
 @end

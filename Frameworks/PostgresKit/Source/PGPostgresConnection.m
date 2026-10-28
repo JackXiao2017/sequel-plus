@@ -398,6 +398,21 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 	return YES;
 }
 
+- (NSString *)encryptedPassword:(NSString *)password forRole:(NSString *)role
+{
+	if (!password || !role || ![self isConnected]) return nil;
+	
+	char *hashed = PQencryptPasswordConn(_connection, [password UTF8String], [role UTF8String], NULL);
+	
+	if (!hashed) return nil;
+	
+	NSString *result = [NSString stringWithUTF8String:hashed];
+	
+	PQfreemem(hashed);
+	
+	return result;
+}
+
 #pragma mark -
 #pragma mark Private API
 
