@@ -8,6 +8,7 @@
 #import "../Source/Postgres/SPPostgresStructureController.h"
 #import "../Source/Postgres/SPPostgresContentController.h"
 #import "../Source/Postgres/SPPostgresHistory.h"
+#import "../Source/Postgres/SPPostgresQueryController.h"
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
 
@@ -19,6 +20,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 - (void)toggleConsole:(id)sender;
 - (void)_applyHistoryEntry:(NSDictionary *)entry;
 - (IBAction)backForwardInHistory:(id)sender;
+- (void)closeRenameTableSheet:(id)sender;
 @end
 
 @interface SPWindowController (SPPostgresDocumentTests)
@@ -564,6 +566,17 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	sheet = [self window].attachedSheet;
 	name = [self viewWithIdentifier:@"renameTableName" in:sheet.contentView];
 	button = [self viewWithIdentifier:@"renameTableButton" in:sheet.contentView];
+
+	// Longer than PostgreSQL's 63-byte names: Rename is off, and Return (its key equivalent) is refused
+	name.stringValue = [@"" stringByPaddingToLength:64 withString:@"n" startingAtIndex:0];
+	[[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification object:name];
+	XCTAssertFalse(button.isEnabled);
+	[button performClick:nil];
+	[self.document closeRenameTableSheet:button];
+	[self spinUntil:^BOOL{ return NO; } timeout:0.3];
+	XCTAssertEqual([self window].attachedSheet, sheet);
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"t");
+
 	name.stringValue = @"t renamed";
 	[[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification object:name];
 	XCTAssertTrue(button.isEnabled);
@@ -587,6 +600,49 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	XCTAssertTrue([self spinUntil:^BOOL{ return alerts.count == 1; } timeout:5]);
 	XCTAssertTrue([alerts.firstObject.informativeText containsString:@"already exists"], @"%@", alerts.firstObject.informativeText);
 	XCTAssertEqualObjects(sidebar.selectedTableName, @"t renamed");
+}
+
+/// R4: a rename inside the user's transaction, rolled back in Query, leaves no stale structure behind.
+- (void)testRollbackAfterRenameRebuildsStructure
+{
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self.controller showWindow:nil];
+	[self selectStructureTable:@"t"];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	SPPostgresQueryController *query = self.document.queryController;
+
+	[self.document viewQuery:nil];
+	[[query editor] setString:@"BEGIN"];
+	[query runAllQueries:nil];
+	XCTAssertEqual([self.document.connection transactionStatus], PGPostgresTransactionInTransaction);
+
+	// Rename Table… from the sidebar, inside that transaction
+	NSMenu *menu = sidebar.tableMenu;
+	[menu performActionForItemAtIndex:[menu indexOfItem:menu.itemArray.lastObject]];
+	NSWindow *sheet = [self window].attachedSheet;
+	XCTAssertNotNil(sheet);
+	NSTextField *name = [self viewWithIdentifier:@"renameTableName" in:sheet.contentView];
+	name.stringValue = @"t renamed";
+	[[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification object:name];
+	[(NSButton *)[self viewWithIdentifier:@"renameTableButton" in:sheet.contentView] performClick:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [sidebar.selectedTableName isEqualToString:@"t renamed"]; } timeout:5], @"%@", alerts.firstObject.informativeText);
+	[self.document viewStructure:nil];
+	XCTAssertEqualObjects(self.document.structureController.table, @"t renamed");
+
+	// ROLLBACK undoes it: the lists show t again, and its Structure reads without an error
+	[self.document viewQuery:nil];
+	[[query editor] setString:@"ROLLBACK"];
+	[query runAllQueries:nil];
+	XCTAssertEqual([self.document.connection transactionStatus], PGPostgresTransactionIdle);
+	XCTAssertTrue([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"t"]);
+	XCTAssertFalse([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"t renamed"]);
+	XCTAssertTrue([sidebar selectTableNamed:@"t"]);
+	[self.document viewStructure:nil];
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
+	XCTAssertEqualObjects(self.document.structureController.table, @"t");
+	XCTAssertEqual([self.document.structureController.columnsView numberOfRows], 8);
+	XCTAssertEqualObjects(self.document.structureController.noticeText, @"");
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
 }
 
 - (void)testStructureChangeMarksContentStale

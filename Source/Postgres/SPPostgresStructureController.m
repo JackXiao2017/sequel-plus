@@ -455,9 +455,11 @@ static NSString * const SPPostgresStructureComment = @"comment";
 {
 	if (invalidated) return;
 
-	// A cell edit is ended, and a draft column of the table being left is saved (it can't stay)
-	[self _endEditing];
-	if (draft && ![self _saveDraft]) [self _discardDraft];
+	// The tab saves a cell edit and a draft column before it changes the selection (and refuses to change it
+	// if they can't be saved: see -commitPendingEdits). Anything still pending here can't follow to another
+	// table: a draft is saved if it can be, and is otherwise dropped after the alert says it wasn't added.
+	if (![self _endEditing]) [columnsView abortEditing];
+	if (draft && ![self _saveDraftSelectingRow:-1]) [self _discardDraft];
 
 	[self setTable:theTable];
 	[self setSchema:theSchema];
@@ -562,25 +564,25 @@ static NSString * const SPPostgresStructureComment = @"comment";
 	if (structureDidChange && !invalidated) structureDidChange(columnsChanged);
 }
 
-/// Commits a cell edit in progress (before an action that reloads the grids).
-- (void)_endEditing
+/// Commits a cell edit in progress (before an action that reloads the grids). NO if the editor can't end: the
+/// edit stays, and the action shouldn't go ahead.
+- (BOOL)_endEditing
 {
-	if (![columnsView currentEditor]) return;
-	if (![[columnsView window] makeFirstResponder:columnsView]) [columnsView abortEditing];
+	if (![columnsView currentEditor]) return YES;
+	return [[columnsView window] makeFirstResponder:columnsView];
 }
 
 - (BOOL)commitPendingEdits
 {
 	if (invalidated) return YES;
 	if ([columnsView currentEditor] && ![[columnsView window] makeFirstResponder:columnsView]) return NO;
-	if (draft) return [self _saveDraft];
+	if (draft) return [self _saveDraftSelectingRow:-1];
 	return YES;
 }
 
 - (IBAction)refresh:(id)sender
 {
-	if (invalidated) return;
-	[self _endEditing];
+	if (invalidated || ![self _endEditing]) return;
 	[self _load];
 }
 
@@ -597,11 +599,10 @@ static NSString * const SPPostgresStructureComment = @"comment";
 
 - (IBAction)addColumn:(id)sender
 {
-	if (invalidated || !structure || !loaded || !editable) return;
-	[self _endEditing];
+	if (invalidated || !structure || !loaded || !editable || ![self _endEditing]) return;
 
 	// One draft at a time: the one there is saved first (if it can't be, it stays for correction)
-	if (draft && ![self _saveDraft]) return;
+	if (draft && ![self _saveDraftSelectingRow:-1]) return;
 
 	draft = [[SPPostgresColumnDefinition alloc] init];
 	[draft setName:[self _nextFreeColumnName]];
@@ -623,8 +624,11 @@ static NSString * const SPPostgresStructureComment = @"comment";
 	}
 }
 
-/// ADD COLUMN for the draft. On failure the draft stays (selected, for correction) and the error is shown.
-- (BOOL)_saveDraft
+/**
+ * ADD COLUMN for the draft. On failure the draft stays (selected, for correction) and the error is shown. On
+ * success row is selected (the row the user clicked, which saved it), or the new column when row is -1.
+ */
+- (BOOL)_saveDraftSelectingRow:(NSInteger)selectRow
 {
 	if (!draft) return YES;
 	if (invalidated || !structure) return NO;
@@ -637,9 +641,9 @@ static NSString * const SPPostgresStructureComment = @"comment";
 		[draft release];
 		draft = nil;
 		[self _didChange:YES];
-		// The new column, where the draft was
-		NSInteger row = [[columns valueForKey:@"name"] indexOfObject:[definition name]];
-		if (row != NSNotFound) [columnsView selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
+		// The row the user clicked (the new column is added after the others, so its index holds), else the new column
+		NSInteger row = (selectRow >= 0) ? selectRow : (NSInteger)[[columns valueForKey:@"name"] indexOfObject:[definition name]];
+		if (row >= 0 && row < [columnsView numberOfRows]) [columnsView selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
 	}
 	else {
 		NSInteger row = (NSInteger)[columns count];
@@ -670,8 +674,7 @@ static NSString * const SPPostgresStructureComment = @"comment";
 
 - (IBAction)removeColumn:(id)sender
 {
-	if (invalidated || !structure || !loaded || !editable) return;
-	[self _endEditing];
+	if (invalidated || !structure || !loaded || !editable || ![self _endEditing]) return;
 
 	NSInteger row = [columnsView selectedRow];
 	if (draft && row == (NSInteger)[columns count]) {
@@ -774,6 +777,17 @@ static NSString * const SPPostgresStructureComment = @"comment";
 	}
 
 	[self _load];
+
+	// USING only helps when the data can't take the type: datatype_mismatch (42804) or a data exception (class 22,
+	// e.g. a value the expression can't convert). A retry also asks again after an error in the expression itself
+	// (class 42: a typo, an unknown function). Anything else (an unknown type, a lock timeout, an aborted
+	// transaction, a lost connection) is a plain alert.
+	NSString *state = [[error userInfo] objectForKey:SPPostgresSQLStateErrorKey];
+	BOOL offerUsing = [state isEqualToString:@"42804"] || [state hasPrefix:@"22"] || (usingExpression && [state hasPrefix:@"42"]);
+	if (!offerUsing) {
+		[self _presentError:error title:[NSString stringWithFormat:NSLocalizedString(@"Could not change the column “%@”", @"Postgres structure: change column failed"), name]];
+		return;
+	}
 
 	NSString *message = [[error localizedDescription] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] ?: @"";
 	NSString *prefilled = [usingExpression length] ? usingExpression : [NSString stringWithFormat:@"%@::%@", SPPostgresQuoteIdentifier(name), type];
@@ -915,6 +929,11 @@ static NSString * const SPPostgresStructureComment = @"comment";
 	void (^finish)(SPPostgresConstraintDefinition *) = [[^(SPPostgresConstraintDefinition *definition) {
 		if (done) return;
 		done = YES;
+		// The sheet has ended
+		if (!invalidated) {
+			[activeSheet autorelease];
+			activeSheet = nil;
+		}
 		if (definition && !invalidated && target == structure) body(definition);
 		[body release];
 		[target release];
@@ -938,8 +957,7 @@ static NSString * const SPPostgresStructureComment = @"comment";
 
 - (IBAction)addIndex:(id)sender
 {
-	if (invalidated || !structure || !loaded || !editable) return;
-	[self _endEditing];
+	if (invalidated || !structure || !loaded || !editable || ![self _endEditing]) return;
 
 	[self _showSheetForKind:SPPostgresConstraintSheetIndexKind completion:^(SPPostgresConstraintDefinition *definition) {
 		BOOL unique = NO;
@@ -989,8 +1007,7 @@ static NSString * const SPPostgresStructureComment = @"comment";
 
 - (IBAction)addConstraint:(id)sender
 {
-	if (invalidated || !structure || !loaded || !editable) return;
-	[self _endEditing];
+	if (invalidated || !structure || !loaded || !editable || ![self _endEditing]) return;
 
 	// A primary key first when the table has none
 	BOOL hasPrimaryKey = [[constraints valueForKey:@"kind"] containsObject:@"PRIMARY KEY"];
@@ -1176,7 +1193,7 @@ static NSString * const SPPostgresStructureComment = @"comment";
 
 	// The selection left the draft: it is saved (or stays selected, for correction)
 	if (grid == columnsView && draft && !savingDraft && [columnsView selectedRow] != (NSInteger)[columns count]) {
-		[self _saveDraft];
+		[self _saveDraftSelectingRow:[columnsView selectedRow]];
 	}
 	[self _updateButtons];
 }
@@ -1187,7 +1204,7 @@ static NSString * const SPPostgresStructureComment = @"comment";
 	if (control != columnsView || !draft || ![self _isDraftRow:[columnsView editedRow]]) return NO;
 
 	if (command == @selector(insertNewline:)) {
-		if ([[columnsView window] makeFirstResponder:columnsView]) [self _saveDraft];
+		if ([[columnsView window] makeFirstResponder:columnsView]) [self _saveDraftSelectingRow:-1];
 		return YES;
 	}
 	if (command == @selector(cancelOperation:)) {

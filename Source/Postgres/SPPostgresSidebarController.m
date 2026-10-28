@@ -61,6 +61,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 - (void)_reloadExtensions;
 - (void)_reloadOutline;
 - (void)_updateSelectionFromOutline;
+- (BOOL)_delegateAllowsSelectionChange;
 - (void)_rememberError:(NSError *)error;
 - (void)_beginReload;
 - (void)_endReload;
@@ -469,6 +470,12 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 {
 	NSString *schema = [schemaPopup titleOfSelectedItem];
 	if (!schema || [schema isEqualToString:selectedSchema]) return;
+
+	// Refused (e.g. an edit that can't be saved): the pop-up shows the schema that stays
+	if (![self _delegateAllowsSelectionChange]) {
+		if (selectedSchema && [schemaPopup indexOfItemWithTitle:selectedSchema] >= 0) [schemaPopup selectItemWithTitle:selectedSchema];
+		return;
+	}
 	[self reloadSchema:schema];
 }
 
@@ -632,6 +639,19 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	}
 
 	return cell;
+}
+
+/// The user's selection change (not the API's) asks the delegate first.
+- (BOOL)selectionShouldChangeInOutlineView:(NSOutlineView *)theOutlineView
+{
+	if (reloading) return YES;
+	return [self _delegateAllowsSelectionChange];
+}
+
+- (BOOL)_delegateAllowsSelectionChange
+{
+	if (![delegate respondsToSelector:@selector(sidebarShouldChangeSelection:)]) return YES;
+	return [delegate sidebarShouldChangeSelection:self];
 }
 
 - (void)outlineViewSelectionDidChange:(NSNotification *)notification

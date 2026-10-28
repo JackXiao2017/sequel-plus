@@ -40,7 +40,9 @@ static PGPostgresResult *SPPostgresExecuteReporting(PGPostgresConnection *connec
 			message = [connection libpqErrorMessage];
 			if (![message length]) message = NSLocalizedString(@"There is no connection to the server.", @"Postgres content query without a connection");
 		}
-		*error = SPPostgresMakeError(SPPostgresErrorQueryFailed, message, nil);
+		// The server's SQLSTATE, for callers that tell kinds of failure apart
+		NSString *state = [connection isConnected] ? [[connection lastError] errorStateCode] : nil;
+		*error = SPPostgresMakeError(SPPostgresErrorQueryFailed, message, [state length] ? @{SPPostgresSQLStateErrorKey: state} : nil);
 	}
 	return result;
 }

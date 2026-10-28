@@ -11,6 +11,7 @@
 #import "../Source/Postgres/SPPostgresTableStructure.h"
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
+#import "../Source/Postgres/SPPostgresErrors.h"
 
 static const NSUInteger SPStructureTestPort = 55418;
 
@@ -27,6 +28,11 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 
 @interface NSObject (SPPostgresStructureControllerTestsDelegate)
 - (BOOL)cancelRowEditing;
+@end
+
+@interface SPPostgresDocument (SPPostgresStructureControllerTests)
+- (BOOL)parentTabShouldClose;
+- (IBAction)backForwardInHistory:(id)sender;
 @end
 
 @interface SPWindowController (SPPostgresStructureControllerTests)
@@ -487,8 +493,9 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	[self setValue:@"varchar(20)" in:columns row:10 column:@"type"];
 	[self setValue:@"'x'" in:columns row:10 column:@"default"];
 	[self setValue:@"a new one" in:columns row:10 column:@"comment"];
-	[self selectRow:0 in:columns];
+	[self selectRow:2 in:columns];
 	XCTAssertFalse(structure.hasDraftColumn);
+	XCTAssertEqual([columns selectedRow], 2, @"the selection stays on the row that was clicked");
 	XCTAssertEqualObjects([self serverTypeOf:@"typed_col"], @"character varying(20)");
 	XCTAssertEqualObjects([self serverValue:@"SELECT attnotnull::text FROM pg_attribute WHERE attrelid = 'structure_test.t'::regclass AND attname = 'typed_col'"], @"true");
 	XCTAssertEqualObjects([self serverValue:@"SELECT col_description('structure_test.t'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid = 'structure_test.t'::regclass AND attname = 'typed_col'))"], @"a new one");
@@ -747,6 +754,116 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	XCTAssertTrue([self.structure.noticeText length] > 0);
 	XCTAssertNotEqualObjects(self.structure.noticeText, @"Views can't be edited here.");
 	XCTAssertFalse([[self.structure valueForKey:@"addColumnButton"] isEnabled]);
+}
+
+#pragma mark - Fix round 1
+
+/// A draft that can't be saved keeps the tab where it is: another table, another schema, closing the tab,
+/// a database switch and a History move are all refused, and the draft keeps what was typed.
+- (void)testFailedDraftVetoesLeaving
+{
+	[self showStructureOf:@"t"];
+	SPPostgresStructureController *structure = self.structure;
+	NSTableView *columns = structure.columnsView;
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	NSOutlineView *outline = [sidebar valueForKey:@"outlineView"];
+
+	[structure addColumn:nil];
+	[[columns currentEditor] setString:@"id"]; // taken
+	[[columns window] makeFirstResponder:columns];
+	[self setValue:@"varchar(7)" in:columns row:8 column:@"type"];
+
+	// Clicking another table: the outline asks first
+	XCTAssertFalse([(id<NSOutlineViewDelegate>)[outline delegate] selectionShouldChangeInOutlineView:outline]);
+	XCTAssertEqual(self.alerts.count, 1u);
+	XCTAssertTrue([self.alerts[0].informativeText containsString:@"already exists"], @"%@", self.alerts[0].informativeText);
+	XCTAssertTrue(structure.hasDraftColumn);
+	XCTAssertEqualObjects([self valueIn:columns row:8 column:@"name"], @"id");
+	XCTAssertEqualObjects([self valueIn:columns row:8 column:@"type"], @"varchar(7)");
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"t");
+
+	// Another schema from the pop-up
+	NSPopUpButton *schemas = [sidebar valueForKey:@"schemaPopup"];
+	[schemas selectItemWithTitle:@"public"];
+	[NSApp sendAction:[schemas action] to:[schemas target] from:schemas];
+	XCTAssertEqualObjects(sidebar.selectedSchema, @"structure_test");
+	XCTAssertEqualObjects([schemas titleOfSelectedItem], @"structure_test");
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"t");
+
+	// Closing the tab, switching database, going back in history
+	XCTAssertFalse([self.document parentTabShouldClose]);
+	NSString *title = [self.document windowTitleString];
+	[self.document switchToDatabase:@"postgres"];
+	XCTAssertFalse(self.document.isProcessing);
+	XCTAssertEqualObjects([self.document windowTitleString], title);
+	NSMenuItem *back = [[NSMenuItem alloc] initWithTitle:@"Back" action:@selector(backForwardInHistory:) keyEquivalent:@""];
+	back.tag = 0;
+	[self.document backForwardInHistory:back];
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"t");
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
+	XCTAssertTrue(structure.hasDraftColumn);
+	XCTAssertEqualObjects([self valueIn:columns row:8 column:@"type"], @"varchar(7)");
+
+	// Corrected, everything goes ahead
+	[self setValue:@"id_two" in:columns row:8 column:@"name"];
+	XCTAssertTrue([(id<NSOutlineViewDelegate>)[outline delegate] selectionShouldChangeInOutlineView:outline]);
+	XCTAssertFalse(structure.hasDraftColumn);
+	XCTAssertEqualObjects([self serverTypeOf:@"id_two"], @"character varying(7)");
+	XCTAssertTrue([self.document parentTabShouldClose]);
+}
+
+/// Only a failure the data can't take (datatype_mismatch, or a data exception) offers USING; others are plain alerts.
+- (void)testInvalidTypeNameGivesPlainAlert
+{
+	[self showStructureOf:@"t"];
+	NSTableView *columns = self.structure.columnsView;
+	NSInteger qty = [self rowNamed:@"qty" in:columns];
+	NSMutableArray *offers = [NSMutableArray array];
+	__block void (^pending)(NSString *) = nil;
+	self.structure.usingPresenter = ^(NSString *serverMessage, NSString *prefilled, void (^completion)(NSString *)) {
+		[offers addObject:serverMessage];
+		pending = completion;
+	};
+
+	[self setValue:@"no_such_type" in:columns row:qty column:@"type"];
+	XCTAssertEqual(offers.count, 0u);
+	XCTAssertEqual(self.alerts.count, 1u);
+	XCTAssertTrue([self.alerts[0].informativeText containsString:@"no_such_type"], @"%@", self.alerts[0].informativeText);
+	XCTAssertEqualObjects([self serverTypeOf:@"qty"], @"text");
+
+	// The SQLSTATE travels with the error
+	SPPostgresTableStructure *direct = [[SPPostgresTableStructure alloc] initWithConnection:self.other schema:@"structure_test" table:@"t"];
+	NSError *error = nil;
+	XCTAssertFalse([direct changeColumn:@"qty" toType:@"integer" using:nil error:&error]);
+	XCTAssertEqualObjects(error.userInfo[SPPostgresSQLStateErrorKey], @"42804");
+	XCTAssertFalse([direct changeColumn:@"qty" toType:@"no_such_type" using:nil error:&error]);
+	XCTAssertEqualObjects(error.userInfo[SPPostgresSQLStateErrorKey], @"42704");
+
+	// qty -> integer still asks; a USING failing on a row's value (class 22) asks again
+	[self setValue:@"integer" in:columns row:qty column:@"type"];
+	XCTAssertEqual(offers.count, 1u);
+	void (^answer)(NSString *) = pending;
+	answer(@"\"qty\"::integer");
+	XCTAssertEqual(offers.count, 2u);
+	answer = pending;
+	answer(nil);
+	XCTAssertEqual(self.alerts.count, 1u);
+	XCTAssertEqualObjects([self serverTypeOf:@"qty"], @"text");
+}
+
+/// The default sheet's controller forgets the sheet once it has ended.
+- (void)testConstraintSheetEndClearsActiveSheet
+{
+	[self.controller showWindow:nil];
+	[self showStructureOf:@"t"];
+	[self.structure addIndex:nil];
+	NSWindow *window = [self.controller window];
+	NSWindow *sheet = window.attachedSheet;
+	XCTAssertNotNil(sheet);
+	XCTAssertEqual([self.structure valueForKey:@"activeSheet"], sheet);
+	[window endSheet:sheet returnCode:NSModalResponseCancel];
+	XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet == nil; } timeout:5]);
+	XCTAssertNil([self.structure valueForKey:@"activeSheet"]);
 }
 
 @end

@@ -793,9 +793,11 @@ NSString * const SPPostgresPaneQuery = @"query";
 	if (![sender isKindOfClass:[SPWindowController class]]) [parentWindowController updateAllTabTitles:self];
 }
 
+/// As MySQL's (couldCommitCurrentViewActions): an edit or Structure draft column that can't be saved keeps the tab open.
 - (BOOL)parentTabShouldClose
 {
-	return YES;
+	if (tornDown) return YES;
+	return [self _endPaneEditing];
 }
 
 /// The tab was closed: disconnects (closing the SSH tunnel too) and detaches from the window.
@@ -973,6 +975,13 @@ NSString * const SPPostgresPaneQuery = @"query";
 	[self _showSelectedTable];
 	[self updateWindowTitle:self];
 	[self _recordHistory];
+}
+
+/// Another table or schema only once an edit in progress (or a Structure draft column) is saved, as MySQL's.
+- (BOOL)sidebarShouldChangeSelection:(SPPostgresSidebarController *)theSidebar
+{
+	if (tornDown) return YES;
+	return [self _endPaneEditing];
 }
 
 - (void)sidebar:(SPPostgresSidebarController *)theSidebar didFailToLoadWithError:(NSError *)error
