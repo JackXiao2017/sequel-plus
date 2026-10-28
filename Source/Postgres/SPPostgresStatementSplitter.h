@@ -24,4 +24,18 @@ __attribute__((visibility("default")))
  */
 + (NSRange)rangeOfStatementAtLocation:(NSUInteger)location inSQL:(NSString *)sql;
 
+/**
+ * The offset just past the last top-level terminating semicolon in sql (one the lexer above accepts as ending a
+ * statement), or 0 when there is none. Text read in chunks: everything before it is whole statements, whatever
+ * comes next (a dollar-quoted body or string still open at the end of the text) is not.
+ */
++ (NSUInteger)lengthOfCompleteStatementsInSQL:(NSString *)sql;
+
+/**
+ * The offset just past the semicolon ending the first statement of characters[0..<length], or 0 when the text holds
+ * no complete statement. Lexes only that far, so a reader can walk a large buffer statement by statement in linear
+ * time. Same lexer and rules as -lengthOfCompleteStatementsInSQL:.
+ */
++ (NSUInteger)lengthOfFirstStatementInCharacters:(const unichar *)characters length:(NSUInteger)length;
+
 @end

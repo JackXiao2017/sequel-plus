@@ -33,6 +33,7 @@
 	NSString *_errorPrimaryMessage;
 	NSString *_errorDetailMessage;
 	NSString *_errorMessageHint;
+	NSString *_errorContext;
 	
 	NSUInteger _errorStatementPosition;
 }
@@ -61,6 +62,12 @@
  * @property errorMessageHint The error message hint.
  */ 
 @property (readonly) NSString *errorMessageHint;
+
+/**
+ * @property errorContext Where the error happened (PG_DIAG_CONTEXT), e.g. "PL/pgSQL function f() line 3 at RAISE"
+ *           or "COPY t, line 2"; nil when the server sent none.
+ */
+@property (readonly) NSString *errorContext;
 
 /**
  * @property errorStatementPosition The position within the executed statement that caused the error.

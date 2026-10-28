@@ -48,10 +48,15 @@
 
 // Fixtures are read from PostgresTests/Fixtures/ next to this source file (located via __FILE__), not bundled
 // as test resources.
++ (NSString *)fixturePathNamed:(NSString *)fileName
+{
+	return [[[[NSString stringWithUTF8String:__FILE__] stringByDeletingLastPathComponent]
+			 stringByAppendingPathComponent:@"Fixtures"] stringByAppendingPathComponent:fileName];
+}
+
 + (void)loadFixtureNamed:(NSString *)name onPort:(NSUInteger)port
 {
-	NSString *path = [[[[NSString stringWithUTF8String:__FILE__] stringByDeletingLastPathComponent]
-					   stringByAppendingPathComponent:@"Fixtures"] stringByAppendingPathComponent:[name stringByAppendingPathExtension:@"sql"]];
+	NSString *path = [self fixturePathNamed:[name stringByAppendingPathExtension:@"sql"]];
 	NSError *readError = nil;
 	NSString *sql = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&readError];
 	if (!sql) { XCTFail(@"Cannot read fixture: %@", readError); return; }
@@ -69,7 +74,11 @@
 		NSString *statement = [[lines componentsJoinedByString:@"\n"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 		directive = [directive stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
 
-		if ([directive hasPrefix:@"db "]) {
+		if ([directive hasPrefix:@"minversion "]) {
+			// The chunk runs only on servers at least this version (server_version_num, e.g. 140000)
+			NSInteger minimum = [[directive substringFromIndex:11] integerValue];
+			if ((NSInteger)[connection serverVersion] < minimum) continue;
+		} else if ([directive hasPrefix:@"db "]) {
 			[connection disconnect];
 			connection = [self connectedConnectionOnPort:port database:[directive substringFromIndex:3]];
 			if (!connection) return;
@@ -88,6 +97,40 @@
 		}
 	}
 	[connection disconnect];
+}
+
+#pragma mark - Import / export databases
+
++ (PGPostgresConnection *)ioConnectionOnPort:(NSUInteger)port database:(NSString *)name
+{
+	if (![name isEqualToString:@"pgkit_io_src"] && ![name isEqualToString:@"pgkit_io_dst"]) {
+		XCTFail(@"ioConnectionOnPort: only empties pgkit_io_src and pgkit_io_dst, not %@", name);
+		return nil;
+	}
+	PGPostgresConnection *admin = [self connectedConnectionOnPort:port];
+	if (!admin) return nil;
+	PGPostgresResult *exists = [admin execute:@"SELECT 1 FROM pg_catalog.pg_database WHERE datname = $1::text" values:@[name]];
+	if (exists.numberOfRows == 0) {
+		NSString *create = [NSString stringWithFormat:@"CREATE DATABASE \"%@\"", name];
+		XCTAssertNotNil([admin execute:create], @"%@: %@", create, admin.lastError.errorPrimaryMessage);
+	}
+	[admin disconnect];
+
+	PGPostgresConnection *connection = [self connectedConnectionOnPort:port database:name];
+	if (!connection) return nil;
+	[connection execute:@"SET lock_timeout = '10s'"];
+	// Empty it: drop every non-system schema (test code only: CASCADE), then recreate public
+	PGPostgresResult *schemas = [connection execute:(@"SELECT nspname::text FROM pg_catalog.pg_namespace"
+													 @" WHERE nspname <> 'information_schema' AND nspname NOT LIKE 'pg\\_%' ORDER BY 1")];
+	for (unsigned long long row = 0; row < schemas.numberOfRows; row++) {
+		NSString *schema = [schemas textValueAtRow:row column:0];
+		NSString *drop = [NSString stringWithFormat:@"DROP SCHEMA IF EXISTS \"%@\" CASCADE",
+						  [schema stringByReplacingOccurrencesOfString:@"\"" withString:@"\"\""]];
+		XCTAssertNotNil([connection execute:drop], @"%@: %@", drop, connection.lastError.errorPrimaryMessage);
+	}
+	XCTAssertNotNil([connection execute:@"CREATE SCHEMA public"], @"CREATE SCHEMA public: %@", connection.lastError.errorPrimaryMessage);
+	[connection execute:@"RESET lock_timeout"];
+	return connection;
 }
 
 #pragma mark - Structure fixture
