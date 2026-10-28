@@ -3,6 +3,7 @@
 NSString * const SPPostgresErrorDomain = @"SPPostgresErrorDomain";
 NSString * const SPPostgresSQLStateErrorKey = @"SPPostgresSQLState";
 NSString * const SPPostgresDependentsErrorKey = @"SPPostgresDependentsErrorKey";
+NSString * const SPPostgresObjectsErrorKey = @"SPPostgresObjectsErrorKey";
 
 NSError *SPPostgresMakeError(NSInteger code, NSString *message, NSDictionary *userInfo)
 {

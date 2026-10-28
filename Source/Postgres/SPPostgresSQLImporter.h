@@ -32,12 +32,21 @@ __attribute__((visibility("default")))
 	NSUInteger statementsRun;
 	NSUInteger errorsIgnored;
 	NSMutableArray *skippedSettings;
+	NSArray *statementsBeforeImport;
 }
 
 - (instancetype)initWithConnection:(PGPostgresConnection *)connection reader:(SPPostgresDumpReader *)reader;
 
 /// Default YES.
 @property BOOL singleTransaction;
+
+/**
+ * SQL statements (NSString) run first, in order, before the file's first item: inside the transaction when
+ * singleTransaction (each committing on its own otherwise). A failure fails the run with SPPostgresErrorQueryFailed,
+ * the server's message followed by its DETAIL and HINT lines (no line number; SQLSTATE under
+ * SPPostgresSQLStateErrorKey), and rolls back. Counted in statementsRun.
+ */
+@property (copy) NSArray *statementsBeforeImport;
 
 /// Asked after a failed item when singleTransaction is NO (error as -run: would report it). nil means Stop.
 @property (copy) SPPostgresImportErrorChoice (^errorHandler)(NSError *error, SPPostgresDumpItem *item);

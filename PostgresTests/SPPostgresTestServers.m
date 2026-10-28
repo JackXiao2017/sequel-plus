@@ -133,6 +133,89 @@
 	return connection;
 }
 
+#pragma mark - Database descriptions
+
+static NSString * const SPUserSchemas = @"nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema'";
+
++ (NSString *)describeText:(NSString *)sql on:(PGPostgresConnection *)connection
+{
+	PGPostgresResult *result = [connection execute:sql];
+	XCTAssertNotNil(result, @"%@: %@", sql, connection.lastError.errorPrimaryMessage);
+	id value = [result textValueAtRow:0 column:0];
+	return [value isKindOfClass:[NSString class]] ? value : @"(null)";
+}
+
++ (NSArray<NSString *> *)describeFirstColumn:(NSString *)sql on:(PGPostgresConnection *)connection
+{
+	PGPostgresResult *result = [connection execute:sql];
+	XCTAssertNotNil(result, @"%@: %@", sql, connection.lastError.errorPrimaryMessage);
+	NSMutableArray *values = [NSMutableArray array];
+	for (unsigned long long row = 0; row < result.numberOfRows; row++) {
+		id value = [result textValueAtRow:row column:0];
+		[values addObject:[value isKindOfClass:[NSString class]] ? value : @"(null)"];
+	}
+	return values;
+}
+
++ (NSDictionary *)describeDatabase:(PGPostgresConnection *)connection
+{
+	NSMutableDictionary *description = [NSMutableDictionary dictionary];
+	NSString *(^aggregate)(NSString *) = ^NSString *(NSString *rowsSQL) {
+		return [self describeText:[NSString stringWithFormat:@"SELECT coalesce(string_agg(x, E'\\n' ORDER BY x COLLATE \"C\"), '') FROM (%@) s(x)", rowsSQL] on:connection];
+	};
+
+	description[@"columns"] = aggregate([NSString stringWithFormat:
+		@"SELECT format('%%I.%%I.%%I %%s notnull=%%s default=%%s identity=%%s generated=%%s', n.nspname, c.relname, a.attname,"
+		" format_type(a.atttypid, a.atttypmod), a.attnotnull, coalesce(pg_get_expr(d.adbin, d.adrelid), '-'), a.attidentity, a.attgenerated)"
+		" FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace"
+		" LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum"
+		" WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f') AND a.attnum > 0 AND NOT a.attisdropped AND %@", SPUserSchemas]);
+	description[@"constraints"] = aggregate([NSString stringWithFormat:
+		@"SELECT CASE WHEN con.conrelid <> 0 THEN con.conrelid::regclass::text ELSE con.contypid::regtype::text END"
+		" || ' ' || con.conname || ' ' || pg_get_constraintdef(con.oid) || ' validated=' || con.convalidated"
+		" FROM pg_constraint con JOIN pg_namespace n ON n.oid = con.connamespace WHERE %@", SPUserSchemas]);
+	description[@"indexes"] = aggregate(@"SELECT indexdef FROM pg_indexes WHERE schemaname NOT LIKE 'pg\\_%' AND schemaname <> 'information_schema'");
+	description[@"triggers"] = aggregate(@"SELECT pg_get_triggerdef(t.oid) || ' enabled=' || t.tgenabled::text FROM pg_trigger t WHERE NOT t.tgisinternal");
+	description[@"views"] = aggregate([NSString stringWithFormat:
+		@"SELECT c.oid::regclass::text || ' ' || c.relkind::text || ' ' || pg_get_viewdef(c.oid)"
+		" FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('v', 'm') AND %@", SPUserSchemas]);
+	description[@"populated"] = aggregate([NSString stringWithFormat:
+		@"SELECT c.oid::regclass::text || ' ' || c.relispopulated"
+		" FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'm' AND %@", SPUserSchemas]);
+	description[@"functions"] = aggregate([NSString stringWithFormat:
+		@"SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace"
+		" WHERE p.prokind IN ('f', 'p') AND %@ AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')", SPUserSchemas]);
+	description[@"enums"] = aggregate(@"SELECT t.typname || ': ' || string_agg(e.enumlabel, ', ' ORDER BY e.enumsortorder) FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid GROUP BY t.typname");
+	description[@"comments"] = aggregate(@"SELECT pg_describe_object(classoid, objoid, objsubid) || ' = ' || description FROM pg_description WHERE objoid >= 16384");
+	description[@"extensions"] = aggregate(@"SELECT extname || ' ' || extnamespace::regnamespace::text FROM pg_extension");
+
+	// Rows of every table and populated materialized view
+	NSArray *relations = [self describeFirstColumn:[NSString stringWithFormat:
+		@"SELECT format('%%I.%%I', n.nspname, c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+		" WHERE (c.relkind IN ('r', 'p') OR (c.relkind = 'm' AND c.relispopulated)) AND %@ ORDER BY 1", SPUserSchemas] on:connection];
+	for (NSString *relation in relations) {
+		NSString *sql = [NSString stringWithFormat:@"SELECT count(*) || ' ' || coalesce(md5(string_agg(t::text, '|' ORDER BY t::text)), '-') FROM %@ t", relation];
+		description[[@"rows " stringByAppendingString:relation]] = [self describeText:sql on:connection];
+	}
+
+	// Sequences
+	NSArray *sequences = [self describeFirstColumn:@"SELECT format('%I.%I', schemaname, sequencename) FROM pg_sequences ORDER BY 1" on:connection];
+	for (NSString *sequence in sequences) {
+		NSString *sql = [NSString stringWithFormat:@"SELECT last_value || ' ' || is_called FROM %@", sequence];
+		description[[@"sequence " stringByAppendingString:sequence]] = [self describeText:sql on:connection];
+	}
+	return description;
+}
+
++ (void)assertDescription:(NSDictionary *)actual equals:(NSDictionary *)expected context:(NSString *)context
+{
+	NSMutableSet *keys = [NSMutableSet setWithArray:expected.allKeys];
+	[keys addObjectsFromArray:actual.allKeys];
+	for (NSString *key in [keys.allObjects sortedArrayUsingSelector:@selector(compare:)]) {
+		XCTAssertEqualObjects(actual[key], expected[key], @"%@: %@", context, key);
+	}
+}
+
 #pragma mark - Structure fixture
 
 + (NSArray<NSString *> *)structureFixtureStatements
