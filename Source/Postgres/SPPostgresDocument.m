@@ -735,9 +735,9 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /**
  * Whether a pane's toolbar item and View menu item are enabled: Query always; Structure, Content and Table Info
  * for any selected table or view; Relations and Triggers for a table (or partitioned table) only; Sequence (no
- * item) for a selected sequence, Extension (no item) for a selected extension. While a sequence is selected there
- * is no table: only Query is enabled (and Structure, which shows the Sequence pane). While an extension is selected
- * only Query is (⌘1 still brings the Extension pane back, see -validateMenuItem: and -viewStructure:).
+ * item) for a selected sequence, Extension (no item) for a selected extension. While a sequence or an extension
+ * is selected there is no table: only Query is enabled, and Structure (⌘1), which shows the Sequence or Extension
+ * pane (-showPane: redirects it).
  */
 - (BOOL)_canShowPane:(NSString *)pane
 {
@@ -747,6 +747,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	if ([pane isEqualToString:SPPostgresPaneExtension]) return [[sidebar selectedExtensionName] length] > 0;
 	// With a sequence selected, Structure (⌘1) is the way back to its pane (-showPane: shows it instead)
 	if ([pane isEqualToString:SPPostgresPaneStructure] && [[sidebar selectedSequenceName] length]) return YES;
+	// The same for a selected extension and its pane
+	if ([pane isEqualToString:SPPostgresPaneStructure] && [[sidebar selectedExtensionName] length]) return YES;
 	if (![[sidebar selectedTableName] length]) return NO;
 	if ([pane isEqualToString:SPPostgresPaneRelations] || [pane isEqualToString:SPPostgresPaneTriggers]) return [sidebar selectionIsTable];
 	return YES;
@@ -839,8 +841,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	BOOL hasTable = [[sidebar selectedTableName] length] > 0;
 	BOOL needsTable = ![currentPane isEqualToString:SPPostgresPaneQuery];
 	NSString *identifier = (needsTable && !hasTable) ? nil : [self _toolbarIdentifierForPane:currentPane];
-	// The Sequence pane has no item of its own: Structure (which shows it) is highlighted
-	if ([currentPane isEqualToString:SPPostgresPaneSequence]) identifier = [self _toolbarIdentifierForPane:SPPostgresPaneStructure];
+	// The Sequence and Extension panes have no item of their own: Structure (which shows them) is highlighted
+	if ([currentPane isEqualToString:SPPostgresPaneSequence] || [currentPane isEqualToString:SPPostgresPaneExtension]) identifier = [self _toolbarIdentifierForPane:SPPostgresPaneStructure];
 	[toolbar setSelectedItemIdentifier:identifier];
 	[toolbar validateVisibleItems];
 }
@@ -1654,10 +1656,13 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}];
 }
 
-/// Drops the extension (never CASCADE); on success the lists reload with nothing selected, else the server's
+/// Drops the extension (never CASCADE); on success the lists reload (nothing selected if it was the selection), else the server's
 /// message (or the objects that depend on it, one per line) is shown.
 - (void)_dropExtension:(NSString *)name
 {
+	// Only the dropped extension's own selection goes (a table, sequence or another extension stays selected)
+	BOOL wasSelected = [name isEqualToString:[sidebar selectedExtensionName]];
+
 	SPPostgresExtensions *extensions = [[[SPPostgresExtensions alloc] initWithConnection:connection] autorelease];
 	NSError *error = nil;
 	if (![extensions dropExtension:name error:&error]) {
@@ -1677,8 +1682,9 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}
 
 	[self _extensionsDidChange];
+	if (!wasSelected) return;
 
-	// Nothing is selected after a drop (not a place the user went to)
+	// Nothing is selected after the selected extension's drop (not a place the user went to)
 	BOOL wasRestoring = restoringHistory;
 	restoringHistory = YES;
 	[sidebar selectTableNamed:nil];
@@ -2360,8 +2366,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	if (tornDown) return NO;
 
 	// As the pane toolbar items
-	// ⌘1 also brings the Extension pane back (its toolbar item stays off)
-	if (action == @selector(viewStructure:)) return [self _canShowPane:SPPostgresPaneStructure] || [self _canShowPane:SPPostgresPaneExtension];
+	if (action == @selector(viewStructure:)) return [self _canShowPane:SPPostgresPaneStructure];
 	if (action == @selector(viewContent:)) return [self _canShowPane:SPPostgresPaneContent];
 	if (action == @selector(viewRelations:)) return [self _canShowPane:SPPostgresPaneRelations];
 	if (action == @selector(viewTriggers:)) return [self _canShowPane:SPPostgresPaneTriggers];
@@ -2523,11 +2528,6 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// Shows the Structure view of the selected table or view.
 - (IBAction)viewStructure:(id)sender
 {
-	// With an extension selected, ⌘1 is the way back to its pane (as with a sequence's)
-	if ([[sidebar selectedExtensionName] length]) {
-		if (!tornDown) [self showPane:SPPostgresPaneExtension];
-		return;
-	}
 	[self _viewPane:SPPostgresPaneStructure];
 }
 

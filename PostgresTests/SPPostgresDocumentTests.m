@@ -1199,11 +1199,13 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 		XCTAssertEqualObjects(document.extensionController.nameField.stringValue, @"citext");
 		XCTAssertEqualObjects(document.history.currentEntry, entry, @"not recorded in History");
 
-		// Only Query and the document's own items
-		for (NSString *identifier in @[SPDocumentTestToolbarStructure, SPDocumentTestToolbarContent, SPDocumentTestToolbarRelations, SPDocumentTestToolbarTriggers, SPDocumentTestToolbarInfo]) {
+		// As with a sequence: only Structure (which is the Extension pane here), Query and the document's own items
+		for (NSString *identifier in @[SPDocumentTestToolbarContent, SPDocumentTestToolbarRelations, SPDocumentTestToolbarTriggers, SPDocumentTestToolbarInfo]) {
 			XCTAssertFalse([document validateToolbarItem:[self toolbarItem:identifier of:document]], @"%@", identifier);
 		}
+		XCTAssertTrue([document validateToolbarItem:[self toolbarItem:SPDocumentTestToolbarStructure of:document]]);
 		XCTAssertTrue([document validateToolbarItem:[self toolbarItem:SPDocumentTestToolbarQuery of:document]]);
+		XCTAssertEqualObjects([[document toolbar] selectedItemIdentifier], SPDocumentTestToolbarStructure, @"the Extension pane highlights Structure");
 		for (NSValue *selector in @[[NSValue valueWithPointer:@selector(viewContent:)], [NSValue valueWithPointer:@selector(viewRelations:)],
 									[NSValue valueWithPointer:@selector(viewTriggers:)], [NSValue valueWithPointer:@selector(viewStatus:)]]) {
 			NSMenuItem *item = [self menuItem:(SEL)[selector pointerValue] key:@""];
@@ -1217,6 +1219,15 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 		NSMenuItem *structureItem = [self menuItem:@selector(viewStructure:) key:@"1"];
 		XCTAssertTrue([self.controller validateMenuItem:structureItem]);
 		[self.controller performSelector:@selector(viewStructure:) withObject:structureItem];
+		XCTAssertEqualObjects(document.currentPane, SPPostgresPaneExtension);
+		XCTAssertEqualObjects([[document toolbar] selectedItemIdentifier], SPDocumentTestToolbarStructure);
+		XCTAssertEqualObjects(document.history.currentEntry, entry, @"not recorded in History");
+
+		// So does the Structure toolbar item
+		[document viewQuery:nil];
+		NSToolbarItem *structureToolbarItem = [self toolbarItem:SPDocumentTestToolbarStructure of:document];
+		XCTAssertTrue([document validateToolbarItem:structureToolbarItem]);
+		[NSApp sendAction:structureToolbarItem.action to:structureToolbarItem.target from:structureToolbarItem];
 		XCTAssertEqualObjects(document.currentPane, SPPostgresPaneExtension);
 		XCTAssertEqualObjects(document.history.currentEntry, entry, @"not recorded in History");
 
@@ -1315,6 +1326,60 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 		NSMenuItem *drop = [menu itemWithTitle:@"Drop Extension…"];
 		XCTAssertTrue([sidebar selectTableNamed:@"sp_t5_items"]);
 		XCTAssertFalse([(id<NSMenuItemValidation>)drop.target validateMenuItem:drop]);
+	}
+}
+
+/// Dropping an extension that isn't the selection (from the sidebar's menu) leaves the selected table and its pane.
+- (void)testDropOtherExtensionKeepsSelectedTable
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresDocument *document = [self extensionDocumentOnPort:port.unsignedIntegerValue running:@[@"CREATE EXTENSION citext", @"CREATE TABLE public.sp_t5_items (id int)"]];
+		SPPostgresSidebarController *sidebar = document.sidebar;
+		XCTAssertTrue([document sidebarShouldChangeSelection:sidebar]);
+		XCTAssertTrue([sidebar selectTableNamed:@"sp_t5_items"]);
+		[document viewStructure:nil];
+		XCTAssertEqualObjects(document.currentPane, SPPostgresPaneStructure);
+
+		[document sidebar:sidebar dropExtensionNamed:@"citext"];
+		XCTAssertEqual(self.extensionConfirmations.count, 1u, @"%@", port);
+		XCTAssertEqual(self.extensionAlerts.count, 0u, @"%@", self.extensionAlerts.firstObject.informativeText);
+		XCTAssertFalse([[sidebar itemTitlesInSection:@"EXTENSIONS"] containsObject:@"citext"]);
+		XCTAssertEqualObjects(sidebar.selectedTableName, @"sp_t5_items");
+		XCTAssertEqualObjects(document.currentPane, SPPostgresPaneStructure);
+	}
+}
+
+/// Extensions don't depend on the schema picker: choosing another schema keeps the selected extension and its pane.
+- (void)testSchemaChangeKeepsSelectedExtension
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresDocument *document = [self extensionDocumentOnPort:port.unsignedIntegerValue running:@[@"CREATE EXTENSION citext", @"DROP SCHEMA IF EXISTS sp_t5_other", @"CREATE SCHEMA sp_t5_other"]];
+		[self addTeardownBlock:^{
+			PGPostgresConnection *cleanup = [SPPostgresTestServers extensionTestConnectionOnPort:port.unsignedIntegerValue];
+			[cleanup execute:@"DROP SCHEMA IF EXISTS sp_t5_other"];
+			[cleanup disconnect];
+		}];
+		SPPostgresSidebarController *sidebar = document.sidebar;
+		[self selectExtension:@"citext" in:document];
+		XCTAssertEqualObjects(document.currentPane, SPPostgresPaneExtension);
+
+		// As the user picks it in the schema pop-up
+		NSPopUpButton *popup = nil;
+		NSMutableArray *queue = [NSMutableArray arrayWithObject:[sidebar view]];
+		while (queue.count && !popup) {
+			NSView *v = queue.firstObject; [queue removeObjectAtIndex:0];
+			if ([v isKindOfClass:[NSPopUpButton class]]) popup = (NSPopUpButton *)v;
+			[queue addObjectsFromArray:v.subviews];
+		}
+		XCTAssertNotNil([popup itemWithTitle:@"sp_t5_other"], @"%@", popup.itemTitles);
+		[popup selectItemWithTitle:@"sp_t5_other"];
+		[NSApp sendAction:popup.action to:popup.target from:popup];
+
+		XCTAssertEqualObjects(sidebar.selectedSchema, @"sp_t5_other", @"%@", port);
+		XCTAssertEqualObjects(sidebar.selectedExtensionName, @"citext");
+		XCTAssertEqualObjects(document.currentPane, SPPostgresPaneExtension);
+		XCTAssertEqualObjects(document.extensionController.nameField.stringValue, @"citext");
+		XCTAssertEqual(self.extensionAlerts.count, 0u, @"%@", self.extensionAlerts.firstObject.informativeText);
 	}
 }
 
