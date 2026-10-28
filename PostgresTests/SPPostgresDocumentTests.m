@@ -12,6 +12,7 @@
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
 #import "../Source/Postgres/SPPostgresExtensionController.h"
+#import "../Source/Postgres/SPPostgresInstallExtensionSheet.h"
 
 static const NSUInteger SPPostgresDocumentTestPort = 55418;
 
@@ -1326,6 +1327,53 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 		NSMenuItem *drop = [menu itemWithTitle:@"Drop Extension…"];
 		XCTAssertTrue([sidebar selectTableNamed:@"sp_t5_items"]);
 		XCTAssertFalse([(id<NSMenuItemValidation>)drop.target validateMenuItem:drop]);
+	}
+}
+
+/// "Install Extension…" opens the sheet; installing citext there lists it, selects it and shows the Extension pane.
+- (void)testInstallSelectsNewExtension
+{
+	// A sheet attaches to the nib's window once it has been shown (kept off screen)
+	[[self window] setFrameOrigin:NSMakePoint(-10000, -10000)];
+	[self.controller showWindow:nil];
+
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresDocument *document = [self extensionDocumentOnPort:port.unsignedIntegerValue running:@[@"CREATE TABLE public.sp_t5_items (id int)"]];
+		SPPostgresSidebarController *sidebar = document.sidebar;
+		XCTAssertFalse([[sidebar itemTitlesInSection:@"EXTENSIONS"] containsObject:@"citext"], @"%@", port);
+		XCTAssertTrue([sidebar selectTableNamed:@"sp_t5_items"]);
+		[document viewStructure:nil];
+
+		NSMenu *menu = sidebar.extensionMenu;
+		NSMenuItem *install = [menu itemWithTitle:@"Install Extension…"];
+		XCTAssertTrue([(id<NSMenuItemValidation>)install.target validateMenuItem:install]);
+		[menu performActionForItemAtIndex:[menu indexOfItem:install]];
+
+		SPPostgresInstallExtensionSheet *sheet = [SPPostgresInstallExtensionSheet currentSheet];
+		XCTAssertNotNil(sheet);
+		XCTAssertNotNil([self window].attachedSheet);
+		XCTAssertEqualObjects(sheet.schemaPopup.titleOfSelectedItem, @"public", @"the schema selected in the left panel");
+		XCTAssertTrue([sheet selectExtensionNamed:@"citext"]);
+		[sheet install:sheet.installButton];
+
+		XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+		XCTAssertNil([SPPostgresInstallExtensionSheet currentSheet]);
+		XCTAssertEqual(self.extensionAlerts.count, 0u, @"%@", self.extensionAlerts.firstObject.informativeText);
+		XCTAssertTrue([[sidebar itemTitlesInSection:@"EXTENSIONS"] containsObject:@"citext"]);
+		XCTAssertEqualObjects(sidebar.selectedExtensionName, @"citext");
+		XCTAssertNil(sidebar.selectedTableName);
+		XCTAssertEqualObjects(document.currentPane, SPPostgresPaneExtension);
+		XCTAssertEqualObjects(document.extensionController.nameField.stringValue, @"citext");
+		XCTAssertEqual(document.connection.transactionStatus, PGPostgresTransactionIdle);
+
+		// Cancel: nothing changes
+		[document showInstallExtensionSheet:nil];
+		sheet = [SPPostgresInstallExtensionSheet currentSheet];
+		XCTAssertNotNil(sheet);
+		[sheet cancel:nil];
+		XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+		XCTAssertEqualObjects(sidebar.selectedExtensionName, @"citext");
+		XCTAssertEqualObjects(document.currentPane, SPPostgresPaneExtension);
 	}
 }
 
