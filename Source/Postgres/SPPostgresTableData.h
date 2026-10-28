@@ -2,13 +2,25 @@
 
 @class PGPostgresConnection;
 @class PGPostgresResult;
+@class PGPostgresError;
 
 /// Quotes a PostgreSQL identifier: wraps it in double quotes and doubles any embedded double quote.
 extern NSString *SPPostgresQuoteIdentifier(NSString *identifier) __attribute__((visibility("default")));
 
+/// A string literal for SQL that takes no parameters (DDL, COMMENT ON): correct whatever standard_conforming_strings is.
+extern NSString *SPPostgresQuoteLiteral(NSString *value) __attribute__((visibility("default")));
+
+/// The server error's DETAIL and HINT as lines to append to its message (each "\nDETAIL: …" / "\nHINT: …", as
+/// psql and the Query view show them), or @"" when it has neither.
+extern NSString *SPPostgresErrorDetailLines(PGPostgresError *error) __attribute__((visibility("default")));
+
 /// Runs sql with values ($n parameters); on failure returns nil with SPPostgresErrorQueryFailed and the server's
 /// message (or libpq's, when the connection is gone).
 extern PGPostgresResult *SPPostgresExecute(PGPostgresConnection *connection, NSString *sql, NSArray *values, NSError **error) __attribute__((visibility("default")));
+
+/// As SPPostgresExecute, but a server error's message is followed by its DETAIL and HINT lines
+/// (SPPostgresErrorDetailLines).
+extern PGPostgresResult *SPPostgresExecuteWithDetails(PGPostgresConnection *connection, NSString *sql, NSArray *values, NSError **error) __attribute__((visibility("default")));
 
 /**
  * Runs body all or nothing on a connection that may be shared with the Query view, where the user may have a
