@@ -24,18 +24,34 @@ __attribute__((visibility("default")))
 						 work:(BOOL (^)(PGPostgresConnection *connection, NSError **error))work
 				   completion:(void (^)(BOOL ok, NSError *error))completion;
 
-/// YES until the provider has answered (or the job was cancelled before it did). Main thread.
+/**
+ * The same with two connections (a Transfer: the source, then the target). Call on the main thread. provider is asked
+ * for a connection to database first; targetProvider is asked for one to targetDatabase only once the source
+ * connection has arrived (so a second SSH prompt never comes while the first is up). work then gets both, on a
+ * background thread; afterwards both are disconnected, and completion is called as above. If either provider fails,
+ * work isn't called, a connection already handed out is disconnected (its owner released), and completion gets that
+ * provider's error. Each provider is only listened to the first time it answers.
+ */
++ (instancetype)runOnDatabase:(NSString *)database
+					 provider:(SPPostgresConnectionProvider)provider
+			   targetDatabase:(NSString *)targetDatabase
+			   targetProvider:(SPPostgresConnectionProvider)targetProvider
+						 work:(BOOL (^)(PGPostgresConnection *connection, PGPostgresConnection *target, NSError **error))work
+				   completion:(void (^)(BOOL ok, NSError *error))completion;
+
+/// YES until the provider has answered (or the job was cancelled before it did); with two connections, until both
+/// arrived. Main thread.
 @property (readonly) BOOL waitingForConnection;
 
 /**
  * While the job waits for its connection: completion is called at once (from a later run loop turn) with NO and
  * SPPostgresErrorCancelled, work is never called, and a connection the provider hands out later is disconnected
- * unused (its owner released).
+ * unused (its owner released). With two connections, a source connection that already arrived is disconnected too.
  *
  * Once work runs: the statement the job's connection is running is interrupted (PQcancel through a cancel token the
  * job takes on its own thread before work starts), and the request is sent again every second until work returns,
- * so a statement waiting on a lock, or a long one, ends. work still checks its own cancel flag (set it before calling
- * this) and reports the cancel. Main thread.
+ * so a statement waiting on a lock, or a long one, ends. With two connections, both get a token and both are
+ * interrupted. work still checks its own cancel flag (set it before calling this) and reports the cancel. Main thread.
  */
 - (void)cancel;
 
