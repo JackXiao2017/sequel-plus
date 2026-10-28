@@ -1,4 +1,6 @@
 #import <XCTest/XCTest.h>
+#include <sys/resource.h>
+#include <signal.h>
 #import <PostgresKit/PostgresKit.h>
 #import "SPPostgresTestServers.h"
 #import "../Source/Postgres/SPPostgresDumpWriter.h"
@@ -413,6 +415,135 @@ static NSString * const SPUserSchemas = @"nspname NOT LIKE 'pg\\_%' AND nspname 
 		XCTAssertFalse([dump containsString:@"inserted meanwhile"]);
 		XCTAssertFalse([dump containsString:@"Zed"]);
 		XCTAssertTrue([dump containsString:@"Grace"]);
+	}
+}
+
+- (void)testInvalidSettingsFailAtOnce
+{
+	PGPostgresConnection *source = [self sourceOn:[SPPostgresTestServers ports].firstObject];
+	NSArray *configurations = @[
+		^(SPPostgresDumpWriter *w) { w.schemas = @[]; },
+		^(SPPostgresDumpWriter *w) { w.tables = @[]; },
+		^(SPPostgresDumpWriter *w) { w.wholeDatabase = YES; w.includeStructure = NO; w.includeData = NO; },
+		^(SPPostgresDumpWriter *w) { },
+		^(SPPostgresDumpWriter *w) { w.wholeDatabase = YES; w.schemas = @[@"public"]; }
+	];
+	for (void (^configure)(SPPostgresDumpWriter *) in configurations) {
+		SPPostgresDumpWriter *writer = [[SPPostgresDumpWriter alloc] initWithConnection:source];
+		configure(writer);
+		NSString *path = [self pathNamed:@"invalid.sql"];
+		NSError *error = nil;
+		XCTAssertFalse([writer writeToPath:path error:&error]);
+		XCTAssertEqual(error.code, SPPostgresErrorInvalidSettings);
+		XCTAssertTrue(error.localizedDescription.length > 0);
+		XCTAssertFalse([[NSFileManager defaultManager] fileExistsAtPath:path]);
+	}
+}
+
+/// Runs a whole-database dump to path with a writer released before the error is read: the error must outlive it.
+- (NSString *)failedDumpMessageFrom:(PGPostgresConnection *)connection toPath:(NSString *)path compress:(BOOL)compress
+{
+	__autoreleasing NSError *error = nil; // not retained by this frame: only what the writer handed out keeps it
+	NSString *message = nil;
+	@autoreleasepool {
+		SPPostgresDumpWriter *writer = [[SPPostgresDumpWriter alloc] initWithConnection:connection];
+		writer.wholeDatabase = YES;
+		writer.compress = compress;
+		XCTAssertFalse([writer writeToPath:path error:&error]);
+		writer = nil;
+		message = [error.localizedDescription copy];
+		XCTAssertEqualObjects(error.domain, SPPostgresErrorDomain);
+		XCTAssertEqual(error.code, SPPostgresErrorQueryFailed);
+	}
+	return message;
+}
+
+- (void)testWriteErrorsOutliveTheWriter
+{
+	PGPostgresConnection *source = [self sourceOn:[SPPostgresTestServers ports].lastObject];
+
+	// The file can't be created
+	NSString *missing = [self.directory stringByAppendingPathComponent:@"no such folder/dump.sql"];
+	NSString *message = [self failedDumpMessageFrom:source toPath:missing compress:NO];
+	XCTAssertTrue([message containsString:@"can't be written"], @"%@", message);
+	XCTAssertEqual(source.transactionStatus, PGPostgresTransactionIdle);
+
+	// A write fails part-way (the file size limit, EFBIG): the partial file is deleted
+	for (NSNumber *compress in @[@NO, @YES]) {
+		NSString *path = [self pathNamed:compress.boolValue ? @"limited.sql.gz" : @"limited.sql"];
+		struct rlimit previous;
+		XCTAssertEqual(getrlimit(RLIMIT_FSIZE, &previous), 0);
+		void (*previousHandler)(int) = signal(SIGXFSZ, SIG_IGN);
+		struct rlimit limited = previous;
+		limited.rlim_cur = 2048;
+		XCTAssertEqual(setrlimit(RLIMIT_FSIZE, &limited), 0);
+		message = [self failedDumpMessageFrom:source toPath:path compress:compress.boolValue];
+		setrlimit(RLIMIT_FSIZE, &previous);
+		signal(SIGXFSZ, previousHandler);
+
+		XCTAssertTrue([message containsString:@"The file can't be written"], @"%@", message);
+		XCTAssertFalse([[NSFileManager defaultManager] fileExistsAtPath:path]);
+		XCTAssertEqual(source.transactionStatus, PGPostgresTransactionIdle);
+		XCTAssertEqualObjects([self text:@"SELECT 1::text" on:source], @"1");
+	}
+}
+
+- (void)testCancelDuringLargeTableCopy
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *source = [self sourceOn:port];
+		[self run:@"CREATE TABLE public.big AS SELECT g AS id, md5(g::text) AS label FROM generate_series(1, 200000) g" on:source];
+
+		SPPostgresDumpWriter *writer = [[SPPostgresDumpWriter alloc] initWithConnection:source];
+		writer.tables = @[@[@"public", @"big"]];
+		__block NSUInteger calls = 0;
+		writer.progress = ^BOOL(NSUInteger tableIndex, NSUInteger tableCount, NSString *table) {
+			calls++;
+			XCTAssertEqual(tableIndex, 1);
+			XCTAssertEqual(tableCount, 1);
+			XCTAssertEqualObjects(table, @"big");
+			return calls < 3; // the first call is before the COPY; the third comes after 2 MiB of it
+		};
+		NSString *path = [self pathNamed:@"big.sql"];
+		NSError *error = nil;
+		XCTAssertFalse([writer writeToPath:path error:&error]);
+		XCTAssertEqual(error.code, SPPostgresErrorCancelled, @"%@", error.localizedDescription);
+		XCTAssertEqual(calls, 3);
+		XCTAssertFalse([[NSFileManager defaultManager] fileExistsAtPath:path]);
+		XCTAssertEqual(source.transactionStatus, PGPostgresTransactionIdle);
+		XCTAssertEqualObjects([self text:@"SELECT count(*)::text FROM public.big" on:source], @"200000");
+
+		// Uncancelled, the same table is written whole
+		writer.progress = nil;
+		XCTAssertTrue([writer writeToPath:path error:&error], @"%@", error.localizedDescription);
+		XCTAssertTrue([[self contentsOf:path] containsString:@"200000\t"]);
+	}
+}
+
+- (void)testPartitionedTableBringsItsPartitions
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *source = [self sourceOn:port];
+		[self run:@"CREATE TABLE public.events_2027 PARTITION OF public.events FOR VALUES FROM ('2027-01-01') TO ('2028-01-01') PARTITION BY LIST (label)" on:source];
+		[self run:@"CREATE TABLE public.events_2027_x PARTITION OF public.events_2027 FOR VALUES IN ('x')" on:source];
+		[self run:@"INSERT INTO public.events VALUES (4, '2027-03-03', 'x')" on:source];
+
+		PGPostgresConnection *destination = [self destinationOn:port];
+		NSString *path = [self dumpFrom:source named:@"events.sql" configure:^(SPPostgresDumpWriter *writer) {
+			writer.tables = @[@[@"public", @"events"]];
+		}];
+		[self import:path into:destination];
+
+		NSString *(^counts)(PGPostgresConnection *) = ^NSString *(PGPostgresConnection *connection) {
+			NSMutableArray *parts = [NSMutableArray array];
+			for (NSString *table in @[@"events", @"events_2025", @"events_2026", @"events_2027", @"events_2027_x"]) {
+				[parts addObject:[NSString stringWithFormat:@"%@=%@", table, [self text:[NSString stringWithFormat:@"SELECT count(*)::text FROM public.%@", table] on:connection]]];
+			}
+			return [parts componentsJoinedByString:@", "];
+		};
+		XCTAssertEqualObjects(counts(destination), @"events=4, events_2025=1, events_2026=2, events_2027=1, events_2027_x=1");
+		XCTAssertEqualObjects(counts(destination), counts(source));
+		XCTAssertEqualObjects([self text:@"SELECT count(*)::text FROM pg_inherits WHERE inhparent IN ('public.events'::regclass, 'public.events_2027'::regclass)" on:destination], @"4");
 	}
 }
 

@@ -199,6 +199,14 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 		if (error) *error = SPPostgresMakeError(SPPostgresErrorInvalidSettings, NSLocalizedString(@"Choose what to export: the whole database, some schemas or some tables.", @"Postgres export: no single scope"), nil);
 		return NO;
 	}
+	if ((schemas && ![schemas count]) || (tables && ![tables count])) {
+		if (error) *error = SPPostgresMakeError(SPPostgresErrorInvalidSettings, NSLocalizedString(@"Choose at least one schema or table to export.", @"Postgres export: empty scope"), nil);
+		return NO;
+	}
+	if (!includeStructure && !includeData) {
+		if (error) *error = SPPostgresMakeError(SPPostgresErrorInvalidSettings, NSLocalizedString(@"Choose the structure, the data, or both to export.", @"Postgres export: neither structure nor data"), nil);
+		return NO;
+	}
 	if ([connection transactionStatus] != PGPostgresTransactionIdle) {
 		if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, NSLocalizedString(@"The export needs a connection with no transaction open.", @"Postgres export: connection busy"), nil);
 		return NO;
@@ -226,11 +234,11 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 	}
 	if (![self _close] && written) {
 		written = NO;
-		failure = writeError;
+		failure = [[writeError retain] autorelease];
 	}
 	if (!written) {
 		unlink([path fileSystemRepresentation]);
-		if (writeError && (!failure || [failure code] != SPPostgresErrorCancelled)) failure = writeError;
+		if (writeError && (!failure || [failure code] != SPPostgresErrorCancelled)) failure = [[writeError retain] autorelease];
 		if (error) *error = failure ?: SPPostgresMakeError(SPPostgresErrorQueryFailed, NSLocalizedString(@"The export failed.", @"Postgres export: unknown failure"), nil);
 	}
 	return written;
@@ -253,7 +261,10 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 	// An empty search_path has the server qualify every name it writes; ISO dates and full float precision read back
 	// the same whatever the importing session's settings (all LOCAL: they end with the transaction)
 	if (![self _rows:@"SELECT pg_catalog.set_config('search_path', '', true), pg_catalog.set_config('datestyle', 'ISO', true),"
-		  " pg_catalog.set_config('intervalstyle', 'postgres', true), pg_catalog.set_config('extra_float_digits', '3', true)" values:nil error:error]) return NO;
+		  " pg_catalog.set_config('intervalstyle', 'postgres', true), pg_catalog.set_config('extra_float_digits', '3', true),"
+		  // A table whose row-level security would hide rows from this role makes the COPY fail instead of exporting
+		  // a subset
+		  " pg_catalog.set_config('row_security', 'off', true)" values:nil error:error]) return NO;
 
 	NSArray *info = [self _rows:@"SELECT pg_catalog.current_setting('server_version')::text, pg_catalog.current_database()::text,"
 					 " pg_catalog.current_setting('server_version_num')::text, pg_catalog.current_setting('client_encoding')::text" values:nil error:error];
@@ -295,7 +306,14 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 								[NSString stringWithFormat:notExtensionMember, @"pg_catalog.pg_class", @"c.oid"]];
 
 	if (tables) {
-		NSString *sql = [NSString stringWithFormat:@"%@ WHERE (n.nspname, c.relname) IN (SELECT x->>0, x->>1 FROM pg_catalog.json_array_elements($1::json) x)%@%@", relationColumns, relationFilter, relationOrder];
+		// A partitioned table brings its partitions, recursively (as pg_dump --table-and-children)
+		NSString *sql = [NSString stringWithFormat:@"%@ WHERE c.oid IN ("
+						 "SELECT g.oid FROM pg_catalog.pg_class g JOIN pg_catalog.pg_namespace gn ON gn.oid = g.relnamespace"
+						 " WHERE (gn.nspname, g.relname) IN (SELECT x->>0, x->>1 FROM pg_catalog.json_array_elements($1::json) x)"
+						 " UNION SELECT t.relid FROM pg_catalog.pg_class g JOIN pg_catalog.pg_namespace gn ON gn.oid = g.relnamespace,"
+						 " LATERAL pg_catalog.pg_partition_tree(g.oid) t"
+						 " WHERE g.relkind = 'p' AND (gn.nspname, g.relname) IN (SELECT x->>0, x->>1 FROM pg_catalog.json_array_elements($1::json) x))%@%@",
+						 relationColumns, relationFilter, relationOrder];
 		relationRows = [self _rows:sql values:@[SPDumpJSON(tables)] error:error];
 		if (!relationRows) return NO;
 		NSMutableSet *found = [NSMutableSet set];
@@ -682,7 +700,7 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 		if (![relation->kind isEqualToString:@"r"]) continue;
 
 		NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-		BOOL written = [self _writeDataOfTable:relation error:error];
+		BOOL written = [self _writeDataOfTable:relation index:index count:[ordered count] error:error];
 		if (!written && error) [*error retain];
 		[pool drain];
 		if (!written) {
@@ -709,7 +727,10 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 	return [self _writeSection:section];
 }
 
-- (BOOL)_writeDataOfTable:(SPPostgresDumpRelation *)relation error:(NSError **)error
+/// Bytes of COPY data between two calls of progress inside one table's COPY.
+static const NSUInteger SPDumpProgressInterval = 1024 * 1024;
+
+- (BOOL)_writeDataOfTable:(SPPostgresDumpRelation *)relation index:(NSUInteger)index count:(NSUInteger)count error:(NSError **)error
 {
 	NSArray *columns = [self _rows:@"SELECT a.attname::text FROM pg_catalog.pg_attribute a WHERE a.attrelid = $1::oid AND a.attnum > 0"
 						" AND NOT a.attisdropped AND a.attgenerated = '' ORDER BY a.attnum" values:@[relation->oid] error:error];
@@ -730,11 +751,29 @@ static NSArray *SPDumpSorted(NSArray *items, NSDictionary *dependencies)
 
 	if (![self _write:[NSString stringWithFormat:@"COPY %@ FROM stdin;\n", target]]) return NO;
 	NSError *copyError = nil;
+	__block NSUInteger sinceProgress = 0;
+	__block BOOL cancelled = NO;
+	BOOL (^tableProgress)(NSUInteger, NSUInteger, NSString *) = progress;
+	NSString *tableName = relation->name;
 	BOOL copied = [connection copyOut:[NSString stringWithFormat:@"COPY %@ TO STDOUT", target] handler:^BOOL(NSData *chunk) {
-		return [self _writeBytes:[chunk bytes] length:[chunk length]];
+		if (![self _writeBytes:[chunk bytes] length:[chunk length]]) return NO;
+		// A long table can be cancelled during its COPY: progress is asked again every SPDumpProgressInterval bytes
+		sinceProgress += [chunk length];
+		if (tableProgress && sinceProgress >= SPDumpProgressInterval) {
+			sinceProgress = 0;
+			if (!tableProgress(index, count, tableName)) {
+				cancelled = YES;
+				return NO;
+			}
+		}
+		return YES;
 	} error:&copyError];
 	if (!copied) {
-		if (error) *error = writeError ?: SPPostgresMakeError(SPPostgresErrorQueryFailed, [copyError localizedDescription] ?: NSLocalizedString(@"The export failed.", @"Postgres export: unknown failure"), nil);
+		if (error) {
+			if (cancelled) *error = [self _cancelledError];
+			else if (writeError) *error = [[writeError retain] autorelease];
+			else *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, [copyError localizedDescription] ?: NSLocalizedString(@"The export failed.", @"Postgres export: unknown failure"), nil);
+		}
 		return NO;
 	}
 	if (![self _write:@"\\.\n\n"]) return NO;

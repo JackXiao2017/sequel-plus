@@ -27,7 +27,9 @@
  *  12. comments on schemas, types, functions and sequences.
  * Structure is 2–8, 11 and 12; data is 9 and 10. No DROP, ownership or privileges are written.
  *
- * Everything is read in one REPEATABLE READ READ ONLY transaction, so the dump is one consistent snapshot. Use on a
+ * Everything is read in one REPEATABLE READ READ ONLY transaction, so the dump is one consistent snapshot, with
+ * row_security off: a table whose row-level security would hide rows from the role fails the export instead of
+ * exporting a subset. Use on a
  * connection of its own that has no transaction open; synchronous, on the caller's thread.
  */
 __attribute__((visibility("default")))
@@ -54,7 +56,8 @@ __attribute__((visibility("default")))
 /// Schema names.
 @property (copy) NSArray *schemas;
 /// @[schema, table] pairs. Only the tables (and views) themselves, their owned sequences, data, indexes, constraints
-/// and triggers are written: trigger functions and the types they use are not, as with pg_dump -t.
+/// and triggers are written: trigger functions and the types they use are not, as with pg_dump -t. A partitioned
+/// table brings its partitions, recursively (as pg_dump --table-and-children).
 @property (copy) NSArray *tables;
 
 /// Both default YES.
@@ -64,11 +67,13 @@ __attribute__((visibility("default")))
 /// gzip the file.
 @property BOOL compress;
 
-/// Called before each table's data (or, without data, before its CREATE), tableIndex from 1; returning NO cancels.
+/// Called before each table's data (or, without data, before its CREATE), tableIndex from 1, and again with the same
+/// tableIndex after every MiB of a table's COPY data; returning NO cancels (also in the middle of a COPY).
 @property (copy) BOOL (^progress)(NSUInteger tableIndex, NSUInteger tableCount, NSString *table);
 
 /**
- * Writes the dump to path. On failure or cancel, the transaction is rolled back, the file deleted, and NO returned
+ * Writes the dump to path. An empty schemas or tables list, or neither structure nor data, fails at once with
+ * SPPostgresErrorInvalidSettings. On failure or cancel, the transaction is rolled back, the file deleted, and NO returned
  * with an error in SPPostgresErrorDomain (SPPostgresErrorCancelled on cancel).
  */
 - (BOOL)writeToPath:(NSString *)path error:(NSError **)error;
