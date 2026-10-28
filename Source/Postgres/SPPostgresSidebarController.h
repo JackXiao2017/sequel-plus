@@ -10,6 +10,9 @@
 /// A reload (-reloadWithCatalog:, or a schema change by the user or -reloadSchema:) had catalog queries
 /// that failed: called once per reload, with the first error. The lists that failed keep what they showed.
 - (void)sidebar:(SPPostgresSidebarController *)sidebar didFailToLoadWithError:(NSError *)error;
+/// The user is about to select another table or schema (click, keys or the schema pop-up): NO keeps the
+/// current selection (e.g. an edit that can't be saved). Not asked for changes made through the API.
+- (BOOL)sidebarShouldChangeSelection:(SPPostgresSidebarController *)sidebar;
 /// "Duplicate Table…" was chosen in the outline's menu for `table`, a table of the selected schema.
 - (void)sidebar:(SPPostgresSidebarController *)sidebar duplicateTableNamed:(NSString *)table;
 /// "Rename Table…" was chosen in the outline's menu for `table`, a table of the selected schema.

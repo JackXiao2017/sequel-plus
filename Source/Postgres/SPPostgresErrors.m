@@ -1,6 +1,7 @@
 #import "SPPostgresErrors.h"
 
 NSString * const SPPostgresErrorDomain = @"SPPostgresErrorDomain";
+NSString * const SPPostgresSQLStateErrorKey = @"SPPostgresSQLState";
 NSString * const SPPostgresDependentsErrorKey = @"SPPostgresDependentsErrorKey";
 
 NSError *SPPostgresMakeError(NSInteger code, NSString *message, NSDictionary *userInfo)
