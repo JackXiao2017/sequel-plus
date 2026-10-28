@@ -13,10 +13,46 @@ static const CGFloat SPPostgresSequenceNoticeHeight = 22;
 
 static NSString * const SPPostgresSequenceNone = @"None";
 
-/// Integers only, over the bigint range (no grouping, no fraction digits). An empty string is nil.
+/**
+ * NSNumberFormatter writes numbers through a double, which loses bigint values past 2^53 (9007199254740993 shows as
+ * …992, LLONG_MAX - 1 as LLONG_MAX). This one writes the long long value itself; it parses as NSNumberFormatter does,
+ * then takes the exact value from the digits.
+ */
+@interface SPPostgresSequenceIntegerFormatter : NSNumberFormatter
+@end
+
+@implementation SPPostgresSequenceIntegerFormatter
+
+- (NSString *)stringForObjectValue:(id)value
+{
+	if ([value isKindOfClass:[NSNumber class]]) return [NSString stringWithFormat:@"%lld", [value longLongValue]];
+	return [super stringForObjectValue:value];
+}
+
+- (NSString *)editingStringForObjectValue:(id)value
+{
+	return [self stringForObjectValue:value];
+}
+
+- (BOOL)getObjectValue:(out id *)value forString:(NSString *)string errorDescription:(out NSString **)error
+{
+	if (![super getObjectValue:value forString:string errorDescription:error]) return NO;
+	if (!value || ![*value isKindOfClass:[NSNumber class]]) return YES;
+
+	// Plain digits (the usual case): their exact value, not the double's (super checked the range)
+	NSString *text = [string stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	NSScanner *scanner = [NSScanner scannerWithString:text];
+	long long exact = 0;
+	if ([scanner scanLongLong:&exact] && [scanner isAtEnd]) *value = [NSNumber numberWithLongLong:exact];
+	return YES;
+}
+
+@end
+
+/// Integers only, over the bigint range (no grouping, no fraction digits), written exactly. An empty string is nil.
 static NSNumberFormatter *SPPostgresSequenceNewFormatter(void)
 {
-	NSNumberFormatter *formatter = [[NSNumberFormatter alloc] init];
+	NSNumberFormatter *formatter = [[SPPostgresSequenceIntegerFormatter alloc] init];
 	[formatter setNumberStyle:NSNumberFormatterNoStyle];
 	[formatter setAllowsFloats:NO];
 	[formatter setMaximumFractionDigits:0];
@@ -596,7 +632,9 @@ static BOOL SPPostgresSequenceReadNumber(NSTextField *field, NSString *label, NS
 
 	[ownerField setStringValue:[loaded owner] ?: @""];
 	NSString *current = @"";
-	if (loaded) current = [loaded lastValue] ? [NSString stringWithFormat:@"%lld", [[loaded lastValue] longLongValue]] : NSLocalizedString(@"Not used yet", @"Postgres sequence: never called");
+	if ([loaded lastValue]) current = [NSString stringWithFormat:@"%lld", [[loaded lastValue] longLongValue]];
+	else if ([loaded pendingValue]) current = [NSString stringWithFormat:NSLocalizedString(@"%lld (next call returns this)", @"Postgres sequence: is_called false (the value nextval returns next)"), [[loaded pendingValue] longLongValue]];
+	else if (loaded) current = NSLocalizedString(@"Not used yet", @"Postgres sequence: value not readable (no SELECT privilege)");
 	[currentValueField setStringValue:current];
 	NSString *note = @"";
 	if ([loaded isIdentity]) {
@@ -632,6 +670,9 @@ static BOOL SPPostgresSequenceReadNumber(NSTextField *field, NSString *label, NS
 {
 	SPPostgresSequenceDefinition *typed = [form definition:error];
 	if (!typed) return nil;
+
+	// The name as typed, without surrounding whitespace (as the Add Sequence sheet takes it)
+	[typed setName:[[typed name] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]];
 
 	SPPostgresSequenceDefinition *definition = [SPPostgresSequenceDefinition definitionWithSequence:sequence];
 	for (NSString *key in editedKeys) [definition setValue:[typed valueForKey:key] forKey:key];
@@ -677,6 +718,12 @@ static BOOL SPPostgresSequenceReadNumber(NSTextField *field, NSString *label, NS
 /// A field's text changed: that field is edited.
 - (void)controlTextDidChange:(NSNotification *)notification
 {
+	// The Set Value sheet's field: Set follows it
+	if ([notification object] == setValueField) {
+		[self _validateSetValueSheet];
+		return;
+	}
+
 	NSString *key = [form keyOfControl:[notification object]];
 	if (!key || !sequence) return;
 	[editedKeys addObject:key];
@@ -732,7 +779,7 @@ static BOOL SPPostgresSequenceReadNumber(NSTextField *field, NSString *label, NS
 	NSNumberFormatter *formatter = SPPostgresSequenceNewFormatter();
 	[setValueField setFormatter:formatter];
 	[formatter release];
-	NSNumber *suggested = [sequence lastValue] ?: [sequence start];
+	NSNumber *suggested = [sequence lastValue] ?: [sequence pendingValue];
 	if (suggested) [setValueField setObjectValue:suggested];
 	[setValueField setDelegate:(id<NSTextFieldDelegate>)self];
 	[content addSubview:setValueField];

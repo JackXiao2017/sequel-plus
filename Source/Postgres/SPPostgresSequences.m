@@ -99,6 +99,7 @@ static NSString * const SPPostgresSequenceCTE =
 @property (readwrite, copy) NSNumber *cache;
 @property (readwrite) BOOL cycle;
 @property (readwrite, copy) NSNumber *lastValue;
+@property (readwrite, copy) NSNumber *pendingValue;
 @property (readwrite) BOOL isCalled;
 @property (readwrite, copy) NSString *ownedBy;
 @property (readwrite) BOOL isIdentity;
@@ -115,7 +116,7 @@ static NSString * const SPPostgresSequenceCTE =
 }
 
 @synthesize schema = _schema, name = _name, dataType = _dataType, start = _start, increment = _increment, minValue = _minValue;
-@synthesize maxValue = _maxValue, cache = _cache, cycle = _cycle, lastValue = _lastValue, isCalled = _isCalled, ownedBy = _ownedBy;
+@synthesize maxValue = _maxValue, cache = _cache, cycle = _cycle, lastValue = _lastValue, pendingValue = _pendingValue, isCalled = _isCalled, ownedBy = _ownedBy;
 @synthesize isIdentity = _isIdentity, identityColumn = _identityColumn, owner = _owner, comment = _comment, identityParts = _identityParts;
 
 - (void)dealloc
@@ -129,6 +130,7 @@ static NSString * const SPPostgresSequenceCTE =
 	[_maxValue release];
 	[_cache release];
 	[_lastValue release];
+	[_pendingValue release];
 	[_ownedBy release];
 	[_identityColumn release];
 	[_owner release];
@@ -333,6 +335,7 @@ static NSString * const SPPostgresSequenceCTE =
 			BOOL called = [SPPostgresSequenceText(state[0][1]) isEqualToString:@"true"];
 			[sequence setIsCalled:called];
 			if (called) [sequence setLastValue:SPPostgresSequenceNumber(state[0][0])];
+			else [sequence setPendingValue:SPPostgresSequenceNumber(state[0][0])];
 		}
 	}
 	return sequence;

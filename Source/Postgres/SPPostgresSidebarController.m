@@ -389,6 +389,25 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[self _endReload];
 }
 
+- (void)reloadSchema:(NSString *)schema selectingSequence:(NSString *)sequence
+{
+	NSString *previousSchema = [[selectedSchema copy] autorelease];
+	NSString *previousTable = [[selectedTableName copy] autorelease];
+	NSString *previousSequence = [[selectedSequenceName copy] autorelease];
+
+	BOOL wasHolding = holdingSelectionChanges;
+	holdingSelectionChanges = YES;
+	[self reloadSchema:schema];
+	if (sequence) [self selectSequenceNamed:sequence];
+	holdingSelectionChanges = wasHolding;
+	if (wasHolding) return;
+
+	BOOL sameSchema = (previousSchema == selectedSchema) || [previousSchema isEqualToString:selectedSchema];
+	BOOL sameTable = (previousTable == selectedTableName) || [previousTable isEqualToString:selectedTableName];
+	BOOL sameSequence = (previousSequence == selectedSequenceName) || [previousSequence isEqualToString:selectedSequenceName];
+	if (!sameSchema || !sameTable || !sameSequence) [delegate sidebarSelectionDidChange:self];
+}
+
 - (void)_reloadExtensions
 {
 	NSError *error = nil;

@@ -666,6 +666,8 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 	if (tornDown || !pane) return NO;
 	if ([pane isEqualToString:SPPostgresPaneQuery]) return YES;
 	if ([pane isEqualToString:SPPostgresPaneSequence]) return [[sidebar selectedSequenceName] length] > 0;
+	// With a sequence selected, Structure (⌘1) is the way back to its pane (-showPane: shows it instead)
+	if ([pane isEqualToString:SPPostgresPaneStructure] && [[sidebar selectedSequenceName] length]) return YES;
 	if (![[sidebar selectedTableName] length]) return NO;
 	if ([pane isEqualToString:SPPostgresPaneRelations] || [pane isEqualToString:SPPostgresPaneTriggers]) return [sidebar selectionIsTable];
 	return YES;
@@ -751,7 +753,10 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 {
 	BOOL hasTable = [[sidebar selectedTableName] length] > 0;
 	BOOL needsTable = ![currentPane isEqualToString:SPPostgresPaneQuery];
-	[toolbar setSelectedItemIdentifier:(needsTable && !hasTable) ? nil : [self _toolbarIdentifierForPane:currentPane]];
+	NSString *identifier = (needsTable && !hasTable) ? nil : [self _toolbarIdentifierForPane:currentPane];
+	// The Sequence pane has no item of its own: Structure (which shows it) is highlighted
+	if ([currentPane isEqualToString:SPPostgresPaneSequence]) identifier = [self _toolbarIdentifierForPane:SPPostgresPaneStructure];
+	[toolbar setSelectedItemIdentifier:identifier];
 	[toolbar validateVisibleItems];
 }
 
@@ -838,12 +843,8 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 
 	if (![name length] || [name isEqualToString:[sidebar selectedSequenceName]]) return;
 
-	// Renamed: the reload's empty selection on the way is not a place the user went to (history)
-	NSString *schema = [[[sidebar selectedSchema] copy] autorelease];
-	restoringHistory = YES;
-	[sidebar reloadSchema:schema];
-	restoringHistory = NO;
-	[sidebar selectSequenceNamed:name];
+	// Renamed: listed again, going straight from the old name to the new one (no other pane on the way)
+	[sidebar reloadSchema:[sidebar selectedSchema] selectingSequence:name];
 }
 
 /// Table Info changed the table's comment: the Structure view is built again when it is next shown.
@@ -1348,13 +1349,10 @@ NSString * const SPPostgresPaneSequence = @"sequence";
 		return;
 	}
 
-	// The schema the sidebar shows (the sheet was modal); the reload's empty selection on the way is not a place
-	// the user went to (history)
+	// The schema the sidebar shows (the sheet was modal)
 	if (![schema isEqualToString:[sidebar selectedSchema]]) return;
-	restoringHistory = YES;
-	[sidebar reloadSchema:schema];
-	restoringHistory = NO;
-	[sidebar selectSequenceNamed:[definition name]];
+	// Straight to the new sequence (no empty selection, so no other pane, on the way)
+	[sidebar reloadSchema:schema selectingSequence:[definition name]];
 }
 
 /// "Delete Sequence…": asked first (after the shown pane's edits are applied); a sequence that columns use is not
