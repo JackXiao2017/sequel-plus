@@ -5,6 +5,8 @@
 #import "SPPostgresRelationsController.h"
 #import "SPPostgresTriggersController.h"
 #import "SPPostgresTableInfoController.h"
+#import "SPPostgresSequenceController.h"
+#import "SPPostgresSequences.h"
 #import "SPPostgresTableStructure.h"
 #import "SPPostgresQueryController.h"
 #import "SPPostgresHistory.h"
@@ -39,6 +41,7 @@ NSString * const SPPostgresPaneRelations = @"relations";
 NSString * const SPPostgresPaneTriggers = @"triggers";
 NSString * const SPPostgresPaneInfo = @"info";
 NSString * const SPPostgresPaneQuery = @"query";
+NSString * const SPPostgresPaneSequence = @"sequence";
 
 @interface SPPostgresDocument () <SPPostgresSidebarControllerDelegate>
 
@@ -57,6 +60,11 @@ NSString * const SPPostgresPaneQuery = @"query";
 - (void)_refreshTriggersIfStale;
 - (void)_installInfoController;
 - (void)_refreshInfoIfStale;
+- (void)_installSequenceController;
+- (void)_refreshSequenceIfStale;
+- (void)_sequenceDidChange:(NSString *)name;
+- (void)_createSequence:(SPPostgresSequenceDefinition *)definition inSchema:(NSString *)schema;
+- (void)_dropSequence:(NSString *)name inSchema:(NSString *)schema;
 - (void)_installQueryController;
 - (void)_queryRunChangedSchema:(BOOL)schemaChanged data:(BOOL)dataChanged;
 - (void)_structureDidChange:(BOOL)columnsChanged;
@@ -112,10 +120,16 @@ NSString * const SPPostgresPaneQuery = @"query";
 	SPPostgresRelationsController *relationsController;
 	SPPostgresTriggersController *triggersController;
 	SPPostgresTableInfoController *infoController;
+	SPPostgresSequenceController *sequenceController;
 	SPPostgresQueryController *queryController;
 	SPPostgresHistory *history;
 	/// The pane shown in the right pane (an SPPostgresPane… name)
 	NSString *currentPane;
+	/// The pane shown when a sequence was selected (instead of a table, a view or nothing): shown again when no
+	/// sequence is selected any more
+	NSString *paneBeforeSequence;
+	/// A sequence was selected when the selection last changed
+	BOOL sequenceSelected;
 
 	NSString *serverVersion;
 	NSString *currentDatabase;
@@ -145,6 +159,11 @@ NSString * const SPPostgresPaneQuery = @"query";
 	BOOL triggersNeedReset;
 	/// The same for Table Info, which also reads again (sizes, estimate) each time it is shown
 	BOOL infoNeedsReset;
+	/// The same for the Sequence view (the selected sequence), which also reads again each time it is shown
+	BOOL sequenceNeedsReset;
+
+	/// The Add Sequence sheet while it is shown
+	NSWindow *addSequenceSheet;
 
 	/// The Duplicate Table sheet while it is shown, and its controls
 	NSWindow *duplicateSheet;
@@ -176,6 +195,7 @@ NSString * const SPPostgresPaneQuery = @"query";
 @synthesize relationsController;
 @synthesize triggersController;
 @synthesize infoController;
+@synthesize sequenceController;
 @synthesize currentPane;
 @synthesize queryController;
 @synthesize history;
@@ -235,9 +255,12 @@ NSString * const SPPostgresPaneQuery = @"query";
 	[relationsController release];
 	[triggersController release];
 	[infoController release];
+	[sequenceController release];
 	[queryController release];
 	[history release];
 	[currentPane release];
+	[paneBeforeSequence release];
+	[addSequenceSheet release];
 	[renameSheet release];
 	[renameNameField release];
 	[renameButton release];
@@ -327,6 +350,7 @@ NSString * const SPPostgresPaneQuery = @"query";
 	[self _installRelationsController];
 	[self _installTriggersController];
 	[self _installInfoController];
+	[self _installSequenceController];
 	[self _installContentController];
 
 	// Constrained, and resized with the window, as MySQL's left pane (see -[SPDatabaseDocument splitView:constrain...])
@@ -528,6 +552,42 @@ NSString * const SPPostgresPaneQuery = @"query";
 }
 
 /**
+ * A Sequence controller on the current connection (replacing the previous one, which is on the previous
+ * connection), in the right pane while the Sequence view is showing. It shows the selected sequence when it is
+ * next shown.
+ */
+- (void)_installSequenceController
+{
+	NSView *pane = [self _rightPane];
+	if (!pane) return;
+
+	if (sequenceController) {
+		[[sequenceController view] removeFromSuperview];
+		[sequenceController invalidate];
+		[sequenceController release];
+	}
+
+	sequenceController = [[SPPostgresSequenceController alloc] initWithConnection:connection];
+
+	// Unretained, as the Content controller's presenter: -invalidate (on replace or teardown) drops the blocks
+	__block SPPostgresDocument *document = self;
+	[sequenceController setAlertPresenter:^(NSAlert *alert) {
+		[document _presentAlert:alert];
+	}];
+	[sequenceController setSequenceDidChange:^(NSString *name) {
+		[document _sequenceDidChange:name];
+	}];
+
+	NSView *sequenceView = [sequenceController view];
+	[sequenceView setFrame:[pane bounds]];
+	[sequenceView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+	if ([currentPane isEqualToString:SPPostgresPaneSequence]) [pane addSubview:sequenceView];
+
+	sequenceNeedsReset = YES;
+	if ([currentPane isEqualToString:SPPostgresPaneSequence]) [self _refreshSequenceIfStale];
+}
+
+/**
  * A Query controller on the current connection (replacing the previous one, which is on the previous
  * connection), keeping the editor's text; in the right pane while the Query view is showing.
  */
@@ -562,7 +622,7 @@ NSString * const SPPostgresPaneQuery = @"query";
 /// The known pane names, in toolbar order.
 - (NSArray *)_paneNames
 {
-	return @[SPPostgresPaneStructure, SPPostgresPaneContent, SPPostgresPaneRelations, SPPostgresPaneTriggers, SPPostgresPaneInfo, SPPostgresPaneQuery];
+	return @[SPPostgresPaneStructure, SPPostgresPaneContent, SPPostgresPaneRelations, SPPostgresPaneTriggers, SPPostgresPaneInfo, SPPostgresPaneQuery, SPPostgresPaneSequence];
 }
 
 /// The view a pane shows, or nil for an unknown name.
@@ -574,6 +634,7 @@ NSString * const SPPostgresPaneQuery = @"query";
 	if ([pane isEqualToString:SPPostgresPaneInfo]) return [infoController view];
 	if ([pane isEqualToString:SPPostgresPaneContent]) return [contentController view];
 	if ([pane isEqualToString:SPPostgresPaneQuery]) return [queryController view];
+	if ([pane isEqualToString:SPPostgresPaneSequence]) return [sequenceController view];
 	return nil;
 }
 
@@ -597,12 +658,14 @@ NSString * const SPPostgresPaneQuery = @"query";
 
 /**
  * Whether a pane's toolbar item and View menu item are enabled: Query always; Structure, Content and Table Info
- * for any selected table or view; Relations and Triggers for a table (or partitioned table) only.
+ * for any selected table or view; Relations and Triggers for a table (or partitioned table) only; Sequence (no
+ * item) for a selected sequence. While a sequence is selected there is no table: only Query is enabled.
  */
 - (BOOL)_canShowPane:(NSString *)pane
 {
 	if (tornDown || !pane) return NO;
 	if ([pane isEqualToString:SPPostgresPaneQuery]) return YES;
+	if ([pane isEqualToString:SPPostgresPaneSequence]) return [[sidebar selectedSequenceName] length] > 0;
 	if (![[sidebar selectedTableName] length]) return NO;
 	if ([pane isEqualToString:SPPostgresPaneRelations] || [pane isEqualToString:SPPostgresPaneTriggers]) return [sidebar selectionIsTable];
 	return YES;
@@ -626,6 +689,8 @@ NSString * const SPPostgresPaneQuery = @"query";
 	if ([pane isEqualToString:SPPostgresPaneStructure] && ![structureController commitPendingEdits]) return NO;
 	// A Table Info comment edit (normally saved as the box loses the focus, above)
 	if ([pane isEqualToString:SPPostgresPaneInfo] && ![infoController commitPendingEdits]) return NO;
+	// Sequence edits not applied yet (Ruling R9: applied on leaving; a failure keeps the user there)
+	if ([pane isEqualToString:SPPostgresPaneSequence] && ![sequenceController commitPendingEdits]) return NO;
 	return YES;
 }
 
@@ -645,6 +710,11 @@ NSString * const SPPostgresPaneQuery = @"query";
 	if (tornDown) return;
 	if (![[self _paneNames] containsObject:pane]) pane = SPPostgresPaneContent;
 
+	// A selected sequence has its own pane (and Query); without one, the Sequence pane gives way to the pane before it
+	BOOL hasSequence = [[sidebar selectedSequenceName] length] > 0;
+	if (hasSequence && ![pane isEqualToString:SPPostgresPaneQuery]) pane = SPPostgresPaneSequence;
+	if (!hasSequence && [pane isEqualToString:SPPostgresPaneSequence]) pane = paneBeforeSequence ?: SPPostgresPaneContent;
+
 	NSView *container = [self _rightPane];
 	if (!container) return;
 
@@ -660,6 +730,8 @@ NSString * const SPPostgresPaneQuery = @"query";
 
 	// Table Info reads again each time it comes up: its sizes and row estimate change with the data
 	if (hiding != showing && [pane isEqualToString:SPPostgresPaneInfo]) infoNeedsReset = YES;
+	// So does the Sequence view (its current value moves)
+	if (hiding != showing && [pane isEqualToString:SPPostgresPaneSequence]) sequenceNeedsReset = YES;
 
 	if (hiding != showing) [hiding removeFromSuperview];
 	if ([showing superview] != container) {
@@ -716,6 +788,8 @@ NSString * const SPPostgresPaneQuery = @"query";
 	relationsNeedReset = YES;
 	triggersNeedReset = YES;
 	infoNeedsReset = YES;
+	// And the Sequence view (ALTER SEQUENCE, setval, …)
+	sequenceNeedsReset = YES;
 
 	if (listsNeedReload && [connection transactionStatus] != PGPostgresTransactionInError) {
 		listsNeedReload = NO;
@@ -752,6 +826,26 @@ NSString * const SPPostgresPaneQuery = @"query";
 	infoNeedsReset = YES;
 }
 
+/**
+ * The Sequence view changed the sequence `name` is now: a column's default naming it reads afresh (Structure, Table
+ * Info), and a rename is listed (and stays selected) in the sidebar.
+ */
+- (void)_sequenceDidChange:(NSString *)name
+{
+	if (tornDown) return;
+	structureNeedsReset = YES;
+	infoNeedsReset = YES;
+
+	if (![name length] || [name isEqualToString:[sidebar selectedSequenceName]]) return;
+
+	// Renamed: the reload's empty selection on the way is not a place the user went to (history)
+	NSString *schema = [[[sidebar selectedSchema] copy] autorelease];
+	restoringHistory = YES;
+	[sidebar reloadSchema:schema];
+	restoringHistory = NO;
+	[sidebar selectSequenceNamed:name];
+}
+
 /// Table Info changed the table's comment: the Structure view is built again when it is next shown.
 - (void)_tableInfoDidChange
 {
@@ -767,6 +861,7 @@ NSString * const SPPostgresPaneQuery = @"query";
 	else if ([currentPane isEqualToString:SPPostgresPaneRelations]) [self _refreshRelationsIfStale];
 	else if ([currentPane isEqualToString:SPPostgresPaneTriggers]) [self _refreshTriggersIfStale];
 	else if ([currentPane isEqualToString:SPPostgresPaneInfo]) [self _refreshInfoIfStale];
+	else if ([currentPane isEqualToString:SPPostgresPaneSequence]) [self _refreshSequenceIfStale];
 }
 
 /// Builds the Structure view again for the selected table (a new structure object, so a rename the server undid is forgotten).
@@ -801,6 +896,14 @@ NSString * const SPPostgresPaneQuery = @"query";
 	if (!infoNeedsReset) return;
 	infoNeedsReset = NO;
 	[infoController showTable:[sidebar selectedTableName] inSchema:[sidebar selectedSchema]];
+}
+
+/// Shows the selected sequence again (nothing selected: empty), dropping edits that weren't applied.
+- (void)_refreshSequenceIfStale
+{
+	if (!sequenceNeedsReset) return;
+	sequenceNeedsReset = NO;
+	[sequenceController showSequence:[sidebar selectedSequenceName] inSchema:[sidebar selectedSchema]];
 }
 
 /// Reloads the Content view if the Query view may have changed its table: afresh after DDL, else keeping its filter, sort and page.
@@ -841,6 +944,27 @@ NSString * const SPPostgresPaneQuery = @"query";
 	// So does Table Info (for a table or view)
 	if (!table || ![table isEqualToString:[infoController table]] || ![schema isEqualToString:[infoController schema]]) infoNeedsReset = YES;
 	if ([currentPane isEqualToString:SPPostgresPaneInfo]) [self _refreshInfoIfStale];
+
+	// A sequence has its own pane, shown whenever one is selected; when none is selected any more, the pane before
+	// it comes back (its edits were applied, or vetoed the change, before the selection moved)
+	NSString *sequence = [sidebar selectedSequenceName];
+	if ([sequence length]) {
+		// Where to go back to (from one sequence to another, it stays)
+		if (!sequenceSelected && ![currentPane isEqualToString:SPPostgresPaneSequence]) {
+			[paneBeforeSequence release];
+			paneBeforeSequence = [currentPane copy];
+		}
+		sequenceSelected = YES;
+		if (![sequence isEqualToString:[sequenceController sequenceName]] || ![schema isEqualToString:[sequenceController schema]]) sequenceNeedsReset = YES;
+		if (![currentPane isEqualToString:SPPostgresPaneSequence]) [self showPane:SPPostgresPaneSequence];
+		else [self _refreshSequenceIfStale];
+	}
+	else {
+		sequenceSelected = NO;
+		if ([sequenceController sequenceName]) [sequenceController showSequence:nil inSchema:nil];
+		sequenceNeedsReset = NO;
+		if ([currentPane isEqualToString:SPPostgresPaneSequence]) [self showPane:paneBeforeSequence ?: SPPostgresPaneContent];
+	}
 
 	// The pane stays when the selection changes (as MySQL's Query tab); one whose item is now disabled
 	// (Relations or Triggers on a view) shows its empty state
@@ -1006,7 +1130,7 @@ NSString * const SPPostgresPaneQuery = @"query";
 {
 	NSMutableString *title = [NSMutableString stringWithFormat:@"(PostgreSQL %@) %@/%@", serverVersion, [self _connectionName], currentDatabase ?: @""];
 
-	NSString *table = [sidebar selectedTableName];
+	NSString *table = [sidebar selectedTableName] ?: [sidebar selectedSequenceName];
 	if ([table length]) [title appendFormat:@"/%@.%@", [sidebar selectedSchema], table];
 
 	return title;
@@ -1128,12 +1252,15 @@ NSString * const SPPostgresPaneQuery = @"query";
 	[sidebar setDelegate:nil];
 	// A Rename Table sheet still up (its completion sees tornDown)
 	if (renameSheet) [[renameSheet sheetParent] endSheet:renameSheet returnCode:NSModalResponseCancel];
+	// An Add Sequence sheet still up (its completion sees tornDown)
+	if (addSequenceSheet) [[addSequenceSheet sheetParent] endSheet:addSequenceSheet returnCode:NSModalResponseCancel];
 
 	[contentController invalidate];
 	[structureController invalidate];
 	[relationsController invalidate];
 	[triggersController invalidate];
 	[infoController invalidate];
+	[sequenceController invalidate]; // ends a Set Value sheet still up
 	[queryController invalidate];
 	[splitView setDelegate:nil];
 	[databasePopup setTarget:nil];
@@ -1189,6 +1316,101 @@ NSString * const SPPostgresPaneQuery = @"query";
 - (void)sidebar:(SPPostgresSidebarController *)theSidebar renameTableNamed:(NSString *)table
 {
 	[self _showRenameTableSheetForTable:table];
+}
+
+/// "Add Sequence…": the sheet (after the shown pane's edits are applied); on Add, the sequence is created and selected.
+- (void)sidebar:(SPPostgresSidebarController *)theSidebar addSequenceInSchema:(NSString *)schema
+{
+	if (tornDown || addSequenceSheet || duplicateSheet || renameSheet || ![schema length] || !parentWindow || isProcessing || [parentWindow attachedSheet]) return;
+	if (![self _endPaneEditing] || ![parentWindow makeFirstResponder:nil]) return;
+
+	NSString *theSchema = [[schema copy] autorelease];
+	NSWindow *sheet = [SPPostgresSequenceSheet beginInSchema:theSchema connection:connection window:parentWindow completion:^(SPPostgresSequenceDefinition *definition) {
+		[addSequenceSheet release];
+		addSequenceSheet = nil;
+		if (definition && !tornDown) [self _createSequence:definition inSchema:theSchema];
+	}];
+	[addSequenceSheet release];
+	addSequenceSheet = [sheet retain];
+}
+
+/// Creates the sequence; on success lists and selects it, else shows the server's message.
+- (void)_createSequence:(SPPostgresSequenceDefinition *)definition inSchema:(NSString *)schema
+{
+	SPPostgresSequences *sequences = [[[SPPostgresSequences alloc] initWithConnection:connection schema:schema] autorelease];
+	NSError *error = nil;
+	if (![sequences createSequence:definition error:&error]) {
+		NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+		[alert setAlertStyle:NSAlertStyleWarning];
+		[alert setMessageText:[NSString stringWithFormat:NSLocalizedString(@"Could not add the sequence “%@”", @"PostgreSQL add sequence failed"), [definition name]]];
+		[alert setInformativeText:[error localizedDescription] ?: @""];
+		[self _presentAlert:alert];
+		return;
+	}
+
+	// The schema the sidebar shows (the sheet was modal); the reload's empty selection on the way is not a place
+	// the user went to (history)
+	if (![schema isEqualToString:[sidebar selectedSchema]]) return;
+	restoringHistory = YES;
+	[sidebar reloadSchema:schema];
+	restoringHistory = NO;
+	[sidebar selectSequenceNamed:[definition name]];
+}
+
+/// "Delete Sequence…": asked first (after the shown pane's edits are applied); a sequence that columns use is not
+/// dropped, and they are listed.
+- (void)sidebar:(SPPostgresSidebarController *)theSidebar deleteSequenceNamed:(NSString *)name
+{
+	if (tornDown || ![name length] || isProcessing) return;
+	if (![self _endPaneEditing]) return;
+
+	NSString *schema = [[[sidebar selectedSchema] copy] autorelease];
+	NSString *sequence = [[name copy] autorelease];
+
+	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+	[alert addButtonWithTitle:NSLocalizedString(@"Delete", @"delete button")];
+	[alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"cancel button")];
+	[[[alert buttons] objectAtIndex:0] setKeyEquivalent:@"\r"];
+	[[[alert buttons] objectAtIndex:1] setKeyEquivalent:@"\033"];
+	[alert setAlertStyle:NSAlertStyleCritical];
+	[alert setMessageText:[NSString stringWithFormat:NSLocalizedString(@"Delete sequence \"%@\"?", @"PostgreSQL delete sequence confirmation"), sequence]];
+	[alert setInformativeText:[NSString stringWithFormat:NSLocalizedString(@"Are you sure you want to delete the sequence \"%@\"? This action cannot be undone.", @"PostgreSQL delete sequence confirmation detail"), sequence]];
+
+	// The document stays alive until the answer comes (a sheet's or a presenter's)
+	[self retain];
+	[self _confirm:alert completion:^(BOOL confirmed) {
+		if (confirmed && !tornDown) [self _dropSequence:sequence inSchema:schema];
+		[self release];
+	}];
+}
+
+/// Drops the sequence (never CASCADE); on success the lists reload (the selection is kept unless it was the one).
+- (void)_dropSequence:(NSString *)name inSchema:(NSString *)schema
+{
+	SPPostgresSequences *sequences = [[[SPPostgresSequences alloc] initWithConnection:connection schema:schema] autorelease];
+	NSError *error = nil;
+	if (![sequences dropSequence:name error:&error]) {
+		NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+		[alert setAlertStyle:NSAlertStyleWarning];
+		if ([[error domain] isEqualToString:SPPostgresErrorDomain] && [error code] == SPPostgresErrorHasDependents) {
+			// The columns, one per line
+			[alert setMessageText:[error localizedDescription]];
+			[alert setInformativeText:[[[error userInfo] objectForKey:SPPostgresDependentsErrorKey] componentsJoinedByString:@"\n"] ?: @""];
+		}
+		else {
+			[alert setMessageText:[NSString stringWithFormat:NSLocalizedString(@"Could not delete the sequence “%@”", @"PostgreSQL delete sequence failed"), name]];
+			[alert setInformativeText:[error localizedDescription] ?: @""];
+		}
+		[self _presentAlert:alert];
+		return;
+	}
+
+	// A column default may have named it (Structure), and the lists change
+	structureNeedsReset = YES;
+	if (![schema isEqualToString:[sidebar selectedSchema]]) return;
+	restoringHistory = YES;
+	[sidebar reloadKeepingSelection];
+	restoringHistory = NO;
 }
 
 #pragma mark - Databases
@@ -1375,6 +1597,7 @@ NSString * const SPPostgresPaneQuery = @"query";
 	[self _installRelationsController];
 	[self _installTriggersController];
 	[self _installInfoController];
+	[self _installSequenceController];
 	[self _installContentController];
 	[self _reloadDatabasePopup];
 
@@ -1395,7 +1618,9 @@ NSString * const SPPostgresPaneQuery = @"query";
 - (void)_recordHistory
 {
 	if (tornDown || restoringHistory || pendingHistoryEntry || ![currentDatabase length]) return;
-	[history recordDatabase:currentDatabase schema:[sidebar selectedSchema] table:[sidebar selectedTableName] pane:currentPane];
+	// A selected sequence is recorded as the entry's table (names are unique among a schema's relations)
+	NSString *table = [sidebar selectedTableName] ?: [sidebar selectedSequenceName];
+	[history recordDatabase:currentDatabase schema:[sidebar selectedSchema] table:table pane:currentPane];
 	[self _updateHistoryControl];
 }
 
@@ -1465,11 +1690,16 @@ NSString * const SPPostgresPaneQuery = @"query";
 	NSString *schema = [entry objectForKey:@"schema"];
 	if ([schema length] && ![schema isEqualToString:[sidebar selectedSchema]]) [sidebar reloadSchema:schema];
 
-	// A table of the entry's schema only (a schema that can't be loaded any more leaves the table unselected)
+	// A table, view or sequence of the entry's schema only (a schema that can't be loaded any more leaves nothing
+	// selected); a Sequence pane entry is a sequence's
 	NSString *table = [entry objectForKey:@"table"];
-	if (![table length] || ([schema length] && ![schema isEqualToString:[sidebar selectedSchema]]) || ![sidebar selectTableNamed:table]) {
-		[sidebar selectTableNamed:nil];
+	BOOL sameSchema = ![schema length] || [schema isEqualToString:[sidebar selectedSchema]];
+	BOOL isSequence = [[entry objectForKey:@"pane"] isEqualToString:SPPostgresPaneSequence];
+	BOOL selected = NO;
+	if ([table length] && sameSchema) {
+		selected = isSequence ? [sidebar selectSequenceNamed:table] : ([sidebar selectTableNamed:table] || [sidebar selectSequenceNamed:table]);
 	}
+	if (!selected) [sidebar selectTableNamed:nil];
 
 	[self showPane:[entry objectForKey:@"pane"]];
 
@@ -1749,11 +1979,13 @@ NSString * const SPPostgresPaneQuery = @"query";
 	// The renamed table stays selected (another selection is kept); the reload on the way is not a place the user went to
 	if (![schema isEqualToString:[sidebar selectedSchema]]) return;
 	NSString *selected = [[[sidebar selectedTableName] copy] autorelease];
+	NSString *selectedSequence = [[[sidebar selectedSequenceName] copy] autorelease];
 	NSString *reselect = [selected isEqualToString:table] ? newName : selected;
 	restoringHistory = YES;
 	[sidebar reloadSchema:schema];
 	restoringHistory = NO;
 	if (reselect) [sidebar selectTableNamed:reselect];
+	else if (selectedSequence) [sidebar selectSequenceNamed:selectedSequence];
 }
 
 #pragma mark - Split view

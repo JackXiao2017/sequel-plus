@@ -121,9 +121,17 @@
 			" WHEN (OLD.code IS DISTINCT FROM NEW.code) EXECUTE FUNCTION structure_test.touch()"),
 		@"CREATE TRIGGER t_audit AFTER INSERT OR DELETE ON structure_test.t FOR EACH STATEMENT EXECUTE FUNCTION structure_test.touch()",
 		@"ALTER TABLE structure_test.t DISABLE TRIGGER t_audit",
+		// Sequences (Task 5): a free one, one a column default uses; t's serial (t_id_seq) and identity (t_ident_seq)
+		// sequences come with t
+		@"CREATE SEQUENCE structure_test.seq_free INCREMENT 5 START 100",
+		@"COMMENT ON SEQUENCE structure_test.seq_free IS 'free'",
+		@"CREATE SEQUENCE structure_test.seq_used",
+		@"CREATE TABLE structure_test.used_t (n int DEFAULT nextval('structure_test.seq_used'))",
 		@"CREATE SCHEMA IF NOT EXISTS \"Sales Data\"",
 		@"DROP TABLE IF EXISTS \"Sales Data\".\"Mixed Case\" CASCADE",
 		@"CREATE TABLE \"Sales Data\".\"Mixed Case\" (\"order\" int PRIMARY KEY, \"select\" text)",
+		@"DROP SEQUENCE IF EXISTS \"Sales Data\".\"Odd \"\"Seq\"\"\"",
+		@"CREATE SEQUENCE \"Sales Data\".\"Odd \"\"Seq\"\"\"",
 	];
 }
 
@@ -143,6 +151,7 @@
 	[connection execute:@"SET lock_timeout = '10s'"];
 	[connection execute:@"DROP SCHEMA IF EXISTS structure_test CASCADE"];
 	[connection execute:@"DROP TABLE IF EXISTS \"Sales Data\".\"Mixed Case\" CASCADE"];
+	[connection execute:@"DROP SEQUENCE IF EXISTS \"Sales Data\".\"Odd \"\"Seq\"\"\""];
 	[connection disconnect];
 }
 

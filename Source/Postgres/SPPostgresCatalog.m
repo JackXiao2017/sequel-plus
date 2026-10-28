@@ -111,6 +111,11 @@
 	return [self relationNamesInSchema:schema kinds:@"'v', 'm'" error:error];
 }
 
+- (NSArray *)sequenceNamesInSchema:(NSString *)schema error:(NSError **)error
+{
+	return [self relationNamesInSchema:schema kinds:@"'S'" error:error];
+}
+
 - (NSArray *)installedExtensions:(NSError **)error
 {
 	PGPostgresResult *result = [self run:@"SELECT extname::text AS n, extversion::text AS v FROM pg_extension ORDER BY extname COLLATE \"C\""

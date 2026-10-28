@@ -17,11 +17,15 @@
 - (void)sidebar:(SPPostgresSidebarController *)sidebar duplicateTableNamed:(NSString *)table;
 /// "Rename Table…" was chosen in the outline's menu for `table`, a table of the selected schema.
 - (void)sidebar:(SPPostgresSidebarController *)sidebar renameTableNamed:(NSString *)table;
+/// "Add Sequence…" was chosen in the outline's menu: a sequence for `schema`, the selected schema.
+- (void)sidebar:(SPPostgresSidebarController *)sidebar addSequenceInSchema:(NSString *)schema;
+/// "Delete Sequence…" was chosen in the outline's menu for `sequence`, a sequence of the selected schema.
+- (void)sidebar:(SPPostgresSidebarController *)sidebar deleteSequenceNamed:(NSString *)sequence;
 @end
 
 /**
  * The left panel of a PostgreSQL tab: a schema picker on top, then an outline with the
- * TABLES and VIEWS of the selected schema and, last, the EXTENSIONS installed in the database.
+ * TABLES, VIEWS and SEQUENCES of the selected schema and, last, the EXTENSIONS installed in the database.
  * Use on the main thread.
  */
 __attribute__((visibility("default")))
@@ -33,7 +37,7 @@ __attribute__((visibility("default")))
 /// Schema popup on top, outline below. Built once; sized by the caller (autoresizes).
 - (NSView *)view;
 
-/// Shows the tables and views of `schema` and selects it in the popup. Clears the table selection.
+/// Shows the tables, views and sequences of `schema` and selects it in the popup. Clears the selection.
 /// If the tables or views can't be loaded, the schema, lists and selection stay as they were.
 - (void)reloadSchema:(NSString *)schema;
 
@@ -42,20 +46,23 @@ __attribute__((visibility("default")))
 - (void)reloadWithCatalog:(SPPostgresCatalog *)catalog;
 
 /**
- * Reloads the schemas, the extensions and the shown schema's tables and views (after the Query view changed
- * them), keeping the selected table if it is still listed. A schema that is gone gives way to the default one.
+ * Reloads the schemas, the extensions and the shown schema's tables, views and sequences (after the Query view
+ * changed them), keeping the selected table or sequence if it is still listed. A schema that is gone gives way to the default one.
  * The delegate hears of a selection change only if the selection ends up different.
  */
 - (void)reloadKeepingSelection;
 
-/// @[@"TABLES", @"VIEWS", @"EXTENSIONS"]: Extensions is always last.
+/// @[@"TABLES", @"VIEWS", @"SEQUENCES", @"EXTENSIONS"]: Extensions is always last.
 - (NSArray *)sectionTitles;
 
-/// Names listed under a section (tables, views or extension names), in display order.
+/// Names listed under a section (tables, views, sequences or extension names), in display order.
 - (NSArray *)itemTitlesInSection:(NSString *)sectionTitle;
 
 /// Selects a table or view of the selected schema in the outline; NO if it is not listed. nil clears the selection.
 - (BOOL)selectTableNamed:(NSString *)name;
+
+/// Selects a sequence of the selected schema in the outline; NO if it is not listed. nil clears the selection.
+- (BOOL)selectSequenceNamed:(NSString *)name;
 
 /**
  * The outline's right-click menu: "Duplicate Table…" and "Rename Table…", enabled on a table (not a view or
@@ -63,10 +70,24 @@ __attribute__((visibility("default")))
  */
 @property (readonly) NSMenu *tableMenu;
 
+/**
+ * The outline's right-click menu on a sequence, the SEQUENCES header or empty space: "Add Sequence…" (for the
+ * selected schema) and "Delete Sequence…" (on a sequence only: the row that was right-clicked, or else the selected
+ * one; hidden elsewhere), through the delegate.
+ */
+@property (readonly) NSMenu *sequenceMenu;
+
+/// The right-click menu for a row of the outline (-1: empty space): sequenceMenu on a sequence, the SEQUENCES
+/// header or empty space, else tableMenu.
+- (NSMenu *)menuForRow:(NSInteger)row;
+
 @property (readonly) NSString *selectedSchema;
 
-/// The selected table or view of the selected schema, or nil.
+/// The selected table or view of the selected schema, or nil (also while a sequence is selected).
 @property (readonly) NSString *selectedTableName;
+
+/// The selected sequence of the selected schema, or nil (also while a table or view is selected).
+@property (readonly) NSString *selectedSequenceName;
 
 /// The selection is listed under TABLES (a table or partitioned table), not VIEWS.
 @property (readonly) BOOL selectionIsTable;

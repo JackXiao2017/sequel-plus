@@ -375,7 +375,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 
 - (void)testSidebarSectionsEndWithExtensions
 {
-	XCTAssertEqualObjects([self.document.sidebar sectionTitles], (@[@"TABLES", @"VIEWS", @"EXTENSIONS"]));
+	XCTAssertEqualObjects([self.document.sidebar sectionTitles], (@[@"TABLES", @"VIEWS", @"SEQUENCES", @"EXTENSIONS"]));
 }
 
 - (void)testSidebarListsTablesViewsAndExtensionsForPublic
@@ -410,7 +410,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 		id item = [outline itemAtRow:row];
 		if ([outline.delegate outlineView:outline isGroupItem:item]) [groupTitles addObject:[item valueForKey:@"title"]];
 	}
-	XCTAssertEqualObjects(groupTitles, (@[@"TABLES", @"VIEWS", @"EXTENSIONS"]));
+	XCTAssertEqualObjects(groupTitles, (@[@"TABLES", @"VIEWS", @"SEQUENCES", @"EXTENSIONS"]));
 	id lastItem = [outline itemAtRow:outline.numberOfRows - 1];
 	XCTAssertTrue([[sidebar itemTitlesInSection:@"EXTENSIONS"] containsObject:[lastItem valueForKey:@"title"]]);
 }
