@@ -22,8 +22,9 @@ typedef NS_ENUM(NSInteger, SPPostgresErrorCode) {
 	/// An edit was refused before any SQL was sent: the relation is read-only (a view, or a table without
 	/// a primary key). The read-only reason is the localized description.
 	SPPostgresErrorNotEditable = 8,
-	/// A column was not dropped because other objects (views, indexes, constraints, foreign keys of other
-	/// tables, …) depend on it. Nothing was sent; the dependents are listed under SPPostgresDependentsErrorKey.
+	/// An object (a column, a sequence, an extension, …) was not dropped because other objects depend on it.
+	/// Nothing was changed: either the dependents were found first and nothing was sent, or the DROP was sent and
+	/// rolled back (an extension: the server's DETAIL). The dependents are listed under SPPostgresDependentsErrorKey.
 	SPPostgresErrorHasDependents = 9
 };
 

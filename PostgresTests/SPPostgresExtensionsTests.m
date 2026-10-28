@@ -103,6 +103,12 @@
 	XCTAssertTrue([extensions installExtension:name version:version schema:schema error:&error], @"%@: %@", name, error);
 }
 
+/// Versions in ascending NSNumericSearch order.
+- (NSArray *)numericallySorted:(NSArray *)versions
+{
+	return [versions sortedArrayUsingComparator:^NSComparisonResult(NSString *a, NSString *b) { return [a compare:b options:NSNumericSearch]; }];
+}
+
 #pragma mark - Reading
 
 - (void)testInstalledAndAvailableLists
@@ -134,6 +140,7 @@
 		SPPostgresAvailableExtension *hstore = available[index];
 		XCTAssertTrue([hstore.versions containsObject:@"1.4"], @"%@", hstore.versions);
 		XCTAssertTrue([hstore.versions containsObject:hstore.defaultVersion]);
+		XCTAssertEqualObjects(hstore.versions, [self numericallySorted:hstore.versions]);
 		XCTAssertNotNil(hstore.comment);
 		XCTAssertNil(hstore.fixedSchema);
 	}
@@ -156,7 +163,8 @@
 		XCTAssertNotNil(targets, @"%@", error);
 		XCTAssertTrue([targets containsObject:@"1.5"], @"%@", targets);
 		XCTAssertTrue([targets containsObject:hstore.defaultVersion], @"%@", targets);
-		XCTAssertEqualObjects(targets.firstObject, @"1.5");
+		// Sorted as version numbers (1.10 after 1.9), not in the server's directory order
+		XCTAssertEqualObjects(targets, [self numericallySorted:targets]);
 
 		XCTAssertTrue([extensions updateExtension:@"hstore" toVersion:hstore.defaultVersion error:&error], @"%@", error);
 		hstore = [self extension:@"hstore" of:extensions];
@@ -196,6 +204,34 @@
 		XCTAssertNil([extensions extensionNamed:@"cube" error:&error]);
 		XCTAssertNil(error);
 		XCTAssertEqual(connection.transactionStatus, PGPostgresTransactionIdle);
+	}
+}
+
+/// cube installs, then earthdistance's CREATE fails (a function earth() is in the way): cube is rolled back too.
+- (void)testFailedInstallRollsBackInstalledRequirement
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *connection = [self connectOn:port];
+		XCTAssertNotNil([connection execute:@"CREATE FUNCTION public.earth() RETURNS float8 LANGUAGE sql AS 'SELECT 1::float8'"], @"%@", connection.lastError.errorPrimaryMessage);
+		[self addTeardownBlock:^{
+			PGPostgresConnection *cleanup = [SPPostgresTestServers extensionTestConnectionOnPort:port.unsignedIntegerValue];
+			[cleanup execute:@"DROP FUNCTION IF EXISTS public.earth()"];
+			[cleanup disconnect];
+		}];
+		SPPostgresExtensions *extensions = [[SPPostgresExtensions alloc] initWithConnection:connection];
+
+		NSError *error = nil;
+		XCTAssertFalse([extensions installExtension:@"earthdistance" version:nil schema:@"public" error:&error], @"%@", port);
+		XCTAssertEqual(error.code, SPPostgresErrorQueryFailed);
+		XCTAssertTrue([error.localizedDescription containsString:@"earth"], @"%@", error);
+		XCTAssertEqualObjects([self installedNames:extensions], @[@"plpgsql"]);
+		XCTAssertNil([extensions extensionNamed:@"cube" error:&error]);
+		XCTAssertNil(error);
+		XCTAssertNil([extensions extensionNamed:@"earthdistance" error:&error]);
+		XCTAssertNil(error);
+		XCTAssertEqual(connection.transactionStatus, PGPostgresTransactionIdle);
+
+		XCTAssertNotNil([connection execute:@"DROP FUNCTION public.earth()"], @"%@", connection.lastError.errorPrimaryMessage);
 	}
 }
 

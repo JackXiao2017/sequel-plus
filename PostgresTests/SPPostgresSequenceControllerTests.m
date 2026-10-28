@@ -331,7 +331,8 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	XCTAssertEqualObjects(groupTitles, (@[@"TABLES", @"VIEWS", @"SEQUENCES", @"EXTENSIONS"]));
 	XCTAssertEqual(firstSequenceRow, sequencesRow + 1);
 
-	// The right-click menus: a sequence has Add and Delete; the header and empty space Add only; a table its own
+	// The right-click menus: a sequence has Add and Delete; the header Add only; a table its own. Empty space is
+	// below EXTENSIONS (the last section): the extension menu (Stage 5)
 	NSMenu *onSequence = [sidebar menuForRow:firstSequenceRow];
 	XCTAssertEqual(onSequence, sidebar.sequenceMenu);
 	XCTAssertFalse([self item:@"Add Sequence…" in:onSequence].hidden);
@@ -340,8 +341,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	XCTAssertEqual(onHeader, sidebar.sequenceMenu);
 	XCTAssertFalse([self item:@"Add Sequence…" in:onHeader].hidden);
 	XCTAssertTrue([self item:@"Delete Sequence…" in:onHeader].hidden);
-	XCTAssertEqual([sidebar menuForRow:-1], sidebar.sequenceMenu);
-	XCTAssertTrue([self item:@"Delete Sequence…" in:sidebar.sequenceMenu].hidden);
+	XCTAssertEqual([sidebar menuForRow:-1], sidebar.extensionMenu);
 	XCTAssertEqual([sidebar menuForRow:tableRow], sidebar.tableMenu);
 	XCTAssertEqualObjects([sidebar.tableMenu.itemArray valueForKey:@"title"], (@[@"Duplicate Table…", @"Rename Table…"]));
 

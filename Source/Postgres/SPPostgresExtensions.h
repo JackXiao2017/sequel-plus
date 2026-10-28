@@ -46,7 +46,7 @@ __attribute__((visibility("default")))
 @property (readonly, copy) NSString *defaultVersion;
 /// nil if none.
 @property (readonly, copy) NSString *comment;
-/// Every available version, in the server's order.
+/// Every available version, sorted as version numbers (NSNumericSearch: 1.10 after 1.9).
 @property (readonly, copy) NSArray *versions;
 /// The schema the control file fixes for the default version (it can't go anywhere else), nil if none.
 @property (readonly, copy) NSString *fixedSchema;
@@ -83,7 +83,7 @@ __attribute__((visibility("default")))
 - (NSArray *)availableExtensions:(NSError **)error;
 
 /// The versions the installed extension can be updated to (pg_extension_update_paths from the installed version,
-/// with a path), in the function's order; empty when there are none or it isn't installed, nil on failure.
+/// with a path), sorted as version numbers (NSNumericSearch: 1.10 after 1.9); empty when there are none or it isn't installed, nil on failure.
 - (NSArray *)updateTargetsForExtension:(NSString *)name error:(NSError **)error;
 
 /**

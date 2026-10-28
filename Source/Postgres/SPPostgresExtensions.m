@@ -196,13 +196,21 @@ static NSString * const SPPostgresExtensionRequirementsSQL =
 	return [extensions firstObject];
 }
 
+/// Versions in ascending version-number order (NSNumericSearch: 1.10 after 1.9), not the server's directory order.
+static NSArray *SPPostgresExtensionSortedVersions(NSArray *versions)
+{
+	return [versions sortedArrayUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+		return [a compare:b options:NSNumericSearch];
+	}];
+}
+
 - (NSArray *)availableExtensions:(NSError **)error
 {
 	NSArray *rows = SPPostgresExtensionRows(_connection, (@"SELECT name::text, default_version::text, comment::text"
 														  @" FROM pg_catalog.pg_available_extensions"
 														  @" WHERE installed_version IS NULL ORDER BY name"), nil, error);
 	if (!rows) return nil;
-	// The versions in the view's own order; schema is the control file's, per version
+	// Every version (sorted below); schema is the control file's, per version
 	NSArray *versionRows = SPPostgresExtensionRows(_connection, (@"SELECT v.name::text, v.version::text, v.schema::text"
 																 @" FROM pg_catalog.pg_available_extension_versions v"
 																 @" WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_extension e WHERE e.extname = v.name)"), nil, error);
@@ -226,7 +234,7 @@ static NSString * const SPPostgresExtensionRequirementsSQL =
 		NSString *fixedSchema = defaultVersion ? schemas[@[name, defaultVersion]] : nil;
 		SPPostgresAvailableExtension *extension = [[SPPostgresAvailableExtension alloc] initWithName:name defaultVersion:defaultVersion
 																							 comment:SPPostgresExtensionText(row[2])
-																							versions:versions[name] fixedSchema:fixedSchema];
+																							versions:SPPostgresExtensionSortedVersions(versions[name]) fixedSchema:fixedSchema];
 		[available addObject:extension];
 		[extension release];
 	}
@@ -251,7 +259,7 @@ static NSString * const SPPostgresExtensionRequirementsSQL =
 		NSString *target = SPPostgresExtensionText([row firstObject]);
 		if (target) [targets addObject:target];
 	}
-	return targets;
+	return SPPostgresExtensionSortedVersions(targets);
 }
 
 /// The names of the installed extensions, nil on failure.
