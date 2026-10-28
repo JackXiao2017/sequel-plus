@@ -36,9 +36,9 @@
 			message = [_connection libpqErrorMessage];
 			if (![message length]) message = NSLocalizedString(@"There is no connection to the server.", @"Postgres catalog query without a connection");
 		}
-		*error = [NSError errorWithDomain:SPPostgresErrorDomain
-									 code:SPPostgresErrorQueryFailed
-								 userInfo:@{NSLocalizedDescriptionKey: message}];
+		// The shared builder, with the server's SQLSTATE (as every other Postgres error has it)
+		NSString *state = [_connection isConnected] ? [pgError errorStateCode] : nil;
+		*error = SPPostgresMakeError(SPPostgresErrorQueryFailed, message, [state length] ? @{SPPostgresSQLStateErrorKey: state} : nil);
 	}
 	return result;
 }

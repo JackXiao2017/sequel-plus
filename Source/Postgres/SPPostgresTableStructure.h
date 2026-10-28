@@ -103,6 +103,42 @@ __attribute__((visibility("default")))
 
 @end
 
+/// One trigger of a table (internal ones, e.g. a foreign key's, are left out).
+__attribute__((visibility("default")))
+@interface SPPostgresTrigger : NSObject
+{
+	NSString *_name;
+	NSString *_timing;
+	NSString *_events;
+	NSString *_level;
+	NSString *_functionSchema;
+	NSString *_functionName;
+	NSString *_condition;
+	BOOL _enabled;
+	NSString *_definition;
+	NSString *_functionDefinition;
+}
+
+@property (readonly, copy) NSString *name;
+/// @"BEFORE", @"AFTER" or @"INSTEAD OF".
+@property (readonly, copy) NSString *timing;
+/// As pg_get_triggerdef writes them, between the timing and ON, e.g. @"INSERT OR UPDATE OF \"code\"".
+@property (readonly, copy) NSString *events;
+/// @"ROW" or @"STATEMENT".
+@property (readonly, copy) NSString *level;
+@property (readonly, copy) NSString *functionSchema;
+@property (readonly, copy) NSString *functionName;
+/// The WHEN condition as pg_get_triggerdef writes it (without its enclosing parentheses), nil if none.
+@property (readonly, copy) NSString *condition;
+/// tgenabled <> 'D' (enabled, also when it fires only as replica or always).
+@property (readonly) BOOL enabled;
+/// pg_get_triggerdef.
+@property (readonly, copy) NSString *definition;
+/// pg_get_functiondef of the trigger function.
+@property (readonly, copy) NSString *functionDefinition;
+
+@end
+
 /// A column to add.
 __attribute__((visibility("default")))
 @interface SPPostgresColumnDefinition : NSObject
@@ -231,6 +267,23 @@ __attribute__((visibility("default")))
 - (BOOL)dropIndexNamed:(NSString *)name error:(NSError **)error;
 - (BOOL)addConstraint:(SPPostgresConstraintDefinition *)definition error:(NSError **)error;
 - (BOOL)dropConstraintNamed:(NSString *)name error:(NSError **)error;
+
+/// SPPostgresTrigger objects by name, or nil on failure.
+- (NSArray *)triggers:(NSError **)error;
+/// The functions a trigger can execute (returning trigger, outside pg_catalog and information_schema), as
+/// @"schema.name" with each part quoted when needed, sorted; nil on failure.
+- (NSArray *)triggerFunctions:(NSError **)error;
+/**
+ * CREATE TRIGGER name timing events [OF columns] ON the table FOR EACH level [WHEN (condition)] EXECUTE FUNCTION
+ * function(). timing is BEFORE, AFTER or INSTEAD OF; events some of INSERT, UPDATE, DELETE, TRUNCATE; columns
+ * (UPDATE only) nil or empty for any; level ROW or STATEMENT; qualifiedFunction one of -triggerFunctions:'s strings
+ * (anything else is refused, so it never carries SQL); condition as typed, nil or empty for none.
+ */
+- (BOOL)addTriggerNamed:(NSString *)name timing:(NSString *)timing events:(NSArray *)events updateColumns:(NSArray *)columns level:(NSString *)level function:(NSString *)qualifiedFunction condition:(NSString *)condition error:(NSError **)error;
+/// DROP TRIGGER name ON the table (never CASCADE).
+- (BOOL)dropTriggerNamed:(NSString *)name error:(NSError **)error;
+/// ALTER TABLE … ENABLE | DISABLE TRIGGER name.
+- (BOOL)setTrigger:(NSString *)name enabled:(BOOL)enabled error:(NSError **)error;
 
 - (BOOL)renameTableTo:(NSString *)newName error:(NSError **)error;
 /// nil or empty removes the comment.
