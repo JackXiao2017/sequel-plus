@@ -29,3 +29,6 @@ typedef NS_ENUM(NSInteger, SPPostgresErrorCode) {
 
 /// userInfo key of SPPostgresErrorHasDependents: an NSArray of NSString, one description per dependent object.
 extern NSString * const SPPostgresDependentsErrorKey __attribute__((visibility("default")));
+
+/// An error in SPPostgresErrorDomain with message as its localized description, plus userInfo's entries (may be nil).
+extern NSError *SPPostgresMakeError(NSInteger code, NSString *message, NSDictionary *userInfo) __attribute__((visibility("default")));

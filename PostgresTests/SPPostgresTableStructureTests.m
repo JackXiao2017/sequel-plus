@@ -22,6 +22,19 @@
 }
 @end
 
+/// Counts KVO notifications.
+@interface SPStructureObserver : NSObject
+@property (nonatomic, strong) NSMutableArray *changes;
+@end
+
+@implementation SPStructureObserver
+- (instancetype)init { if ((self = [super init])) _changes = [NSMutableArray array]; return self; }
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context
+{
+	[self.changes addObject:[NSString stringWithFormat:@"%@: %@ -> %@", keyPath, change[NSKeyValueChangeOldKey], change[NSKeyValueChangeNewKey]]];
+}
+@end
+
 /// Statements run on each server before every test. structure_test is dropped and rebuilt; the "Sales Data"
 /// schema belongs to the catalog fixture (whose tests list its tables), so only our own table in it is
 /// dropped and rebuilt, and dropped again in -tearDown.
@@ -621,6 +634,71 @@ static NSArray<NSString *> *SPStructureSetupStatements(void)
 
 #pragma mark - Table
 
+- (void)testReadsOfMissingRelationFail
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *connection = [self connectOn:port];
+		NSString *expected = @"There is no table “gone” in schema “structure_test”.";
+
+		for (SPPostgresTableStructure *structure in @[[self structureOn:connection table:@"gone"],
+													  [self structureOn:connection schema:@"no such schema" table:@"t"]]) {
+			NSString *message = [structure.schema isEqualToString:@"structure_test"] ? expected
+				: @"There is no table “t” in schema “no such schema”.";
+			NSError *error = nil;
+			XCTAssertNil([structure columns:&error]);
+			XCTAssertEqualObjects(error.localizedDescription, message);
+			error = nil;
+			XCTAssertNil([structure indexes:&error]);
+			XCTAssertEqualObjects(error.localizedDescription, message);
+			error = nil;
+			XCTAssertNil([structure constraints:&error]);
+			XCTAssertEqualObjects(error.localizedDescription, message);
+			error = nil;
+			XCTAssertNil([structure tableComment:&error]);
+			XCTAssertEqualObjects(error.localizedDescription, message);
+			error = nil;
+			XCTAssertNil([structure relationKind:&error]);
+			XCTAssertEqualObjects(error.localizedDescription, message);
+			error = nil;
+			XCTAssertNil([structure dependentsOfColumn:@"id" error:&error]);
+			XCTAssertEqualObjects(error.localizedDescription, message);
+		}
+
+		// An existing table without comment, indexes or constraints still reads as empty, without an error
+		XCTAssertNotNil([connection execute:@"CREATE TABLE structure_test.bare ()"]);
+		SPPostgresTableStructure *bare = [self structureOn:connection table:@"bare"];
+		NSError *error = nil;
+		XCTAssertEqualObjects([bare columns:&error], @[]);
+		XCTAssertNil(error);
+		XCTAssertEqualObjects([bare indexes:&error], @[]);
+		XCTAssertEqualObjects([bare constraints:&error], @[]);
+		XCTAssertNil([bare tableComment:&error]);
+		XCTAssertNil(error);
+
+		// A rename inside the user's transaction, rolled back: the old name is gone from the object's view
+		SPPostgresTableStructure *structure = [self structureOn:connection table:@"t"];
+		XCTAssertNotNil([connection execute:@"BEGIN"]);
+		XCTAssertTrue([structure renameTableTo:@"gone" error:&error], @"%@", error);
+		XCTAssertNotNil([connection execute:@"ROLLBACK"]);
+		XCTAssertNil([structure columns:&error]);
+		XCTAssertEqualObjects(error.localizedDescription, expected);
+	}
+}
+
+- (void)testRenameTableNotifiesObservers
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresTableStructure *structure = [self structureOn:[self connectOn:port] table:@"t"];
+		SPStructureObserver *observer = [[SPStructureObserver alloc] init];
+		[structure addObserver:observer forKeyPath:@"table" options:NSKeyValueObservingOptionOld | NSKeyValueObservingOptionNew context:NULL];
+		NSError *error = nil;
+		XCTAssertTrue([structure renameTableTo:@"t_renamed" error:&error], @"%@", error);
+		XCTAssertFalse([structure renameTableTo:@"t_renamed" error:&error]); // same name: the server refuses, no notification
+		[structure removeObserver:observer forKeyPath:@"table"];
+		XCTAssertEqualObjects(observer.changes, @[@"table: t -> t_renamed"]);
+	}
+}
+
 - (void)testRenameTableAndTableComment
 {
 	for (NSNumber *port in [SPPostgresTestServers ports]) {
@@ -791,6 +869,66 @@ static NSArray<NSString *> *SPStructureSetupStatements(void)
 		// And after a success
 		XCTAssertTrue([structure addColumn:[self definition:@"free" type:@"int"] error:&error], @"%@", error);
 		XCTAssertEqualObjects([self value:@"SHOW lock_timeout" on:connection], before);
+	}
+}
+
+- (void)testDropColumnLocksTableBeforeCheckingDependents
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPStructureStatementRecorder *recorder = nil;
+		PGPostgresConnection *connection = [self connectOn:port recorder:&recorder];
+		PGPostgresConnection *other = [self connectOn:port];
+		SPPostgresTableStructure *structure = [self structureOn:connection table:@"t"];
+		structure.lockTimeout = 1;
+		NSError *error = nil;
+
+		// Locked elsewhere: it times out on the lock, before the dependents are even read
+		XCTAssertNotNil([other execute:@"BEGIN"]);
+		XCTAssertNotNil([other execute:@"LOCK TABLE structure_test.t IN ACCESS SHARE MODE"]);
+		[recorder.statements removeAllObjects];
+		NSDate *start = [NSDate date];
+		XCTAssertFalse([structure dropColumn:@"Order" error:&error]);
+		XCTAssertLessThan([[NSDate date] timeIntervalSinceDate:start], 5.0);
+		XCTAssertTrue([error.localizedDescription containsString:@"lock timeout"], @"%@", error);
+		NSString *sent = [recorder.statements componentsJoinedByString:@"\n"];
+		XCTAssertTrue([sent containsString:@"LOCK TABLE \"structure_test\".\"t\" IN ACCESS EXCLUSIVE MODE"], @"%@", sent);
+		XCTAssertFalse([sent containsString:@"pg_depend"], @"%@", sent);
+		XCTAssertNotNil([other execute:@"ROLLBACK"]);
+
+		// Unlocked: LOCK, then the dependents, then the drop
+		[recorder.statements removeAllObjects];
+		XCTAssertTrue([structure dropColumn:@"Order" error:&error], @"%@", error);
+		NSUInteger lock = NSNotFound, depend = NSNotFound, drop = NSNotFound;
+		for (NSUInteger i = 0; i < recorder.statements.count; i++) {
+			NSString *sql = recorder.statements[i];
+			if (lock == NSNotFound && [sql hasPrefix:@"LOCK TABLE"]) lock = i;
+			if (depend == NSNotFound && [sql containsString:@"pg_depend"]) depend = i;
+			if (drop == NSNotFound && [sql containsString:@"DROP COLUMN"]) drop = i;
+		}
+		XCTAssertTrue(lock != NSNotFound && depend != NSNotFound && drop != NSNotFound, @"%@", recorder.statements);
+		XCTAssertLessThan(lock, depend);
+		XCTAssertLessThan(depend, drop);
+	}
+}
+
+- (void)testUserSetLocalLockTimeoutSurvivesAChange
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *connection = [self connectOn:port];
+		SPPostgresTableStructure *structure = [self structureOn:connection table:@"t"];
+		NSError *error = nil;
+		XCTAssertNotNil([connection execute:@"SET lock_timeout = '9s'"]);
+
+		XCTAssertNotNil([connection execute:@"BEGIN"]);
+		XCTAssertNotNil([connection execute:@"SET LOCAL lock_timeout = '3s'"]);
+		XCTAssertTrue([structure addColumn:[self definition:@"local_one" type:@"int"] error:&error], @"%@", error);
+		XCTAssertEqualObjects([self value:@"SHOW lock_timeout" on:connection], @"3s");
+		XCTAssertFalse([structure changeColumn:@"qty" toType:@"integer" using:nil error:&error]);
+		XCTAssertEqualObjects([self value:@"SHOW lock_timeout" on:connection], @"3s");
+		XCTAssertNotNil([connection execute:@"COMMIT"]);
+
+		XCTAssertEqualObjects([self value:@"SHOW lock_timeout" on:connection], @"9s");
+		XCTAssertNotNil([self column:@"local_one" of:structure]);
 	}
 }
 
