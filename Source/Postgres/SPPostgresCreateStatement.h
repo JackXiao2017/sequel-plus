@@ -14,9 +14,11 @@
  *   CREATE TABLE "s"."t" (
  *       one line per column, in attnum order: the quoted name, format_type, COLLATE when the collation isn't the
  *       type's default, then GENERATED ALWAYS AS (expr) STORED (VIRTUAL on PostgreSQL 18), GENERATED ALWAYS | BY
- *       DEFAULT AS IDENTITY, or DEFAULT expr, then NOT NULL;
+ *       DEFAULT AS IDENTITY, or DEFAULT expr, then NOT NULL (on PostgreSQL 18 from the column's NOT NULL
+ *       constraint, contype 'n': CONSTRAINT "n" NOT NULL when its name isn't the server's default
+ *       table_column_not_null, and NO INHERIT; a NOT VALID one is added afterwards instead, see below);
  *       one CONSTRAINT "n" <pg_get_constraintdef> line per primary key, unique, check, foreign key and exclusion
- *       constraint (PostgreSQL 18's NOT NULL constraints, contype 'n', are the columns' NOT NULL);
+ *       constraint;
  *   )
  *   then INHERITS ("s"."parent", …) for an inheritance child (whose inherited columns and constraints come from
  *   its parents and are left out), PARTITION BY <pg_get_partkeydef> for a partitioned table, WITH (reloptions).
@@ -24,7 +26,7 @@
  *   [(its own constraints)] <pg_get_expr(relpartbound)> (FOR VALUES … or DEFAULT): its columns, constraints,
  *   indexes and triggers that come from the parent are left out.
  * Then:
- *   - a constraint that isn't validated, as ALTER TABLE … ADD CONSTRAINT … NOT VALID;
+ *   - a constraint that isn't validated (NOT NULL included), as ALTER TABLE … ADD CONSTRAINT … NOT VALID;
  *   - one pg_get_indexdef statement per index that backs no constraint (and isn't a partition's copy of its
  *     parent's index);
  *   - COMMENT ON TABLE and COMMENT ON COLUMN;
@@ -33,7 +35,9 @@
  *     the default.
  *
  * A serial column appears as its DEFAULT nextval('…'::regclass): no sequence DDL is written (nor an identity
- * column's sequence options), so the statement runs as is only while that sequence exists.
+ * column's sequence options), so the statement runs as is only while that sequence exists. Nor is what a
+ * partition or an inheritance child sets on a column it inherits (its own SET NOT NULL, DEFAULT, …): inherited
+ * columns are left to the parent.
  *
  * A view: CREATE VIEW "s"."v" AS <pg_get_viewdef(oid, true)> (with its options and CHECK OPTION); a materialized
  * view: CREATE MATERIALIZED VIEW "s"."m" AS <definition> (WITH NO DATA when it isn't populated) and its

@@ -101,7 +101,19 @@
 	NSString *comment = [structure tableComment:&error];
 	XCTAssertNil(error);
 
+	// Not in the readers: each column's collation, and PostgreSQL 18's NOT NULL constraints (none before 18)
+	NSString *relation = [NSString stringWithFormat:@"%@.%@", [self quoted:schema], [self quoted:table]];
+	PGPostgresResult *details = [connection execute:
+		@"SELECT (SELECT coalesce(json_agg(a.attname || ' ' || coalesce(co.collname, '-') ORDER BY a.attnum), '[]')"
+		"   FROM pg_attribute a LEFT JOIN pg_collation co ON co.oid = a.attcollation WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped)::text,"
+		" (SELECT coalesce(json_agg(c.conname || ' ' || pg_get_constraintdef(c.oid) || ' ' || c.connoinherit || ' ' || c.convalidated || ' ' || c.conislocal ORDER BY c.conname), '[]')"
+		"   FROM pg_constraint c WHERE c.conrelid = $1::regclass AND c.contype = 'n')::text" values:@[relation]];
+	XCTAssertNotNil(details, @"%@", connection.lastError.errorPrimaryMessage);
+	NSArray *row = [details rowAsArray];
+
 	return @{
+		@"collations": row[0],
+		@"notNullConstraints": row[1],
 		@"kind": kind,
 		@"comment": comment ?: [NSNull null],
 		@"columns": [self describe:columns keys:@[@"name", @"typeName", @"nullable", @"defaultExpression", @"autoKind", @"generationExpression", @"comment", @"attnum"]],
@@ -109,6 +121,11 @@
 		@"constraints": [self describe:constraints keys:@[@"name", @"kind", @"definition", @"columns", @"referencedSchema", @"referencedTable", @"referencedColumns", @"onUpdate", @"onDelete"]],
 		@"triggers": [self describe:triggers keys:@[@"name", @"timing", @"events", @"level", @"functionSchema", @"functionName", @"condition", @"enabled", @"definition"]],
 	};
+}
+
+- (NSString *)quoted:(NSString *)identifier
+{
+	return [NSString stringWithFormat:@"\"%@\"", [identifier stringByReplacingOccurrencesOfString:@"\"" withString:@"\"\""]];
 }
 
 /// Generates the relation's statement, drops the relation, runs the statement and compares the readers' views.
@@ -317,6 +334,34 @@
 							  "    CONSTRAINT \"nn_c_check\" CHECK ((c > 0))\n);\n");
 		XCTAssertEqual([[statement componentsSeparatedByString:@"NOT NULL"] count], 3u, @"once per column: %@", statement);
 	}
+}
+
+/// PostgreSQL 18's NOT NULL constraints keep a name of their own, NO INHERIT and NOT VALID.
+- (void)testNotNullConstraintDetailsOnPG18
+{
+	PGPostgresConnection *connection = [self connectOn:@55418];
+	if ([self serverVersionOn:connection] < 180000) return;
+	[self run:@"CREATE TABLE structure_test.nnx (a int CONSTRAINT my_a_nn NOT NULL NO INHERIT, b int NOT NULL, c int, \"Odd \"\"d\"\"\" int CONSTRAINT \"Odd nn\" NOT NULL)" on:connection];
+	[self run:@"INSERT INTO structure_test.nnx VALUES (1, 1, NULL, 1)" on:connection];
+	[self run:@"ALTER TABLE structure_test.nnx ADD CONSTRAINT c_nn NOT NULL c NOT VALID" on:connection];
+	[self run:@"CREATE TABLE structure_test.nnx_rows AS SELECT * FROM structure_test.nnx" on:connection];
+
+	NSString *statement = [self roundTrip:@"nnx" schema:@"structure_test" kind:@"TABLE" on:connection];
+	XCTAssertEqualObjects(statement, @"CREATE TABLE \"structure_test\".\"nnx\" (\n"
+						  "    \"a\" integer CONSTRAINT \"my_a_nn\" NOT NULL NO INHERIT,\n"
+						  "    \"b\" integer NOT NULL,\n"
+						  "    \"c\" integer,\n"
+						  "    \"Odd \"\"d\"\"\" integer CONSTRAINT \"Odd nn\" NOT NULL\n"
+						  ");\n\n"
+						  "ALTER TABLE \"structure_test\".\"nnx\" ADD CONSTRAINT \"c_nn\" NOT NULL c NOT VALID;\n");
+
+	// With the data, as a dump loads it: the table, its rows (c NULL), then the unvalidated constraint
+	NSString *alter = @"ALTER TABLE \"structure_test\".\"nnx\" ADD CONSTRAINT \"c_nn\" NOT NULL c NOT VALID;\n";
+	[self run:@"DROP TABLE structure_test.nnx" on:connection];
+	[self execute:[statement stringByReplacingOccurrencesOfString:alter withString:@""] on:connection];
+	[self run:@"INSERT INTO structure_test.nnx SELECT * FROM structure_test.nnx_rows" on:connection];
+	[self execute:alter on:connection];
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::int FROM structure_test.nnx WHERE c IS NULL" on:connection], @1);
 }
 
 #pragma mark - Session and failures

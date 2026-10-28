@@ -30,6 +30,7 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 	PGPostgresConnection *connection;
 	SPPostgresTableStructure *structure;
 	NSString *savedComment; // what the server holds (@"" for none)
+	BOOL commentEdited;     // the user typed in the box since it was loaded, saved or reverted
 	NSTimeInterval lockTimeout;
 
 	NSView *view;
@@ -107,7 +108,7 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 
 #pragma mark - View
 
-- (NSTextField *)_newLabel:(NSString *)text atY:(CGFloat)y
+- (NSTextField *)_labelWithText:(NSString *)text atY:(CGFloat)y
 {
 	NSTextField *label = [NSTextField labelWithString:text];
 	[label setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
@@ -117,7 +118,7 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 	return label;
 }
 
-/// A selectable, read-only value next to its label.
+/// A selectable, read-only value next to its label (retained: the caller releases it).
 - (NSTextField *)_newValueFieldAtY:(CGFloat)y width:(CGFloat)width
 {
 	NSTextField *field = [[NSTextField labelWithString:@""] retain];
@@ -128,7 +129,7 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 	return field;
 }
 
-- (NSScrollView *)_newScrollViewWithTextView:(NSTextView *)textView frame:(NSRect)frame
+- (NSScrollView *)_scrollViewWithTextView:(NSTextView *)textView frame:(NSRect)frame
 {
 	NSScrollView *scrollView = [[[NSScrollView alloc] initWithFrame:frame] autorelease];
 	[scrollView setHasVerticalScroller:YES];
@@ -169,7 +170,7 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 						NSLocalizedString(@"Total size:", @"Postgres table info: total size label")];
 	NSMutableArray *fields = [NSMutableArray array];
 	for (NSString *title in titles) {
-		[view addSubview:[self _newLabel:title atY:y]];
+		[view addSubview:[self _labelWithText:title atY:y]];
 		NSTextField *field = [self _newValueFieldAtY:y width:width];
 		[view addSubview:field];
 		[fields addObject:field];
@@ -186,24 +187,24 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 	// Comments
 	y -= 6;
 	CGFloat commentTop = y + 17;
-	[view addSubview:[self _newLabel:NSLocalizedString(@"Comments:", @"Postgres table info: comment label") atY:y]];
+	[view addSubview:[self _labelWithText:NSLocalizedString(@"Comments:", @"Postgres table info: comment label") atY:y]];
 	NSRect commentFrame = NSMakeRect(SPPostgresInfoValueX, commentTop - SPPostgresInfoCommentHeight, width - SPPostgresInfoValueX - SPPostgresInfoMargin, SPPostgresInfoCommentHeight);
 	commentView = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, NSWidth(commentFrame), SPPostgresInfoCommentHeight)];
 	[commentView setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
 	[commentView setDelegate:self];
 	[commentView setEditable:NO];
-	NSScrollView *commentScroll = [self _newScrollViewWithTextView:commentView frame:commentFrame];
+	NSScrollView *commentScroll = [self _scrollViewWithTextView:commentView frame:commentFrame];
 	[commentScroll setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
 	[view addSubview:commentScroll];
 
 	// Create syntax, to the bottom bar
 	CGFloat syntaxTop = NSMinY(commentFrame) - 14;
-	[view addSubview:[self _newLabel:NSLocalizedString(@"Create syntax:", @"Postgres table info: create syntax label") atY:syntaxTop - 17]];
+	[view addSubview:[self _labelWithText:NSLocalizedString(@"Create syntax:", @"Postgres table info: create syntax label") atY:syntaxTop - 17]];
 	NSRect syntaxFrame = NSMakeRect(SPPostgresInfoValueX, SPPostgresInfoNoticeHeight, width - SPPostgresInfoValueX - SPPostgresInfoMargin, syntaxTop - SPPostgresInfoNoticeHeight);
 	createSyntaxView = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, NSWidth(syntaxFrame), NSHeight(syntaxFrame))];
 	[createSyntaxView setEditable:NO];
 	[createSyntaxView setSelectable:YES];
-	NSScrollView *syntaxScroll = [self _newScrollViewWithTextView:createSyntaxView frame:syntaxFrame];
+	NSScrollView *syntaxScroll = [self _scrollViewWithTextView:createSyntaxView frame:syntaxFrame];
 	[syntaxScroll setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 	[view addSubview:syntaxScroll];
 
@@ -327,6 +328,7 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 	NSString *commentText = [comment isKindOfClass:[NSString class]] ? comment : @"";
 	[savedComment release];
 	savedComment = [commentText copy];
+	commentEdited = NO;
 	[commentView setString:commentText];
 	[commentView setEditable:info != nil];
 
@@ -342,9 +344,16 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 	return [[commentView string] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 }
 
+/**
+ * Only what the user typed is pending: a comment set elsewhere (e.g. in SQL) with surrounding whitespace is shown
+ * as it is, and merely viewing it must never send COMMENT ON. Trimmed text is compared with the trimmed saved
+ * comment, as MySQL's Table Info does.
+ */
 - (BOOL)hasPendingComment
 {
-	return structure != nil && [commentView isEditable] && ![[self _trimmedComment] isEqualToString:savedComment];
+	if (!commentEdited || !structure || ![commentView isEditable]) return NO;
+	NSString *saved = [savedComment stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	return ![[self _trimmedComment] isEqualToString:saved];
 }
 
 - (BOOL)commitPendingEdits
@@ -360,6 +369,7 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 
 	[savedComment release];
 	savedComment = [comment retain];
+	commentEdited = NO;
 	[commentView setString:comment];
 
 	// The create syntax follows (a failure to read it keeps the old text; the comment is saved)
@@ -371,6 +381,11 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 }
 
 #pragma mark - Text view delegate
+
+- (void)textDidChange:(NSNotification *)notification
+{
+	if ([notification object] == commentView) commentEdited = YES;
+}
 
 /// The comment box keeps the focus (and its text) when the comment can't be saved.
 - (BOOL)textShouldEndEditing:(NSText *)textObject
@@ -384,6 +399,7 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 {
 	if (textView == commentView && commandSelector == @selector(cancelOperation:)) {
 		[commentView setString:savedComment];
+		commentEdited = NO;
 		return YES;
 	}
 	return NO;
