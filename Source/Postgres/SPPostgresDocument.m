@@ -10,6 +10,8 @@
 #import "SPPostgresExtensions.h"
 #import "SPPostgresInstallExtensionSheet.h"
 #import "SPPostgresUsersController.h"
+#import "SPPostgresExportController.h"
+#import "SPPostgresBackgroundJob.h"
 #import "SPPostgresSequences.h"
 #import "SPPostgresTableStructure.h"
 #import "SPPostgresQueryController.h"
@@ -219,6 +221,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 	/// The Users sheet while it is shown (or connecting)
 	SPPostgresUsersController *usersController;
+	SPPostgresExportController *exportController;
 
 	BOOL tornDown;
 }
@@ -238,8 +241,10 @@ NSString * const SPPostgresPaneExtension = @"extension";
 @synthesize favorite;
 @synthesize alertPresenter;
 @synthesize confirmationPresenter;
-@synthesize usersConnectionProvider;
+@synthesize connectionProvider;
 @synthesize usersController;
+@synthesize exportController;
+@synthesize currentDatabase;
 @synthesize isProcessing;
 @synthesize parentWindowController;
 @synthesize parentWindow;
@@ -321,8 +326,9 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[pendingAlert release];
 	[alertPresenter release];
 	[confirmationPresenter release];
-	[usersConnectionProvider release];
+	[connectionProvider release];
 	[usersController release];
+	[exportController release];
 
 	[super dealloc];
 }
@@ -1433,6 +1439,9 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	// The Users sheet (or its connecting): ended as Cancel, its connections closed
 	[usersController endSheet];
 
+	// The Export sheet ends; an export running is cancelled (it deletes what it wrote)
+	[exportController cancel:nil];
+
 	// A Duplicate Table sheet still up (its completion sees tornDown)
 	if (duplicateSheet) [[duplicateSheet sheetParent] endSheet:duplicateSheet returnCode:NSModalResponseCancel];
 
@@ -2405,6 +2414,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	if (action == @selector(viewStatus:)) return [self _canShowPane:SPPostgresPaneInfo];
 
 	if (action == @selector(showUserManager:)) return [self _canShowUsers];
+	if (action == @selector(export:)) return [self _canRunSheetJob];
 
 	// View > Back/Forward In History (tags 0 and 1), as MySQL's
 	if (action == @selector(backForwardInHistory:)) {
@@ -2598,39 +2608,75 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// The Users sheet can open: connected, not processing (a database switch), and no sheet is attached.
 - (BOOL)_canShowUsers
 {
-	return !tornDown && !isProcessing && !confirmingSwitch && !usersController && [connection isConnected] && parentWindow && ![parentWindow attachedSheet];
+	return [self _canRunSheetJob];
+}
+
+/// The sheet of a job (Users, Export, Import) can open: connected, not processing (a database switch), no sheet
+/// attached, and no other job's sheet pending.
+- (BOOL)_canRunSheetJob
+{
+	return !tornDown && !isProcessing && !confirmingSwitch && !usersController && !exportController && [connection isConnected] && parentWindow && ![parentWindow attachedSheet];
+}
+
+/**
+ * The default connection provider: a new SPPostgresConnector per call, for the favorite with the database asked for
+ * and the passwords this session was opened with (as -_switchToDatabase:forHistory:), with the console logger
+ * attached. adopt (may be nil) is handed each connector as it is made, and keeps it; without one, the connector is
+ * kept until the background job on its connection ends (SPPostgresBackgroundJob). sheetWindow (may be nil) gives the
+ * window the connector's SSH sheets go to, else this tab's window.
+ */
+- (SPPostgresConnectionProvider)_defaultConnectionProviderAdopting:(void (^)(SPPostgresConnector *theConnector))adopt sheetWindow:(NSWindow *(^)(void))sheetWindow
+{
+	SPPostgresFavorite *base = [[favorite copy] autorelease];
+	NSString *thePassword = [connector password] ?: [connection password];
+	NSString *theSSHPassword = [connector sshPassword];
+	NSString *connectionName = [self _connectionName];
+	NSWindow *window = parentWindow;
+	void (^theAdopt)(SPPostgresConnector *) = [[adopt copy] autorelease];
+	NSWindow *(^theSheetWindow)(void) = [[sheetWindow copy] autorelease];
+
+	SPPostgresConnectionProvider provider = ^(NSString *database, void (^completion)(PGPostgresConnection *, NSError *)) {
+		SPPostgresFavorite *target = [[base copy] autorelease];
+		[target setDatabase:database];
+		NSWindow *host = (theSheetWindow ? theSheetWindow() : nil) ?: window;
+		SPPostgresConnector *newConnector = [[[SPPostgresConnector alloc] initWithFavorite:target password:thePassword sshPassword:theSSHPassword parentWindow:host] autorelease];
+		if (theAdopt) theAdopt(newConnector);
+		void (^done)(PGPostgresConnection *, NSError *) = [[completion copy] autorelease];
+		// The completion block keeps the connector during the attempt (the connector lets go of it once called)
+		[newConnector connectWithCompletion:^(PGPostgresConnection *theConnection, NSError *error) {
+			// The statements go to the Console as this tab's do (COPY data never does; passwords only as verifiers)
+			if (theConnection) {
+				SPPostgresConsoleLogger *jobLogger = [[[SPPostgresConsoleLogger alloc] initWithConnectionName:connectionName database:database] autorelease];
+				[jobLogger attachToConnection:theConnection];
+				if (!theAdopt) [SPPostgresBackgroundJob keepOwner:newConnector untilJobEndsOnConnection:theConnection];
+			}
+			done(theConnection, error);
+		}];
+	};
+	return [[provider copy] autorelease];
+}
+
+- (SPPostgresConnectionProvider)effectiveConnectionProvider
+{
+	if (connectionProvider) return [[connectionProvider retain] autorelease];
+	return [self _defaultConnectionProviderAdopting:nil sheetWindow:nil];
 }
 
 - (IBAction)showUserManager:(id)sender
 {
 	if (![self _canShowUsers] || ![currentDatabase length]) return;
 
-	void (^provider)(NSString *, void (^)(PGPostgresConnection *, NSError *)) = usersConnectionProvider;
-	__block SPPostgresUsersController *owner = nil; // not retained by the block (MRC __block)
+	SPPostgresConnectionProvider provider = connectionProvider;
+	__block SPPostgresUsersController *owner = nil; // not retained by the blocks (MRC __block)
 	NSString *connectionName = [self _connectionName];
 	if (!provider) {
-		// As -_switchToDatabase:forHistory:: the same favorite and the passwords this session was opened with
-		SPPostgresFavorite *base = [[favorite copy] autorelease];
-		NSString *thePassword = [connector password] ?: [connection password];
-		NSString *theSSHPassword = [connector sshPassword];
-		NSWindow *window = parentWindow;
-		provider = ^(NSString *database, void (^completion)(PGPostgresConnection *, NSError *)) {
-			SPPostgresFavorite *target = [[base copy] autorelease];
-			[target setDatabase:database];
-			// Once the Users sheet is up, the SSH tunnel's sheets (passphrase, host key) can only attach to it
-			NSWindow *host = [owner windowForConnectorSheets] ?: window;
-			SPPostgresConnector *usersConnector = [[[SPPostgresConnector alloc] initWithFavorite:target password:thePassword sshPassword:theSSHPassword parentWindow:host] autorelease];
-			[owner adoptConnector:usersConnector]; // keeps it until the sheet ends
-			void (^done)(PGPostgresConnection *, NSError *) = [[completion copy] autorelease];
-			[usersConnector connectWithCompletion:^(PGPostgresConnection *theConnection, NSError *error) {
-				// The sheet's statements go to the Console as this tab's do (passwords only as verifiers)
-				if (theConnection) {
-					SPPostgresConsoleLogger *usersLogger = [[[SPPostgresConsoleLogger alloc] initWithConnectionName:connectionName database:database] autorelease];
-					[usersLogger attachToConnection:theConnection];
-				}
-				done(theConnection, error);
-			}];
-		};
+		// The sheet keeps its connectors until it ends; once it is up, the SSH tunnel's sheets (passphrase, host key)
+		// can only attach to it
+		provider = [self _defaultConnectionProviderAdopting:^(SPPostgresConnector *theConnector) {
+			[owner adoptConnector:theConnector];
+		} sheetWindow:^NSWindow *{
+			return [owner windowForConnectorSheets];
+		}];
 	}
 
 	SPPostgresUsersController *controller = [[SPPostgresUsersController alloc] initWithDatabase:currentDatabase connectionProvider:provider];
@@ -2654,6 +2700,23 @@ NSString * const SPPostgresPaneExtension = @"extension";
 		}
 		[self autorelease];
 	}];
+}
+
+#pragma mark - Export
+
+- (IBAction)export:(id)sender
+{
+	if (![self _canRunSheetJob] || ![currentDatabase length]) return;
+
+	SPPostgresExportController *controller = [[SPPostgresExportController alloc] initWithDocument:self];
+	exportController = controller; // released when it ends
+	[controller setDidEnd:^{
+		if (exportController == controller) {
+			exportController = nil;
+			[controller autorelease];
+		}
+	}];
+	[controller beginSheet];
 }
 
 - (void)unavailableInThisVersion:(id)sender
