@@ -9,6 +9,7 @@ work as they do on MySQL tabs:
 - **Relations:** foreign keys.
 - **Triggers:** a table's triggers and their functions.
 - **Table Info:** owner, sizes and the CREATE statement.
+- **Sequences:** a SEQUENCES section in the left panel, where sequences can be listed, added, modified and deleted.
 
 **Architecture:**
 - A new metadata + DDL layer, `SPPostgresTableStructure`, serves all four views. Every change runs immediately
@@ -23,6 +24,11 @@ work as they do on MySQL tabs:
 **Spec:** `docs/superpowers/specs/2026-10-27-postgresql-support-design.md` (Goals 7, 8, 9, 14; "Structure"; the
 builder's calls on USING, dependent columns and transactions) as amended by
 `docs/superpowers/specs/2026-10-27-postgresql-tabs-design.md`.
+
+**Amendment (owner, 2026-10-28):** "add the sequence management, such as list, modify, delete, add sequence".
+- This overrides the spec's non-goal for sequences only.
+- Views and functions stay out of scope.
+- Task 5 implements it.
 
 ## Global Constraints
 
@@ -71,6 +77,8 @@ builder's calls on USING, dependent columns and transactions) as amended by
    - Nothing is dropped, and every dependent is listed by name.
    - PostgreSQL itself would silently drop the indexes and constraints, so this needs a pre-check.
    - Pinned in Task 1 (`testDropColumnWithDependentsIsRefusedAndListsThem`).
+   - The same applies to deleting a sequence that a column default uses: it is refused, and the columns are
+     listed. Pinned in Task 5 (`testDropSequenceInUseIsRefusedAndListsColumns`).
 3. **The user's open transaction from the Query view.**
    - A failing DDL leaves it open and usable.
    - An aborted transaction refuses DDL without sending it.
@@ -454,3 +462,112 @@ builder's calls on USING, dependent columns and transactions) as amended by
   - ⌘1–⌘6 on both;
   - a USING retry;
   - a refused column drop.
+
+### Task 5: Sequences
+
+**Files:**
+- Create: `Source/Postgres/SPPostgresSequences.h/.m` (data and DDL) and
+  `Source/Postgres/SPPostgresSequenceController.h/.m` (the editor pane).
+- Modify: `Source/Postgres/SPPostgresCatalog.h/.m`. Add
+  `- (NSArray *)sequenceNamesInSchema:(NSString *)schema error:(NSError **)error;` (relkind `S`, sorted).
+- Modify: `Source/Postgres/SPPostgresSidebarController.h/.m`:
+  - A `SEQUENCES` section between `VIEWS` and `EXTENSIONS`.
+  - `@property (readonly) NSString *selectedSequenceName;` (nil unless a sequence is selected; `selectedTableName`
+    is nil then).
+  - Right-click menu on a sequence: "Add Sequence…" and "Delete Sequence…". On the section header or empty
+    space: "Add Sequence…".
+  - Delegate methods `sidebar:addSequenceInSchema:` and `sidebar:deleteSequenceNamed:`.
+- Modify: `Source/Postgres/SPPostgresDocument.h/.m`:
+  - Pane `SPPostgresPaneSequence` `@"sequence"`, shown whenever a sequence is selected.
+  - Toolbar: only Query and the document-level items stay enabled while it shows.
+  - History records sequence selections with `pane` `sequence` and `table` = the sequence name.
+- Test: `PostgresTests/SPPostgresSequencesTests.m` (both ports) and `PostgresTests/SPPostgresSequenceControllerTests.m`.
+
+**Interfaces:**
+- **Consumes:** `SPPostgresRunAtomically` with savepoint `sp_structure`, the lock_timeout rule (Global Constraints),
+  `SPPostgresQuoteIdentifier`/`SPPostgresQuoteLiteral`, `isValidTableName:` (63 bytes), and the pane mechanism and
+  presenters from Task 2.
+- **Produces `SPPostgresSequence : NSObject`** (readonly):
+  - `schema`, `name`, `dataType` (`smallint`, `integer` or `bigint`);
+  - `NSNumber` values `start`, `increment`, `minValue`, `maxValue`, `cache`, and `BOOL cycle`, all from
+    `pg_sequence`;
+  - `lastValue` (`NSNumber`, nil when never called; read with `SELECT last_value, is_called FROM "s"."seq"`) and
+    `BOOL isCalled`;
+  - `ownedBy` (`@"schema.table.column"` from `pg_depend` deptype `a`, nil if none);
+  - `BOOL isIdentity` (deptype `i`: the sequence behind an identity column), `owner`, `comment`.
+  - Values are `NSNumber` (`long long`); bigint limits fit.
+- **Produces `SPPostgresSequenceDefinition : NSObject`** (readwrite): the same settable fields — `name`,
+  `dataType`, `start`, `increment`, `minValue`, `maxValue`, `cache`, `cycle`, `ownedBy`, `comment`. A nil number
+  means the server default.
+- **Produces `SPPostgresSequences : NSObject`:**
+  - `- (instancetype)initWithConnection:(PGPostgresConnection *)connection schema:(NSString *)schema;`
+  - `@property NSTimeInterval lockTimeout;` (default 5)
+  - `- (SPPostgresSequence *)sequenceNamed:(NSString *)name error:(NSError **)error;`
+  - `- (BOOL)createSequence:(SPPostgresSequenceDefinition *)definition error:(NSError **)error;`
+    Runs `CREATE SEQUENCE "s"."n" AS <type> INCREMENT BY … MINVALUE … MAXVALUE … START WITH … CACHE … [NO] CYCLE
+    [OWNED BY "s"."t"."c"]`, then `COMMENT ON SEQUENCE` when a comment is given. Numbers are formatted from
+    `NSNumber`, never from typed text.
+  - `- (BOOL)alterSequence:(NSString *)name to:(SPPostgresSequenceDefinition *)definition error:(NSError **)error;`
+    - Sends only what changed, in one atomic block: `ALTER SEQUENCE … AS/INCREMENT/MINVALUE/MAXVALUE/START/CACHE/
+      CYCLE/OWNED BY` (`OWNED BY NONE` when cleared), `RENAME TO`, and `COMMENT`.
+    - For an identity sequence, the same options go through `ALTER TABLE "s"."t" ALTER COLUMN "c" SET …` instead,
+      and rename and OWNED BY are refused with "This sequence belongs to identity column t.c; rename or detach it
+      from the column."
+  - `- (BOOL)setValue:(NSNumber *)value isCalled:(BOOL)isCalled ofSequence:(NSString *)name error:(NSError **)error;`
+    (`SELECT setval($1::regclass, $2::bigint, $3::boolean)`)
+  - `- (NSArray *)columnsUsingSequence:(NSString *)name error:(NSError **)error;`
+    - Lists `"s"."t"."c"` for every column whose default refers to the sequence: `pg_depend` from `pg_attrdef`
+      to the sequence, then to the column.
+    - For an identity sequence, it lists its column.
+  - `- (BOOL)dropSequence:(NSString *)name error:(NSError **)error;`
+    - When `columnsUsingSequence:` is non-empty, it fails with `SPPostgresErrorHasDependents`, the message
+      `"<name>" can't be deleted because these columns use it.`, and the list. Nothing is sent.
+    - Otherwise it runs plain `DROP SEQUENCE` (never CASCADE).
+- **Sequence pane layout** follows Table Info's label-grid style:
+  - Editable fields: Name, Type popup, Start, Increment, Min, Max, Cache, Cycle checkbox, Owned by (a popup of
+    `schema.table.column` for integer columns of tables in the schema, plus "None"), and Comment.
+  - Read-only: Owner, and "Current value" (`lastValue`, or `Not used yet`).
+  - Buttons:
+    - **Apply** calls `alterSequence:to:` and reloads.
+    - **Revert** reloads.
+    - **Set Value…** opens a small sheet with a value field and a "next call returns this value" checkbox, which
+      means `isCalled` NO.
+  - Number fields accept integers only, enforced by an `NSNumberFormatter` with no fraction digits.
+  - Identity sequences show the note above, with Name and Owned by read-only.
+- **Add Sequence…** opens a sheet with the same fields, prefilled with the defaults (`bigint`, start 1,
+  increment 1, cache 1, no cycle, owned by None). On success the new sequence is selected in the sidebar.
+- **Delete Sequence…** asks "Delete sequence "x"?". When the sequence is in use, an alert lists the columns,
+  one per line.
+
+- [ ] **Step 1: Extend the fixture** in `structure_test`:
+  - `seq_free` (`increment 5 start 100`, comment "free");
+  - `seq_used`, used by `used_t.n int default nextval('structure_test.seq_used')`;
+  - `t`'s serial sequence `t_id_seq` and its identity sequence `t_ident_seq` already exist (Task 1);
+  - in `"Sales Data"`, a sequence `"Odd ""Seq"""`.
+- [ ] **Step 2: Write the failing tests:**
+  - **Data, both ports:**
+    - `testCatalogListsSequencesSorted`
+    - `testSequenceDetails`: `seq_free` has start 100, increment 5, comment "free", lastValue nil; after
+      `nextval` it is 100, isCalled YES; `t_id_seq` ownedBy is `structure_test.t.id`; `t_ident_seq` isIdentity.
+    - `testCreateWithAllOptionsAndOwnedBy`
+    - `testAlterChangesOnlyWhatChangedAndRenames`: rename to a 64-byte name is refused before sending.
+    - `testAlterIdentitySequenceGoesThroughColumnAndRefusesRename`
+    - `testSetValueNextCallReturnsIt`
+    - `testDropSequenceInUseIsRefusedAndListsColumns`: `seq_used` lists `structure_test.used_t.n`;
+      `t_id_seq` lists `structure_test.t.id`; both still exist.
+    - `testDropFreeSequence`
+    - `testOddSequenceName`
+    - `testChangesInsideUserTransactionKeepItOpen`
+  - **View, port 55418:**
+    - `testSidebarShowsSequencesSectionBeforeExtensions`
+    - `testSelectingSequenceShowsPaneAndDisablesTableItems`
+    - `testApplyEditsSequence`
+    - `testAddSequenceSheetCreatesAndSelects`: drive the sheet's completion.
+    - `testDeleteInUseSequenceShowsColumns`
+    - `testHistoryRestoresSequenceSelection`
+    - `testQueryCreateSequenceAppearsInSidebar`: uses stage 2's DDL refresh.
+- [ ] **Step 3: Run them and confirm they fail.**
+- [ ] **Step 4: Implement.**
+- [ ] **Step 5: Run the full suite and the app build.**
+- [ ] **Step 6: Commit.**
+- [ ] **Step 7 (controller):** visual check of the SEQUENCES section and the sequence pane.
