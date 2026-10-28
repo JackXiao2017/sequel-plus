@@ -17,6 +17,7 @@
 @class SPPostgresUsersController;
 @class SPWindowController;
 @class SPPostgresExportController;
+@class SPPostgresImportController;
 
 /**
  * Hands out a connection of its own to database: calls completion exactly once, on the main thread (synchronously or
@@ -157,6 +158,22 @@ __attribute__((visibility("default")))
 
 /// The Export sheet's controller while it is shown or its export runs, else nil.
 @property (readonly) SPPostgresExportController *exportController;
+
+/**
+ * File ▸ Import…: the open panel, then (for CSV) the mapping sheet, then the import (SPPostgresImportController).
+ * Enabled while connected, not processing and no sheet is attached. Import from Clipboard stays disabled.
+ */
+- (IBAction)import:(id)sender;
+
+/// The Import controller while its panel or sheets are shown or its import runs, else nil.
+@property (readonly) SPPostgresImportController *importController;
+
+/**
+ * An import changed the database (called by SPPostgresImportController after a successful or partly successful
+ * import): the sidebar reloads keeping its selection (once the tab's own transaction can read the catalog), the
+ * database pop-up too, and every pane is marked stale, the shown one reloading now.
+ */
+- (void)importDidChangeDatabase;
 
 /// The database this tab is connected to.
 @property (readonly) NSString *currentDatabase;
