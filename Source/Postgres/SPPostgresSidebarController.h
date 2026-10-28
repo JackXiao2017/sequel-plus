@@ -12,6 +12,8 @@
 - (void)sidebar:(SPPostgresSidebarController *)sidebar didFailToLoadWithError:(NSError *)error;
 /// "Duplicate Table…" was chosen in the outline's menu for `table`, a table of the selected schema.
 - (void)sidebar:(SPPostgresSidebarController *)sidebar duplicateTableNamed:(NSString *)table;
+/// "Rename Table…" was chosen in the outline's menu for `table`, a table of the selected schema.
+- (void)sidebar:(SPPostgresSidebarController *)sidebar renameTableNamed:(NSString *)table;
 @end
 
 /**
@@ -53,8 +55,8 @@ __attribute__((visibility("default")))
 - (BOOL)selectTableNamed:(NSString *)name;
 
 /**
- * The outline's right-click menu: "Duplicate Table…", enabled on a table (not a view or extension). It acts on
- * the row that was right-clicked, or else on the selected one, through the delegate.
+ * The outline's right-click menu: "Duplicate Table…" and "Rename Table…", enabled on a table (not a view or
+ * extension). They act on the row that was right-clicked, or else on the selected one, through the delegate.
  */
 @property (readonly) NSMenu *tableMenu;
 
@@ -62,6 +64,9 @@ __attribute__((visibility("default")))
 
 /// The selected table or view of the selected schema, or nil.
 @property (readonly) NSString *selectedTableName;
+
+/// The selection is listed under TABLES (a table or partitioned table), not VIEWS.
+@property (readonly) BOOL selectionIsTable;
 
 /// The first catalog error of the last reload (whose failed lists kept what they showed), or nil.
 @property (readonly) NSError *lastError;

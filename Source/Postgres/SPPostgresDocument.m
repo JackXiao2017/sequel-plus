@@ -1,6 +1,8 @@
 #import "SPPostgresDocument.h"
 #import "SPPostgresSidebarController.h"
 #import "SPPostgresContentController.h"
+#import "SPPostgresStructureController.h"
+#import "SPPostgresTableStructure.h"
 #import "SPPostgresQueryController.h"
 #import "SPPostgresHistory.h"
 #import "SPPostgresTableDuplicator.h"
@@ -28,6 +30,13 @@ static NSString * const SPPostgresDocumentToolbarIdentifier = @"TableWindowToolb
 static const CGFloat SPPostgresSidebarDefaultWidth = 214;
 static const NSSize SPPostgresSplitViewSize = {943, 549};
 
+NSString * const SPPostgresPaneStructure = @"structure";
+NSString * const SPPostgresPaneContent = @"content";
+NSString * const SPPostgresPaneRelations = @"relations";
+NSString * const SPPostgresPaneTriggers = @"triggers";
+NSString * const SPPostgresPaneInfo = @"info";
+NSString * const SPPostgresPaneQuery = @"query";
+
 @interface SPPostgresDocument () <SPPostgresSidebarControllerDelegate>
 
 @property (readwrite) BOOL isProcessing;
@@ -38,10 +47,18 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 - (void)_attachCurrentConnection;
 - (void)_buildContent;
 - (void)_installContentController;
+- (void)_installStructureController;
 - (void)_installQueryController;
 - (void)_queryRunChangedSchema:(BOOL)schemaChanged data:(BOOL)dataChanged;
+- (void)_structureDidChange:(BOOL)columnsChanged;
 - (void)_refreshContentIfStale;
-- (void)_showQueryPane:(BOOL)query;
+- (void)_refreshStructureIfStale;
+- (void)_refreshCurrentPaneIfStale;
+- (NSView *)_viewForPane:(NSString *)pane;
+- (BOOL)_endEditingInPane:(NSString *)pane;
+- (BOOL)_canShowPane:(NSString *)pane;
+- (void)_updatePaneToolbarSelection;
+- (void)_updateEmptyStates;
 - (NSView *)_rightPane;
 - (void)_showSelectedTable;
 - (void)_buildToolbar;
@@ -61,10 +78,13 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 - (void)_goBackInHistory:(BOOL)back;
 - (void)_applyHistoryEntry:(NSDictionary *)entry;
 - (void)_abandonHistoryRestore;
-- (BOOL)_endContentEditing;
+- (BOOL)_endPaneEditing;
 - (void)_confirmLeavingSession:(void (^)(BOOL proceed))completion;
 - (void)_showDuplicateTableSheetForTable:(NSString *)table;
 - (void)_duplicateTable:(NSString *)table inSchema:(NSString *)schema toName:(NSString *)newName withContent:(BOOL)withContent;
+- (void)_showRenameTableSheetForTable:(NSString *)table;
+- (void)_renameTable:(NSString *)table inSchema:(NSString *)schema toName:(NSString *)newName;
+- (void)_validateNameSheets;
 
 @end
 
@@ -77,10 +97,13 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	SPPostgresConsoleLogger *logger;
 	SPPostgresSidebarController *sidebar;
 	SPPostgresContentController *contentController;
+	SPPostgresStructureController *structureController;
 	SPPostgresQueryController *queryController;
 	SPPostgresHistory *history;
-	/// The right pane shows the Query view (else the Content view)
-	BOOL showingQuery;
+	/// The pane shown in the right pane (an SPPostgresPane… name)
+	NSString *currentPane;
+	/// The Relations, Triggers and Table Info panes until their views exist: an empty-state text (by pane name)
+	NSMutableDictionary *placeholderPanes;
 
 	NSString *serverVersion;
 	NSString *currentDatabase;
@@ -102,12 +125,21 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	/// Content view last loaded: it reloads when it is next shown
 	BOOL contentNeedsReload;
 	BOOL contentNeedsReset;
+	/// The Structure view shows another table than the selected one, or the Query view (or a rename) may have
+	/// changed it: it is built again, from the sidebar's selection, when it is next shown
+	BOOL structureNeedsReset;
 
 	/// The Duplicate Table sheet while it is shown, and its controls
 	NSWindow *duplicateSheet;
 	NSTextField *duplicateNameField;
 	NSButton *duplicateContentSwitch;
 	NSButton *duplicateButton;
+
+	/// The Rename Table sheet while it is shown, and its controls
+	NSWindow *renameSheet;
+	NSTextField *renameNameField;
+	NSButton *renameButton;
+	NSString *renameOriginalName;
 
 	SPSplitView *splitView;
 	NSToolbar *toolbar;
@@ -123,6 +155,8 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 
 @synthesize sidebar;
 @synthesize contentController;
+@synthesize structureController;
+@synthesize currentPane;
 @synthesize queryController;
 @synthesize history;
 @synthesize connection;
@@ -143,6 +177,8 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 		connector = [theConnector retain];
 		favorite = [theFavorite copy];
 		history = [[SPPostgresHistory alloc] init];
+		currentPane = [SPPostgresPaneContent copy];
+		placeholderPanes = [[NSMutableDictionary alloc] init];
 
 		[self _attachCurrentConnection];
 
@@ -176,8 +212,15 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	[logger release];
 	[sidebar release];
 	[contentController release];
+	[structureController release];
 	[queryController release];
 	[history release];
+	[currentPane release];
+	[placeholderPanes release];
+	[renameSheet release];
+	[renameNameField release];
+	[renameButton release];
+	[renameOriginalName release];
 	[pendingHistoryEntry release];
 	[duplicateSheet release];
 	[duplicateNameField release];
@@ -259,6 +302,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	[mainView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 	[splitView addSubview:mainView];
 	[self _installQueryController];
+	[self _installStructureController];
 	[self _installContentController];
 
 	// Constrained, and resized with the window, as MySQL's left pane (see -[SPDatabaseDocument splitView:constrain...])
@@ -268,7 +312,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	[splitView setAutosaveName:SPPostgresSplitterName];
 }
 
-/// The right pane (Content or Query view), or nil before it is built.
+/// The right pane (holding the shown pane's view), or nil before it is built.
 - (NSView *)_rightPane
 {
 	if ([[splitView subviews] count] < 2) return nil;
@@ -302,9 +346,48 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	NSView *contentView = [contentController view];
 	[contentView setFrame:[pane bounds]];
 	[contentView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
-	if (!showingQuery) [pane addSubview:contentView];
+	if ([currentPane isEqualToString:SPPostgresPaneContent]) [pane addSubview:contentView];
 
 	[self _showSelectedTable];
+}
+
+/**
+ * A Structure controller on the current connection (replacing the previous one, which is on the previous
+ * connection), in the right pane while the Structure view is showing. It shows the selected table when it is
+ * next shown.
+ */
+- (void)_installStructureController
+{
+	NSView *pane = [self _rightPane];
+	if (!pane) return;
+
+	if (structureController) {
+		[[structureController view] removeFromSuperview];
+		[structureController invalidate];
+		[structureController release];
+	}
+
+	structureController = [[SPPostgresStructureController alloc] initWithConnection:connection];
+
+	// Unretained, as the Content controller's presenter: -invalidate (on replace or teardown) drops the blocks
+	__block SPPostgresDocument *document = self;
+	[structureController setAlertPresenter:^(NSAlert *alert) {
+		[document _presentAlert:alert];
+	}];
+	[structureController setConfirmationPresenter:^(NSAlert *alert, void (^completion)(BOOL confirmed)) {
+		[document _confirm:alert completion:completion];
+	}];
+	[structureController setStructureDidChange:^(BOOL columnsChanged) {
+		[document _structureDidChange:columnsChanged];
+	}];
+
+	NSView *structureView = [structureController view];
+	[structureView setFrame:[pane bounds]];
+	[structureView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+	if ([currentPane isEqualToString:SPPostgresPaneStructure]) [pane addSubview:structureView];
+
+	structureNeedsReset = YES;
+	if ([currentPane isEqualToString:SPPostgresPaneStructure]) [self _refreshStructureIfStale];
 }
 
 /**
@@ -336,42 +419,155 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	NSView *queryView = [queryController view];
 	[queryView setFrame:[pane bounds]];
 	[queryView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
-	if (showingQuery) [pane addSubview:queryView];
+	if ([currentPane isEqualToString:SPPostgresPaneQuery]) [pane addSubview:queryView];
+}
+
+/// The known pane names, in toolbar order.
+- (NSArray *)_paneNames
+{
+	return @[SPPostgresPaneStructure, SPPostgresPaneContent, SPPostgresPaneRelations, SPPostgresPaneTriggers, SPPostgresPaneInfo, SPPostgresPaneQuery];
+}
+
+/// The view a pane shows. Relations, Triggers and Table Info have a placeholder (with an empty-state text) so far.
+- (NSView *)_viewForPane:(NSString *)pane
+{
+	if ([pane isEqualToString:SPPostgresPaneStructure]) return [structureController view];
+	if ([pane isEqualToString:SPPostgresPaneContent]) return [contentController view];
+	if ([pane isEqualToString:SPPostgresPaneQuery]) return [queryController view];
+	if (![[self _paneNames] containsObject:pane]) return nil;
+
+	NSView *placeholder = [placeholderPanes objectForKey:pane];
+	if (!placeholder) {
+		placeholder = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, 700, 500)] autorelease];
+		[placeholder setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+		NSTextField *label = [NSTextField labelWithString:@""];
+		[label setIdentifier:@"paneEmptyState"];
+		[label setTextColor:[NSColor secondaryLabelColor]];
+		[label setAlignment:NSTextAlignmentCenter];
+		[label setFrame:NSMakeRect(20, 240, 660, 20)];
+		[label setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin | NSViewMaxYMargin];
+		[placeholder addSubview:label];
+		[placeholderPanes setObject:placeholder forKey:pane];
+		[self _updateEmptyStates];
+	}
+	return placeholder;
+}
+
+/// The toolbar item of a pane (SPMainToolbar.m), or nil.
+- (NSString *)_toolbarIdentifierForPane:(NSString *)pane
+{
+	NSDictionary *identifiers = @{SPPostgresPaneStructure: SPMainToolbarTableStructure, SPPostgresPaneContent: SPMainToolbarTableContent,
+								  SPPostgresPaneRelations: SPMainToolbarTableRelations, SPPostgresPaneTriggers: SPMainToolbarTableTriggers,
+								  SPPostgresPaneInfo: SPMainToolbarTableInfo, SPPostgresPaneQuery: SPMainToolbarCustomQuery};
+	return [identifiers objectForKey:pane];
+}
+
+/// The pane a toolbar item shows, or nil.
+- (NSString *)_paneForToolbarIdentifier:(NSString *)identifier
+{
+	for (NSString *pane in [self _paneNames]) {
+		if ([[self _toolbarIdentifierForPane:pane] isEqualToString:identifier]) return pane;
+	}
+	return nil;
 }
 
 /**
- * Shows the Query view or the Content view in the right pane, as MySQL's tab view does. The other view is
- * taken out of the window (keeping its state), so its key equivalents don't apply meanwhile. An edit in
- * progress in the Content grid is ended (saved) first; if it can't end, nothing changes.
+ * Whether a pane's toolbar item and View menu item are enabled: Query always; Structure, Content and Table Info
+ * for any selected table or view; Relations and Triggers for a table (or partitioned table) only.
  */
-- (void)_showQueryPane:(BOOL)query
+- (BOOL)_canShowPane:(NSString *)pane
 {
-	NSView *pane = [self _rightPane];
-	if (!pane) return;
+	if (tornDown || !pane) return NO;
+	if ([pane isEqualToString:SPPostgresPaneQuery]) return YES;
+	if (![[sidebar selectedTableName] length]) return NO;
+	if ([pane isEqualToString:SPPostgresPaneRelations] || [pane isEqualToString:SPPostgresPaneTriggers]) return [sidebar selectionIsTable];
+	return YES;
+}
 
-	NSView *showing = query ? [queryController view] : [contentController view];
-	NSView *hiding = query ? [contentController view] : [queryController view];
+/**
+ * Ends an edit in progress in a pane's view (saving it), and saves a Structure draft column. NO if it couldn't
+ * (e.g. the value or the column was refused): the tab should stay where it is.
+ */
+- (BOOL)_endEditingInPane:(NSString *)pane
+{
+	NSView *paneView = [self _viewForPane:pane];
+	NSWindow *window = [[self _rightPane] window];
 
-	if ([hiding superview] && [pane window]) {
-		NSResponder *responder = [[pane window] firstResponder];
-		BOOL editingInHiding = [responder isKindOfClass:[NSView class]] && [(NSView *)responder isDescendantOf:hiding];
-		if (editingInHiding && ![[pane window] makeFirstResponder:nil]) return;
+	if ([paneView superview] && window) {
+		NSResponder *responder = [window firstResponder];
+		BOOL editingInPane = [responder isKindOfClass:[NSView class]] && [(NSView *)responder isDescendantOf:paneView];
+		if (editingInPane && ![window makeFirstResponder:nil]) return NO;
 	}
 
-	showingQuery = query;
+	if ([pane isEqualToString:SPPostgresPaneStructure] && ![structureController commitPendingEdits]) return NO;
+	return YES;
+}
 
-	[hiding removeFromSuperview];
-	if ([showing superview] != pane) {
-		[showing setFrame:[pane bounds]];
-		[pane addSubview:showing];
+/// Ends an edit in progress in the shown pane (see -_endEditingInPane:).
+- (BOOL)_endPaneEditing
+{
+	return [self _endEditingInPane:currentPane];
+}
+
+/**
+ * Shows a pane in the right pane, as MySQL's tab view does. The other panes' views are taken out of the window
+ * (keeping their state), so their key equivalents don't apply meanwhile. An edit in progress in the pane being
+ * left is ended (saved) first; if it can't end, nothing changes.
+ */
+- (void)showPane:(NSString *)pane
+{
+	if (tornDown) return;
+	if (![[self _paneNames] containsObject:pane]) pane = SPPostgresPaneContent;
+
+	NSView *container = [self _rightPane];
+	if (!container) return;
+
+	NSView *showing = [self _viewForPane:pane];
+	NSView *hiding = [self _viewForPane:currentPane];
+
+	if (hiding != showing && ![self _endEditingInPane:currentPane]) return;
+
+	if (pane != currentPane) {
+		[currentPane release];
+		currentPane = [pane copy];
 	}
 
-	[toolbar setSelectedItemIdentifier:query ? SPMainToolbarCustomQuery : ([[sidebar selectedTableName] length] ? SPMainToolbarTableContent : nil)];
-	[toolbar validateVisibleItems];
+	if (hiding != showing) [hiding removeFromSuperview];
+	if ([showing superview] != container) {
+		[showing setFrame:[container bounds]];
+		[container addSubview:showing];
+	}
 
-	if (!query) [self _refreshContentIfStale];
+	[self _updatePaneToolbarSelection];
+	[self _refreshCurrentPaneIfStale];
+	[self _updateEmptyStates];
 
 	[self _recordHistory];
+}
+
+/// The shown pane's toolbar item is selected (none for a table pane without a table), and the items revalidated.
+- (void)_updatePaneToolbarSelection
+{
+	BOOL hasTable = [[sidebar selectedTableName] length] > 0;
+	BOOL needsTable = ![currentPane isEqualToString:SPPostgresPaneQuery];
+	[toolbar setSelectedItemIdentifier:(needsTable && !hasTable) ? nil : [self _toolbarIdentifierForPane:currentPane]];
+	[toolbar validateVisibleItems];
+}
+
+/// A pane whose item is disabled for the selection (Relations or Triggers on a view) says so in its empty state.
+- (void)_updateEmptyStates
+{
+	BOOL isView = [[sidebar selectedTableName] length] && ![sidebar selectionIsTable];
+	NSDictionary *texts = @{
+		SPPostgresPaneRelations: isView ? NSLocalizedString(@"Relations aren't available for views.", @"PostgreSQL relations pane: view selected") : @"",
+		SPPostgresPaneTriggers: isView ? NSLocalizedString(@"Triggers aren't available for views.", @"PostgreSQL triggers pane: view selected") : @"",
+		SPPostgresPaneInfo: @"",
+	};
+	for (NSString *pane in placeholderPanes) {
+		for (NSView *subview in [[placeholderPanes objectForKey:pane] subviews]) {
+			if ([[subview identifier] isEqualToString:@"paneEmptyState"]) [(NSTextField *)subview setStringValue:[texts objectForKey:pane] ?: @""];
+		}
+	}
 }
 
 /**
@@ -387,6 +583,11 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	if (schemaChanged) listsNeedReload = YES;
 	if (dataChanged) contentNeedsReload = YES;
 
+	// The Structure view is built again from the sidebar's selection: a statement may have altered the table, and
+	// a transaction's end (COMMIT/END count as data changes, ROLLBACK/ABORT as schema changes) may have undone a
+	// rename the structure object followed
+	structureNeedsReset = YES;
+
 	if (listsNeedReload && [connection transactionStatus] != PGPostgresTransactionInError) {
 		listsNeedReload = NO;
 		contentNeedsReset = YES; // its columns may have changed
@@ -399,7 +600,30 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 		[self updateWindowTitle:self];
 	}
 
-	if (!showingQuery) [self _refreshContentIfStale];
+	[self _refreshCurrentPaneIfStale];
+}
+
+/// The Structure view changed the table: the Content view shows its new columns when it is next shown.
+- (void)_structureDidChange:(BOOL)columnsChanged
+{
+	if (tornDown) return;
+	if (columnsChanged) contentNeedsReset = YES;
+	else contentNeedsReload = YES;
+}
+
+/// The shown pane reloads if it may be stale.
+- (void)_refreshCurrentPaneIfStale
+{
+	if ([currentPane isEqualToString:SPPostgresPaneContent]) [self _refreshContentIfStale];
+	else if ([currentPane isEqualToString:SPPostgresPaneStructure]) [self _refreshStructureIfStale];
+}
+
+/// Builds the Structure view again for the selected table (a new structure object, so a rename the server undid is forgotten).
+- (void)_refreshStructureIfStale
+{
+	if (!structureNeedsReset) return;
+	structureNeedsReset = NO;
+	[structureController showTable:[sidebar selectedTableName] inSchema:[sidebar selectedSchema]];
 }
 
 /// Reloads the Content view if the Query view may have changed its table: afresh after DDL, else keeping its filter, sort and page.
@@ -414,7 +638,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	else [contentController reload];
 }
 
-/// The Content view shows the table or view selected in the sidebar (or nothing), and the Content toolbar item is selected with it.
+/// The Content view (and the Structure view when shown) show the table or view selected in the sidebar (or nothing), and the pane's toolbar item is selected with it.
 - (void)_showSelectedTable
 {
 	NSString *table = [sidebar selectedTableName];
@@ -426,9 +650,14 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 		contentNeedsReset = NO;
 	}
 
-	// The Query view stays when the selection changes (as MySQL's)
-	[toolbar setSelectedItemIdentifier:showingQuery ? SPMainToolbarCustomQuery : ([table length] ? SPMainToolbarTableContent : nil)];
-	[toolbar validateVisibleItems];
+	// The Structure view follows when it is shown (or next time it is)
+	if (!table || ![table isEqualToString:[structureController table]] || ![schema isEqualToString:[structureController schema]]) structureNeedsReset = YES;
+	if ([currentPane isEqualToString:SPPostgresPaneStructure]) [self _refreshStructureIfStale];
+
+	// The pane stays when the selection changes (as MySQL's Query tab); one whose item is now disabled
+	// (Relations or Triggers on a view) shows its empty state
+	[self _updatePaneToolbarSelection];
+	[self _updateEmptyStates];
 }
 
 - (void)_buildToolbar
@@ -706,7 +935,11 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 
 	[sidebar invalidate];
 	[sidebar setDelegate:nil];
+	// A Rename Table sheet still up (its completion sees tornDown)
+	if (renameSheet) [[renameSheet sheetParent] endSheet:renameSheet returnCode:NSModalResponseCancel];
+
 	[contentController invalidate];
+	[structureController invalidate];
 	[queryController invalidate];
 	[splitView setDelegate:nil];
 	[databasePopup setTarget:nil];
@@ -750,6 +983,11 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 - (void)sidebar:(SPPostgresSidebarController *)theSidebar duplicateTableNamed:(NSString *)table
 {
 	[self _showDuplicateTableSheetForTable:table];
+}
+
+- (void)sidebar:(SPPostgresSidebarController *)theSidebar renameTableNamed:(NSString *)table
+{
+	[self _showRenameTableSheetForTable:table];
 }
 
 #pragma mark - Databases
@@ -803,8 +1041,8 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 		return;
 	}
 
-	// As MySQL's (couldCommitCurrentViewActions): an edit in progress in the Content grid is saved first
-	if (![self _endContentEditing]) {
+	// As MySQL's (couldCommitCurrentViewActions): an edit in progress in the shown pane is saved first
+	if (![self _endPaneEditing]) {
 		[self _selectCurrentDatabaseInPopup];
 		return;
 	}
@@ -813,16 +1051,6 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 		if (proceed) [self _switchToDatabase:database forHistory:NO];
 		else [self _selectCurrentDatabaseInPopup];
 	}];
-}
-
-/// Ends an edit in progress in the Content grid (saving it); NO if it couldn't end (e.g. the value was refused).
-- (BOOL)_endContentEditing
-{
-	NSResponder *responder = [parentWindow firstResponder];
-	if ([responder isKindOfClass:[NSView class]] && [(NSView *)responder isDescendantOf:[contentController view]]) {
-		return [parentWindow makeFirstResponder:nil];
-	}
-	return YES;
 }
 
 /**
@@ -942,6 +1170,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 
 	[sidebar reloadWithCatalog:catalog];
 	[self _installQueryController];
+	[self _installStructureController];
 	[self _installContentController];
 	[self _reloadDatabasePopup];
 
@@ -958,11 +1187,11 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 
 #pragma mark - History
 
-/// Records where the tab is now (database, schema, table, Content or Query view), unless a history entry is being shown.
+/// Records where the tab is now (database, schema, table, pane), unless a history entry is being shown.
 - (void)_recordHistory
 {
 	if (tornDown || restoringHistory || pendingHistoryEntry || ![currentDatabase length]) return;
-	[history recordDatabase:currentDatabase schema:[sidebar selectedSchema] table:[sidebar selectedTableName] pane:showingQuery ? @"query" : @"content"];
+	[history recordDatabase:currentDatabase schema:[sidebar selectedSchema] table:[sidebar selectedTableName] pane:currentPane];
 	[self _updateHistoryControl];
 }
 
@@ -997,8 +1226,8 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 {
 	if (tornDown || isProcessing || confirmingSwitch) return;
 
-	// As MySQL's (couldCommitCurrentViewActions): an edit in progress in the Content grid is ended (saved) first
-	if (![self _endContentEditing]) return;
+	// As MySQL's (couldCommitCurrentViewActions): an edit in progress in the shown pane is ended (saved) first
+	if (![self _endPaneEditing]) return;
 
 	NSDictionary *entry = back ? [history goBack] : [history goForward];
 	if (!entry) return;
@@ -1024,7 +1253,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	[self _updateHistoryControl];
 }
 
-/// Selects the entry's schema, table (none if it had none) and view, without recording that as a new entry.
+/// Selects the entry's schema, table (none if it had none) and pane (an unknown one: Content), without recording that as a new entry.
 - (void)_applyHistoryEntry:(NSDictionary *)entry
 {
 	restoringHistory = YES;
@@ -1038,7 +1267,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 		[sidebar selectTableNamed:nil];
 	}
 
-	[self _showQueryPane:[[entry objectForKey:@"pane"] isEqualToString:@"query"]];
+	[self showPane:[entry objectForKey:@"pane"]];
 
 	restoringHistory = NO;
 }
@@ -1061,8 +1290,8 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 {
 	if (tornDown || duplicateSheet || ![table length] || !parentWindow || isProcessing) return;
 
-	// An edit in progress in the Content grid is ended (saved) first, as MySQL's
-	if (![parentWindow makeFirstResponder:nil]) return;
+	// An edit in progress (and a Structure draft column) is ended (saved) first, as MySQL's
+	if (![self _endPaneEditing] || ![parentWindow makeFirstResponder:nil]) return;
 
 	NSString *schema = [[[sidebar selectedSchema] copy] autorelease];
 	if (![schema length]) return;
@@ -1124,7 +1353,7 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	[content addSubview:duplicateButton];
 
 	[duplicateSheet setInitialFirstResponder:duplicateNameField];
-	[self controlTextDidChange:nil];
+	[self _validateNameSheets];
 
 	[parentWindow beginSheet:duplicateSheet completionHandler:^(NSModalResponse returnCode) {
 		NSString *newName = [[[duplicateNameField stringValue] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] copy];
@@ -1150,10 +1379,19 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	return [[duplicateNameField stringValue] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 }
 
-/// Duplicate is enabled while the name is one PostgreSQL keeps as given (not empty, at most 63 bytes).
+/// Duplicate (and Rename) is enabled while the name is one PostgreSQL keeps as given (not empty, at most 63 bytes).
 - (void)controlTextDidChange:(NSNotification *)notification
 {
-	[duplicateButton setEnabled:[SPPostgresTableDuplicator isValidTableName:[self _duplicateTableName]]];
+	[self _validateNameSheets];
+}
+
+- (void)_validateNameSheets
+{
+	if (duplicateSheet) [duplicateButton setEnabled:[SPPostgresTableDuplicator isValidTableName:[self _duplicateTableName]]];
+	if (renameSheet) {
+		NSString *name = [self _renameTableName];
+		[renameButton setEnabled:[SPPostgresTableDuplicator isValidTableName:name] && ![name isEqualToString:renameOriginalName]];
+	}
 }
 
 - (void)closeDuplicateTableSheet:(id)sender
@@ -1187,6 +1425,131 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	[sidebar reloadSchema:schema];
 	restoringHistory = NO;
 	[sidebar selectTableNamed:newName];
+}
+
+#pragma mark - Rename Table
+
+/// A sheet as the Duplicate Table one (and MySQL's Rename Table sheet): the new name, Cancel/Rename.
+- (void)_showRenameTableSheetForTable:(NSString *)table
+{
+	if (tornDown || renameSheet || duplicateSheet || ![table length] || !parentWindow || isProcessing) return;
+
+	// An edit in progress (and a Structure draft column) is ended (saved) first
+	if (![self _endPaneEditing] || ![parentWindow makeFirstResponder:nil]) return;
+
+	NSString *schema = [[[sidebar selectedSchema] copy] autorelease];
+	if (![schema length]) return;
+
+	NSRect frame = NSMakeRect(0, 0, 260, 106);
+	renameSheet = [[NSWindow alloc] initWithContentRect:frame styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:YES];
+	[renameSheet setReleasedWhenClosed:NO];
+	[renameSheet setTitle:NSLocalizedString(@"Rename Table", @"PostgreSQL rename table sheet title")];
+	[renameSheet setContentMinSize:NSMakeSize(260, 106)];
+	[renameSheet setContentMaxSize:NSMakeSize(600, 106)];
+	NSView *content = [renameSheet contentView];
+	NSFont *smallFont = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
+
+	NSTextField *message = [NSTextField labelWithString:[NSString stringWithFormat:NSLocalizedString(@"Rename table '%@' to:", @"PostgreSQL rename table sheet message"), table]];
+	[message setFrame:NSMakeRect(17, 72, 226, 14)];
+	[message setFont:smallFont];
+	[message setLineBreakMode:NSLineBreakByTruncatingMiddle];
+	[message setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+	[content addSubview:message];
+
+	renameNameField = [[NSTextField alloc] initWithFrame:NSMakeRect(20, 45, 222, 19)];
+	[renameNameField setIdentifier:@"renameTableName"];
+	[[renameNameField cell] setControlSize:NSControlSizeSmall];
+	[renameNameField setFont:smallFont];
+	[[renameNameField cell] setUsesSingleLineMode:YES];
+	[[renameNameField cell] setScrollable:YES];
+	[renameNameField setStringValue:table];
+	[renameNameField setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+	[renameNameField setDelegate:(id<NSTextFieldDelegate>)self];
+	[content addSubview:renameNameField];
+
+	NSButton *cancel = [NSButton buttonWithTitle:NSLocalizedString(@"Cancel", @"cancel button") target:self action:@selector(closeRenameTableSheet:)];
+	[cancel setFrame:NSMakeRect(61, 10, 91, 28)];
+	[cancel setControlSize:NSControlSizeSmall];
+	[cancel setFont:smallFont];
+	[cancel setTag:NSModalResponseCancel];
+	[cancel setKeyEquivalent:@"\e"];
+	[cancel setAutoresizingMask:NSViewMinXMargin | NSViewMaxYMargin];
+	[content addSubview:cancel];
+
+	renameButton = [[NSButton buttonWithTitle:NSLocalizedString(@"Rename", @"PostgreSQL rename table sheet: rename button") target:self action:@selector(closeRenameTableSheet:)] retain];
+	[renameButton setIdentifier:@"renameTableButton"];
+	[renameButton setFrame:NSMakeRect(150, 10, 97, 28)];
+	[renameButton setControlSize:NSControlSizeSmall];
+	[renameButton setFont:smallFont];
+	[renameButton setTag:NSModalResponseOK];
+	[renameButton setKeyEquivalent:@"\r"];
+	[renameButton setAutoresizingMask:NSViewMinXMargin | NSViewMaxYMargin];
+	[content addSubview:renameButton];
+
+	[renameOriginalName release];
+	renameOriginalName = [table copy];
+	[renameSheet setInitialFirstResponder:renameNameField];
+	[self _validateNameSheets];
+
+	[parentWindow beginSheet:renameSheet completionHandler:^(NSModalResponse returnCode) {
+		NSString *newName = [[[renameNameField stringValue] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] copy];
+
+		[renameNameField setDelegate:nil];
+		[renameSheet orderOut:nil];
+		[renameSheet release], renameSheet = nil;
+		[renameNameField release], renameNameField = nil;
+		[renameButton release], renameButton = nil;
+		[renameOriginalName release], renameOriginalName = nil;
+
+		if (returnCode == NSModalResponseOK && !tornDown && [newName length] && ![newName isEqualToString:table]) {
+			[self _renameTable:table inSchema:schema toName:newName];
+		}
+		[newName release];
+	}];
+}
+
+/// The sheet's name, trimmed.
+- (NSString *)_renameTableName
+{
+	return [[renameNameField stringValue] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+- (void)closeRenameTableSheet:(id)sender
+{
+	if (!renameSheet) return;
+	if ([sender tag] == NSModalResponseOK && ![renameButton isEnabled]) {
+		NSBeep();
+		return;
+	}
+	[parentWindow endSheet:renameSheet returnCode:[sender tag]];
+}
+
+/// Renames the table (ALTER TABLE … RENAME TO, as a structure change); on success the lists reload, keeping the selection on it.
+- (void)_renameTable:(NSString *)table inSchema:(NSString *)schema toName:(NSString *)newName
+{
+	SPPostgresTableStructure *tableStructure = [[[SPPostgresTableStructure alloc] initWithConnection:connection schema:schema table:table] autorelease];
+	NSError *error = nil;
+	if (![tableStructure renameTableTo:newName error:&error]) {
+		NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+		[alert setAlertStyle:NSAlertStyleWarning];
+		[alert setMessageText:NSLocalizedString(@"Error", @"error")];
+		[alert setInformativeText:[NSString stringWithFormat:NSLocalizedString(@"Couldn't rename '%@'.\nPostgreSQL said: %@", @"PostgreSQL rename table failed"), table, [error localizedDescription] ?: @""]];
+		[self _presentAlert:alert];
+		return;
+	}
+
+	// Its columns' table name changed: the Content and Structure views load it afresh
+	contentNeedsReset = YES;
+	structureNeedsReset = YES;
+
+	// The renamed table stays selected (another selection is kept); the reload on the way is not a place the user went to
+	if (![schema isEqualToString:[sidebar selectedSchema]]) return;
+	NSString *selected = [[[sidebar selectedTableName] copy] autorelease];
+	NSString *reselect = [selected isEqualToString:table] ? newName : selected;
+	restoringHistory = YES;
+	[sidebar reloadSchema:schema];
+	restoringHistory = NO;
+	if (reselect) [sidebar selectTableNamed:reselect];
 }
 
 #pragma mark - Split view
@@ -1245,8 +1608,12 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 
 	if (tornDown) return NO;
 
-	// As the Content toolbar item
-	if (action == @selector(viewContent:)) return [[sidebar selectedTableName] length] > 0;
+	// As the pane toolbar items
+	if (action == @selector(viewStructure:)) return [self _canShowPane:SPPostgresPaneStructure];
+	if (action == @selector(viewContent:)) return [self _canShowPane:SPPostgresPaneContent];
+	if (action == @selector(viewRelations:)) return [self _canShowPane:SPPostgresPaneRelations];
+	if (action == @selector(viewTriggers:)) return [self _canShowPane:SPPostgresPaneTriggers];
+	if (action == @selector(viewStatus:)) return [self _canShowPane:SPPostgresPaneInfo];
 
 	// View > Back/Forward In History (tags 0 and 1), as MySQL's
 	if (action == @selector(backForwardInHistory:)) {
@@ -1280,10 +1647,11 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 	return SPMainToolbarSelectableItemIdentifiers();
 }
 
-/// The database picker, Table History, the console, Content and Query work on Postgres tabs so far
+/// The database picker, Table History, the console and the pane items work on Postgres tabs so far
 - (NSArray *)_availableToolbarItemIdentifiers
 {
-	return @[SPMainToolbarDatabaseSelection, SPMainToolbarHistoryNavigation, SPMainToolbarShowConsole, SPMainToolbarTableContent, SPMainToolbarCustomQuery];
+	return @[SPMainToolbarDatabaseSelection, SPMainToolbarHistoryNavigation, SPMainToolbarShowConsole, SPMainToolbarTableStructure,
+			 SPMainToolbarTableContent, SPMainToolbarTableRelations, SPMainToolbarTableTriggers, SPMainToolbarTableInfo, SPMainToolbarCustomQuery];
 }
 
 - (NSToolbarItem *)toolbar:(NSToolbar *)theToolbar itemForItemIdentifier:(NSString *)identifier willBeInsertedIntoToolbar:(BOOL)flag
@@ -1319,8 +1687,20 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 		[item setToolTip:NSLocalizedString(@"Show the console which shows all PostgreSQL commands performed by Sequel Pro", @"PostgreSQL toolbar: console tooltip")];
 		action = @selector(toggleConsole:);
 	}
+	else if ([identifier isEqualToString:SPMainToolbarTableStructure]) {
+		action = @selector(viewStructure:);
+	}
 	else if ([identifier isEqualToString:SPMainToolbarTableContent]) {
 		action = @selector(viewContent:);
+	}
+	else if ([identifier isEqualToString:SPMainToolbarTableRelations]) {
+		action = @selector(viewRelations:);
+	}
+	else if ([identifier isEqualToString:SPMainToolbarTableTriggers]) {
+		action = @selector(viewTriggers:);
+	}
+	else if ([identifier isEqualToString:SPMainToolbarTableInfo]) {
+		action = @selector(viewStatus:);
 	}
 	else if ([identifier isEqualToString:SPMainToolbarCustomQuery]) {
 		action = @selector(viewQuery:);
@@ -1354,31 +1734,64 @@ static const NSSize SPPostgresSplitViewSize = {943, 549};
 		return ![consoleWindow isKeyWindow];
 	}
 
-	// As MySQL's: Content needs a table (or view)
-	if ([identifier isEqualToString:SPMainToolbarTableContent]) {
-		return !tornDown && [[sidebar selectedTableName] length] > 0;
-	}
+	// The pane items: see -_canShowPane:
+	NSString *pane = [self _paneForToolbarIdentifier:identifier];
+	if (pane) return [self _canShowPane:pane];
 
 	return !tornDown;
+}
+
+/// Shows a pane its item allows (see -_canShowPane:), and gives its main view the keyboard focus.
+- (void)_viewPane:(NSString *)pane
+{
+	if (![self _canShowPane:pane]) return;
+	[self showPane:pane];
+	if (![currentPane isEqualToString:pane]) return;
+
+	NSView *focus = nil;
+	if ([pane isEqualToString:SPPostgresPaneContent]) {
+		[self _showSelectedTable];
+		focus = [contentController tableView];
+	}
+	else if ([pane isEqualToString:SPPostgresPaneStructure]) focus = [structureController columnsView];
+	else if ([pane isEqualToString:SPPostgresPaneQuery]) focus = [queryController editor];
+	if (focus) [[focus window] makeFirstResponder:focus];
+}
+
+/// Shows the Structure view of the selected table or view.
+- (IBAction)viewStructure:(id)sender
+{
+	[self _viewPane:SPPostgresPaneStructure];
 }
 
 /// Shows the Content view of the selected table.
 - (IBAction)viewContent:(id)sender
 {
-	if (tornDown || ![[sidebar selectedTableName] length]) return;
-	[self _showQueryPane:NO];
-	if (showingQuery) return;
-	[self _showSelectedTable];
-	[[[contentController view] window] makeFirstResponder:[contentController tableView]];
+	[self _viewPane:SPPostgresPaneContent];
+}
+
+/// Shows the Relations pane of the selected table.
+- (IBAction)viewRelations:(id)sender
+{
+	[self _viewPane:SPPostgresPaneRelations];
+}
+
+/// Shows the Triggers pane of the selected table.
+- (IBAction)viewTriggers:(id)sender
+{
+	[self _viewPane:SPPostgresPaneTriggers];
+}
+
+/// Shows the Table Info pane of the selected table or view (MySQL's View > Table Info).
+- (IBAction)viewStatus:(id)sender
+{
+	[self _viewPane:SPPostgresPaneInfo];
 }
 
 /// Shows the Query view, the editor focused.
 - (IBAction)viewQuery:(id)sender
 {
-	if (tornDown) return;
-	[self _showQueryPane:YES];
-	if (!showingQuery) return;
-	[[[queryController view] window] makeFirstResponder:[queryController editor]];
+	[self _viewPane:SPPostgresPaneQuery];
 }
 
 - (void)unavailableInThisVersion:(id)sender

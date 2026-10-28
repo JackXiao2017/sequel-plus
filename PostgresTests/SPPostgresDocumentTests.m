@@ -5,6 +5,9 @@
 #import "../Source/SPWindowController.h"
 #import "../Source/Postgres/SPPostgresDocument.h"
 #import "../Source/Postgres/SPPostgresSidebarController.h"
+#import "../Source/Postgres/SPPostgresStructureController.h"
+#import "../Source/Postgres/SPPostgresContentController.h"
+#import "../Source/Postgres/SPPostgresHistory.h"
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
 
@@ -14,6 +17,8 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 @interface SPPostgresDocument (SPPostgresDocumentTestsActions)
 - (void)refreshDatabases:(id)sender;
 - (void)toggleConsole:(id)sender;
+- (void)_applyHistoryEntry:(NSDictionary *)entry;
+- (IBAction)backForwardInHistory:(id)sender;
 @end
 
 @interface SPWindowController (SPPostgresDocumentTests)
@@ -444,7 +449,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 
 	SPPostgresSidebarController *sidebar = self.document.sidebar;
 	NSMenu *menu = sidebar.tableMenu;
-	XCTAssertEqualObjects([menu.itemArray valueForKey:@"title"], (@[@"Duplicate Table…"]));
+	XCTAssertEqualObjects([menu.itemArray valueForKey:@"title"], (@[@"Duplicate Table…", @"Rename Table…"]));
 	NSMenuItem *duplicate = menu.itemArray.firstObject;
 
 	// Only for a table: not a view, not without a selection
@@ -510,6 +515,192 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 
 	[admin execute:@"DROP TABLE IF EXISTS public.customers_copy, public.\"cust copy\""];
 	[admin disconnect];
+}
+
+#pragma mark - Structure
+
+/// The Structure fixture on this test's server, dropped when the test ends; structure_test.<table> selected.
+- (void)selectStructureTable:(NSString *)table
+{
+	[SPPostgresTestServers loadStructureFixtureOnPort:SPPostgresDocumentTestPort];
+	[self addTeardownBlock:^{
+		[SPPostgresTestServers dropStructureFixtureOnPort:SPPostgresDocumentTestPort];
+	}];
+	[self.document.sidebar reloadSchema:@"structure_test"];
+	XCTAssertTrue([self.document.sidebar selectTableNamed:table]);
+}
+
+- (void)testRenameTableFromSidebarMenuReloadsAndKeepsSelection
+{
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self.controller showWindow:nil];
+	[self selectStructureTable:@"child"];
+	[self.document viewStructure:nil];
+
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	NSMenu *menu = sidebar.tableMenu;
+	NSMenuItem *rename = menu.itemArray.lastObject;
+	XCTAssertEqualObjects(rename.title, @"Rename Table…");
+
+	// Only for a table
+	XCTAssertTrue([sidebar selectTableNamed:@"t_view"]);
+	XCTAssertFalse([(id<NSMenuItemValidation>)rename.target validateMenuItem:rename]);
+	XCTAssertTrue([sidebar selectTableNamed:@"t"]);
+	XCTAssertTrue([(id<NSMenuItemValidation>)rename.target validateMenuItem:rename]);
+
+	// The sheet, prefilled with the name; Cancel does nothing
+	[menu performActionForItemAtIndex:[menu indexOfItem:rename]];
+	NSWindow *sheet = [self window].attachedSheet;
+	XCTAssertNotNil(sheet);
+	NSTextField *name = [self viewWithIdentifier:@"renameTableName" in:sheet.contentView];
+	NSButton *button = [self viewWithIdentifier:@"renameTableButton" in:sheet.contentView];
+	XCTAssertEqualObjects(name.stringValue, @"t");
+	[[self window] endSheet:sheet returnCode:NSModalResponseCancel];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"t");
+
+	// Renamed: listed under its new name, still selected, and the Structure view follows
+	[menu performActionForItemAtIndex:[menu indexOfItem:rename]];
+	sheet = [self window].attachedSheet;
+	name = [self viewWithIdentifier:@"renameTableName" in:sheet.contentView];
+	button = [self viewWithIdentifier:@"renameTableButton" in:sheet.contentView];
+	name.stringValue = @"t renamed";
+	[[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification object:name];
+	XCTAssertTrue(button.isEnabled);
+	[button performClick:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [sidebar.selectedTableName isEqualToString:@"t renamed"]; } timeout:5], @"%@ %@", sidebar.selectedTableName, alerts.firstObject.informativeText);
+	XCTAssertTrue([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"t renamed"]);
+	XCTAssertFalse([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"t"]);
+	XCTAssertEqualObjects(self.document.structureController.table, @"t renamed");
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
+	XCTAssertTrue([[self.document windowTitleString] hasSuffix:@"/structure_test.t renamed"]);
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+
+	// A name that is taken: the server's message, nothing renamed
+	[menu performActionForItemAtIndex:[menu indexOfItem:rename]];
+	sheet = [self window].attachedSheet;
+	name = [self viewWithIdentifier:@"renameTableName" in:sheet.contentView];
+	button = [self viewWithIdentifier:@"renameTableButton" in:sheet.contentView];
+	name.stringValue = @"child";
+	[[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification object:name];
+	[button performClick:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return alerts.count == 1; } timeout:5]);
+	XCTAssertTrue([alerts.firstObject.informativeText containsString:@"already exists"], @"%@", alerts.firstObject.informativeText);
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"t renamed");
+}
+
+- (void)testStructureChangeMarksContentStale
+{
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self selectStructureTable:@"t"];
+	[self.document viewContent:nil];
+	NSArray *before = [[self.document.contentController.tableView tableColumns] valueForKeyPath:@"headerCell.stringValue"];
+	XCTAssertFalse([before containsObject:@"fresh_col"]);
+
+	[self.document viewStructure:nil];
+	SPPostgresStructureController *structure = self.document.structureController;
+	[structure addColumn:nil];
+	NSTableView *columns = structure.columnsView;
+	[[columns currentEditor] setString:@"fresh_col"];
+	[(id)[columns delegate] control:columns textView:(NSTextView *)[columns currentEditor] doCommandBySelector:@selector(insertNewline:)];
+	XCTAssertFalse(structure.hasDraftColumn);
+
+	[self.document viewContent:nil];
+	NSArray *after = [[self.document.contentController.tableView tableColumns] valueForKeyPath:@"headerCell.stringValue"];
+	XCTAssertTrue([after containsObject:@"fresh_col"], @"%@", after);
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+
+	// A draft not saved yet is saved before leaving the pane
+	[self.document viewStructure:nil];
+	[structure addColumn:nil];
+	[[columns currentEditor] setString:@"leaving_col"];
+	[self.document viewContent:nil];
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneContent);
+	XCTAssertFalse(structure.hasDraftColumn);
+	XCTAssertTrue([[[self.document.contentController.tableView tableColumns] valueForKeyPath:@"headerCell.stringValue"] containsObject:@"leaving_col"]);
+
+	// One that can't be saved keeps the tab on Structure
+	[self.document viewStructure:nil];
+	[structure addColumn:nil];
+	[[columns currentEditor] setString:@"leaving_col"]; // taken
+	[self.document viewContent:nil];
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
+	XCTAssertTrue(structure.hasDraftColumn);
+	XCTAssertEqual(alerts.count, 1u);
+}
+
+- (void)testHistoryRecordsAndRestoresStructurePane
+{
+	[self selectStructureTable:@"t"];
+	[self.document viewStructure:nil];
+	XCTAssertEqualObjects(self.document.history.currentEntry[@"pane"], @"structure");
+	XCTAssertEqualObjects(self.document.history.currentEntry[@"table"], @"t");
+
+	[self.document viewQuery:nil];
+	XCTAssertEqualObjects(self.document.history.currentEntry[@"pane"], @"query");
+	XCTAssertTrue([self.document.sidebar selectTableNamed:@"child"]);
+	[self.document viewRelations:nil];
+	XCTAssertEqualObjects(self.document.history.currentEntry[@"pane"], @"relations");
+
+	// Back: Query, then Structure of t
+	[self.document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneQuery);
+	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"child");
+	[self.document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	[self.document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
+	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"t");
+	XCTAssertEqualObjects(self.document.structureController.table, @"t");
+
+	// Forward to Relations
+	[self.document backForwardInHistory:[self historyMenuItemWithTag:1]];
+	[self.document backForwardInHistory:[self historyMenuItemWithTag:1]];
+	[self.document backForwardInHistory:[self historyMenuItemWithTag:1]];
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneRelations);
+	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"child");
+
+	// Every pane name restores; an unknown one as Content
+	for (NSString *pane in @[@"structure", @"content", @"relations", @"triggers", @"info", @"query"]) {
+		[self.document _applyHistoryEntry:@{@"database": @"pgkit_test", @"schema": @"structure_test", @"table": @"t", @"pane": pane}];
+		XCTAssertEqualObjects(self.document.currentPane, pane);
+	}
+	[self.document _applyHistoryEntry:@{@"database": @"pgkit_test", @"schema": @"structure_test", @"table": @"t", @"pane": @"no such pane"}];
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneContent);
+}
+
+- (NSMenuItem *)historyMenuItemWithTag:(NSInteger)tag
+{
+	NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:@"History" action:@selector(backForwardInHistory:) keyEquivalent:@""];
+	item.tag = tag;
+	return item;
+}
+
+- (void)testMySQLTabUnaffected
+{
+	[self selectStructureTable:@"t"];
+	NSMenuItem *structureItem = [[NSMenuItem alloc] initWithTitle:@"Structure" action:@selector(viewStructure:) keyEquivalent:@"1"];
+	XCTAssertTrue([self.controller validateMenuItem:structureItem]);
+
+	// A MySQL tab (not connected) answers for itself, through SPDatabaseDocument
+	id mysql = [self.controller addNewConnection];
+	XCTAssertEqual([self.controller selectedDocument], mysql);
+	XCTAssertTrue([mysql isKindOfClass:NSClassFromString(@"SPDatabaseDocument")]);
+	XCTAssertEqual([self.controller validateMenuItem:structureItem], [mysql validateMenuItem:structureItem]);
+	XCTAssertFalse([self.controller validateMenuItem:structureItem], @"no database on the MySQL tab");
+	NSToolbarItem *mysqlStructure = nil;
+	for (NSToolbarItem *item in [[self window].toolbar items]) {
+		if ([item.itemIdentifier isEqualToString:@"SwitchToTableStructureToolbarItemIdentifier"]) mysqlStructure = item;
+	}
+	XCTAssertNotNil(mysqlStructure);
+	XCTAssertEqual([mysqlStructure target], mysql);
+	XCTAssertEqualObjects(NSStringFromSelector([mysqlStructure action]), @"viewStructure:");
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneContent, @"the Postgres tab isn't touched");
+
+	// Only the Postgres tab answers on its own tab
+	[[self tabView] selectTabViewItem:self.document.parentTabViewItem];
+	XCTAssertTrue([self.controller validateMenuItem:structureItem]);
+	[self.controller performSelector:@selector(viewStructure:) withObject:structureItem];
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
 }
 
 #pragma mark - Console
