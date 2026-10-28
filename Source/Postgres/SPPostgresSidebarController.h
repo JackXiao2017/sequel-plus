@@ -41,6 +41,13 @@ __attribute__((visibility("default")))
 /// If the tables or views can't be loaded, the schema, lists and selection stay as they were.
 - (void)reloadSchema:(NSString *)schema;
 
+/**
+ * Shows the tables, views and sequences of `schema` (as -reloadSchema:) and selects its sequence `sequence`, the
+ * delegate hearing of one selection change at the end (none if the selection is the same), not of the empty
+ * selection on the way. A sequence that isn't listed leaves nothing selected.
+ */
+- (void)reloadSchema:(NSString *)schema selectingSequence:(NSString *)sequence;
+
 /// Switches to another catalog (another database): reloads schemas, extensions and the default schema.
 /// A list that can't be loaded keeps what it showed.
 - (void)reloadWithCatalog:(SPPostgresCatalog *)catalog;

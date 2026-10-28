@@ -152,6 +152,7 @@
 		XCTAssertFalse(free.cycle);
 		XCTAssertEqualObjects(free.comment, @"free");
 		XCTAssertNil(free.lastValue, @"never called");
+		XCTAssertEqualObjects(free.pendingValue, @100, @"the next call returns the start");
 		XCTAssertFalse(free.isCalled);
 		XCTAssertNil(free.ownedBy);
 		XCTAssertFalse(free.isIdentity);
@@ -161,6 +162,7 @@
 		XCTAssertEqualObjects([self value:@"SELECT nextval('structure_test.seq_free')::text" on:connection], @"100");
 		free = [self sequence:@"seq_free" of:sequences];
 		XCTAssertEqualObjects(free.lastValue, @100);
+		XCTAssertNil(free.pendingValue);
 		XCTAssertTrue(free.isCalled);
 
 		SPPostgresSequence *serial = [self sequence:@"t_id_seq" of:sequences];
@@ -450,6 +452,7 @@
 		SPPostgresSequence *free = [self sequence:@"seq_free" of:sequences];
 		XCTAssertFalse(free.isCalled);
 		XCTAssertNil(free.lastValue);
+		XCTAssertEqualObjects(free.pendingValue, @500);
 		XCTAssertEqualObjects([self value:@"SELECT nextval('structure_test.seq_free')::text" on:connection], @"500");
 
 		XCTAssertTrue([sequences setValue:@42 isCalled:YES ofSequence:@"seq_free" error:&error], @"%@", error);

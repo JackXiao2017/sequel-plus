@@ -16,6 +16,7 @@ __attribute__((visibility("default")))
 	NSNumber *_cache;
 	BOOL _cycle;
 	NSNumber *_lastValue;
+	NSNumber *_pendingValue;
 	BOOL _isCalled;
 	NSString *_ownedBy;
 	BOOL _isIdentity;
@@ -38,6 +39,9 @@ __attribute__((visibility("default")))
 /// or "the next call returns this value"), and when the user may not read the sequence.
 @property (readonly, copy) NSNumber *lastValue;
 @property (readonly) BOOL isCalled;
+/// What the next nextval returns while is_called is false (last_value: the start of a sequence never used, or the
+/// value setval(…, false) set); nil once it was called, and when the user may not read the sequence.
+@property (readonly, copy) NSNumber *pendingValue;
 /// @"schema.table.column" of the column the sequence is OWNED BY (pg_depend deptype 'a', as serial columns'), or nil.
 @property (readonly, copy) NSString *ownedBy;
 /// The sequence behind an identity column (pg_depend deptype 'i'): its options are changed through that column.

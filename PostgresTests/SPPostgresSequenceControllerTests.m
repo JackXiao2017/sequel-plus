@@ -1,4 +1,5 @@
 #import <XCTest/XCTest.h>
+#import <objc/runtime.h>
 #import <PostgresKit/PostgresKit.h>
 #import "SPPostgresTestServers.h"
 #import "SPTestPrefsGuard.h"
@@ -9,6 +10,7 @@
 #import "../Source/Postgres/SPPostgresSequences.h"
 #import "../Source/Postgres/SPPostgresQueryController.h"
 #import "../Source/Postgres/SPPostgresContentController.h"
+#import "../Source/Postgres/SPPostgresStructureController.h"
 #import "../Source/Postgres/SPPostgresHistory.h"
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
@@ -34,6 +36,25 @@ static NSString * const SPSequenceTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 
 @interface SPWindowController (SPPostgresSequenceControllerTests)
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem;
+@end
+
+/// Every -showPane: and Structure -showTable:inSchema: call while recording (see -recordPaneChanges).
+static NSMutableArray *SPSequenceTestPaneLog = nil;
+
+@implementation SPPostgresDocument (SPSequenceTestRecording)
+- (void)sp_seqtest_showPane:(NSString *)pane
+{
+	[SPSequenceTestPaneLog addObject:[@"showPane:" stringByAppendingString:pane ?: @"nil"]];
+	[self sp_seqtest_showPane:pane]; // the original (exchanged)
+}
+@end
+
+@implementation SPPostgresStructureController (SPSequenceTestRecording)
+- (void)sp_seqtest_showTable:(NSString *)table inSchema:(NSString *)schema
+{
+	[SPSequenceTestPaneLog addObject:[@"structure:" stringByAppendingString:table ?: @"nil"]];
+	[self sp_seqtest_showTable:table inSchema:schema];
+}
 @end
 
 /// The SEQUENCES section and the Sequence pane of a Postgres tab hosted in a window (port 55418).
@@ -257,6 +278,23 @@ static NSString * const SPSequenceTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	[self.document backForwardInHistory:item];
 }
 
+/// Records -showPane: and Structure loads into SPSequenceTestPaneLog until the test ends.
+- (void)recordPaneChanges
+{
+	SPSequenceTestPaneLog = [NSMutableArray array];
+	Method showPane = class_getInstanceMethod([SPPostgresDocument class], @selector(showPane:));
+	Method recordPane = class_getInstanceMethod([SPPostgresDocument class], @selector(sp_seqtest_showPane:));
+	Method showTable = class_getInstanceMethod([SPPostgresStructureController class], @selector(showTable:inSchema:));
+	Method recordTable = class_getInstanceMethod([SPPostgresStructureController class], @selector(sp_seqtest_showTable:inSchema:));
+	method_exchangeImplementations(showPane, recordPane);
+	method_exchangeImplementations(showTable, recordTable);
+	[self addTeardownBlock:^{
+		method_exchangeImplementations(showPane, recordPane);
+		method_exchangeImplementations(showTable, recordTable);
+		SPSequenceTestPaneLog = nil;
+	}];
+}
+
 #pragma mark - Sidebar
 
 - (void)testSidebarShowsSequencesSectionBeforeExtensions
@@ -361,7 +399,7 @@ static NSString * const SPSequenceTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	XCTAssertFalse([pane.ownedByPopup.itemTitles containsObject:@"structure_test.t.code"], @"integer columns only");
 	XCTAssertEqualObjects(pane.commentField.stringValue, @"free");
 	XCTAssertEqualObjects(pane.ownerField.stringValue, @"pgkit_test");
-	XCTAssertEqualObjects(pane.currentValueField.stringValue, @"Not used yet");
+	XCTAssertEqualObjects(pane.currentValueField.stringValue, @"100 (next call returns this)");
 	XCTAssertEqualObjects(pane.identityNoteField.stringValue, @"");
 	XCTAssertTrue(pane.nameField.isEditable);
 	XCTAssertTrue(pane.ownedByPopup.isEnabled);
@@ -381,17 +419,19 @@ static NSString * const SPSequenceTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	XCTAssertFalse([formatter getObjectValue:&value forString:@"1.5" errorDescription:NULL]);
 	XCTAssertFalse([formatter getObjectValue:&value forString:@"abc" errorDescription:NULL]);
 
-	// Only Query and the document's own items are enabled
-	for (NSString *identifier in @[SPSequenceTestToolbarStructure, SPSequenceTestToolbarContent, SPSequenceTestToolbarRelations, SPSequenceTestToolbarTriggers, SPSequenceTestToolbarInfo]) {
+	// Only Structure (which is the Sequence pane here), Query and the document's own items are enabled
+	for (NSString *identifier in @[SPSequenceTestToolbarContent, SPSequenceTestToolbarRelations, SPSequenceTestToolbarTriggers, SPSequenceTestToolbarInfo]) {
 		XCTAssertFalse([self.document validateToolbarItem:[self toolbarItem:identifier]], @"%@", identifier);
 	}
+	XCTAssertTrue([self.document validateToolbarItem:[self toolbarItem:SPSequenceTestToolbarStructure]]);
 	XCTAssertTrue([self.document validateToolbarItem:[self toolbarItem:SPSequenceTestToolbarQuery]]);
-	XCTAssertNil([[self.document toolbar] selectedItemIdentifier]);
-	for (NSValue *selector in @[[NSValue valueWithPointer:@selector(viewStructure:)], [NSValue valueWithPointer:@selector(viewContent:)], [NSValue valueWithPointer:@selector(viewRelations:)],
+	XCTAssertEqualObjects([[self.document toolbar] selectedItemIdentifier], SPSequenceTestToolbarStructure, @"the Sequence pane highlights Structure");
+	for (NSValue *selector in @[[NSValue valueWithPointer:@selector(viewContent:)], [NSValue valueWithPointer:@selector(viewRelations:)],
 								[NSValue valueWithPointer:@selector(viewTriggers:)], [NSValue valueWithPointer:@selector(viewStatus:)]]) {
 		NSMenuItem *item = [self menuItem:(SEL)[selector pointerValue] key:@""];
 		XCTAssertFalse([self.controller validateMenuItem:item], @"%@", item.title);
 	}
+	XCTAssertTrue([self.controller validateMenuItem:[self menuItem:@selector(viewStructure:) key:@"1"]]);
 	XCTAssertTrue([self.controller validateMenuItem:[self menuItem:@selector(viewQuery:) key:@"6"]]);
 
 	// The table panes' actions do nothing without a table (nil selectedTableName everywhere)
@@ -546,7 +586,7 @@ static NSString * const SPSequenceTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	XCTAssertEqualObjects(pane.cacheField.stringValue, @"1");
 
 	// A rename: the sidebar lists and selects the new name, the pane follows it
-	[self type:@"seq renamed" into:pane.nameField];
+	[self type:@"  seq renamed \n" into:pane.nameField]; // trimmed
 	[pane apply:nil];
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"seq renamed");
@@ -581,7 +621,7 @@ static NSString * const SPSequenceTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	[setButton performClick:nil];
 	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
 	XCTAssertEqual(self.alerts.count, 1u, @"%@", self.alerts.lastObject.informativeText);
-	XCTAssertEqualObjects(pane.currentValueField.stringValue, @"Not used yet");
+	XCTAssertEqualObjects(pane.currentValueField.stringValue, @"77 (next call returns this)");
 	XCTAssertEqualObjects([self serverValue:@"SELECT nextval('structure_test.\"seq renamed\"')::text"], @"77");
 
 	// …and as the last value
@@ -837,6 +877,169 @@ static NSString * const SPSequenceTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	[self.document switchToDatabase:@"pgkit_test"];
 	XCTAssertTrue([self spinUntil:^BOOL{ return [[self.document windowTitleString] containsString:@"/pgkit_test"] && !self.document.isProcessing; } timeout:20]);
 	[self selectSequence:@"seq_free"];
+	XCTAssertEqualObjects(self.pane.incrementField.stringValue, @"5");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+}
+
+#pragma mark - Fix round 1
+
+/// Values past 2^53 show exactly (not through a double), in the fields, Current value and the Set Value prefill.
+- (void)testBigintValuesDisplayExactly
+{
+	[self serverRun:@"CREATE SEQUENCE structure_test.big MINVALUE 9007199254740993 MAXVALUE 9223372036854775806 START 9007199254740993"];
+	[self selectSequence:@"big"];
+	SPPostgresSequenceController *pane = self.pane;
+	XCTAssertEqualObjects(pane.startField.stringValue, @"9007199254740993");
+	XCTAssertEqualObjects(pane.minValueField.stringValue, @"9007199254740993");
+	XCTAssertEqualObjects(pane.maxValueField.stringValue, @"9223372036854775806");
+	XCTAssertEqualObjects(pane.currentValueField.stringValue, @"9007199254740993 (next call returns this)");
+	NSFormatter *formatter = pane.startField.formatter;
+	XCTAssertEqualObjects([formatter stringForObjectValue:@(1234567890123456789LL)], @"1234567890123456789");
+	XCTAssertEqualObjects([formatter editingStringForObjectValue:@(LLONG_MAX - 1)], @"9223372036854775806");
+	id value = nil;
+	XCTAssertTrue([formatter getObjectValue:&value forString:@"9007199254740993" errorDescription:NULL]);
+	XCTAssertEqual([value longLongValue], 9007199254740993LL);
+
+	// The Set Value prefill: the pending value, then the last value
+	[self.controller showWindow:nil];
+	[pane setValue:nil];
+	NSTextField *field = [self viewWithIdentifier:@"setValueField" in:pane.setValueSheet.contentView];
+	XCTAssertEqualObjects(field.stringValue, @"9007199254740993");
+	[[self window] endSheet:pane.setValueSheet returnCode:NSModalResponseCancel];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+
+	[self serverRun:@"SELECT setval('structure_test.big', 9223372036854775806)"];
+	[pane revert:nil];
+	XCTAssertEqualObjects(pane.currentValueField.stringValue, @"9223372036854775806");
+	[pane setValue:nil];
+	field = [self viewWithIdentifier:@"setValueField" in:pane.setValueSheet.contentView];
+	XCTAssertEqualObjects(field.stringValue, @"9223372036854775806");
+	NSButton *set = [self viewWithIdentifier:@"setValueButton" in:pane.setValueSheet.contentView];
+	[set performClick:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+	XCTAssertEqualObjects([self serverValue:@"SELECT last_value::text FROM structure_test.big"], @"9223372036854775806", @"set exactly what was shown");
+
+	// An edit elsewhere leaves the big values exact on the server
+	[self type:@"3" into:pane.cacheField];
+	[pane apply:nil];
+	XCTAssertEqualObjects([self serverValue:@"SELECT seqmin::text || ' ' || seqstart::text FROM pg_sequence WHERE seqrelid = 'structure_test.big'::regclass"], @"9007199254740993 9007199254740993");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+}
+
+/// After setval(…, false) the pane says what the next call returns, and Set Value offers it.
+- (void)testPendingValueShownAfterSetValueNextCall
+{
+	[self serverRun:@"CREATE SEQUENCE structure_test.fresh"];
+	[self selectSequence:@"fresh"];
+	SPPostgresSequenceController *pane = self.pane;
+	XCTAssertEqualObjects(pane.currentValueField.stringValue, @"1 (next call returns this)");
+	XCTAssertNil(pane.sequence.lastValue);
+	XCTAssertEqualObjects(pane.sequence.pendingValue, @1);
+
+	[self serverRun:@"SELECT setval('structure_test.fresh', 40, false)"];
+	[pane revert:nil];
+	XCTAssertEqualObjects(pane.currentValueField.stringValue, @"40 (next call returns this)");
+	[self.controller showWindow:nil];
+	[pane setValue:nil];
+	NSWindow *sheet = pane.setValueSheet;
+	NSTextField *field = [self viewWithIdentifier:@"setValueField" in:sheet.contentView];
+	NSButton *set = [self viewWithIdentifier:@"setValueButton" in:sheet.contentView];
+	XCTAssertEqualObjects(field.stringValue, @"40");
+	XCTAssertTrue(set.isEnabled);
+
+	// Set is revalidated as the value is typed
+	field.stringValue = @"";
+	[[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification object:field];
+	XCTAssertFalse(set.isEnabled, @"no value");
+	field.stringValue = @"12a";
+	[[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification object:field];
+	XCTAssertFalse(set.isEnabled, @"not a number");
+	field.stringValue = @"12";
+	[[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification object:field];
+	XCTAssertTrue(set.isEnabled);
+	[[self window] endSheet:sheet returnCode:NSModalResponseCancel];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+
+	[self serverRun:@"SELECT nextval('structure_test.fresh')"];
+	[pane revert:nil];
+	XCTAssertEqualObjects(pane.currentValueField.stringValue, @"40");
+	XCTAssertNil(pane.sequence.pendingValue);
+}
+
+/// ⌘1 (and the Structure toolbar item) bring the Sequence pane back from Query while a sequence is selected.
+- (void)testStructureItemReturnsToSequencePaneFromQuery
+{
+	[self selectSequence:@"seq_free"];
+	[self.document viewQuery:nil];
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneQuery);
+	XCTAssertEqualObjects([[self.document toolbar] selectedItemIdentifier], SPSequenceTestToolbarQuery);
+
+	NSMenuItem *structureItem = [self menuItem:@selector(viewStructure:) key:@"1"];
+	XCTAssertTrue([self.controller validateMenuItem:structureItem]);
+	[self.controller performSelector:@selector(viewStructure:) withObject:structureItem];
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence);
+	XCTAssertNotNil([[self.pane view] window]);
+	XCTAssertEqualObjects([[self.document toolbar] selectedItemIdentifier], SPSequenceTestToolbarStructure);
+
+	[self.document viewQuery:nil];
+	NSToolbarItem *toolbarItem = [self toolbarItem:SPSequenceTestToolbarStructure];
+	XCTAssertTrue([self.document validateToolbarItem:toolbarItem]);
+	[NSApp sendAction:toolbarItem.action to:toolbarItem.target from:toolbarItem];
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence);
+	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"seq_free");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+}
+
+/// A rename in the pane, and Add Sequence, go from one sequence to the other: no other pane shows on the way.
+- (void)testRenameAndAddDoNotFlashAnotherPane
+{
+	[self clickTable:@"t"];
+	[self.document viewStructure:nil];
+	[self selectSequence:@"seq_free"];
+	SPPostgresSequenceController *pane = self.pane;
+	[self recordPaneChanges];
+
+	[self type:@"seq_free2" into:pane.nameField];
+	[pane apply:nil];
+	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"seq_free2");
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence);
+	XCTAssertEqualObjects(pane.sequenceName, @"seq_free2");
+	XCTAssertEqualObjects(SPSequenceTestPaneLog, @[], @"no pane change, no Structure load");
+
+	[self.controller showWindow:nil];
+	[self.document sidebar:self.document.sidebar addSequenceInSchema:@"structure_test"];
+	NSWindow *sheet = [self window].attachedSheet;
+	XCTAssertNotNil(sheet);
+	[self type:@"added_quietly" into:[self viewWithIdentifier:@"sequenceName" in:sheet.contentView]];
+	[(NSButton *)[self viewWithIdentifier:@"sequenceAddButton" in:sheet.contentView] performClick:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self.document.sidebar.selectedSequenceName isEqualToString:@"added_quietly"]; } timeout:5], @"%@", self.alerts.firstObject.informativeText);
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence);
+	XCTAssertEqualObjects(pane.sequenceName, @"added_quietly");
+	XCTAssertEqualObjects(SPSequenceTestPaneLog, @[], @"no pane change, no Structure load");
+
+	// The pane before the sequences is still where a table goes back to
+	XCTAssertTrue([self clickTable:@"t"]);
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+}
+
+/// History goes back to a sequence of another database: the switch, then the sequence and its pane.
+- (void)testHistoryRestoresSequenceAcrossDatabaseSwitch
+{
+	[self selectSequence:@"seq_free"];
+	PGPostgresConnection *oldConnection = self.document.connection;
+	[self.document switchToDatabase:@"postgres"];
+	XCTAssertTrue([self spinUntil:^BOOL{ return self.document.connection != oldConnection && !self.document.isProcessing; } timeout:20]);
+	XCTAssertNil(self.document.sidebar.selectedSequenceName);
+
+	PGPostgresConnection *postgresConnection = self.document.connection;
+	[self goBack:YES];
+	XCTAssertTrue([self spinUntil:^BOOL{ return self.document.connection != postgresConnection && !self.document.isProcessing; } timeout:20]);
+	XCTAssertTrue([[self.document windowTitleString] containsString:@"/pgkit_test/structure_test.seq_free"], @"%@", [self.document windowTitleString]);
+	XCTAssertEqualObjects(self.document.sidebar.selectedSchema, @"structure_test");
+	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"seq_free");
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence);
+	XCTAssertEqualObjects(self.pane.sequenceName, @"seq_free");
 	XCTAssertEqualObjects(self.pane.incrementField.stringValue, @"5");
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 }
