@@ -202,6 +202,29 @@
 	}
 }
 
+/// Typing in the filter while the selected extension stays listed keeps the chosen version and schema.
+- (void)testFilterKeepsChosenVersion
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *connection = [self connectOn:port];
+		SPPostgresInstallExtensionSheet *sheet = [self sheetOn:connection];
+
+		XCTAssertTrue([sheet selectExtensionNamed:@"hstore"], @"%@", port);
+		[self choose:@"1.4" in:sheet.versionPopup];
+		[self filter:sheet with:@"hst"];
+		XCTAssertEqualObjects([self listedNamesIn:sheet], @[@"hstore"]);
+		XCTAssertEqualObjects(sheet.versionPopup.titleOfSelectedItem, @"1.4", @"%@: the chosen version stays", port);
+		[self filter:sheet with:@"hstor"];
+		XCTAssertEqualObjects(sheet.versionPopup.titleOfSelectedItem, @"1.4", @"%@", port);
+		XCTAssertTrue(sheet.installButton.isEnabled);
+
+		[sheet install:sheet.installButton];
+		XCTAssertTrue([self spinUntil:^BOOL{ return self.completions.count == 1; } timeout:5]);
+		XCTAssertEqualObjects(self.completions, @[@"hstore"]);
+		XCTAssertEqualObjects([[connection execute:@"SELECT extversion::text FROM pg_extension WHERE extname = 'hstore'"] textValueAtRow:0 column:0], @"1.4", @"%@", port);
+	}
+}
+
 /// An extension whose control file fixes its schema shows that schema, disabled.
 - (void)testFixedSchemaShownDisabled
 {

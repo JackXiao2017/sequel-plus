@@ -57,8 +57,11 @@ __attribute__((visibility("default")))
  * Reads and changes the extensions of the connection's database. Every change runs through
  * SPPostgresRunStructureChange (savepoint sp_structure inside the user's transaction, lock_timeout = lockTimeout),
  * so a failure leaves everything as it was and the user's transaction open; inside an aborted transaction nothing
- * is sent. Extension names are quoted with SPPostgresQuoteIdentifier, versions with SPPostgresQuoteLiteral; reads
- * use $n parameters. Never cascades. Use on the main thread.
+ * is sent. Reads of the server's extension directory (pg_available_extension(s), pg_available_extension_versions,
+ * pg_extension_update_paths), which raise ERROR on a missing or malformed control file, run as
+ * SPPostgresRunGuardedRead (savepoint sp_extension_read inside the user's transaction), so a failing read leaves that
+ * transaction open. Extension names are quoted with SPPostgresQuoteIdentifier, versions with SPPostgresQuoteLiteral;
+ * reads use $n parameters. Never cascades. Use on the main thread.
  */
 __attribute__((visibility("default")))
 @interface SPPostgresExtensions : NSObject
@@ -83,7 +86,9 @@ __attribute__((visibility("default")))
 - (NSArray *)availableExtensions:(NSError **)error;
 
 /// The versions the installed extension can be updated to (pg_extension_update_paths from the installed version,
-/// with a path), sorted as version numbers (NSNumericSearch: 1.10 after 1.9); empty when there are none or it isn't installed, nil on failure.
+/// with a path), sorted as version numbers (NSNumericSearch: 1.10 after 1.9); empty when there are none, when it isn't
+/// installed, or when its control file is gone (no defaultVersion: not asked, as the server would raise ERROR); nil
+/// on failure.
 - (NSArray *)updateTargetsForExtension:(NSString *)name error:(NSError **)error;
 
 /**

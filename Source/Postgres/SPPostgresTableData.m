@@ -118,6 +118,12 @@ BOOL SPPostgresRunAtomically(PGPostgresConnection *connection, NSString *savepoi
 	return SPPostgresRunGuarded(connection, SPPostgresGuardAtomic, savepoint, abortedMessage, body, error);
 }
 
+BOOL SPPostgresRunGuardedRead(PGPostgresConnection *connection, NSString *savepoint, NSString *abortedMessage,
+							  BOOL (^body)(NSError **error), NSError **error)
+{
+	return SPPostgresRunGuarded(connection, SPPostgresGuardRead, savepoint, abortedMessage, body, error);
+}
+
 #pragma mark - SPPostgresColumn
 
 @interface SPPostgresColumn ()
