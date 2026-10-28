@@ -1044,4 +1044,187 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 }
 
+#pragma mark - Final fix wave
+
+/// The sidebar's outline view, its window shown and the outline the first responder (as for a user's click or key).
+- (NSOutlineView *)liveOutline
+{
+	[self.controller showWindow:nil];
+	NSOutlineView *outline = [self.document.sidebar valueForKey:@"outlineView"];
+	XCTAssertNotNil(outline);
+	XCTAssertNotNil(outline.window);
+	[outline.window makeFirstResponder:outline];
+	return outline;
+}
+
+- (NSInteger)rowOfSequence:(NSString *)name in:(NSOutlineView *)outline
+{
+	for (NSInteger row = 0; row < outline.numberOfRows; row++) {
+		id item = [outline itemAtRow:row];
+		if ([[item valueForKey:@"title"] isEqualToString:name] && ![outline.delegate outlineView:outline isGroupItem:item]) return row;
+	}
+	XCTFail(@"no row %@", name);
+	return -1;
+}
+
+/**
+ * A mouse click on the row, as NSOutlineView handles one: the row is taken from the click's point first, then the
+ * delegate is asked (selectionShouldChangeInOutlineView:), then that row is selected. (The test host app is not
+ * active, so AppKit's own mouse tracking ignores a synthesized click; the down-arrow test drives AppKit's key path.)
+ */
+- (void)clickRow:(NSInteger)row in:(NSOutlineView *)outline
+{
+	NSRect rect = [outline rectOfRow:row];
+	NSInteger clicked = [outline rowAtPoint:NSMakePoint(NSMidX(rect), NSMidY(rect))];
+	XCTAssertEqual(clicked, row);
+	if (![(id<NSOutlineViewDelegate>)outline.delegate selectionShouldChangeInOutlineView:outline]) return;
+	[outline selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)clicked] byExtendingSelection:NO];
+}
+
+/// The down arrow key, through NSOutlineView's own key handling.
+- (void)pressDownArrowIn:(NSOutlineView *)outline
+{
+	NSString *arrow = [NSString stringWithFormat:@"%C", (unichar)NSDownArrowFunctionKey];
+	NSEvent *key = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:NSEventModifierFlagFunction | NSEventModifierFlagNumericPad timestamp:[[NSProcessInfo processInfo] systemUptime] windowNumber:outline.window.windowNumber context:nil characters:arrow charactersIgnoringModifiers:arrow isARepeat:NO keyCode:125];
+	[outline keyDown:key];
+}
+
+- (NSUInteger)historyCount
+{
+	return [[self.document.history valueForKey:@"entries"] count];
+}
+
+/// Leaving a sequence with a rename not applied yet: the rename is applied, and the row the user clicked is the one
+/// selected (the sidebar isn't reloaded under the outline's feet while it changes the selection).
+- (void)testUnappliedRenameThenClickSelectsClickedSequence
+{
+	[self selectSequence:@"seq_free"];
+	NSOutlineView *outline = [self liveOutline];
+	[self type:@"zz_seq" into:self.pane.nameField];
+	XCTAssertTrue(self.pane.hasPendingEdits);
+
+	[self clickRow:[self rowOfSequence:@"seq_used" in:outline] in:outline];
+	[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"seq_used");
+	XCTAssertEqualObjects([[outline itemAtRow:outline.selectedRow] valueForKey:@"title"], @"seq_used");
+	XCTAssertEqualObjects(self.pane.sequenceName, @"seq_used");
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence);
+	XCTAssertEqualObjects([self.document.sidebar itemTitlesInSection:@"SEQUENCES"], (@[@"seq_used", @"t_id_seq", @"t_ident_seq", @"zz_seq"]));
+	XCTAssertEqualObjects([self serverValue:@"SELECT count(*)::text FROM pg_class WHERE oid = to_regclass('structure_test.zz_seq')"], @"1");
+
+	// History: the renamed sequence under its new name, then the one clicked
+	XCTAssertEqualObjects(self.document.history.currentEntry[@"table"], @"seq_used");
+	[self goBack:YES];
+	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"zz_seq");
+	XCTAssertEqualObjects(self.pane.sequenceName, @"zz_seq");
+}
+
+/// The same with the down arrow key.
+- (void)testUnappliedRenameThenDownArrowSelectsNextSequence
+{
+	[self selectSequence:@"seq_free"];
+	NSOutlineView *outline = [self liveOutline];
+	[self type:@"zz_seq" into:self.pane.nameField];
+
+	[self pressDownArrowIn:outline];
+	[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"seq_used");
+	XCTAssertEqualObjects([[outline itemAtRow:outline.selectedRow] valueForKey:@"title"], @"seq_used");
+	XCTAssertEqualObjects(self.pane.sequenceName, @"seq_used");
+	XCTAssertEqualObjects([self.document.sidebar itemTitlesInSection:@"SEQUENCES"], (@[@"seq_used", @"t_id_seq", @"t_ident_seq", @"zz_seq"]));
+}
+
+/// A serial column added (or dropped) in Structure lists (or unlists) its sequence, the table and pane staying put
+/// and History unchanged.
+- (void)testSerialColumnAddAndDropUpdatesSequences
+{
+	XCTAssertTrue([self clickTable:@"t"]);
+	[self.document viewStructure:nil];
+	SPPostgresStructureController *structure = self.document.structureController;
+	NSTableView *columns = structure.columnsView;
+	NSDictionary *entry = self.document.history.currentEntry;
+	NSUInteger entries = [self historyCount];
+	[self recordPaneChanges];
+
+	[structure addColumn:nil];
+	[[columns currentEditor] setString:@"counter"];
+	[[columns window] makeFirstResponder:columns];
+	NSInteger draft = [columns numberOfRows] - 1;
+	id<NSTableViewDataSource> source = (id<NSTableViewDataSource>)columns.dataSource;
+	[source tableView:columns setObjectValue:@"integer" forTableColumn:[columns tableColumnWithIdentifier:@"type"] row:draft];
+	[source tableView:columns setObjectValue:@1 forTableColumn:[columns tableColumnWithIdentifier:@"auto"] row:draft]; // serial
+	XCTAssertTrue([structure commitPendingEdits]);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+
+	XCTAssertTrue([[self.document.sidebar itemTitlesInSection:@"SEQUENCES"] containsObject:@"t_counter_seq"], @"%@", [self.document.sidebar itemTitlesInSection:@"SEQUENCES"]);
+	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"t");
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
+	XCTAssertEqualObjects(self.document.history.currentEntry, entry);
+	XCTAssertEqual([self historyCount], entries);
+
+	// Dropped: its owned sequence goes with it, and from the list
+	NSInteger row = -1;
+	for (NSInteger r = 0; r < columns.numberOfRows; r++) {
+		if ([[source tableView:columns objectValueForTableColumn:[columns tableColumnWithIdentifier:@"name"] row:r] isEqual:@"counter"]) row = r;
+	}
+	XCTAssertGreaterThanOrEqual(row, 0);
+	[columns selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
+	[structure removeColumn:nil];
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+	XCTAssertEqualObjects([self serverValue:@"SELECT (to_regclass('structure_test.t_counter_seq') IS NULL)::text"], @"true");
+	XCTAssertFalse([[self.document.sidebar itemTitlesInSection:@"SEQUENCES"] containsObject:@"t_counter_seq"], @"%@", [self.document.sidebar itemTitlesInSection:@"SEQUENCES"]);
+	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"t");
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
+	XCTAssertEqualObjects(self.document.history.currentEntry, entry);
+	XCTAssertEqual([self historyCount], entries);
+	XCTAssertEqualObjects(SPSequenceTestPaneLog, @[], @"no pane change, no Structure reload from the sidebar");
+}
+
+/// Renaming a table while a sequence is selected: no other pane on the way, no History entry.
+- (void)testRenameTableWithSequenceSelectedDoesNotFlashOrRecord
+{
+	[self selectSequence:@"seq_free"];
+	NSDictionary *entry = self.document.history.currentEntry;
+	NSUInteger entries = [self historyCount];
+	[self recordPaneChanges];
+
+	[self.document _renameTable:@"child" inSchema:@"structure_test" toName:@"child2"];
+	XCTAssertTrue([[self.document.sidebar itemTitlesInSection:@"TABLES"] containsObject:@"child2"]);
+	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"seq_free");
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence);
+	XCTAssertEqualObjects(SPSequenceTestPaneLog, @[], @"no pane change");
+	XCTAssertEqualObjects(self.document.history.currentEntry, entry);
+	XCTAssertEqual([self historyCount], entries);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+}
+
+/// A rename typed but not applied, then Back: the rename is applied, and History goes to the place before the sequence.
+- (void)testPendingRenameThenHistoryBack
+{
+	XCTAssertTrue([self clickTable:@"t"]);
+	[self.document viewContent:nil];
+	[self selectSequence:@"seq_free"];
+	[self type:@"seq_back" into:self.pane.nameField];
+
+	[self goBack:YES];
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+	XCTAssertEqualObjects([self serverValue:@"SELECT to_regclass('structure_test.seq_back')::text"], @"structure_test.seq_back");
+	XCTAssertEqualObjects([self serverValue:@"SELECT (to_regclass('structure_test.seq_free') IS NULL)::text"], @"true");
+	XCTAssertTrue([[self.document.sidebar itemTitlesInSection:@"SEQUENCES"] containsObject:@"seq_back"]);
+	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"t");
+	XCTAssertNil(self.document.sidebar.selectedSequenceName);
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneContent);
+
+	// Forward: the sequence, under its new name
+	[self goBack:NO];
+	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"seq_back");
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence);
+	XCTAssertEqualObjects(self.pane.sequenceName, @"seq_back");
+	XCTAssertFalse(self.document.history.canGoForward);
+}
+
 @end

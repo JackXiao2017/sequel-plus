@@ -45,6 +45,21 @@ static const NSUInteger SPPostgresHistoryMaximumEntries = 50;
 	position = [entries count] - 1;
 }
 
+- (void)renameTable:(NSString *)oldName to:(NSString *)newName inDatabase:(NSString *)db schema:(NSString *)schema
+{
+	if (![oldName length] || ![newName length]) return;
+
+	for (NSUInteger i = 0; i < [entries count]; i++) {
+		NSDictionary *entry = [entries objectAtIndex:i];
+		if (![[entry objectForKey:@"table"] isEqualToString:oldName]) continue;
+		if (![[entry objectForKey:@"database"] isEqualToString:db ?: @""] || ![[entry objectForKey:@"schema"] isEqualToString:schema ?: @""]) continue;
+
+		NSMutableDictionary *renamed = [[entry mutableCopy] autorelease];
+		[renamed setObject:newName forKey:@"table"];
+		[entries replaceObjectAtIndex:i withObject:[[renamed copy] autorelease]];
+	}
+}
+
 - (NSDictionary *)goBack
 {
 	if (![self canGoBack]) return nil;
