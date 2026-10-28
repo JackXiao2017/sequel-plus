@@ -107,8 +107,11 @@ static BOOL SPPostgresUsersSameDate(NSDate *a, NSDate *b)
 	BOOL applying;
 	/// What the sheet's end reports (set by Apply before ending it)
 	BOOL closingApplied;
+	/// The running Apply's first transaction changed roles (what its partial-failure message starts with)
+	BOOL appliedRoleChanges;
 
 	NSWindow *sheet;
+	NSTextField *rolesHeader;
 	NSTableView *rolesTable;
 	NSTabView *tabView;
 	NSTextField *nameField;
@@ -134,6 +137,9 @@ static BOOL SPPostgresUsersSameDate(NSDate *a, NSDate *b)
 }
 
 @synthesize alertPresenter;
+@synthesize canPresent;
+@synthesize serverName;
+@synthesize rolesHeader;
 @synthesize sheet, rolesTable, tabView, nameField, passwordField, clearPasswordCheckbox, validUntilCheckbox, validUntilPicker, connectionLimitField;
 @synthesize loginCheckbox, inheritCheckbox, superuserCheckbox, createDBCheckbox, createRoleCheckbox, replicationCheckbox, bypassRLSCheckbox;
 @synthesize memberOfTable, membersTable, memberOfCandidates, membersCandidates;
@@ -191,8 +197,11 @@ static BOOL SPPostgresUsersSameDate(NSDate *a, NSDate *b)
 	[membersCandidates release];
 	[lastErrorMessage release];
 	[alertPresenter release];
+	[canPresent release];
+	[serverName release];
 
 	[sheet release];
+	[rolesHeader release];
 	[rolesTable release];
 	[tabView release];
 	[nameField release];
@@ -229,6 +238,21 @@ static BOOL SPPostgresUsersSameDate(NSDate *a, NSDate *b)
 	NSInteger row = [rolesTable selectedRow];
 	if (row < 0 || row >= (NSInteger)[editedRoles count]) return nil;
 	return [editedRoles objectAtIndex:(NSUInteger)row];
+}
+
+- (NSWindow *)windowForConnectorSheets
+{
+	return (sheetOpen && sheet) ? sheet : parentWindow;
+}
+
+- (PGPostgresConnection *)openConnectionForDatabase:(NSString *)theDatabase
+{
+	return theDatabase ? [connections objectForKey:theDatabase] : nil;
+}
+
+- (NSArray *)adoptedConnectors
+{
+	return [[connectors copy] autorelease];
 }
 
 - (void)adoptConnector:(SPPostgresConnector *)connector
@@ -307,7 +331,8 @@ static BOOL SPPostgresUsersSameDate(NSDate *a, NSDate *b)
 			[self _finish:NO];
 			return;
 		}
-		if (!parentWindow || [parentWindow attachedSheet]) {
+		// The roles may take seconds to load (e.g. over SSH): by now the tab may be another one, or in another window
+		if (!parentWindow || [parentWindow attachedSheet] || (canPresent && !canPresent())) {
 			[self _finish:NO];
 			return;
 		}
@@ -520,12 +545,19 @@ static BOOL SPPostgresUsersSameDate(NSDate *a, NSDate *b)
 	NSView *content = [sheet contentView];
 
 	// Left: the roles
-	NSTextField *rolesLabel = [NSTextField labelWithString:NSLocalizedString(@"ROLES", @"Postgres users: roles list title")];
-	[rolesLabel setFont:[NSFont boldSystemFontOfSize:[NSFont smallSystemFontSize]]];
-	[rolesLabel setTextColor:[NSColor secondaryLabelColor]];
-	[rolesLabel setFrame:NSMakeRect(SPPostgresUsersMargin, SPPostgresUsersSheetHeight - SPPostgresUsersMargin - 14, SPPostgresUsersListWidth, 14)];
-	[rolesLabel setAutoresizingMask:NSViewMaxXMargin | NSViewMinYMargin];
-	[content addSubview:rolesLabel];
+	// Its header names the server: the sheet may outlive a glance at which tab it came from
+	NSString *header = [serverName length]
+		? [NSString stringWithFormat:NSLocalizedString(@"Users on %@", @"Postgres users: roles list title naming the server"), serverName]
+		: NSLocalizedString(@"ROLES", @"Postgres users: roles list title");
+	rolesHeader = [[NSTextField labelWithString:header] retain];
+	[rolesHeader setIdentifier:@"usersHeader"];
+	[rolesHeader setFont:[NSFont boldSystemFontOfSize:[NSFont smallSystemFontSize]]];
+	[rolesHeader setTextColor:[NSColor secondaryLabelColor]];
+	[rolesHeader setLineBreakMode:NSLineBreakByTruncatingMiddle];
+	[rolesHeader setToolTip:header];
+	[rolesHeader setFrame:NSMakeRect(SPPostgresUsersMargin, SPPostgresUsersSheetHeight - SPPostgresUsersMargin - 14, SPPostgresUsersListWidth, 14)];
+	[rolesHeader setAutoresizingMask:NSViewMaxXMargin | NSViewMinYMargin];
+	[content addSubview:rolesHeader];
 
 	CGFloat listBottom = 44;
 	NSScrollView *rolesScroll = [[[NSScrollView alloc] initWithFrame:NSMakeRect(SPPostgresUsersMargin, listBottom, SPPostgresUsersListWidth, SPPostgresUsersSheetHeight - SPPostgresUsersMargin - 20 - listBottom)] autorelease];
@@ -1158,12 +1190,14 @@ static BOOL SPPostgresUsersParseLimit(NSString *text, NSInteger *limit)
 	// 1. The roles and every database-level grant (databases are shared objects), in one transaction
 	NSError *error = nil;
 	NSArray *statements = [rolesReader statementsForOriginalRoles:originalRoles edited:editedRoles error:&error];
+	BOOL roleChanges = [statements count] > 0;
 	if (statements) statements = [statements arrayByAddingObjectsFromArray:[privilegesPane databaseStatements]];
 	if (!statements || ![rolesReader applyStatements:statements error:&error]) {
 		[self _showErrorTitle:title message:[error localizedDescription] ?: @""];
 		return;
 	}
 	[privilegesPane forgetDatabaseEdits];
+	appliedRoleChanges = roleChanges;
 
 	// 2. Each database's other edits on its own connection: the document's database first, then the others by name
 	NSMutableArray *order = [[[privilegesPane databasesWithPendingStatements] mutableCopy] autorelease];
@@ -1198,9 +1232,21 @@ static BOOL SPPostgresUsersParseLimit(NSString *text, NSInteger *limit)
 		}
 		applying = NO;
 		NSString *reason = [applyError localizedDescription] ?: NSLocalizedString(@"The connection failed.", @"Postgres users: connection failed, no reason");
-		NSString *message = [done count]
-			? [NSString stringWithFormat:NSLocalizedString(@"Roles and %@ were saved; changes in %@ were not: %@", @"Postgres users: apply failed in a later database"), [done componentsJoinedByString:@", "], name, reason]
-			: [NSString stringWithFormat:NSLocalizedString(@"Roles were saved; changes in %@ were not: %@", @"Postgres users: apply failed in the first database"), name, reason];
+		// What was saved first: the roles (when the Apply changed any), then the databases done
+		NSString *saved = [done componentsJoinedByString:@", "];
+		NSString *message = nil;
+		if (appliedRoleChanges && [done count]) {
+			message = [NSString stringWithFormat:NSLocalizedString(@"Roles and %@ were saved; changes in %@ were not: %@", @"Postgres users: apply failed in a later database"), saved, name, reason];
+		}
+		else if (appliedRoleChanges) {
+			message = [NSString stringWithFormat:NSLocalizedString(@"Roles were saved; changes in %@ were not: %@", @"Postgres users: apply failed in the first database"), name, reason];
+		}
+		else if ([done count]) {
+			message = [NSString stringWithFormat:NSLocalizedString(@"%@ were saved; changes in %@ were not: %@", @"Postgres users: apply without role changes failed in a later database"), saved, name, reason];
+		}
+		else {
+			message = [NSString stringWithFormat:NSLocalizedString(@"Changes in %@ were not saved: %@", @"Postgres users: apply without role changes failed in the first database"), name, reason];
+		}
 		[self _reloadAfterPartialApply];
 		[self _showErrorTitle:NSLocalizedString(@"Not all changes were applied", @"Postgres users: partial apply title") message:message];
 		[self _updateButtons];
@@ -1287,6 +1333,16 @@ static BOOL SPPostgresUsersParseLimit(NSString *text, NSInteger *limit)
 	if ([notification object] == rolesTable) [self _selectionDidChange];
 }
 
+/// A membership row can be edited: the shown role and the row's role are both still there (not marked for removal:
+/// Apply leaves the memberships of a dropped role alone, so they are shown disabled).
+- (BOOL)_membershipRowEditable:(NSTableView *)table row:(NSInteger)row
+{
+	if (!shownRole || [shownRole markedForDeletion]) return NO;
+	NSArray *candidates = (table == memberOfTable) ? memberOfCandidates : membersCandidates;
+	if (row < 0 || row >= (NSInteger)[candidates count]) return NO;
+	return ![[self _draftRoleNamed:[candidates objectAtIndex:(NSUInteger)row]] markedForDeletion];
+}
+
 /// Membership rows: whether the pair exists and with admin option, from the shown role's side.
 - (NSNumber *)_membershipForTable:(NSTableView *)table row:(NSInteger)row admin:(BOOL)admin
 {
@@ -1309,7 +1365,7 @@ static BOOL SPPostgresUsersParseLimit(NSString *text, NSInteger *limit)
 
 - (void)tableView:(NSTableView *)table setObjectValue:(id)object forTableColumn:(NSTableColumn *)column row:(NSInteger)row
 {
-	if (table == rolesTable || !shownRole || [shownRole markedForDeletion]) return;
+	if (table == rolesTable || ![self _membershipRowEditable:table row:row]) return;
 	[self _commitFields];
 	NSArray *candidates = (table == memberOfTable) ? memberOfCandidates : membersCandidates;
 	if (row < 0 || row >= (NSInteger)[candidates count]) return;
@@ -1339,13 +1395,13 @@ static BOOL SPPostgresUsersParseLimit(NSString *text, NSInteger *limit)
 - (void)tableView:(NSTableView *)table willDisplayCell:(id)cell forTableColumn:(NSTableColumn *)column row:(NSInteger)row
 {
 	if (table == rolesTable || ![cell respondsToSelector:@selector(setEnabled:)]) return;
-	[cell setEnabled:shownRole && ![shownRole markedForDeletion]];
+	[cell setEnabled:[self _membershipRowEditable:table row:row]];
 }
 
 - (BOOL)tableView:(NSTableView *)table shouldEditTableColumn:(NSTableColumn *)column row:(NSInteger)row
 {
 	if (table == rolesTable) return NO;
-	return shownRole && ![shownRole markedForDeletion] && ![[column identifier] isEqualToString:SPPostgresUsersNameColumn];
+	return [self _membershipRowEditable:table row:row] && ![[column identifier] isEqualToString:SPPostgresUsersNameColumn];
 }
 
 #pragma mark - Privileges

@@ -36,6 +36,22 @@ __attribute__((visibility("default")))
 /// Keeps a connector the provider made, and disconnects it when the sheet ends.
 - (void)adoptConnector:(SPPostgresConnector *)connector;
 
+/**
+ * Asked when the roles have loaded, just before the sheet attaches (which may be seconds after
+ * -beginSheetForWindow:completion:, e.g. over SSH): NO (e.g. the tab is no longer the window's selected one) ends
+ * quietly instead, the completion getting NO and the connections closed. nil (the default) always presents.
+ */
+@property (copy) BOOL (^canPresent)(void);
+
+/// The server the sheet edits, shown at its top as "Users on <name>" (e.g. the favorite's name); nil shows "ROLES".
+@property (copy) NSString *serverName;
+
+/**
+ * The window a connector the provider opens should host its sheets on (e.g. SSH passwords and host keys): the
+ * Users sheet once it is attached (the parent window can't show a sheet then), else the parent window.
+ */
+@property (readonly) NSWindow *windowForConnectorSheets;
+
 /// Shows the controller's alerts (errors). nil (the default) shows them as a sheet on the Users sheet (or on the
 /// parent window before it is open). Replaceable, e.g. by tests.
 @property (copy) void (^alertPresenter)(NSAlert *alert);
@@ -89,6 +105,13 @@ __attribute__((visibility("default")))
 - (NSArray *)privilegeRowsShown;
 /// The edited SPPostgresPrivilegeObjects still pending in a database, for every role.
 - (NSArray *)pendingPrivilegeEditsInDatabase:(NSString *)database;
+
+/// The label at the top of the roles list ("Users on <serverName>", or "ROLES").
+@property (readonly) NSTextField *rolesHeader;
+/// The connection the sheet holds to a database (nil when it has none yet).
+- (PGPostgresConnection *)openConnectionForDatabase:(NSString *)database;
+/// The connectors adopted from the provider (-adoptConnector:), in order.
+@property (readonly) NSArray *adoptedConnectors;
 
 /// The last error shown (nil until one is).
 @property (readonly, copy) NSString *lastErrorMessage;

@@ -8,6 +8,7 @@
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
 #import "../Source/Postgres/SPPostgresPrivileges.h"
+#import "../Source/Postgres/SPPostgresConsoleLogger.h"
 
 static NSString * const SPUsersTestToolbarUsers = @"SwitchToUserManagerToolbarItemIdentifier";
 
@@ -41,6 +42,7 @@ static NSString * const SPUsersTestToolbarUsers = @"SwitchToUserManagerToolbarIt
 		[SPPostgresTestServers dropTestRolesOnPort:port.unsignedIntegerValue];
 		PGPostgresConnection *connection = [self connectOn:port];
 		[self run:@"DROP TABLE IF EXISTS public.sp_t4_owned" on:connection];
+		[self run:@"DROP TABLE IF EXISTS public.sp_t4_later" on:connection];
 		[self run:@"CREATE ROLE sp_t4_group NOLOGIN" on:connection];
 		[self run:@"CREATE ROLE sp_t4_login LOGIN PASSWORD 'Pw-sp_t4!' IN ROLE sp_t4_group" on:connection];
 		[self run:@"CREATE ROLE sp_t4_owner LOGIN" on:connection];
@@ -72,6 +74,7 @@ static NSString * const SPUsersTestToolbarUsers = @"SwitchToUserManagerToolbarIt
 	for (NSNumber *port in [SPPostgresTestServers ports]) {
 		PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue];
 		[connection execute:@"DROP TABLE IF EXISTS public.sp_t4_owned"];
+		[connection execute:@"DROP TABLE IF EXISTS public.sp_t4_later"];
 		[connection disconnect];
 		[SPPostgresTestServers dropTestRolesOnPort:port.unsignedIntegerValue];
 		if (self.reloadCatalogFixture) [SPPostgresTestServers loadFixtureNamed:@"catalog" onPort:port.unsignedIntegerValue];
@@ -496,7 +499,10 @@ static NSString * const SPUsersTestToolbarUsers = @"SwitchToUserManagerToolbarIt
 		XCTAssertEqualObjects(controller.databasePopup.titleOfSelectedItem, @"pgkit_test");
 		XCTAssertTrue([controller.databasePopup.itemTitles containsObject:@"pgkit_nopublic"]);
 		XCTAssertEqualObjects(controller.schemaPopup.titleOfSelectedItem, @"public");
-		XCTAssertEqualObjects(controller.creatorPopup.titleOfSelectedItem, [self value:@"SELECT pg_get_userbyid(nspowner)::text FROM pg_namespace WHERE nspname = 'public'" on:[self connectOn:port]], @"the schema's owner");
+		// The schema's owner; for pg_database_owner (public on PG 15+) the database's owner it stands for
+		NSString *creatorSQL = @"SELECT CASE WHEN pg_get_userbyid(nspowner) = 'pg_database_owner' THEN (SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database()) "
+			"ELSE pg_get_userbyid(nspowner) END::text FROM pg_namespace WHERE nspname = 'public'";
+		XCTAssertEqualObjects(controller.creatorPopup.titleOfSelectedItem, [self value:creatorSQL on:[self connectOn:port]], @"the schema's owner");
 
 		NSArray<SPPostgresPrivilegeObject *> *rows = [controller privilegeRowsShown];
 		XCTAssertGreaterThan(rows.count, 5u);
@@ -835,6 +841,257 @@ static NSString * const SPUsersTestToolbarUsers = @"SwitchToUserManagerToolbarIt
 	[controller endSheet];
 	XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet == nil && self.document.usersController == nil; } timeout:5]);
 	XCTAssertTrue([self.document validateToolbarItem:item]);
+}
+
+#pragma mark - Final fix wave
+
+/// F1: on PG 15+ public belongs to pg_database_owner; the default creator is the database's owner, so defaults apply.
+- (void)testDefaultCreatorForPublicOwnedByDatabaseOwnerApplies
+{
+	NSNumber *port = @55418;
+	PGPostgresConnection *check = [self connectOn:port];
+	XCTAssertEqualObjects([self value:@"SELECT pg_get_userbyid(nspowner)::text FROM pg_namespace WHERE nspname = 'public'" on:check], @"pg_database_owner");
+	NSString *databaseOwner = [self value:@"SELECT pg_get_userbyid(datdba)::text FROM pg_database WHERE datname = current_database()" on:check];
+	XCTAssertEqualObjects(databaseOwner, @"pgkit_test");
+
+	SPPostgresUsersController *controller = [self beginOn:port];
+	[self select:@"sp_t4_priv" in:controller];
+	XCTAssertEqualObjects(controller.creatorPopup.titleOfSelectedItem, databaseOwner, @"the default creator");
+	[self set:YES privilege:@"SELECT" of:@"default tables" named:@"Tables created later" in:controller];
+	[controller apply:nil];
+	[self waitForEndOf:controller];
+	XCTAssertEqualObjects(self.completions.firstObject, @YES, @"%@", controller.lastErrorMessage);
+
+	// A table the database's owner (this connection's role) creates later
+	[self run:@"CREATE TABLE public.sp_t4_later (id int)" on:check];
+	XCTAssertEqualObjects([self value:@"SELECT pg_get_userbyid(relowner)::text FROM pg_class WHERE oid = 'public.sp_t4_later'::regclass" on:check], databaseOwner);
+	XCTAssertTrue([self role:@"sp_t4_priv" holds:@"SELECT" onTable:@"public.sp_t4_later" on:check]);
+	[self run:@"DROP TABLE public.sp_t4_later" on:check];
+}
+
+/// F2: the sheet only attaches when the gate still allows it once the roles have loaded; it names the server.
+- (void)testSheetAttachesOnlyWhenCanPresent
+{
+	NSNumber *port = @55418;
+	for (NSNumber *allowedAtAttach in @[@NO, @YES]) {
+		[self.completions removeAllObjects];
+		__block void (^pendingCompletion)(PGPostgresConnection *, NSError *) = nil;
+		__block NSWindow *hostWhileLoading = nil;
+		__block SPPostgresUsersController *controller = nil;
+		controller = [[SPPostgresUsersController alloc] initWithDatabase:@"pgkit_test" connectionProvider:^(NSString *database, void (^completion)(PGPostgresConnection *, NSError *)) {
+			hostWhileLoading = controller.windowForConnectorSheets;
+			pendingCompletion = completion; // deferred, as a connector's
+		}];
+		__weak SPPostgresUsersControllerTests *weakSelf = self;
+		controller.alertPresenter = ^(NSAlert *alert) { [weakSelf.alerts addObject:alert]; };
+		controller.serverName = @"pg18 users";
+		__block BOOL allowed = YES;
+		__block NSUInteger asked = 0;
+		controller.canPresent = ^BOOL{ asked++; return allowed; };
+		[self.controllers addObject:controller];
+		[controller beginSheetForWindow:self.window completion:^(BOOL applied) { [weakSelf.completions addObject:@(applied)]; }];
+		XCTAssertNotNil(pendingCompletion);
+		XCTAssertNil(self.window.attachedSheet);
+		XCTAssertEqual(hostWhileLoading, self.window, @"before the sheet is attached, connectors use the parent window");
+
+		// Meanwhile the tab was switched (or moved to another window)
+		allowed = allowedAtAttach.boolValue;
+		PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_test"];
+		[self.openConnections addObject:connection];
+		pendingCompletion(connection, nil);
+		XCTAssertEqual(asked, 1u);
+
+		if (!allowed) {
+			XCTAssertNil(self.window.attachedSheet, @"no sheet over whatever the window shows now");
+			XCTAssertEqualObjects(self.completions, @[@NO]);
+			XCTAssertFalse(connection.isConnected, @"its connections are closed");
+			XCTAssertEqual(self.alerts.count, 0u, @"quietly");
+			continue;
+		}
+		XCTAssertEqual(self.window.attachedSheet, controller.sheet);
+		XCTAssertEqualObjects(controller.rolesHeader.stringValue, @"Users on pg18 users");
+		XCTAssertEqual(controller.windowForConnectorSheets, controller.sheet, @"once attached, connectors' sheets go on the Users sheet");
+		XCTAssertEqual(self.completions.count, 0u);
+		[controller cancel:nil];
+		[self waitForEndOf:controller];
+		XCTAssertEqualObjects(self.completions, @[@NO]);
+	}
+}
+
+/// F5: default-privilege edits follow their creator's rename, and go with its removal.
+- (void)testRenamedOrRemovedCreatorCarriesDefaultEdits
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresUsersController *controller = [self beginOn:port];
+		[self select:@"sp_t4_priv" in:controller];
+		[self choose:@"sp_t4_owner" in:controller.creatorPopup];
+		[self set:YES privilege:@"SELECT" of:@"default tables" named:@"Tables created later" in:controller];
+
+		// The creator renamed in the same session: the edit stays visible and is applied for the new name
+		[self select:@"sp_t4_owner" in:controller];
+		controller.nameField.stringValue = @"sp_t4_owner2";
+		[self select:@"sp_t4_priv" in:controller];
+		XCTAssertEqualObjects(controller.creatorPopup.titleOfSelectedItem, @"sp_t4_owner");
+		XCTAssertEqualObjects([self privilege:@"SELECT" of:@"default tables" named:@"Tables created later" in:controller], @YES, @"still shown");
+		[controller apply:nil];
+		[self waitForEndOf:controller];
+		XCTAssertEqualObjects(self.completions.firstObject, @YES, @"%@", controller.lastErrorMessage);
+		PGPostgresConnection *check = [self connectOn:port];
+		NSString *sql = @"SELECT string_agg(x, ',' ORDER BY x) FROM (SELECT pg_get_userbyid(d.defaclrole) || ':' || a.privilege_type AS x FROM pg_default_acl d, aclexplode(d.defaclacl) a "
+			"WHERE a.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'sp_t4_priv') AND d.defaclnamespace = 'public'::regnamespace) s";
+		XCTAssertEqualObjects([self value:sql on:check], @"sp_t4_owner2:SELECT");
+		[self.completions removeAllObjects];
+
+		// The creator removed: its default edits go, and Apply isn't stuck on them
+		controller = [self beginOn:port];
+		[self select:@"sp_t4_priv" in:controller];
+		[self choose:@"sp_t4_owner2" in:controller.creatorPopup];
+		[self set:YES privilege:@"INSERT" of:@"default tables" named:@"Tables created later" in:controller];
+		[self set:YES privilege:@"SELECT" of:@"table" named:@"customers" in:controller];
+		XCTAssertEqual([controller pendingPrivilegeEditsInDatabase:@"pgkit_test"].count, 2u);
+		[self select:@"sp_t4_owner2" in:controller];
+		[controller removeRole:nil];
+		NSArray<SPPostgresPrivilegeObject *> *pending = [controller pendingPrivilegeEditsInDatabase:@"pgkit_test"];
+		XCTAssertEqual(pending.count, 1u, @"only the creator's default edit goes");
+		XCTAssertEqualObjects(pending.firstObject.name, @"customers");
+		[controller removeRole:nil]; // unmarked again
+		[controller apply:nil];
+		[self waitForEndOf:controller];
+		XCTAssertEqualObjects(self.completions.firstObject, @YES, @"%@", controller.lastErrorMessage);
+		XCTAssertTrue([self role:@"sp_t4_priv" holds:@"SELECT" onTable:@"public.customers" on:check]);
+		XCTAssertEqualObjects([self value:sql on:check], @"sp_t4_owner2:SELECT", @"the removed creator's INSERT was dropped");
+		[self.completions removeAllObjects];
+	}
+}
+
+/// F6: a partial apply without role changes doesn't claim roles were saved.
+- (void)testPartialApplyWithoutRoleChangesNamesWhatWasSaved
+{
+	self.reloadCatalogFixture = YES;
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		for (NSNumber *firstToo in @[@YES, @NO]) {
+			SPPostgresUsersController *controller = [self beginOn:port];
+			[self select:@"sp_t4_priv" in:controller];
+			if (firstToo.boolValue) [self set:YES privilege:@"SELECT" of:@"table" named:@"customers" in:controller];
+			[self choose:@"pgkit_nopublic" in:controller.databasePopup];
+			[self set:YES privilege:@"SELECT" of:@"table" named:@"items" in:controller];
+			PGPostgresConnection *nopublic = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_nopublic"];
+			[self.openConnections addObject:nopublic];
+			[self run:@"DROP TABLE app.items" on:nopublic];
+
+			[controller apply:nil];
+			XCTAssertTrue([self spinUntil:^BOOL{ return controller.lastErrorMessage != nil; } timeout:10]);
+			NSString *prefix = firstToo.boolValue ? @"pgkit_test were saved; changes in pgkit_nopublic were not:" : @"Changes in pgkit_nopublic were not saved:";
+			XCTAssertTrue([controller.lastErrorMessage hasPrefix:prefix], @"%@", controller.lastErrorMessage);
+			XCTAssertEqual(self.window.attachedSheet, controller.sheet, @"the sheet stays");
+
+			[controller cancel:nil];
+			[self waitForEndOf:controller];
+			[self.completions removeAllObjects];
+			[self.alerts removeAllObjects];
+			[SPPostgresTestServers loadFixtureNamed:@"catalog" onPort:port.unsignedIntegerValue];
+		}
+	}
+}
+
+/// F7: roles marked for removal are listed disabled in both membership tables.
+- (void)testRolesMarkedForRemovalAreDisabledInMembership
+{
+	SPPostgresUsersController *controller = [self beginOn:@55418];
+	[self select:@"sp_t4_group" in:controller];
+	[controller removeRole:nil];
+	XCTAssertTrue(controller.selectedRole.markedForDeletion);
+
+	NSTableView *tables[] = { controller.memberOfTable, controller.membersTable };
+	[self select:@"sp_t4_login" in:controller];
+	for (int i = 0; i < 2; i++) {
+		NSTableView *table = tables[i];
+		NSArray *candidates = (i == 0) ? controller.memberOfCandidates : controller.membersCandidates;
+		NSInteger group = (NSInteger)[candidates indexOfObject:@"sp_t4_group"];
+		NSInteger owner = (NSInteger)[candidates indexOfObject:@"sp_t4_owner"];
+		XCTAssertNotEqual(group, (NSInteger)NSNotFound);
+		XCTAssertNotEqual(owner, (NSInteger)NSNotFound);
+		NSTableColumn *member = [table tableColumnWithIdentifier:@"member"];
+		NSTableColumn *admin = [table tableColumnWithIdentifier:@"admin"];
+		XCTAssertFalse([table.delegate tableView:table shouldEditTableColumn:member row:group]);
+		XCTAssertFalse([table.delegate tableView:table shouldEditTableColumn:admin row:group]);
+		XCTAssertTrue([table.delegate tableView:table shouldEditTableColumn:member row:owner]);
+		NSCell *cell = [table preparedCellAtColumn:[table columnWithIdentifier:@"member"] row:group];
+		XCTAssertFalse(cell.isEnabled, @"shown disabled");
+		XCTAssertTrue([[table preparedCellAtColumn:[table columnWithIdentifier:@"member"] row:owner] isEnabled]);
+
+		// A tick that gets through anyway changes nothing
+		id before = [table.dataSource tableView:table objectValueForTableColumn:member row:group];
+		[table.dataSource tableView:table setObjectValue:@(![before boolValue]) forTableColumn:member row:group];
+		XCTAssertEqualObjects([table.dataSource tableView:table objectValueForTableColumn:member row:group], before);
+	}
+	XCTAssertEqualObjects([controller.selectedRole.memberOf objectForKey:@"sp_t4_group"], @NO, @"still a member, as on the server");
+	[controller cancel:nil];
+	[self waitForEndOf:controller];
+}
+
+/// F3 and F4: the default provider's connections log to the Console under the tab's name (passwords only as
+/// verifiers), and a connector opened while the sheet is up hosts its SSH sheets on the Users sheet.
+- (void)testDefaultProviderLogsToConsoleAndUsesUsersSheetForConnectors
+{
+	// As SPPostgresDocumentTests: the volatile argument domain only, restored even on failure
+	NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+	NSDictionary *original = [prefs volatileDomainForName:NSArgumentDomain] ?: @{};
+	NSMutableDictionary *domain = [original mutableCopy];
+	domain[@"ConsoleEnableLogging"] = @YES;
+	domain[@"ConsoleEnableInterfaceLogging"] = @YES;
+	[prefs removeVolatileDomainForName:NSArgumentDomain];
+	[prefs setVolatileDomain:domain forName:NSArgumentDomain];
+	[self addTeardownBlock:^{
+		[prefs removeVolatileDomainForName:NSArgumentDomain];
+		[prefs setVolatileDomain:original forName:NSArgumentDomain];
+	}];
+
+	[self buildDocument];
+	NSWindow *window = [self.windowController window];
+	[self.document showUserManager:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet != nil; } timeout:20], @"%@", self.alerts);
+	SPPostgresUsersController *controller = self.document.usersController;
+	XCTAssertEqual(window.attachedSheet, controller.sheet);
+	XCTAssertEqualObjects(controller.rolesHeader.stringValue, @"Users on pg18 users");
+	XCTAssertEqual(controller.adoptedConnectors.count, 1u);
+
+	// F4: another database's connector, opened while the sheet is up
+	NSPopUpButton *popup = controller.databasePopup;
+	[popup selectItemWithTitle:@"pgkit_nopublic"];
+	[NSApp sendAction:popup.action to:popup.target from:popup];
+	XCTAssertEqual(controller.adoptedConnectors.count, 2u);
+	XCTAssertEqual([(SPPostgresConnector *)controller.adoptedConnectors.lastObject parentWindow], controller.sheet);
+	XCTAssertTrue([self spinUntil:^BOOL{ return popup.isEnabled; } timeout:20]);
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"pgkit_nopublic", @"%@", controller.lastErrorMessage);
+
+	// F3: each connection has a logger like the tab's
+	for (NSString *database in @[@"pgkit_test", @"pgkit_nopublic"]) {
+		SPPostgresConsoleLogger *logger = [SPPostgresConsoleLogger loggerForConnection:[controller openConnectionForDatabase:database]];
+		XCTAssertNotNil(logger, @"%@", database);
+		XCTAssertEqualObjects(logger.connectionName, @"pg18 users");
+		XCTAssertEqualObjects(logger.database, database);
+	}
+
+	NSString *password = @"Plain-sp_t4-Console!";
+	[self select:@"sp_t4_login" in:controller];
+	controller.passwordField.stringValue = password;
+	[controller apply:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet == nil && self.document.usersController == nil; } timeout:10], @"%@", controller.lastErrorMessage);
+
+	// Test-only read of the console's existing storage (no public accessor)
+	id queryController = [(id)NSClassFromString(@"SPQueryController") valueForKey:@"sharedQueryController"];
+	NSArray *messages = [queryController valueForKey:@"messagesFullSet"];
+	id alter = nil;
+	for (id message in messages) {
+		NSString *text = [message valueForKey:@"message"];
+		XCTAssertFalse([text containsString:password], @"%@", text);
+		if ([text containsString:@"sp_t4_login"] && [text containsString:@"PASSWORD"]) alter = message;
+	}
+	XCTAssertNotNil(alter, @"the role statement is in the console");
+	XCTAssertEqualObjects([alter valueForKey:@"messageConnection"], @"pg18 users");
+	XCTAssertEqualObjects([alter valueForKey:@"messageDatabase"], @"pgkit_test");
+	XCTAssertTrue([[alter valueForKey:@"message"] containsString:@"SCRAM-SHA-256$"] || [[alter valueForKey:@"message"] containsString:@"md5"], @"%@", [alter valueForKey:@"message"]);
 }
 
 @end
