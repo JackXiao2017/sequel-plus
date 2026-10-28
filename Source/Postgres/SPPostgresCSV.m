@@ -1,6 +1,7 @@
 #import "SPPostgresCSV.h"
 #import "SPPostgresTableData.h"
 #import "SPPostgresErrors.h"
+#import "SPPostgresCompressedFileReader.h"
 #import <PostgresKit/PostgresKit.h>
 #include <sys/stat.h>
 
@@ -244,16 +245,51 @@ typedef NS_ENUM(NSInteger, SPCSVState) {
 	SPCSVQuotedSawEscape    // inside quotes, just after an escape that isn't the quote
 };
 
+/// "Row <n>", or "The header row" for row 0 (the header), as the subject of a reading error's message.
+static NSString *SPCSVRowMessage(NSUInteger dataRow, NSString *rowFormat, NSString *headerMessage)
+{
+	if (!dataRow) return headerMessage;
+	return [NSString stringWithFormat:rowFormat, (unsigned long)dataRow];
+}
+
+/// Whether bytes[0..<length] is valid UTF-8 (no overlongs, surrogates or values past U+10FFFF).
+static BOOL SPCSVIsValidUTF8(const unsigned char *bytes, NSUInteger length)
+{
+	NSUInteger i = 0;
+	while (i < length) {
+		unsigned char c = bytes[i];
+		if (c < 0x80) { i++; continue; }
+		NSUInteger extra;
+		unsigned char low = 0x80, high = 0xBF;
+		if (c >= 0xC2 && c <= 0xDF) extra = 1;
+		else if (c == 0xE0) { extra = 2; low = 0xA0; }
+		else if (c == 0xED) { extra = 2; high = 0x9F; }
+		else if (c >= 0xE1 && c <= 0xEF) extra = 2;
+		else if (c == 0xF0) { extra = 3; low = 0x90; }
+		else if (c >= 0xF1 && c <= 0xF3) extra = 3;
+		else if (c == 0xF4) { extra = 3; high = 0x8F; }
+		else return NO;
+		if (extra >= length - i) return NO; // cut short
+		for (NSUInteger k = 1; k <= extra; k++) {
+			unsigned char next = bytes[i + k];
+			if (k == 1 ? (next < low || next > high) : (next < 0x80 || next > 0xBF)) return NO;
+		}
+		i += extra + 1;
+	}
+	return YES;
+}
+
 /**
- * Reads a CSV file in chunks by COPY FROM (FORMAT csv)'s rules, row by row. A row is an array of NSData (the
- * field's bytes, UTF-8 not checked) or NSNull.
+ * Reads a CSV file (plain, gzip or bzip2: SPPostgresCompressedFileReader) in chunks by COPY FROM (FORMAT csv)'s
+ * rules, row by row. A row is an array of NSData (the field's bytes, UTF-8 not checked) or NSNull. Its errors name
+ * data rows, counted from 1 after the header (the header itself is "the header row"), as the server's "COPY t,
+ * line N" and the import's short-row message do.
  */
 @interface SPPostgresCSVReader : NSObject
 {
-	FILE *file;
+	SPPostgresCompressedFileReader *source;
 	NSString *path;
-	unsigned long long fileSize;
-	unsigned long long bytesRead;
+	NSUInteger headerRows;
 	unsigned char delimiter, quote, escape;
 	NSData *nullBytes;
 
@@ -273,17 +309,13 @@ typedef NS_ENUM(NSInteger, SPCSVState) {
 - (instancetype)initWithPath:(NSString *)path options:(SPPostgresCSVOptions *)options error:(NSError **)error;
 /// The next row, or nil at the end (error untouched) or on an error (set).
 - (NSArray *)nextRow:(NSError **)error;
-/// 1-based number of the last row returned, the header counted.
-@property (readonly) NSUInteger rowsReturned;
+/// The data row number of the last row returned: 0 for the header, then 1, 2… (the header not counted).
+@property (readonly) NSUInteger lastDataRow;
 @property (readonly) unsigned long long bytesRead;
 @property (readonly) unsigned long long fileSize;
 @end
 
 @implementation SPPostgresCSVReader
-
-@synthesize rowsReturned;
-@synthesize bytesRead;
-@synthesize fileSize;
 
 - (instancetype)initWithPath:(NSString *)aPath options:(SPPostgresCSVOptions *)options error:(NSError **)error
 {
@@ -293,14 +325,12 @@ typedef NS_ENUM(NSInteger, SPCSVState) {
 			return nil;
 		}
 		path = [aPath copy];
-		file = fopen([path fileSystemRepresentation], "rb");
-		if (!file) {
-			if (error) *error = SPCSVFileError(NSLocalizedString(@"“%@” can't be read: %s.", @"Postgres import: the file can't be opened"), path);
+		source = [[SPPostgresCompressedFileReader alloc] initWithPath:path error:error];
+		if (!source) {
 			[self release];
 			return nil;
 		}
-		struct stat info;
-		if (fstat(fileno(file), &info) == 0) fileSize = (unsigned long long)info.st_size;
+		headerRows = [options header] ? 1 : 0;
 		nullBytes = [[[options nullString] ?: @"" dataUsingEncoding:NSUTF8StringEncoding] retain];
 		field = [[NSMutableData alloc] init];
 		row = [[NSMutableArray alloc] init];
@@ -313,7 +343,7 @@ typedef NS_ENUM(NSInteger, SPCSVState) {
 
 - (void)dealloc
 {
-	if (file) fclose(file);
+	[source release];
 	[path release];
 	[nullBytes release];
 	[field release];
@@ -321,6 +351,27 @@ typedef NS_ENUM(NSInteger, SPCSVState) {
 	[ready release];
 	[readError release];
 	[super dealloc];
+}
+
+- (NSUInteger)lastDataRow
+{
+	return rowsReturned > headerRows ? rowsReturned - headerRows : 0;
+}
+
+- (unsigned long long)bytesRead
+{
+	return [source bytesRead];
+}
+
+- (unsigned long long)fileSize
+{
+	return [source fileSize];
+}
+
+/// The data row number of the row being parsed (0: the header).
+- (NSUInteger)_parsingDataRow
+{
+	return rowsParsed + 1 > headerRows ? rowsParsed + 1 - headerRows : 0;
 }
 
 - (void)_endField
@@ -397,22 +448,31 @@ typedef NS_ENUM(NSInteger, SPCSVState) {
 	}
 }
 
-- (BOOL)_readChunk
+/// Reads and parses the next chunk, setting *got to its length (0 at the end of the file). NO on a read error.
+- (BOOL)_readChunk:(NSUInteger *)got
 {
+	*got = 0;
 	unsigned char *buffer = malloc(SPCSVReadSize);
 	if (!buffer) {
 		readError = [SPCSVError(SPPostgresErrorQueryFailed, NSLocalizedString(@"Out of memory reading the file.", @"Postgres import: out of memory")) retain];
 		return NO;
 	}
-	size_t length = fread(buffer, 1, SPCSVReadSize, file);
-	if (length < SPCSVReadSize && ferror(file)) {
-		readError = [SPCSVFileError(NSLocalizedString(@"“%@” can't be read: %s.", @"Postgres import: a read failed"), path) retain];
+	NSUInteger length = 0;
+	BOOL damaged = NO;
+	if (![source readBytes:buffer count:SPCSVReadSize read:&length damaged:&damaged]) {
 		free(buffer);
+		if (damaged) {
+			NSString *message = SPCSVRowMessage([self _parsingDataRow],
+				NSLocalizedString(@"The file is damaged or truncated (near row %lu).", @"Postgres CSV: damaged or truncated compressed file (data row)"),
+				NSLocalizedString(@"The file is damaged or truncated (near the header row).", @"Postgres CSV: damaged or truncated compressed file (header)"));
+			readError = [SPCSVError(SPPostgresErrorQueryFailed, message) retain];
+		}
+		else readError = [SPCSVFileError(NSLocalizedString(@"“%@” can't be read: %s.", @"Postgres import: a read failed"), path) retain];
 		return NO;
 	}
-	bytesRead += length;
+	*got = length;
 	const unsigned char *bytes = buffer;
-	if (atStart) {
+	if (atStart && length) {
 		atStart = NO;
 		if (length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) {
 			bytes += 3;
@@ -421,16 +481,22 @@ typedef NS_ENUM(NSInteger, SPCSVState) {
 	}
 	[self _parseBytes:bytes length:length];
 	free(buffer);
+	return YES;
+}
 
-	if (feof(file)) {
-		atEnd = YES;
-		if (state == SPCSVQuotedSawQuote) state = SPCSVUnquoted;
-		if (state != SPCSVUnquoted) {
-			readError = [SPCSVError(SPPostgresErrorQueryFailed, [NSString stringWithFormat:NSLocalizedString(@"Row %lu has a quoted field that isn't closed.", @"Postgres CSV: unterminated quoted field"), (unsigned long)(rowsParsed + 1)]) retain];
-			return NO;
-		}
-		if (rowStarted || [row count] || [field length]) [self _endRow];
+/// The end of the file: the last row (without a line break) ends, or an open quote is an error.
+- (BOOL)_finish
+{
+	atEnd = YES;
+	if (state == SPCSVQuotedSawQuote) state = SPCSVUnquoted;
+	if (state != SPCSVUnquoted) {
+		NSString *message = SPCSVRowMessage([self _parsingDataRow],
+			NSLocalizedString(@"Row %lu has a quoted field that isn't closed.", @"Postgres CSV: unterminated quoted field"),
+			NSLocalizedString(@"The header row has a quoted field that isn't closed.", @"Postgres CSV: unterminated quoted field in the header"));
+		readError = [SPCSVError(SPPostgresErrorQueryFailed, message) retain];
+		return NO;
 	}
+	if (rowStarted || [row count] || [field length]) [self _endRow];
 	return YES;
 }
 
@@ -438,7 +504,8 @@ typedef NS_ENUM(NSInteger, SPCSVState) {
 {
 	while (![ready count] && !atEnd && !readError) {
 		NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
-		[self _readChunk];
+		NSUInteger got = 0;
+		if ([self _readChunk:&got] && !got) [self _finish];
 		[pool drain];
 	}
 	if ([ready count]) {
@@ -453,8 +520,8 @@ typedef NS_ENUM(NSInteger, SPCSVState) {
 
 @end
 
-/// The row's fields as NSString / NSNull, or nil with an error when one isn't UTF-8.
-static NSArray *SPCSVStrings(NSArray *fields, NSUInteger rowNumber, NSError **error)
+/// The row's fields as NSString / NSNull, or nil with an error naming dataRow (0: the header) when one isn't UTF-8.
+static NSArray *SPCSVStrings(NSArray *fields, NSUInteger dataRow, NSError **error)
 {
 	NSMutableArray *strings = [NSMutableArray arrayWithCapacity:[fields count]];
 	for (id value in fields) {
@@ -464,7 +531,9 @@ static NSArray *SPCSVStrings(NSArray *fields, NSUInteger rowNumber, NSError **er
 		}
 		NSString *string = [[[NSString alloc] initWithData:value encoding:NSUTF8StringEncoding] autorelease];
 		if (!string) {
-			if (error) *error = SPCSVError(SPPostgresErrorQueryFailed, [NSString stringWithFormat:NSLocalizedString(@"Row %lu isn't valid UTF-8 text.", @"Postgres CSV: row not UTF-8"), (unsigned long)rowNumber]);
+			if (error) *error = SPCSVError(SPPostgresErrorQueryFailed, SPCSVRowMessage(dataRow,
+				NSLocalizedString(@"Row %lu isn't valid UTF-8 text.", @"Postgres CSV: row not UTF-8"),
+				NSLocalizedString(@"The header row isn't valid UTF-8 text.", @"Postgres CSV: header not UTF-8")));
 			return nil;
 		}
 		[strings addObject:string];
@@ -597,7 +666,7 @@ static void SPCSVAppendCopyText(NSMutableData *out, id value)
 			}
 			break;
 		}
-		NSArray *strings = SPCSVStrings(fields, [reader rowsReturned], error);
+		NSArray *strings = SPCSVStrings(fields, [reader lastDataRow], error);
 		if (!strings) return nil;
 		[rows addObject:strings];
 	}
@@ -617,7 +686,7 @@ static void SPCSVAppendCopyText(NSMutableData *out, id value)
 			if (readError && error) *error = readError;
 			return readError ? nil : names;
 		}
-		NSArray *strings = SPCSVStrings(fields, 1, error);
+		NSArray *strings = SPCSVStrings(fields, 0, error);
 		if (!strings) return nil;
 		for (id name in strings) {
 			if (name == [NSNull null] || ![name length]) name = [NSString stringWithFormat:NSLocalizedString(@"Column %lu", @"Postgres CSV: a column without a name"), (unsigned long)([names count] + 1)];
@@ -708,7 +777,6 @@ static void SPCSVAppendCopyText(NSMutableData *out, id value)
 		if (error) *error = readError;
 		return NO;
 	}
-	NSUInteger headerRows = [options header] ? 1 : 0;
 
 	if (!SPPostgresExecuteWithDetails(connection, @"BEGIN", nil, error)) return NO;
 
@@ -740,12 +808,18 @@ static void SPCSVAppendCopyText(NSMutableData *out, id value)
 					NSString *message = [NSString stringWithFormat:(fieldCount == 1
 						? NSLocalizedString(@"Row %lu has %lu field; column “%@” needs field %lu.", @"Postgres CSV import: row too short (one field)")
 						: NSLocalizedString(@"Row %lu has %lu fields; column “%@” needs field %lu.", @"Postgres CSV import: row too short")),
-						(unsigned long)([reader rowsReturned] - headerRows), (unsigned long)fieldCount, targetNames[index], (unsigned long)(fieldIndexes[index] + 1)];
+						(unsigned long)[reader lastDataRow], (unsigned long)fieldCount, targetNames[index], (unsigned long)(fieldIndexes[index] + 1)];
 					dataError = [SPCSVError(SPPostgresErrorQueryFailed, message) retain];
 					break;
 				}
+				id value = [fields objectAtIndex:fieldIndexes[index]];
+				// Checked here so the message names the row as the other reading errors do
+				if (value != [NSNull null] && !SPCSVIsValidUTF8([value bytes], [value length])) {
+					dataError = [SPCSVError(SPPostgresErrorQueryFailed, [NSString stringWithFormat:NSLocalizedString(@"Row %lu isn't valid UTF-8 text.", @"Postgres CSV: row not UTF-8"), (unsigned long)[reader lastDataRow]]) retain];
+					break;
+				}
 				if (index) [chunk appendBytes:"\t" length:1];
-				SPCSVAppendCopyText(chunk, [fields objectAtIndex:fieldIndexes[index]]);
+				SPCSVAppendCopyText(chunk, value);
 			}
 			[chunk appendBytes:"\n" length:1];
 			[pool drain];

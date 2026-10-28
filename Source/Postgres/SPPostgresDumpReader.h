@@ -39,13 +39,8 @@ __attribute__((visibility("default")))
 __attribute__((visibility("default")))
 @interface SPPostgresDumpReader : NSObject
 {
-	FILE *file;              // plain and bzip2 files
-	void *gzipFile;          // gzFile, for gzip files
-	void *bzipFile;          // BZFILE, for bzip2 files (on file)
-	NSInteger format;        // plain, gzip or bzip2 (from the first bytes)
-	unsigned long long offset; // compressed bytes consumed so far
+	id source;               // SPPostgresCompressedFileReader: the file's bytes, decompressed
 	NSUInteger chunkSize;
-	unsigned long long fileSize;
 
 	unichar *characters;     // decoded text not yet handed out, from position to length
 	NSUInteger capacity;
