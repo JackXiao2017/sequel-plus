@@ -115,6 +115,12 @@
 		@"ALTER TABLE structure_test.t ADD CONSTRAINT t_amount_check CHECK (amount >= 0)",
 		@"CREATE VIEW structure_test.t_view AS SELECT code FROM structure_test.t",
 		@"CREATE TABLE structure_test.child (id int PRIMARY KEY, t_id int REFERENCES structure_test.t (id) ON DELETE CASCADE)",
+		// Triggers (Task 3): a row trigger on UPDATE OF code with a WHEN, and a disabled statement-level one
+		@"CREATE FUNCTION structure_test.touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
+		(@"CREATE TRIGGER t_touch BEFORE UPDATE OF code ON structure_test.t FOR EACH ROW"
+			" WHEN (OLD.code IS DISTINCT FROM NEW.code) EXECUTE FUNCTION structure_test.touch()"),
+		@"CREATE TRIGGER t_audit AFTER INSERT OR DELETE ON structure_test.t FOR EACH STATEMENT EXECUTE FUNCTION structure_test.touch()",
+		@"ALTER TABLE structure_test.t DISABLE TRIGGER t_audit",
 		@"CREATE SCHEMA IF NOT EXISTS \"Sales Data\"",
 		@"DROP TABLE IF EXISTS \"Sales Data\".\"Mixed Case\" CASCADE",
 		@"CREATE TABLE \"Sales Data\".\"Mixed Case\" (\"order\" int PRIMARY KEY, \"select\" text)",

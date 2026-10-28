@@ -2,6 +2,8 @@
 #import "SPPostgresSidebarController.h"
 #import "SPPostgresContentController.h"
 #import "SPPostgresStructureController.h"
+#import "SPPostgresRelationsController.h"
+#import "SPPostgresTriggersController.h"
 #import "SPPostgresTableStructure.h"
 #import "SPPostgresQueryController.h"
 #import "SPPostgresHistory.h"
@@ -48,9 +50,14 @@ NSString * const SPPostgresPaneQuery = @"query";
 - (void)_buildContent;
 - (void)_installContentController;
 - (void)_installStructureController;
+- (void)_installRelationsController;
+- (void)_installTriggersController;
+- (void)_refreshRelationsIfStale;
+- (void)_refreshTriggersIfStale;
 - (void)_installQueryController;
 - (void)_queryRunChangedSchema:(BOOL)schemaChanged data:(BOOL)dataChanged;
 - (void)_structureDidChange:(BOOL)columnsChanged;
+- (void)_relationsDidChange;
 - (void)_refreshContentIfStale;
 - (void)_refreshStructureIfStale;
 - (void)_refreshCurrentPaneIfStale;
@@ -98,11 +105,13 @@ NSString * const SPPostgresPaneQuery = @"query";
 	SPPostgresSidebarController *sidebar;
 	SPPostgresContentController *contentController;
 	SPPostgresStructureController *structureController;
+	SPPostgresRelationsController *relationsController;
+	SPPostgresTriggersController *triggersController;
 	SPPostgresQueryController *queryController;
 	SPPostgresHistory *history;
 	/// The pane shown in the right pane (an SPPostgresPane… name)
 	NSString *currentPane;
-	/// The Relations, Triggers and Table Info panes until their views exist: an empty-state text (by pane name)
+	/// The Table Info pane until its view exists: an empty-state text (by pane name)
 	NSMutableDictionary *placeholderPanes;
 
 	NSString *serverVersion;
@@ -128,6 +137,9 @@ NSString * const SPPostgresPaneQuery = @"query";
 	/// The Structure view shows another table than the selected one, or the Query view (or a rename) may have
 	/// changed it: it is built again, from the sidebar's selection, when it is next shown
 	BOOL structureNeedsReset;
+	/// The same for the Relations and Triggers views: built again from the sidebar's selection when next shown
+	BOOL relationsNeedReset;
+	BOOL triggersNeedReset;
 
 	/// The Duplicate Table sheet while it is shown, and its controls
 	NSWindow *duplicateSheet;
@@ -156,6 +168,8 @@ NSString * const SPPostgresPaneQuery = @"query";
 @synthesize sidebar;
 @synthesize contentController;
 @synthesize structureController;
+@synthesize relationsController;
+@synthesize triggersController;
 @synthesize currentPane;
 @synthesize queryController;
 @synthesize history;
@@ -213,6 +227,8 @@ NSString * const SPPostgresPaneQuery = @"query";
 	[sidebar release];
 	[contentController release];
 	[structureController release];
+	[relationsController release];
+	[triggersController release];
 	[queryController release];
 	[history release];
 	[currentPane release];
@@ -303,6 +319,8 @@ NSString * const SPPostgresPaneQuery = @"query";
 	[splitView addSubview:mainView];
 	[self _installQueryController];
 	[self _installStructureController];
+	[self _installRelationsController];
+	[self _installTriggersController];
 	[self _installContentController];
 
 	// Constrained, and resized with the window, as MySQL's left pane (see -[SPDatabaseDocument splitView:constrain...])
@@ -391,6 +409,83 @@ NSString * const SPPostgresPaneQuery = @"query";
 }
 
 /**
+ * A Relations controller on the current connection (replacing the previous one, which is on the previous
+ * connection), in the right pane while the Relations view is showing. It shows the selected table when it is
+ * next shown.
+ */
+- (void)_installRelationsController
+{
+	NSView *pane = [self _rightPane];
+	if (!pane) return;
+
+	if (relationsController) {
+		[[relationsController view] removeFromSuperview];
+		[relationsController invalidate];
+		[relationsController release];
+	}
+
+	relationsController = [[SPPostgresRelationsController alloc] initWithConnection:connection];
+
+	// Unretained, as the Content controller's presenter: -invalidate (on replace or teardown) drops the blocks
+	__block SPPostgresDocument *document = self;
+	[relationsController setAlertPresenter:^(NSAlert *alert) {
+		[document _presentAlert:alert];
+	}];
+	[relationsController setConfirmationPresenter:^(NSAlert *alert, void (^completion)(BOOL confirmed)) {
+		[document _confirm:alert completion:completion];
+	}];
+	[relationsController setRelationsDidChange:^{
+		[document _relationsDidChange];
+	}];
+
+	NSView *relationsView = [relationsController view];
+	[relationsView setFrame:[pane bounds]];
+	[relationsView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+	if ([currentPane isEqualToString:SPPostgresPaneRelations]) [pane addSubview:relationsView];
+
+	relationsNeedReset = YES;
+	[self _updateEmptyStates];
+	if ([currentPane isEqualToString:SPPostgresPaneRelations]) [self _refreshRelationsIfStale];
+}
+
+/**
+ * A Triggers controller on the current connection (replacing the previous one, which is on the previous
+ * connection), in the right pane while the Triggers view is showing. It shows the selected table when it is
+ * next shown.
+ */
+- (void)_installTriggersController
+{
+	NSView *pane = [self _rightPane];
+	if (!pane) return;
+
+	if (triggersController) {
+		[[triggersController view] removeFromSuperview];
+		[triggersController invalidate];
+		[triggersController release];
+	}
+
+	triggersController = [[SPPostgresTriggersController alloc] initWithConnection:connection];
+
+	// Unretained, as the Content controller's presenter: -invalidate (on replace or teardown) drops the blocks
+	__block SPPostgresDocument *document = self;
+	[triggersController setAlertPresenter:^(NSAlert *alert) {
+		[document _presentAlert:alert];
+	}];
+	[triggersController setConfirmationPresenter:^(NSAlert *alert, void (^completion)(BOOL confirmed)) {
+		[document _confirm:alert completion:completion];
+	}];
+
+	NSView *triggersView = [triggersController view];
+	[triggersView setFrame:[pane bounds]];
+	[triggersView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+	if ([currentPane isEqualToString:SPPostgresPaneTriggers]) [pane addSubview:triggersView];
+
+	triggersNeedReset = YES;
+	[self _updateEmptyStates];
+	if ([currentPane isEqualToString:SPPostgresPaneTriggers]) [self _refreshTriggersIfStale];
+}
+
+/**
  * A Query controller on the current connection (replacing the previous one, which is on the previous
  * connection), keeping the editor's text; in the right pane while the Query view is showing.
  */
@@ -428,10 +523,12 @@ NSString * const SPPostgresPaneQuery = @"query";
 	return @[SPPostgresPaneStructure, SPPostgresPaneContent, SPPostgresPaneRelations, SPPostgresPaneTriggers, SPPostgresPaneInfo, SPPostgresPaneQuery];
 }
 
-/// The view a pane shows. Relations, Triggers and Table Info have a placeholder (with an empty-state text) so far.
+/// The view a pane shows. Table Info has a placeholder (with an empty-state text) so far.
 - (NSView *)_viewForPane:(NSString *)pane
 {
 	if ([pane isEqualToString:SPPostgresPaneStructure]) return [structureController view];
+	if ([pane isEqualToString:SPPostgresPaneRelations]) return [relationsController view];
+	if ([pane isEqualToString:SPPostgresPaneTriggers]) return [triggersController view];
 	if ([pane isEqualToString:SPPostgresPaneContent]) return [contentController view];
 	if ([pane isEqualToString:SPPostgresPaneQuery]) return [queryController view];
 	if (![[self _paneNames] containsObject:pane]) return nil;
@@ -568,6 +665,8 @@ NSString * const SPPostgresPaneQuery = @"query";
 			if ([[subview identifier] isEqualToString:@"paneEmptyState"]) [(NSTextField *)subview setStringValue:[texts objectForKey:pane] ?: @""];
 		}
 	}
+	[relationsController setEmptyStateText:[texts objectForKey:SPPostgresPaneRelations]];
+	[triggersController setEmptyStateText:[texts objectForKey:SPPostgresPaneTriggers]];
 }
 
 /**
@@ -587,6 +686,9 @@ NSString * const SPPostgresPaneQuery = @"query";
 	// a transaction's end (COMMIT/END count as data changes, ROLLBACK/ABORT as schema changes) may have undone a
 	// rename the structure object followed
 	structureNeedsReset = YES;
+	// The same for Relations and Triggers (CREATE TRIGGER, ALTER TABLE … ADD CONSTRAINT, …)
+	relationsNeedReset = YES;
+	triggersNeedReset = YES;
 
 	if (listsNeedReload && [connection transactionStatus] != PGPostgresTransactionInError) {
 		listsNeedReload = NO;
@@ -603,12 +705,22 @@ NSString * const SPPostgresPaneQuery = @"query";
 	[self _refreshCurrentPaneIfStale];
 }
 
-/// The Structure view changed the table: the Content view shows its new columns when it is next shown.
+/// The Structure view changed the table: the Content view shows its new columns, and Relations and Triggers (a
+/// renamed column, a foreign key added or dropped there) the server's state, when they are next shown.
 - (void)_structureDidChange:(BOOL)columnsChanged
 {
 	if (tornDown) return;
 	if (columnsChanged) contentNeedsReset = YES;
 	else contentNeedsReload = YES;
+	relationsNeedReset = YES;
+	triggersNeedReset = YES;
+}
+
+/// The Relations view added or dropped a foreign key: the Structure view's constraints follow when it is next shown.
+- (void)_relationsDidChange
+{
+	if (tornDown) return;
+	structureNeedsReset = YES;
 }
 
 /// The shown pane reloads if it may be stale.
@@ -616,6 +728,8 @@ NSString * const SPPostgresPaneQuery = @"query";
 {
 	if ([currentPane isEqualToString:SPPostgresPaneContent]) [self _refreshContentIfStale];
 	else if ([currentPane isEqualToString:SPPostgresPaneStructure]) [self _refreshStructureIfStale];
+	else if ([currentPane isEqualToString:SPPostgresPaneRelations]) [self _refreshRelationsIfStale];
+	else if ([currentPane isEqualToString:SPPostgresPaneTriggers]) [self _refreshTriggersIfStale];
 }
 
 /// Builds the Structure view again for the selected table (a new structure object, so a rename the server undid is forgotten).
@@ -624,6 +738,24 @@ NSString * const SPPostgresPaneQuery = @"query";
 	if (!structureNeedsReset) return;
 	structureNeedsReset = NO;
 	[structureController showTable:[sidebar selectedTableName] inSchema:[sidebar selectedSchema]];
+}
+
+/// Shows the selected table's foreign keys again; a view (or nothing) shows none (the pane has its empty state).
+- (void)_refreshRelationsIfStale
+{
+	if (!relationsNeedReset) return;
+	relationsNeedReset = NO;
+	BOOL isTable = [sidebar selectionIsTable];
+	[relationsController showTable:isTable ? [sidebar selectedTableName] : nil inSchema:isTable ? [sidebar selectedSchema] : nil];
+}
+
+/// Shows the selected table's triggers again; a view (or nothing) shows none (the pane has its empty state).
+- (void)_refreshTriggersIfStale
+{
+	if (!triggersNeedReset) return;
+	triggersNeedReset = NO;
+	BOOL isTable = [sidebar selectionIsTable];
+	[triggersController showTable:isTable ? [sidebar selectedTableName] : nil inSchema:isTable ? [sidebar selectedSchema] : nil];
 }
 
 /// Reloads the Content view if the Query view may have changed its table: afresh after DDL, else keeping its filter, sort and page.
@@ -653,6 +785,13 @@ NSString * const SPPostgresPaneQuery = @"query";
 	// The Structure view follows when it is shown (or next time it is)
 	if (!table || ![table isEqualToString:[structureController table]] || ![schema isEqualToString:[structureController schema]]) structureNeedsReset = YES;
 	if ([currentPane isEqualToString:SPPostgresPaneStructure]) [self _refreshStructureIfStale];
+
+	// So do Relations and Triggers (for a table only)
+	NSString *paneTable = [sidebar selectionIsTable] ? table : nil;
+	if (!paneTable || ![paneTable isEqualToString:[relationsController table]] || ![schema isEqualToString:[relationsController schema]]) relationsNeedReset = YES;
+	if (!paneTable || ![paneTable isEqualToString:[triggersController table]] || ![schema isEqualToString:[triggersController schema]]) triggersNeedReset = YES;
+	if ([currentPane isEqualToString:SPPostgresPaneRelations]) [self _refreshRelationsIfStale];
+	if ([currentPane isEqualToString:SPPostgresPaneTriggers]) [self _refreshTriggersIfStale];
 
 	// The pane stays when the selection changes (as MySQL's Query tab); one whose item is now disabled
 	// (Relations or Triggers on a view) shows its empty state
@@ -793,10 +932,11 @@ NSString * const SPPostgresPaneQuery = @"query";
 	if (![sender isKindOfClass:[SPWindowController class]]) [parentWindowController updateAllTabTitles:self];
 }
 
-/// As MySQL's (couldCommitCurrentViewActions): an edit or Structure draft column that can't be saved keeps the tab open.
+/// As MySQL's (couldCommitCurrentViewActions): an edit or Structure draft column that can't be saved keeps the tab
+/// open, while connected; without a connection nothing could be saved, so it closes (dropping the draft), as MySQL's.
 - (BOOL)parentTabShouldClose
 {
-	if (tornDown) return YES;
+	if (tornDown || ![connection isConnected]) return YES;
 	return [self _endPaneEditing];
 }
 
@@ -942,6 +1082,8 @@ NSString * const SPPostgresPaneQuery = @"query";
 
 	[contentController invalidate];
 	[structureController invalidate];
+	[relationsController invalidate];
+	[triggersController invalidate];
 	[queryController invalidate];
 	[splitView setDelegate:nil];
 	[databasePopup setTarget:nil];
@@ -1180,6 +1322,8 @@ NSString * const SPPostgresPaneQuery = @"query";
 	[sidebar reloadWithCatalog:catalog];
 	[self _installQueryController];
 	[self _installStructureController];
+	[self _installRelationsController];
+	[self _installTriggersController];
 	[self _installContentController];
 	[self _reloadDatabasePopup];
 
@@ -1763,6 +1907,8 @@ NSString * const SPPostgresPaneQuery = @"query";
 		focus = [contentController tableView];
 	}
 	else if ([pane isEqualToString:SPPostgresPaneStructure]) focus = [structureController columnsView];
+	else if ([pane isEqualToString:SPPostgresPaneRelations]) focus = [relationsController relationsView];
+	else if ([pane isEqualToString:SPPostgresPaneTriggers]) focus = [triggersController triggersView];
 	else if ([pane isEqualToString:SPPostgresPaneQuery]) focus = [queryController editor];
 	if (focus) [[focus window] makeFirstResponder:focus];
 }

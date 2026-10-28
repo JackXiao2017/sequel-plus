@@ -411,7 +411,7 @@
 		NSError *error = nil;
 
 		NSDictionary *expected = @{
-			@"code": @[@"constraint t_code_key on table structure_test.t", @"view structure_test.t_view"],
+			@"code": @[@"constraint t_code_key on table structure_test.t", @"trigger t_touch on table structure_test.t", @"view structure_test.t_view"],
 			@"amount": @[@"constraint t_amount_check on table structure_test.t", @"index structure_test.t_amount_idx",
 						 @"index structure_test.t_qty_amount_idx"],
 			@"qty": @[@"index structure_test.t_qty_amount_idx"],

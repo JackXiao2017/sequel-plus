@@ -536,7 +536,8 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	NSString *list = self.alerts[0].informativeText;
 	XCTAssertTrue([list containsString:@"view structure_test.t_view"], @"%@", list);
 	XCTAssertTrue([list containsString:@"constraint t_code_key on table structure_test.t"], @"%@", list);
-	XCTAssertEqual([[list componentsSeparatedByString:@"\n"] count], 2u, @"one per line: %@", list);
+	XCTAssertTrue([list containsString:@"trigger t_touch on table structure_test.t"], @"%@", list);
+	XCTAssertEqual([[list componentsSeparatedByString:@"\n"] count], 3u, @"one per line: %@", list);
 	XCTAssertTrue([self.alerts[0].messageText containsString:@"depend"], @"%@", self.alerts[0].messageText);
 	XCTAssertEqualObjects([self serverTypeOf:@"code"], @"text", @"nothing dropped");
 

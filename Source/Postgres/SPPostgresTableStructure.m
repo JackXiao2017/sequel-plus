@@ -202,6 +202,133 @@ BOOL SPPostgresRunStructureChange(PGPostgresConnection *connection, NSTimeInterv
 
 @end
 
+@interface SPPostgresTrigger ()
+@property (readwrite, copy) NSString *name;
+@property (readwrite, copy) NSString *timing;
+@property (readwrite, copy) NSString *events;
+@property (readwrite, copy) NSString *level;
+@property (readwrite, copy) NSString *functionSchema;
+@property (readwrite, copy) NSString *functionName;
+@property (readwrite, copy) NSString *condition;
+@property (readwrite) BOOL enabled;
+@property (readwrite, copy) NSString *definition;
+@property (readwrite, copy) NSString *functionDefinition;
+@end
+
+@implementation SPPostgresTrigger
+
+@synthesize name = _name;
+@synthesize timing = _timing;
+@synthesize events = _events;
+@synthesize level = _level;
+@synthesize functionSchema = _functionSchema;
+@synthesize functionName = _functionName;
+@synthesize condition = _condition;
+@synthesize enabled = _enabled;
+@synthesize definition = _definition;
+@synthesize functionDefinition = _functionDefinition;
+
+- (void)dealloc
+{
+	[_name release];
+	[_timing release];
+	[_events release];
+	[_level release];
+	[_functionSchema release];
+	[_functionName release];
+	[_condition release];
+	[_definition release];
+	[_functionDefinition release];
+	[super dealloc];
+}
+
+- (NSString *)description
+{
+	return [NSString stringWithFormat:@"<%@ %@>", [self class], _definition];
+}
+
+@end
+
+#pragma mark - Trigger definition text
+
+/**
+ * The index of the first occurrence of keyword in text at or after start that is outside double-quoted identifiers
+ * and single-quoted literals (pg_get_triggerdef quotes both, doubling an embedded quote), or NSNotFound.
+ */
+static NSUInteger SPPostgresTriggerFind(NSString *text, NSString *keyword, NSUInteger start)
+{
+	unichar quote = 0;
+	NSUInteger length = [text length];
+	for (NSUInteger i = start; i < length; i++) {
+		unichar c = [text characterAtIndex:i];
+		if (quote) {
+			if (c == quote) quote = 0; // a doubled quote closes and reopens: the same in the end
+			continue;
+		}
+		if (c == '"' || c == '\'') {
+			quote = c;
+			continue;
+		}
+		if ([text compare:keyword options:NSLiteralSearch range:NSMakeRange(i, MIN([keyword length], length - i))] == NSOrderedSame) return i;
+	}
+	return NSNotFound;
+}
+
+/// The index of the parenthesis closing the one at open (quote-aware), or NSNotFound.
+static NSUInteger SPPostgresTriggerClosingParenthesis(NSString *text, NSUInteger open)
+{
+	unichar quote = 0;
+	NSInteger depth = 0;
+	for (NSUInteger i = open; i < [text length]; i++) {
+		unichar c = [text characterAtIndex:i];
+		if (quote) {
+			if (c == quote) quote = 0;
+			continue;
+		}
+		if (c == '"' || c == '\'') quote = c;
+		else if (c == '(') depth++;
+		else if (c == ')' && --depth == 0) return i;
+	}
+	return NSNotFound;
+}
+
+/**
+ * The events and WHEN condition of pg_get_triggerdef's text (`CREATE [CONSTRAINT] TRIGGER <quotedName> <timing>
+ * <events> ON …[ WHEN (<condition>)] EXECUTE …`): the events are what lies between the timing and the first ON
+ * outside quotes; the condition is the WHEN's parenthesised text, without the parentheses that enclose all of it.
+ */
+static void SPPostgresTriggerParse(NSString *definition, NSString *quotedName, NSString **events, NSString **condition)
+{
+	*events = nil;
+	*condition = nil;
+	NSRange nameRange = [definition rangeOfString:[NSString stringWithFormat:@"TRIGGER %@ ", quotedName]];
+	if (nameRange.location == NSNotFound) return;
+
+	NSUInteger start = NSMaxRange(nameRange);
+	for (NSString *timing in @[@"BEFORE ", @"AFTER ", @"INSTEAD OF "]) {
+		if ([definition length] >= start + [timing length] && [[definition substringWithRange:NSMakeRange(start, [timing length])] isEqualToString:timing]) {
+			start += [timing length];
+			break;
+		}
+	}
+	NSUInteger on = SPPostgresTriggerFind(definition, @" ON ", start);
+	if (on == NSNotFound) return;
+	*events = [definition substringWithRange:NSMakeRange(start, on - start)];
+
+	NSUInteger when = SPPostgresTriggerFind(definition, @" WHEN (", on);
+	if (when == NSNotFound) return;
+	NSUInteger open = when + [@" WHEN " length];
+	NSUInteger close = SPPostgresTriggerClosingParenthesis(definition, open);
+	if (close == NSNotFound) return;
+	NSString *text = [definition substringWithRange:NSMakeRange(open + 1, close - open - 1)];
+
+	// pg_get_triggerdef wraps the expression in parentheses of its own: drop those that enclose all of it
+	while ([text hasPrefix:@"("] && SPPostgresTriggerClosingParenthesis(text, 0) == [text length] - 1) {
+		text = [text substringWithRange:NSMakeRange(1, [text length] - 2)];
+	}
+	*condition = text;
+}
+
 @implementation SPPostgresColumnDefinition
 
 @synthesize name = _name;
@@ -743,6 +870,132 @@ BOOL SPPostgresRunStructureChange(PGPostgresConnection *connection, NSTimeInterv
 - (BOOL)dropConstraintNamed:(NSString *)name error:(NSError **)error
 {
 	return [self changeWith:@[[NSString stringWithFormat:@"ALTER TABLE %@ DROP CONSTRAINT %@", [self qualifiedName], SPPostgresQuoteIdentifier(name)]] error:error];
+}
+
+#pragma mark - Triggers
+
+- (NSArray *)triggers:(NSError **)error
+{
+	NSArray *rows = [self rows:
+		@"SELECT t.tgname::text, pg_catalog.quote_ident(t.tgname)::text, pg_catalog.pg_get_triggerdef(t.oid)::text, t.tgtype::text,"
+		" (t.tgenabled <> 'D')::text, fn.nspname::text, p.proname::text, pg_catalog.pg_get_functiondef(p.oid)::text"
+		" FROM rel JOIN pg_catalog.pg_trigger t ON t.tgrelid = rel.oid"
+		" JOIN pg_catalog.pg_proc p ON p.oid = t.tgfoid"
+		" JOIN pg_catalog.pg_namespace fn ON fn.oid = p.pronamespace"
+		" WHERE NOT t.tgisinternal"
+		" ORDER BY t.tgname COLLATE \"C\"" values:nil error:error];
+	if (!rows) return nil;
+
+	NSMutableArray *triggers = [NSMutableArray arrayWithCapacity:[rows count]];
+	for (NSArray *row in rows) {
+		SPPostgresTrigger *trigger = [[[SPPostgresTrigger alloc] init] autorelease];
+		trigger.name = SPPostgresStructureText(row[0]);
+		trigger.definition = SPPostgresStructureText(row[2]);
+
+		// tgtype (pg_trigger.h): ROW 1, BEFORE 2, INSTEAD 64
+		NSInteger type = [SPPostgresStructureText(row[3]) integerValue];
+		trigger.level = (type & 1) ? @"ROW" : @"STATEMENT";
+		trigger.timing = (type & 64) ? @"INSTEAD OF" : ((type & 2) ? @"BEFORE" : @"AFTER");
+
+		NSString *events = nil, *condition = nil;
+		SPPostgresTriggerParse(trigger.definition ?: @"", SPPostgresStructureText(row[1]) ?: @"", &events, &condition);
+		trigger.events = events ?: @"";
+		trigger.condition = condition;
+
+		trigger.enabled = SPPostgresStructureIsTrue(row[4]);
+		trigger.functionSchema = SPPostgresStructureText(row[5]);
+		trigger.functionName = SPPostgresStructureText(row[6]);
+		trigger.functionDefinition = SPPostgresStructureText(row[7]);
+		[triggers addObject:trigger];
+	}
+	return triggers;
+}
+
+- (NSArray *)triggerFunctions:(NSError **)error
+{
+	NSArray *rows = SPPostgresStructureRows(_connection,
+		@"SELECT pg_catalog.quote_ident(n.nspname)::text || '.' || pg_catalog.quote_ident(p.proname)::text"
+		" FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace"
+		" WHERE p.prorettype = 'pg_catalog.trigger'::pg_catalog.regtype AND p.pronargs = 0"
+		" AND n.nspname NOT IN ('pg_catalog', 'information_schema')"
+		" ORDER BY n.nspname COLLATE \"C\", p.proname COLLATE \"C\"", nil, error);
+	if (!rows) return nil;
+
+	NSMutableArray *functions = [NSMutableArray arrayWithCapacity:[rows count]];
+	for (NSArray *row in rows) {
+		NSString *function = SPPostgresStructureText(row[0]);
+		if (function) [functions addObject:function];
+	}
+	return functions;
+}
+
+- (BOOL)addTriggerNamed:(NSString *)name timing:(NSString *)timing events:(NSArray *)events updateColumns:(NSArray *)columns level:(NSString *)level function:(NSString *)qualifiedFunction condition:(NSString *)condition error:(NSError **)error
+{
+	if (![self checkName:name error:error]) return NO;
+
+	NSString *theTiming = [timing uppercaseString] ?: @"";
+	if (![@[@"BEFORE", @"AFTER", @"INSTEAD OF"] containsObject:theTiming]) {
+		return SPPostgresStructureRefuse([NSString stringWithFormat:NSLocalizedString(@"“%@” is not a trigger timing (BEFORE, AFTER or INSTEAD OF).", @"Postgres structure: unknown trigger timing"), timing], error);
+	}
+	NSString *theLevel = [level uppercaseString] ?: @"";
+	if (![@[@"ROW", @"STATEMENT"] containsObject:theLevel]) {
+		return SPPostgresStructureRefuse([NSString stringWithFormat:NSLocalizedString(@"“%@” is not a trigger level (ROW or STATEMENT).", @"Postgres structure: unknown trigger level"), level], error);
+	}
+
+	// The events in the server's own order
+	NSMutableSet *chosen = [NSMutableSet set];
+	for (id event in events) {
+		NSString *upper = [event isKindOfClass:[NSString class]] ? [event uppercaseString] : @"";
+		if (![@[@"INSERT", @"UPDATE", @"DELETE", @"TRUNCATE"] containsObject:upper]) {
+			return SPPostgresStructureRefuse([NSString stringWithFormat:NSLocalizedString(@"“%@” is not a trigger event (INSERT, UPDATE, DELETE or TRUNCATE).", @"Postgres structure: unknown trigger event"), event], error);
+		}
+		[chosen addObject:upper];
+	}
+	if (![chosen count]) return SPPostgresStructureRefuse(NSLocalizedString(@"Choose at least one event.", @"Postgres structure: no trigger event"), error);
+
+	NSMutableArray *clauses = [NSMutableArray array];
+	for (NSString *event in @[@"INSERT", @"DELETE", @"UPDATE", @"TRUNCATE"]) {
+		if (![chosen containsObject:event]) continue;
+		if ([event isEqualToString:@"UPDATE"] && [columns count]) {
+			NSString *list = [self columnList:columns error:error];
+			if (!list) return NO;
+			[clauses addObject:[NSString stringWithFormat:@"UPDATE OF %@", [list substringWithRange:NSMakeRange(1, [list length] - 2)]]];
+		}
+		else {
+			[clauses addObject:event];
+		}
+	}
+	if ([columns count] && ![chosen containsObject:@"UPDATE"]) {
+		return SPPostgresStructureRefuse(NSLocalizedString(@"Columns can only be chosen for an UPDATE trigger.", @"Postgres structure: trigger columns without UPDATE"), error);
+	}
+
+	NSString *when = [condition stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	NSString *function = qualifiedFunction ?: @"";
+
+	return [self change:^BOOL(NSError **bodyError) {
+		// The function is sent as given only when it is one the server lists (each part quoted by quote_ident)
+		NSArray *functions = [self triggerFunctions:bodyError];
+		if (!functions) return NO;
+		if (![functions containsObject:function]) {
+			return SPPostgresStructureRefuse([NSString stringWithFormat:NSLocalizedString(@"“%@” is not a trigger function (a function returning trigger, outside pg_catalog).", @"Postgres structure: unknown trigger function"), function], bodyError);
+		}
+		NSMutableString *sql = [NSMutableString stringWithFormat:@"CREATE TRIGGER %@ %@ %@ ON %@ FOR EACH %@", SPPostgresQuoteIdentifier(name), theTiming,
+								[clauses componentsJoinedByString:@" OR "], [self qualifiedName], theLevel];
+		if ([when length]) [sql appendFormat:@" WHEN (%@)", when];
+		[sql appendFormat:@" EXECUTE FUNCTION %@()", function];
+		return [self run:sql error:bodyError];
+	} error:error];
+}
+
+- (BOOL)dropTriggerNamed:(NSString *)name error:(NSError **)error
+{
+	return [self changeWith:@[[NSString stringWithFormat:@"DROP TRIGGER %@ ON %@", SPPostgresQuoteIdentifier(name ?: @""), [self qualifiedName]]] error:error];
+}
+
+- (BOOL)setTrigger:(NSString *)name enabled:(BOOL)enabled error:(NSError **)error
+{
+	return [self changeWith:@[[NSString stringWithFormat:@"ALTER TABLE %@ %@ TRIGGER %@", [self qualifiedName], enabled ? @"ENABLE" : @"DISABLE",
+							   SPPostgresQuoteIdentifier(name ?: @"")]] error:error];
 }
 
 #pragma mark - Table
