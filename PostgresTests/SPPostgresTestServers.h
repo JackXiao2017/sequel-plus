@@ -42,4 +42,8 @@
 /// pgkit_test and pgkit_nopublic (when it exists). Test-only cleanup: app code never uses DROP OWNED.
 + (void)dropTestRolesOnPort:(NSUInteger)port;
 
+/// Returns a connection to database pgkit_ext (created when missing) after dropping every extension installed there
+/// except plpgsql, dependents first (test code only: DROP EXTENSION … CASCADE), or fails the current test.
++ (PGPostgresConnection *)extensionTestConnectionOnPort:(NSUInteger)port;
+
 @end

@@ -192,4 +192,41 @@
 	[last disconnect];
 }
 
+#pragma mark - Extensions database
+
++ (PGPostgresConnection *)extensionTestConnectionOnPort:(NSUInteger)port
+{
+	PGPostgresConnection *admin = [self connectedConnectionOnPort:port];
+	if (!admin) return nil;
+	PGPostgresResult *exists = [admin execute:@"SELECT 1 FROM pg_catalog.pg_database WHERE datname = 'pgkit_ext'"];
+	if (exists.numberOfRows == 0) {
+		XCTAssertNotNil([admin execute:@"CREATE DATABASE pgkit_ext"], @"CREATE DATABASE pgkit_ext: %@", admin.lastError.errorPrimaryMessage);
+	}
+	[admin disconnect];
+
+	PGPostgresConnection *connection = [self connectedConnectionOnPort:port database:@"pgkit_ext"];
+	if (!connection) return nil;
+	[connection execute:@"SET lock_timeout = '10s'"];
+	[connection execute:@"DROP TABLE IF EXISTS public.sp_t5_items"];
+	// Dependents first: an extension no other installed extension requires, one at a time, until only plpgsql is left
+	for (NSUInteger round = 0; round < 50; round++) {
+		PGPostgresResult *leaves = [connection execute:(@"SELECT e.extname::text FROM pg_catalog.pg_extension e"
+														@" WHERE e.extname <> 'plpgsql' AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d"
+														@" JOIN pg_catalog.pg_extension r ON r.oid = d.objid"
+														@" WHERE d.classid = 'pg_catalog.pg_extension'::regclass"
+														@" AND d.refclassid = 'pg_catalog.pg_extension'::regclass AND d.refobjid = e.oid)"
+														@" ORDER BY 1 LIMIT 1")];
+		if (!leaves.numberOfRows) break;
+		NSString *name = [leaves textValueAtRow:0 column:0];
+		NSString *drop = [NSString stringWithFormat:@"DROP EXTENSION IF EXISTS \"%@\" CASCADE",
+						  [name stringByReplacingOccurrencesOfString:@"\"" withString:@"\"\""]];
+		if (![connection execute:drop]) {
+			XCTFail(@"%@: %@", drop, connection.lastError.errorPrimaryMessage);
+			break;
+		}
+	}
+	[connection execute:@"RESET lock_timeout"];
+	return connection;
+}
+
 @end
