@@ -1,8 +1,14 @@
 #import "SPPostgresDumpReader.h"
 #import "SPPostgresStatementSplitter.h"
 #import "SPPostgresErrors.h"
-#import "SPConstants.h"
-#import "SPFileHandle.h"
+#import <zlib.h>
+#import <bzlib.h>
+
+typedef NS_ENUM(NSInteger, SPDumpFileFormat) {
+	SPDumpFilePlain = 0,
+	SPDumpFileGzip = 1,
+	SPDumpFileBzip2 = 2
+};
 
 @implementation SPPostgresDumpItem
 
@@ -72,8 +78,9 @@ static NSUInteger SPCompleteUTF8Length(const unsigned char *bytes, NSUInteger co
 - (instancetype)initWithPath:(NSString *)path error:(NSError **)error
 {
 	if ((self = [super init])) {
-		fileHandle = [[SPFileHandle fileHandleForReadingAtPath:path] retain];
-		if (!fileHandle) {
+		const char *fsPath = [path fileSystemRepresentation];
+		file = fsPath ? fopen(fsPath, "rb") : NULL;
+		if (!file) {
 			if (error) {
 				NSString *message = [NSString stringWithFormat:NSLocalizedString(@"The file “%@” can't be opened.", @"Postgres import: file can't be opened"), [path lastPathComponent]];
 				*error = SPPostgresMakeError(SPPostgresErrorQueryFailed, message, nil);
@@ -81,6 +88,37 @@ static NSUInteger SPCompleteUTF8Length(const unsigned char *bytes, NSUInteger co
 			[self release];
 			return nil;
 		}
+
+		// The format, from the first bytes: gzip 1f 8b, bzip2 "BZh"
+		unsigned char magic[3] = {0, 0, 0};
+		size_t magicLength = fread(magic, 1, 3, file);
+		rewind(file);
+		if (magicLength >= 2 && magic[0] == 0x1f && magic[1] == 0x8b) format = SPDumpFileGzip;
+		else if (magicLength == 3 && magic[0] == 'B' && magic[1] == 'Z' && magic[2] == 'h') format = SPDumpFileBzip2;
+		else format = SPDumpFilePlain;
+
+		BOOL opened = YES;
+		if (format == SPDumpFileGzip) {
+			fclose(file);
+			file = NULL;
+			gzipFile = gzopen(fsPath, "rb");
+			opened = gzipFile != NULL;
+		}
+		else if (format == SPDumpFileBzip2) {
+			int bzError = BZ_OK;
+			bzipFile = BZ2_bzReadOpen(&bzError, file, 0, 0, NULL, 0);
+			if (bzError != BZ_OK) {
+				if (bzipFile) BZ2_bzReadClose(&bzError, bzipFile);
+				bzipFile = NULL;
+				opened = NO;
+			}
+		}
+		if (!opened) {
+			if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, [NSString stringWithFormat:NSLocalizedString(@"The file is damaged or truncated (near line %lu).", @"Postgres import: damaged or truncated file"), 1UL], nil);
+			[self release];
+			return nil;
+		}
+
 		NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
 		fileSize = [attributes fileSize];
 		chunkSize = 1024 * 1024;
@@ -93,8 +131,10 @@ static NSUInteger SPCompleteUTF8Length(const unsigned char *bytes, NSUInteger co
 
 - (void)dealloc
 {
-	[fileHandle closeFile];
-	[fileHandle release];
+	int bzError;
+	if (bzipFile) BZ2_bzReadClose(&bzError, bzipFile);
+	if (gzipFile) gzclose((gzFile)gzipFile);
+	if (file) fclose(file);
 	[pendingBytes release];
 	[readError release];
 	if (characters) free(characters);
@@ -103,7 +143,95 @@ static NSUInteger SPCompleteUTF8Length(const unsigned char *bytes, NSUInteger co
 
 - (unsigned long long)bytesRead
 {
-	return [fileHandle realDataReadLength];
+	return offset;
+}
+
+/// Records error as the reader's error (returned again by later calls); NO.
+- (BOOL)_fail:(NSString *)message
+{
+	[readError release];
+	readError = [SPPostgresMakeError(SPPostgresErrorQueryFailed, message, nil) retain];
+	return NO;
+}
+
+- (BOOL)_failDamaged
+{
+	return [self _fail:[NSString stringWithFormat:NSLocalizedString(@"The file is damaged or truncated (near line %lu).", @"Postgres import: damaged or truncated file"), (unsigned long)currentLine]];
+}
+
+/**
+ * Reads up to count decompressed bytes into bytes, setting *read (0 at the end of the file). NO (with readError set)
+ * when the file can't be read, or a compressed file is damaged or ends before its stream does.
+ */
+- (BOOL)_readBytes:(void *)bytes count:(NSUInteger)count read:(NSUInteger *)read
+{
+	*read = 0;
+	if (count > INT_MAX) count = INT_MAX;
+
+	switch ((SPDumpFileFormat)format) {
+		case SPDumpFilePlain: {
+			size_t n = fread(bytes, 1, count, file);
+			if (n == 0 && ferror(file)) return [self _fail:[NSString stringWithFormat:NSLocalizedString(@"The file can't be read (near line %lu).", @"Postgres import: file read error"), (unsigned long)currentLine]];
+			*read = n;
+			long position = ftell(file);
+			if (position >= 0) offset = (unsigned long long)position;
+			return YES;
+		}
+
+		case SPDumpFileGzip: {
+			int n = gzread((gzFile)gzipFile, bytes, (unsigned)count);
+			int gzError = Z_OK;
+			gzerror((gzFile)gzipFile, &gzError);
+			// zlib reports a stream cut short as Z_BUF_ERROR ("unexpected end of file"), returning what it decoded
+			if (n < 0 || (gzError != Z_OK && gzError != Z_STREAM_END)) return [self _failDamaged];
+			*read = (NSUInteger)n;
+			z_off_t position = gzoffset((gzFile)gzipFile);
+			if (position >= 0) offset = (unsigned long long)position;
+			return YES;
+		}
+
+		case SPDumpFileBzip2: {
+			while (bzipFile) {
+				int bzError = BZ_OK;
+				int n = BZ2_bzRead(&bzError, bzipFile, bytes, (int)count);
+				long position = ftell(file);
+				if (position >= 0) offset = (unsigned long long)position;
+				if (bzError == BZ_OK) {
+					*read = (NSUInteger)n;
+					return YES;
+				}
+				if (bzError != BZ_STREAM_END) return [self _failDamaged]; // BZ_UNEXPECTED_EOF, BZ_DATA_ERROR, …
+
+				// The end of a stream: another may follow (pbzip2 writes several)
+				void *unused = NULL;
+				int unusedCount = 0;
+				BZ2_bzReadGetUnused(&bzError, bzipFile, &unused, &unusedCount);
+				NSData *rest = (bzError == BZ_OK && unusedCount > 0) ? [NSData dataWithBytes:unused length:(NSUInteger)unusedCount] : nil;
+				BZ2_bzReadClose(&bzError, bzipFile);
+				bzipFile = NULL;
+
+				BOOL more = [rest length] > 0;
+				if (!more) {
+					int c = fgetc(file);
+					if (c != EOF) { ungetc(c, file); more = YES; }
+				}
+				if (more) {
+					bzipFile = BZ2_bzReadOpen(&bzError, file, 0, 0, (void *)[rest bytes], (int)[rest length]);
+					if (bzError != BZ_OK) {
+						if (bzipFile) BZ2_bzReadClose(&bzError, bzipFile);
+						bzipFile = NULL;
+						return [self _failDamaged];
+					}
+				}
+				if (n > 0) {
+					*read = (NSUInteger)n;
+					return YES;
+				}
+			}
+			return YES; // the end of the file
+		}
+	}
+	return YES;
 }
 
 #pragma mark - Buffer
@@ -123,9 +251,17 @@ static NSUInteger SPCompleteUTF8Length(const unsigned char *bytes, NSUInteger co
 		position = 0;
 	}
 
-	NSData *chunk = [fileHandle readDataOfLength:MAX(chunkSize, (NSUInteger)1)];
-	if (![chunk length]) endOfFile = YES;
-	[pendingBytes appendData:chunk];
+	NSUInteger wanted = MAX(chunkSize, (NSUInteger)1);
+	NSUInteger pendingLength = [pendingBytes length];
+	[pendingBytes setLength:pendingLength + wanted];
+	NSUInteger got = 0;
+	if (![self _readBytes:(unsigned char *)[pendingBytes mutableBytes] + pendingLength count:wanted read:&got]) {
+		[pendingBytes setLength:pendingLength];
+		if (error) *error = [[readError retain] autorelease];
+		return NO;
+	}
+	[pendingBytes setLength:pendingLength + got];
+	if (!got) endOfFile = YES;
 
 	NSUInteger usable = endOfFile ? [pendingBytes length] : SPCompleteUTF8Length([pendingBytes bytes], [pendingBytes length]);
 	if (!usable) return YES;
@@ -134,7 +270,7 @@ static NSUInteger SPCompleteUTF8Length(const unsigned char *bytes, NSUInteger co
 	if (!text) {
 		[readError release];
 		readError = [SPPostgresMakeError(SPPostgresErrorQueryFailed, [NSString stringWithFormat:NSLocalizedString(@"The file isn't valid UTF-8 text (near line %lu).", @"Postgres import: file not UTF-8"), (unsigned long)currentLine], nil) retain];
-		if (error) *error = readError;
+		if (error) *error = [[readError retain] autorelease];
 		return NO;
 	}
 	[pendingBytes replaceBytesInRange:NSMakeRange(0, usable) withBytes:NULL length:0];
@@ -147,7 +283,7 @@ static NSUInteger SPCompleteUTF8Length(const unsigned char *bytes, NSUInteger co
 			[text release];
 			[readError release];
 			readError = [SPPostgresMakeError(SPPostgresErrorQueryFailed, NSLocalizedString(@"Out of memory reading the file.", @"Postgres import: out of memory"), nil) retain];
-			if (error) *error = readError;
+			if (error) *error = [[readError retain] autorelease];
 			return NO;
 		}
 		characters = grown;
@@ -244,18 +380,21 @@ static NSUInteger SPCompleteUTF8Length(const unsigned char *bytes, NSUInteger co
 - (SPPostgresDumpItem *)nextItem:(NSError **)error
 {
 	if (readError) {
-		if (error) *error = readError;
+		if (error) *error = [[readError retain] autorelease];
 		return nil;
 	}
 
-	// An unread COPY's data is skipped
-	if (inCopy) {
-		NSError *copyError = nil;
-		while ([self nextCopyData:&copyError]) {}
-		if (copyError) {
-			if (error) *error = copyError;
-			return nil;
+	// An unread COPY's data is skipped, a chunk at a time (each one released before the next is read)
+	while (inCopy) {
+		BOOL more;
+		@autoreleasepool {
+			more = [self nextCopyData:NULL] != nil;
 		}
+		if (!more) break;
+	}
+	if (readError) {
+		if (error) *error = [[readError retain] autorelease];
+		return nil;
 	}
 
 	if (![self _skipBlank:error]) return nil;
@@ -292,14 +431,20 @@ static NSUInteger SPCompleteUTF8Length(const unsigned char *bytes, NSUInteger co
 	NSString *statement = [self _stringFrom:start to:contentEnd];
 	[self _advanceTo:end];
 
+	// COPY … FROM stdin, looking only at the statement's top-level code (not inside strings, quoted identifiers,
+	// comments or parentheses, so neither COPY (SELECT 'from stdin') TO STDOUT nor a column list counts)
 	static NSRegularExpression *copyPattern = nil;
 	static dispatch_once_t once;
 	dispatch_once(&once, ^{
-		copyPattern = [[NSRegularExpression alloc] initWithPattern:@"^\\s*COPY\\b.*\\bFROM\\s+stdin\\b"
+		copyPattern = [[NSRegularExpression alloc] initWithPattern:@"\\ACOPY\\b.*\\bFROM\\s+stdin\\b"
 														   options:NSRegularExpressionCaseInsensitive | NSRegularExpressionDotMatchesLineSeparators
 															 error:NULL];
 	});
-	BOOL isCopy = [copyPattern firstMatchInString:statement options:0 range:NSMakeRange(0, [statement length])] != nil;
+	BOOL isCopy = NO;
+	if ([statement length] >= 4 && [[statement substringToIndex:4] caseInsensitiveCompare:@"COPY"] == NSOrderedSame) {
+		NSString *code = [SPPostgresStatementSplitter topLevelCodeOfStatement:statement];
+		isCopy = [copyPattern firstMatchInString:code options:0 range:NSMakeRange(0, [code length])] != nil;
+	}
 
 	if (isCopy) {
 		// The data starts on the next line
@@ -318,61 +463,67 @@ static NSUInteger SPCompleteUTF8Length(const unsigned char *bytes, NSUInteger co
 - (NSData *)nextCopyData:(NSError **)error
 {
 	if (readError) {
-		if (error) *error = readError;
+		if (error) *error = [[readError retain] autorelease];
 		return nil;
 	}
 	if (!inCopy) return nil;
 
-	for (;;) {
-		// Whole lines from position, up to the \. line
-		NSUInteger j = position;
-		NSUInteger lastLineEnd = position; // after the last whole data line
-		BOOL ended = NO;
-		NSUInteger markerEnd = 0;
-		while (j < length) {
-			NSUInteger lineStart = j;
-			while (j < length && characters[j] != '\n') j++;
-			BOOL complete = j < length;
-			if (!complete && !endOfFile) break;
+	NSData *result = nil;
+	BOOL done = NO;
+	while (!done) {
+		// Each turn's chunk, text and data are released before the next read
+		@autoreleasepool {
+			// Whole lines from position, up to the \. line
+			NSUInteger j = position;
+			NSUInteger lastLineEnd = position; // after the last whole data line
+			BOOL ended = NO;
+			NSUInteger markerEnd = 0;
+			while (j < length) {
+				NSUInteger lineStart = j;
+				while (j < length && characters[j] != '\n') j++;
+				BOOL complete = j < length;
+				if (!complete && !endOfFile) break;
 
-			NSUInteger contentEnd = j;
-			if (contentEnd > lineStart && characters[contentEnd - 1] == '\r') contentEnd--;
-			if (contentEnd - lineStart == 2 && characters[lineStart] == '\\' && characters[lineStart + 1] == '.') {
-				ended = YES;
-				markerEnd = complete ? j + 1 : j;
-				break;
+				NSUInteger contentEnd = j;
+				if (contentEnd > lineStart && characters[contentEnd - 1] == '\r') contentEnd--;
+				if (contentEnd - lineStart == 2 && characters[lineStart] == '\\' && characters[lineStart + 1] == '.') {
+					ended = YES;
+					markerEnd = complete ? j + 1 : j;
+					break;
+				}
+				if (!complete) break; // a last data line without \n at the end of the file: no \. line follows
+				j++;
+				lastLineEnd = j;
 			}
-			if (!complete) break; // a last data line without \n at the end of the file: no \. line follows
-			j++;
-			lastLineEnd = j;
-		}
 
-		if (lastLineEnd > position) {
-			NSString *text = [self _stringFrom:position to:lastLineEnd];
-			[self _advanceTo:lastLineEnd];
-			return [text dataUsingEncoding:NSUTF8StringEncoding];
-		}
-
-		if (ended) {
-			[self _advanceTo:markerEnd];
-			inCopy = NO;
-			return nil;
-		}
-
-		if (endOfFile) {
-			inCopy = NO;
-			NSString *message = [NSString stringWithFormat:NSLocalizedString(@"The data of the COPY on line %lu has no end marker (\\.) before the end of the file.", @"Postgres import: COPY data without \\."), (unsigned long)copyLine];
-			[readError release];
-			readError = [SPPostgresMakeError(SPPostgresErrorQueryFailed, message, nil) retain];
-			if (error) *error = readError;
-			return nil;
-		}
-
-		if (![self _readMore:error]) {
-			inCopy = NO;
-			return nil;
+			if (lastLineEnd > position) {
+				NSString *text = [self _stringFrom:position to:lastLineEnd];
+				[self _advanceTo:lastLineEnd];
+				result = [[text dataUsingEncoding:NSUTF8StringEncoding] retain];
+				done = YES;
+			}
+			else if (ended) {
+				[self _advanceTo:markerEnd];
+				inCopy = NO;
+				done = YES;
+			}
+			else if (endOfFile) {
+				inCopy = NO;
+				[self _fail:[NSString stringWithFormat:NSLocalizedString(@"The data of the COPY on line %lu has no end marker (\\.) before the end of the file.", @"Postgres import: COPY data without \\."), (unsigned long)copyLine]];
+				done = YES;
+			}
+			else if (![self _readMore:NULL]) {
+				inCopy = NO;
+				done = YES;
+			}
 		}
 	}
+
+	if (!result && readError) {
+		if (error) *error = [[readError retain] autorelease];
+		return nil;
+	}
+	return [result autorelease];
 }
 
 @end
