@@ -2,6 +2,7 @@
 #import "SPPostgresTableStructure.h"
 #import "SPPostgresCreateStatement.h"
 #import "SPPostgresQueryController.h"
+#import "SPPostgresTaskRunner.h"
 #import "SPConstants.h"
 #import <PostgresKit/PostgresKit.h>
 
@@ -19,7 +20,7 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 @property (readwrite, copy) NSString *noticeText;
 
 - (void)_buildView;
-- (void)_load;
+- (void)_loadInBackground;
 - (void)_showInfo:(NSDictionary *)info syntax:(NSString *)syntax;
 - (NSString *)_trimmedComment;
 
@@ -32,6 +33,11 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 	NSString *savedComment; // what the server holds (@"" for none)
 	BOOL commentEdited;     // the user typed in the box since it was loaded, saved or reverted
 	NSTimeInterval lockTimeout;
+
+	SPPostgresTaskRunner *taskRunner;
+	NSUInteger loadGeneration; // taken by each load (and by -invalidate): only the latest one's completion is applied
+	BOOL switchPending;        // -showTable:inSchema: asked for a table not loaded yet (a cancel leaves the view stale)
+	BOOL stale;
 
 	NSView *view;
 	NSTextField *typeField;
@@ -52,6 +58,8 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 @synthesize noticeText;
 @synthesize alertPresenter;
 @synthesize tableInfoDidChange;
+@synthesize taskRunner;
+@synthesize stale;
 @synthesize typeField, ownerField, rowsField, tableSizeField, indexSizeField, totalSizeField;
 @synthesize commentView, createSyntaxView;
 
@@ -61,6 +69,7 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 {
 	if ((self = [super init])) {
 		connection = [theConnection retain];
+		taskRunner = [[SPPostgresTaskRunner inlineRunnerWithConnection:theConnection] retain];
 		savedComment = [@"" retain];
 		noticeText = [@"" copy];
 		lockTimeout = 5;
@@ -74,6 +83,7 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 	[self invalidate];
 
 	[connection release];
+	[taskRunner release];
 	[structure release];
 	[savedComment release];
 	[schema release];
@@ -98,6 +108,7 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 {
 	if (invalidated) return;
 	invalidated = YES;
+	loadGeneration++;
 
 	[commentView setDelegate:nil];
 
@@ -257,6 +268,24 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 
 #pragma mark - Loading
 
+/// The runner's thread: the table's information and create syntax, read through structure and connection alone (nil,
+/// with *error, if either can't be read).
+static NSDictionary *SPPostgresTableInfoRead(SPPostgresTableStructure *structure, NSString *table, NSString *schema, PGPostgresConnection *connection, NSError **error)
+{
+	NSDictionary *info = [structure tableInfo:error];
+	if (!info) return nil;
+	NSString *syntax = [SPPostgresCreateStatement createStatementForTable:table inSchema:schema connection:connection error:error];
+	if (!syntax) return nil;
+	return @{@"info" : info, @"syntax" : syntax};
+}
+
+// A load (a switch, -reload) drops a comment edit not saved (as it always has: the text is replaced), so the busy
+// state's focus change saves nothing, and takes a new load generation. On the runner's thread the work uses only the
+// structure object (made on the main thread, where nothing uses it while the runner is busy: saving is refused then)
+// and copies of the names. Back on the main thread the completion is dropped if the controller was invalidated or a
+// newer load was asked for; a cancelled load shows no alert (a cancelled switch leaves the view stale); a failed one
+// shows the error.
+
 - (void)showTable:(NSString *)theTable inSchema:(NSString *)theSchema
 {
 	if (invalidated) return;
@@ -269,30 +298,58 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 		structure = [[SPPostgresTableStructure alloc] initWithConnection:connection schema:theSchema table:theTable];
 		[structure setLockTimeout:lockTimeout];
 	}
-	[self _load];
+
+	// The previous table's information goes at once
+	[self _showInfo:nil syntax:nil];
+	[self setNoticeText:@""];
+	[noticeField setStringValue:@""];
+	switchPending = (structure != nil);
+	[self _loadInBackground];
 }
 
 - (void)reload
 {
 	if (invalidated) return;
-	[self _load];
+	[self _loadInBackground];
 }
 
 /// Reads the table's information and create syntax; on failure the view empties and the error is shown.
-- (void)_load
+- (void)_loadInBackground
 {
-	NSDictionary *info = nil;
-	NSString *syntax = nil;
-	NSError *error = nil;
-	if (structure) {
-		info = [structure tableInfo:&error];
-		if (info) syntax = [SPPostgresCreateStatement createStatementForTable:table inSchema:schema connection:connection error:&error];
-		if (!syntax) info = nil;
+	NSUInteger generation = ++loadGeneration;
+	stale = NO;
+	if (commentEdited) {
+		[commentView setString:savedComment];
+		commentEdited = NO;
+	}
+	if (!structure) {
+		switchPending = NO;
+		[self _applyInfo:nil error:nil];
+		return;
 	}
 
-	[self _showInfo:info syntax:syntax];
+	SPPostgresTableStructure *target = structure;
+	NSString *theTable = [[table copy] autorelease];
+	NSString *theSchema = [[schema copy] autorelease];
+	[taskRunner runTaskWithDescription:NSLocalizedString(@"Reloading...", @"Reloading table task string") cancelTitle:NSLocalizedString(@"Cancel", @"cancel button") work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		return SPPostgresTableInfoRead(target, theTable, theSchema, theConnection, error);
+	} completion:^(id result, NSError *error, BOOL cancelled) {
+		if (invalidated || generation != loadGeneration) return;
+		if (cancelled) {
+			if (switchPending) stale = YES;
+			return;
+		}
+		switchPending = NO;
+		[self _applyInfo:result error:error];
+	}];
+}
 
-	if (structure && !info) {
+/// Shows what was read (SPPostgresTableInfoRead); nil with a table: the view empties and the error is shown.
+- (void)_applyInfo:(NSDictionary *)result error:(NSError *)error
+{
+	[self _showInfo:[result objectForKey:@"info"] syntax:[result objectForKey:@"syntax"]];
+
+	if (structure && !result) {
 		NSString *message = [[[[error localizedDescription] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsSeparatedByString:@"\n"] firstObject];
 		if (![message length]) message = NSLocalizedString(@"An unknown error occurred.", @"Postgres structure: unknown error");
 		[self setNoticeText:[NSString stringWithFormat:NSLocalizedString(@"Could not load the information: %@", @"Postgres table info: bottom line on a read failure"), message]];
@@ -359,6 +416,12 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 - (BOOL)commitPendingEdits
 {
 	if (invalidated || ![self hasPendingComment]) return YES;
+
+	// Saving runs on the main thread, so never while a load is using the connection: the text stays
+	if ([taskRunner isBusy]) {
+		NSBeep();
+		return NO;
+	}
 
 	NSString *comment = [[[self _trimmedComment] copy] autorelease];
 	NSError *error = nil;

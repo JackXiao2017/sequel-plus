@@ -12,6 +12,7 @@
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
 #import "../Source/Postgres/SPPostgresErrors.h"
+#import "../Source/Postgres/SPPostgresTaskRunner.h"
 
 static const NSUInteger SPStructureTestPort = 55418;
 
@@ -865,6 +866,128 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	[window endSheet:sheet returnCode:NSModalResponseCancel];
 	XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet == nil; } timeout:5]);
 	XCTAssertNil([self.structure valueForKey:@"activeSheet"]);
+}
+
+#pragma mark - Background loading
+
+/// Gives the Structure view the tab's background runner (the tab keeps it on an inline runner until Stage 8 Task 7).
+/// Every test using it waits for the runner before anything else uses the connection; side SQL goes through `other`.
+- (SPPostgresStructureController *)structureOnTabRunner
+{
+	SPPostgresStructureController *structure = self.structure;
+	structure.taskRunner = self.document.taskRunner;
+	XCTAssertFalse(structure.taskRunner.isInline);
+	return structure;
+}
+
+- (void)waitFor:(SPPostgresTaskRunner *)runner
+{
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+}
+
+/// Queues a one-second statement on runner, ahead of whatever is asked next.
+- (void)queueSleepOn:(SPPostgresTaskRunner *)runner
+{
+	[runner runTaskWithDescription:@"Sleeping..." cancelTitle:@"Cancel" work:^id(PGPostgresConnection *connection, NSError **error) {
+		return [connection execute:@"SELECT pg_sleep(1)"];
+	} completion:nil];
+	XCTAssertTrue(runner.isBusy);
+}
+
+/// Every cell of grid, row by row.
+- (NSArray *)rowsOf:(NSTableView *)grid
+{
+	NSMutableArray *rows = [NSMutableArray array];
+	for (NSInteger row = 0; row < [grid numberOfRows]; row++) {
+		NSMutableArray *values = [NSMutableArray array];
+		for (NSTableColumn *column in [grid tableColumns]) [values addObject:[[grid dataSource] tableView:grid objectValueForTableColumn:column row:row] ?: [NSNull null]];
+		[rows addObject:values];
+	}
+	return rows;
+}
+
+- (void)testShowTableLoadsInBackground
+{
+	SPPostgresStructureController *structure = [self structureOnTabRunner];
+	[structure showTable:@"t" inSchema:@"structure_test"];
+	XCTAssertTrue(structure.taskRunner.isBusy, @"showTable: returns while the structure loads");
+	XCTAssertEqualObjects(structure.taskRunner.currentDescription, @"Reloading...");
+	XCTAssertEqualObjects(structure.taskRunner.currentCancelTitle, @"Cancel");
+	[self waitFor:structure.taskRunner];
+
+	// What the inline (synchronous) path shows for the same table
+	SPPostgresStructureController *reference = [[SPPostgresStructureController alloc] initWithConnection:self.other];
+	XCTAssertTrue(reference.taskRunner.isInline);
+	[reference showTable:@"t" inSchema:@"structure_test"];
+	XCTAssertFalse(reference.taskRunner.isBusy);
+
+	XCTAssertEqual([structure.columnsView numberOfRows], 8);
+	XCTAssertEqualObjects([self rowsOf:structure.columnsView], [self rowsOf:reference.columnsView]);
+	XCTAssertEqualObjects([self rowsOf:structure.indexesView], [self rowsOf:reference.indexesView]);
+	XCTAssertEqualObjects([self rowsOf:structure.constraintsView], [self rowsOf:reference.constraintsView]);
+	XCTAssertTrue([structure.indexesView numberOfRows] > 0);
+	XCTAssertEqual(structure.editable, reference.editable);
+	XCTAssertTrue(structure.editable);
+	XCTAssertEqualObjects(structure.noticeText, reference.noticeText);
+	XCTAssertFalse(structure.stale);
+	XCTAssertTrue([[structure valueForKey:@"addColumnButton"] isEnabled]);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+	[reference invalidate];
+}
+
+/// A switch cancelled before it loaded: the pane is empty (no alert) and stale; Refresh loads it.
+- (void)testCancelledSwitchShowsEmptyPaneNoAlert
+{
+	SPPostgresStructureController *structure = [self structureOnTabRunner];
+	SPPostgresTaskRunner *runner = structure.taskRunner;
+	[structure showTable:@"child" inSchema:@"structure_test"];
+	[self waitFor:runner];
+	XCTAssertEqual([structure.columnsView numberOfRows], 2);
+
+	[self queueSleepOn:runner];
+	[structure showTable:@"t" inSchema:@"structure_test"];
+	XCTAssertTrue(runner.isBusy);
+	[runner cancelAll];
+	[self waitFor:runner];
+
+	XCTAssertEqualObjects(structure.table, @"t");
+	XCTAssertEqual([structure.columnsView numberOfRows], 0);
+	XCTAssertEqual([structure.indexesView numberOfRows], 0);
+	XCTAssertEqual([structure.constraintsView numberOfRows], 0);
+	XCTAssertEqualObjects(structure.noticeText, @"");
+	XCTAssertEqual(self.alerts.count, 0u, @"a cancelled load shows no alert");
+	XCTAssertTrue(structure.stale, @"the next show (or Refresh) loads it");
+	XCTAssertTrue([[structure valueForKey:@"refreshButton"] isEnabled]);
+	XCTAssertFalse([[structure valueForKey:@"addColumnButton"] isEnabled]);
+
+	[structure refresh:nil];
+	[self waitFor:runner];
+	XCTAssertEqual([structure.columnsView numberOfRows], 8);
+	XCTAssertFalse(structure.stale);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+}
+
+/// A column change while a load runs is refused (nothing reaches the connection) and the grid keeps the server's value.
+- (void)testChangeRefusedWhileBusy
+{
+	SPPostgresStructureController *structure = [self structureOnTabRunner];
+	SPPostgresTaskRunner *runner = structure.taskRunner;
+	[structure showTable:@"t" inSchema:@"structure_test"];
+	[self waitFor:runner];
+	NSInteger row = [self rowNamed:@"code" in:structure.columnsView];
+
+	[self queueSleepOn:runner];
+	XCTAssertFalse([self canEdit:structure.columnsView row:row column:@"comment"], @"no edit starts while busy");
+	[self setValue:@"while busy" in:structure.columnsView row:row column:@"comment"];
+	[structure addColumn:nil];
+	XCTAssertFalse(structure.hasDraftColumn);
+	XCTAssertTrue(runner.isBusy);
+	[self waitFor:runner];
+
+	XCTAssertEqualObjects([self serverValue:@"SELECT col_description('structure_test.t'::regclass, 2)"], @"the code");
+	XCTAssertEqualObjects([self valueIn:structure.columnsView row:row column:@"comment"], @"the code");
+	XCTAssertTrue([self canEdit:structure.columnsView row:row column:@"comment"], @"editable again once idle");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 }
 
 @end

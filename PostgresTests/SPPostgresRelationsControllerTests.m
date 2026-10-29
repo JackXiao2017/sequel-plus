@@ -13,6 +13,7 @@
 #import "../Source/Postgres/SPPostgresTableStructure.h"
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
+#import "../Source/Postgres/SPPostgresTaskRunner.h"
 
 static const NSUInteger SPRelationsTestPort = 55418;
 
@@ -775,6 +776,190 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 	XCTAssertTrue([self spinUntil:^BOOL{ return !self.document.connection.isConnected; } timeout:5]);
 	XCTAssertTrue([self.document parentTabShouldClose]);
 	XCTAssertEqual(self.alerts.count, alerts, @"no attempt to save");
+}
+
+#pragma mark - Background loading
+
+/// The tab's background runner (the tab keeps the panes on inline runners until Stage 8 Task 7). Every test using it
+/// waits for the runner before anything else uses the connection; side SQL goes through `other`.
+- (SPPostgresTaskRunner *)tabRunner
+{
+	SPPostgresTaskRunner *runner = self.document.taskRunner;
+	XCTAssertFalse(runner.isInline);
+	return runner;
+}
+
+- (void)waitFor:(SPPostgresTaskRunner *)runner
+{
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+}
+
+/// Queues a one-second statement on runner, ahead of whatever is asked next.
+- (void)queueSleepOn:(SPPostgresTaskRunner *)runner
+{
+	[runner runTaskWithDescription:@"Sleeping..." cancelTitle:@"Cancel" work:^id(PGPostgresConnection *connection, NSError **error) {
+		return [connection execute:@"SELECT pg_sleep(1)"];
+	} completion:nil];
+	XCTAssertTrue(runner.isBusy);
+}
+
+/// Every cell of grid, row by row.
+- (NSArray *)rowsOf:(NSTableView *)grid
+{
+	NSMutableArray *rows = [NSMutableArray array];
+	for (NSInteger row = 0; row < [grid numberOfRows]; row++) {
+		NSMutableArray *values = [NSMutableArray array];
+		for (NSTableColumn *column in [grid tableColumns]) [values addObject:[[grid dataSource] tableView:grid objectValueForTableColumn:column row:row] ?: [NSNull null]];
+		[rows addObject:values];
+	}
+	return rows;
+}
+
+- (void)testShowTableLoadsInBackground
+{
+	SPPostgresRelationsController *relations = self.relations;
+	relations.taskRunner = [self tabRunner];
+	[relations showTable:@"child" inSchema:@"structure_test"];
+	XCTAssertTrue(relations.taskRunner.isBusy, @"showTable: returns while the keys load");
+	XCTAssertEqualObjects(relations.taskRunner.currentDescription, @"Reloading...");
+	XCTAssertEqualObjects(relations.taskRunner.currentCancelTitle, @"Cancel");
+	[self waitFor:relations.taskRunner];
+
+	SPPostgresRelationsController *reference = [[SPPostgresRelationsController alloc] initWithConnection:self.other];
+	XCTAssertTrue(reference.taskRunner.isInline);
+	[reference showTable:@"child" inSchema:@"structure_test"];
+	XCTAssertFalse(reference.taskRunner.isBusy);
+
+	XCTAssertEqual([relations.relationsView numberOfRows], 1);
+	XCTAssertEqualObjects([self rowsOf:relations.relationsView], [self rowsOf:reference.relationsView]);
+	XCTAssertEqualObjects(relations.noticeText, reference.noticeText);
+	XCTAssertEqualObjects(relations.noticeText, @"Relations for table: child");
+	XCTAssertTrue([[relations valueForKey:@"addButton"] isEnabled]);
+	XCTAssertFalse(relations.stale);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+	[reference invalidate];
+}
+
+- (void)testCancelledSwitchShowsEmptyPaneNoAlert
+{
+	SPPostgresRelationsController *relations = self.relations;
+	SPPostgresTaskRunner *runner = [self tabRunner];
+	relations.taskRunner = runner;
+	[relations showTable:@"child" inSchema:@"structure_test"];
+	[self waitFor:runner];
+	XCTAssertEqual([relations.relationsView numberOfRows], 1);
+
+	[self queueSleepOn:runner];
+	[relations showTable:@"t" inSchema:@"structure_test"];
+	[runner cancelAll];
+	[self waitFor:runner];
+
+	XCTAssertEqualObjects(relations.table, @"t");
+	XCTAssertEqual([relations.relationsView numberOfRows], 0);
+	XCTAssertEqualObjects(relations.noticeText, @"");
+	XCTAssertEqual(self.alerts.count, 0u, @"a cancelled load shows no alert");
+	XCTAssertTrue(relations.stale);
+	XCTAssertTrue([[relations valueForKey:@"refreshButton"] isEnabled]);
+	XCTAssertFalse([[relations valueForKey:@"addButton"] isEnabled]);
+
+	[relations refresh:nil];
+	[self waitFor:runner];
+	XCTAssertEqualObjects(relations.noticeText, @"Relations for table: t");
+	XCTAssertTrue([[relations valueForKey:@"addButton"] isEnabled]);
+	XCTAssertFalse(relations.stale);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+}
+
+- (void)testTriggersShowTableLoadsInBackground
+{
+	SPPostgresTriggersController *triggers = self.triggers;
+	triggers.taskRunner = [self tabRunner];
+	[triggers showTable:@"t" inSchema:@"structure_test"];
+	XCTAssertTrue(triggers.taskRunner.isBusy, @"showTable: returns while the triggers load");
+	XCTAssertEqualObjects(triggers.taskRunner.currentDescription, @"Reloading...");
+	XCTAssertEqualObjects(triggers.taskRunner.currentCancelTitle, @"Cancel");
+	[self waitFor:triggers.taskRunner];
+
+	SPPostgresTriggersController *reference = [[SPPostgresTriggersController alloc] initWithConnection:self.other];
+	XCTAssertTrue(reference.taskRunner.isInline);
+	[reference showTable:@"t" inSchema:@"structure_test"];
+	XCTAssertFalse(reference.taskRunner.isBusy);
+
+	XCTAssertEqual([triggers.triggersView numberOfRows], 2);
+	XCTAssertEqualObjects([self rowsOf:triggers.triggersView], [self rowsOf:reference.triggersView]);
+	XCTAssertEqualObjects(triggers.noticeText, reference.noticeText);
+	XCTAssertEqualObjects(triggers.noticeText, @"Triggers for table: t");
+	XCTAssertTrue([[triggers valueForKey:@"addButton"] isEnabled]);
+	XCTAssertFalse(triggers.stale);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+	[reference invalidate];
+}
+
+- (void)testTriggersCancelledSwitchShowsEmptyPaneNoAlert
+{
+	SPPostgresTriggersController *triggers = self.triggers;
+	SPPostgresTaskRunner *runner = [self tabRunner];
+	triggers.taskRunner = runner;
+	[triggers showTable:@"t" inSchema:@"structure_test"];
+	[self waitFor:runner];
+	XCTAssertEqual([triggers.triggersView numberOfRows], 2);
+	[self selectRow:1 in:triggers.triggersView];
+	XCTAssertTrue([[triggers.functionSourceView string] length] > 0);
+
+	[self queueSleepOn:runner];
+	[triggers showTable:@"child" inSchema:@"structure_test"];
+	[runner cancelAll];
+	[self waitFor:runner];
+
+	XCTAssertEqualObjects(triggers.table, @"child");
+	XCTAssertEqual([triggers.triggersView numberOfRows], 0);
+	XCTAssertEqualObjects([triggers.functionSourceView string], @"");
+	XCTAssertEqualObjects(triggers.noticeText, @"");
+	XCTAssertEqual(self.alerts.count, 0u, @"a cancelled load shows no alert");
+	XCTAssertTrue(triggers.stale);
+	XCTAssertTrue([[triggers valueForKey:@"refreshButton"] isEnabled]);
+	XCTAssertFalse([[triggers valueForKey:@"addButton"] isEnabled]);
+
+	[triggers refresh:nil];
+	[self waitFor:runner];
+	XCTAssertEqualObjects(triggers.noticeText, @"Triggers for table: child");
+	XCTAssertFalse(triggers.stale);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+}
+
+/// The short writes refuse while a load runs: nothing reaches the connection.
+- (void)testChangesRefusedWhileBusy
+{
+	SPPostgresTaskRunner *runner = [self tabRunner];
+	SPPostgresTriggersController *triggers = self.triggers;
+	SPPostgresRelationsController *relations = self.relations;
+	triggers.taskRunner = runner;
+	relations.taskRunner = runner;
+	[triggers showTable:@"t" inSchema:@"structure_test"];
+	[relations showTable:@"child" inSchema:@"structure_test"];
+	[self waitFor:runner];
+	__block NSUInteger asked = 0;
+	self.document.confirmationPresenter = ^(NSAlert *alert, void (^completion)(BOOL)) { asked++; completion(YES); };
+	triggers.triggerSheetPresenter = ^(NSArray *columnNames, NSArray *functions, void (^completion)(SPPostgresTriggerDefinition *)) { asked++; completion(nil); };
+	relations.constraintSheetPresenter = ^(NSArray *columnNames, void (^completion)(SPPostgresConstraintDefinition *)) { asked++; completion(nil); };
+	[self selectRow:0 in:triggers.triggersView];
+	[self selectRow:0 in:relations.relationsView];
+
+	[self queueSleepOn:runner];
+	XCTAssertFalse([(id<NSTableViewDelegate>)[triggers.triggersView delegate] tableView:triggers.triggersView shouldEditTableColumn:[self column:@"enabled" of:triggers.triggersView] row:0]);
+	[self setValue:@YES in:triggers.triggersView row:0 column:@"enabled"]; // t_audit is disabled
+	[triggers addTrigger:nil];
+	[triggers removeTrigger:nil];
+	[relations addRelation:nil];
+	[relations removeRelation:nil];
+	XCTAssertEqual(asked, 0u, @"not even asked while busy");
+	XCTAssertTrue(runner.isBusy);
+	[self waitFor:runner];
+
+	XCTAssertEqualObjects([self tgenabled:@"t_audit"], @"D");
+	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM pg_constraint WHERE conname = 'child_t_id_fkey'"], @1);
+	XCTAssertEqual([triggers.triggersView numberOfRows], 2);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 }
 
 @end

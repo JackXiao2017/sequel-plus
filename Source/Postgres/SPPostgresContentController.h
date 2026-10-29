@@ -65,6 +65,10 @@ __attribute__((visibility("default")))
 /// With a background runner (the tab's, from Stage 8 Task 7) a load returns at once and is applied when it completes.
 @property (retain) SPPostgresTaskRunner *taskRunner;
 
+/// A table switch was cancelled before the table's rows loaded: Refresh (-reload), or the tab showing the view or
+/// selecting the table again, loads it.
+@property (readonly, getter=isStale) BOOL stale;
+
 /// Shows errors. nil (the default) shows them as sheets on the view's window. Replaceable (the tab routes them through its own).
 @property (copy) void (^alertPresenter)(NSAlert *alert);
 

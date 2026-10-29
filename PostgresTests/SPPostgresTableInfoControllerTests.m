@@ -11,6 +11,7 @@
 #import "../Source/Postgres/SPPostgresCreateStatement.h"
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
+#import "../Source/Postgres/SPPostgresTaskRunner.h"
 
 static const NSUInteger SPInfoTestPort = 55418;
 
@@ -454,6 +455,106 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	[self.document viewContent:nil];
 	XCTAssertNil([[self.info view] window]);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+}
+
+#pragma mark - Background loading
+
+/// Gives Table Info the tab's background runner (the tab keeps it on an inline runner until Stage 8 Task 7). Every
+/// test using it waits for the runner before anything else uses the connection; side SQL goes through `other`.
+- (SPPostgresTableInfoController *)infoOnTabRunner
+{
+	SPPostgresTableInfoController *info = self.info;
+	info.taskRunner = self.document.taskRunner;
+	XCTAssertFalse(info.taskRunner.isInline);
+	return info;
+}
+
+- (void)waitFor:(SPPostgresTaskRunner *)runner
+{
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+}
+
+- (NSArray *)shownValuesOf:(SPPostgresTableInfoController *)info
+{
+	return @[[info.typeField stringValue], [info.ownerField stringValue], [info.rowsField stringValue], [info.tableSizeField stringValue],
+			 [info.indexSizeField stringValue], [info.totalSizeField stringValue], [info.commentView string], [info.createSyntaxView string],
+			 info.noticeText, @([info.commentView isEditable])];
+}
+
+- (void)testShowTableLoadsInBackground
+{
+	SPPostgresTableInfoController *info = [self infoOnTabRunner];
+	[info showTable:@"t" inSchema:@"structure_test"];
+	XCTAssertTrue(info.taskRunner.isBusy, @"showTable: returns while the information loads");
+	XCTAssertEqualObjects(info.taskRunner.currentDescription, @"Reloading...");
+	XCTAssertEqualObjects(info.taskRunner.currentCancelTitle, @"Cancel");
+	[self waitFor:info.taskRunner];
+
+	SPPostgresTableInfoController *reference = [[SPPostgresTableInfoController alloc] initWithConnection:self.other];
+	XCTAssertTrue(reference.taskRunner.isInline);
+	[reference showTable:@"t" inSchema:@"structure_test"];
+	XCTAssertFalse(reference.taskRunner.isBusy);
+
+	XCTAssertEqualObjects([self shownValuesOf:info], [self shownValuesOf:reference]);
+	XCTAssertEqualObjects([info.typeField stringValue], @"table");
+	XCTAssertEqualObjects([info.commentView string], @"the t table");
+	XCTAssertTrue([[info.createSyntaxView string] hasPrefix:@"CREATE TABLE"], @"%@", [info.createSyntaxView string]);
+	XCTAssertFalse(info.stale);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+	[reference invalidate];
+}
+
+- (void)testCancelledSwitchShowsEmptyPaneNoAlert
+{
+	SPPostgresTableInfoController *info = [self infoOnTabRunner];
+	SPPostgresTaskRunner *runner = info.taskRunner;
+	[info showTable:@"t" inSchema:@"structure_test"];
+	[self waitFor:runner];
+	XCTAssertEqualObjects([info.typeField stringValue], @"table");
+
+	[runner runTaskWithDescription:@"Sleeping..." cancelTitle:@"Cancel" work:^id(PGPostgresConnection *connection, NSError **error) {
+		return [connection execute:@"SELECT pg_sleep(1)"];
+	} completion:nil];
+	[info showTable:@"child" inSchema:@"structure_test"];
+	XCTAssertTrue(runner.isBusy);
+	[runner cancelAll];
+	[self waitFor:runner];
+
+	XCTAssertEqualObjects(info.table, @"child");
+	XCTAssertEqualObjects([self shownValuesOf:info], (@[@"", @"", @"", @"", @"", @"", @"", @"", @"", @NO]));
+	XCTAssertEqual(self.alerts.count, 0u, @"a cancelled load shows no alert");
+	XCTAssertTrue(info.stale, @"the next show (or a reload) loads it");
+
+	[info reload];
+	[self waitFor:runner];
+	XCTAssertEqualObjects([info.typeField stringValue], @"table");
+	XCTAssertTrue([[info.createSyntaxView string] containsString:@"child"], @"%@", [info.createSyntaxView string]);
+	XCTAssertFalse(info.stale);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+}
+
+/// A comment save while a load runs is refused (nothing reaches the connection); the typed text stays.
+- (void)testCommentSaveRefusedWhileBusy
+{
+	[self showInfoOf:@"t"];
+	SPPostgresTableInfoController *info = [self infoOnTabRunner];
+	SPPostgresTaskRunner *runner = info.taskRunner;
+	[self typeComment:@"while busy"];
+	XCTAssertTrue(info.hasPendingComment);
+
+	[runner runTaskWithDescription:@"Sleeping..." cancelTitle:@"Cancel" work:^id(PGPostgresConnection *connection, NSError **error) {
+		return [connection execute:@"SELECT pg_sleep(1)"];
+	} completion:nil];
+	XCTAssertFalse([info commitPendingEdits]);
+	XCTAssertTrue(info.hasPendingComment);
+	[self waitFor:runner];
+
+	XCTAssertEqualObjects([self serverValue:@"SELECT obj_description('structure_test.t'::regclass, 'pg_class')"], @"the t table");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+
+	// Once idle it saves
+	XCTAssertTrue([info commitPendingEdits]);
+	XCTAssertEqualObjects([self serverValue:@"SELECT obj_description('structure_test.t'::regclass, 'pg_class')"], @"while busy");
 }
 
 @end

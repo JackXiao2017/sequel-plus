@@ -1,6 +1,7 @@
 #import <Cocoa/Cocoa.h>
 
 @class PGPostgresConnection;
+@class SPPostgresTaskRunner;
 
 /**
  * The Table Info view of a PostgreSQL tab, laid out as MySQL's Table Info tab: a grid of labels (Type, Owner,
@@ -14,6 +15,12 @@
  * through -[SPPostgresTableStructure setTableComment:error:] (SPPostgresRunStructureChange). If that fails, an
  * alert shows the server's message, the typed text stays, and the edit doesn't end (the box keeps the focus;
  * -commitPendingEdits returns NO), so the tab doesn't move on; Escape in the box puts the saved comment back.
+ *
+ * Loads (-showTable:inSchema:, -reload) run through taskRunner: with the tab's background runner they return at once
+ * and the end state they document holds once the runner is idle. A cancelled load shows no alert: a cancelled table
+ * switch leaves the view empty and stale (a reload, or the tab showing it again, loads it); a cancelled reload keeps
+ * what was shown. Saving the comment runs on the main thread and is refused (NSBeep; -commitPendingEdits returns NO,
+ * the text stays) while the runner is busy.
  */
 __attribute__((visibility("default")))
 @interface SPPostgresTableInfoController : NSObject <NSTextViewDelegate>
@@ -56,6 +63,11 @@ __attribute__((visibility("default")))
 
 /// Seconds a comment change waits for a lock held elsewhere before it fails (default 5).
 @property (nonatomic) NSTimeInterval lockTimeout;
+
+/// Runs the loads (default: an inline runner on the connection, so a load has finished when its method returns).
+@property (nonatomic, retain) SPPostgresTaskRunner *taskRunner;
+/// A table switch was cancelled before the table loaded: the view is empty until a reload or the next show loads it.
+@property (readonly, getter=isStale) BOOL stale;
 
 /// Shows errors. nil (the default) shows them as sheets on the view's window.
 @property (copy) void (^alertPresenter)(NSAlert *alert);

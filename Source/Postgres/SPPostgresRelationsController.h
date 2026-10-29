@@ -2,6 +2,7 @@
 
 @class PGPostgresConnection;
 @class SPPostgresConstraintDefinition;
+@class SPPostgresTaskRunner;
 
 /**
  * The Relations view of a PostgreSQL tab, laid out as MySQL's Relations tab: one grid of the table's foreign keys
@@ -13,6 +14,11 @@
  * shows the server's message and the grid reloads.
  *
  * A non-empty emptyStateText (set by the tab, e.g. for a view) hides the grid and its bar and shows that text.
+ *
+ * Loads (-showTable:inSchema:, -reload, Refresh) run through taskRunner: with the tab's background runner they return
+ * at once and the end state they document holds once the runner is idle. A cancelled load shows no alert: a cancelled
+ * table switch leaves the grid empty and the view stale (Refresh, or the tab showing it again, loads it); a cancelled
+ * reload keeps what was shown. + and − run on the main thread and are refused (NSBeep) while the runner is busy.
  */
 __attribute__((visibility("default")))
 @interface SPPostgresRelationsController : NSObject <NSTableViewDataSource, NSTableViewDelegate>
@@ -45,6 +51,11 @@ __attribute__((visibility("default")))
 @property (readonly, copy) NSString *noticeText;
 /// Shown instead of the grid when not empty (e.g. @"Relations aren't available for views.").
 @property (nonatomic, copy) NSString *emptyStateText;
+
+/// Runs the loads (default: an inline runner on the connection, so a load has finished when its method returns).
+@property (nonatomic, retain) SPPostgresTaskRunner *taskRunner;
+/// A table switch was cancelled before the table loaded: the grid is empty until Refresh or the next show loads it.
+@property (readonly, getter=isStale) BOOL stale;
 
 /// Shows errors. nil (the default) shows them as sheets on the view's window.
 @property (copy) void (^alertPresenter)(NSAlert *alert);

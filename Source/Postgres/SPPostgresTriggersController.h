@@ -1,6 +1,7 @@
 #import <Cocoa/Cocoa.h>
 
 @class PGPostgresConnection;
+@class SPPostgresTaskRunner;
 
 /// A trigger to add, as the add-trigger sheet returns it (see -[SPPostgresTableStructure addTriggerNamed:…]).
 __attribute__((visibility("default")))
@@ -60,6 +61,12 @@ __attribute__((visibility("default")))
  * Each change runs through SPPostgresTableStructure (SPPostgresRunStructureChange).
  *
  * A non-empty emptyStateText (set by the tab, e.g. for a view) hides the grid, bar and source and shows that text.
+ *
+ * Loads (-showTable:inSchema:, -reload, Refresh) run through taskRunner: with the tab's background runner they return
+ * at once and the end state they document holds once the runner is idle. A cancelled load shows no alert: a cancelled
+ * table switch leaves the grid empty and the view stale (Refresh, or the tab showing it again, loads it); a cancelled
+ * reload keeps what was shown. The changes (Enabled, +, −) run on the main thread and are refused (NSBeep) while the
+ * runner is busy.
  */
 __attribute__((visibility("default")))
 @interface SPPostgresTriggersController : NSObject <NSTableViewDataSource, NSTableViewDelegate>
@@ -97,6 +104,11 @@ __attribute__((visibility("default")))
 /// Seconds a change waits for a lock held elsewhere before it fails (default 5), passed to the table's
 /// SPPostgresTableStructure.
 @property (nonatomic) NSTimeInterval lockTimeout;
+
+/// Runs the loads (default: an inline runner on the connection, so a load has finished when its method returns).
+@property (nonatomic, retain) SPPostgresTaskRunner *taskRunner;
+/// A table switch was cancelled before the table loaded: the grid is empty until Refresh or the next show loads it.
+@property (readonly, getter=isStale) BOOL stale;
 
 /// Shows errors. nil (the default) shows them as sheets on the view's window.
 @property (copy) void (^alertPresenter)(NSAlert *alert);

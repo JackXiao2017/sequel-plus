@@ -59,6 +59,8 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	BOOL loaded;                    // the current table's rows loaded at least once (the grid and counts are its own)
 	BOOL loadingTable;              // a table switch hasn't loaded its first rows yet ("Loading table data...")
 	BOOL needsShow;                 // a table switch was cancelled before its columns came: Refresh shows the table again
+	BOOL switchPending;             // -showTable:inSchema: asked for a table whose rows haven't loaded yet
+	BOOL stale;                     // a table switch was cancelled (see -isStale)
 	NSUInteger loadGeneration;      // taken by each load (and by -invalidate): only the latest one's completion is applied
 	BOOL endingEdit;                // inside -_endEditing (a commit then leaves the reload to its caller)
 	BOOL reloadOwed;                // a commit inside -_endEditing wants the rows reloaded
@@ -102,6 +104,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 @synthesize alertPresenter;
 @synthesize confirmationPresenter;
 @synthesize taskRunner;
+@synthesize stale;
 
 #pragma mark - Setup
 
@@ -451,12 +454,14 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	loaded = NO;
 	needsShow = NO;
 	loadingTable = NO;
+	stale = NO;
 	NSUInteger generation = ++loadGeneration;
 
 	if ([theTable length] && [theSchema length]) {
 		tableData = [[SPPostgresTableData alloc] initWithConnection:connection schema:theSchema table:theTable];
 		loadingTable = YES;
 	}
+	switchPending = (tableData != nil);
 
 	// The previous table's columns, rows and counts go at once
 	[self _showColumns];
@@ -477,8 +482,11 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 
 		if (!result) {
 			loadingTable = NO;
-			if (cancelled) needsShow = YES;
-			else [self _presentError:error title:[NSString stringWithFormat:NSLocalizedString(@"Could not load the columns of “%@”", @"Postgres content: columns failed"), theTable]];
+			if (cancelled) needsShow = stale = YES;
+			else {
+				switchPending = NO;
+				[self _presentError:error title:[NSString stringWithFormat:NSLocalizedString(@"Could not load the columns of “%@”", @"Postgres content: columns failed"), theTable]];
+			}
 			[self _updateBottomBar];
 			return;
 		}
@@ -528,6 +536,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	if (!tableData || ![columns count]) return;
 	if (!committingInGrid) [self _endEditing];
 	reloadPending = NO; // this load shows the rows as they are now
+	stale = NO;
 	NSUInteger generation = ++loadGeneration;
 
 	// Everything the work needs, so it never reads this controller (the filter is never changed once made)
@@ -568,6 +577,8 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 		if (invalidated || generation != loadGeneration) return;
 		BOOL firstRows = loadingTable;
 		loadingTable = NO;
+		if (cancelled) stale = switchPending;
+		else switchPending = NO;
 
 		if (result) [self _showPage:result];
 		else if (!cancelled) [self _presentError:error title:title];

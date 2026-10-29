@@ -204,6 +204,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	BOOL sequenceNeedsReset;
 	/// The same for the Extension view (the selected extension), which also reads again each time it is shown
 	BOOL extensionNeedsReset;
+	/// (A table pane whose table switch was cancelled is stale too, by its controller's isStale: the pane loads the table
+	/// when it is next shown, or its table selected again, as with these flags.)
 
 	/// Inside the sidebar's should-change callback (the outline has already taken the row the user clicked or moved
 	/// to): the sidebar isn't reloaded meanwhile, which would put another item at that row. The reload waits until
@@ -580,6 +582,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}
 
 	structureController = [[SPPostgresStructureController alloc] initWithConnection:connection];
+	// Keeps its own inline runner on the tab's connection for now, as Content (see -_installContentController): Task 7
+	// switches every controller to the tab's background runner at once
 
 	// Unretained, as the Content controller's presenter: -invalidate (on replace or teardown) drops the blocks
 	__block SPPostgresDocument *document = self;
@@ -619,6 +623,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}
 
 	relationsController = [[SPPostgresRelationsController alloc] initWithConnection:connection];
+	// Keeps its own inline runner on the tab's connection for now, as Content (see -_installContentController): Task 7
+	// switches every controller to the tab's background runner at once
 
 	// Unretained, as the Content controller's presenter: -invalidate (on replace or teardown) drops the blocks
 	__block SPPostgresDocument *document = self;
@@ -659,6 +665,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}
 
 	triggersController = [[SPPostgresTriggersController alloc] initWithConnection:connection];
+	// Keeps its own inline runner on the tab's connection for now, as Content (see -_installContentController): Task 7
+	// switches every controller to the tab's background runner at once
 
 	// Unretained, as the Content controller's presenter: -invalidate (on replace or teardown) drops the blocks
 	__block SPPostgresDocument *document = self;
@@ -696,6 +704,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}
 
 	infoController = [[SPPostgresTableInfoController alloc] initWithConnection:connection];
+	// Keeps its own inline runner on the tab's connection for now, as Content (see -_installContentController): Task 7
+	// switches every controller to the tab's background runner at once
 
 	// Unretained, as the Content controller's presenter: -invalidate (on replace or teardown) drops the blocks
 	__block SPPostgresDocument *document = self;
@@ -1146,7 +1156,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// Builds the Structure view again for the selected table (a new structure object, so a rename the server undid is forgotten).
 - (void)_refreshStructureIfStale
 {
-	if (!structureNeedsReset) return;
+	if (!structureNeedsReset && ![structureController isStale]) return;
 	structureNeedsReset = NO;
 	[structureController showTable:[sidebar selectedTableName] inSchema:[sidebar selectedSchema]];
 }
@@ -1154,7 +1164,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// Shows the selected table's foreign keys again; a view (or nothing) shows none (the pane has its empty state).
 - (void)_refreshRelationsIfStale
 {
-	if (!relationsNeedReset) return;
+	if (!relationsNeedReset && ![relationsController isStale]) return;
 	relationsNeedReset = NO;
 	BOOL isTable = [sidebar selectionIsTable];
 	[relationsController showTable:isTable ? [sidebar selectedTableName] : nil inSchema:isTable ? [sidebar selectedSchema] : nil];
@@ -1163,7 +1173,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// Shows the selected table's triggers again; a view (or nothing) shows none (the pane has its empty state).
 - (void)_refreshTriggersIfStale
 {
-	if (!triggersNeedReset) return;
+	if (!triggersNeedReset && ![triggersController isStale]) return;
 	triggersNeedReset = NO;
 	BOOL isTable = [sidebar selectionIsTable];
 	[triggersController showTable:isTable ? [sidebar selectedTableName] : nil inSchema:isTable ? [sidebar selectedSchema] : nil];
@@ -1172,7 +1182,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// Shows the selected table's or view's information again (nothing selected: empty).
 - (void)_refreshInfoIfStale
 {
-	if (!infoNeedsReset) return;
+	if (!infoNeedsReset && ![infoController isStale]) return;
 	infoNeedsReset = NO;
 	[infoController showTable:[sidebar selectedTableName] inSchema:[sidebar selectedSchema]];
 }
@@ -1193,10 +1203,11 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[extensionController showExtension:[sidebar selectedExtensionName]];
 }
 
-/// Reloads the Content view if the Query view may have changed its table: afresh after DDL, else keeping its filter, sort and page.
+/// Reloads the Content view if the Query view may have changed its table: afresh after DDL, else keeping its filter, sort
+/// and page (a table switch that was cancelled: its table, from -reload).
 - (void)_refreshContentIfStale
 {
-	if (!contentNeedsReload && !contentNeedsReset) return;
+	if (!contentNeedsReload && !contentNeedsReset && ![contentController isStale]) return;
 	BOOL reset = contentNeedsReset;
 	contentNeedsReload = NO;
 	contentNeedsReset = NO;
@@ -1211,25 +1222,26 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	NSString *table = [sidebar selectedTableName];
 	NSString *schema = [sidebar selectedSchema];
 
-	if (![table isEqualToString:[contentController table]] || ![schema isEqualToString:[contentController schema]] || !table) {
+	// A switch to this table that was cancelled (the view is stale) loads it again
+	if (![table isEqualToString:[contentController table]] || ![schema isEqualToString:[contentController schema]] || !table || [contentController isStale]) {
 		[contentController showTable:table inSchema:schema];
 		contentNeedsReload = NO;
 		contentNeedsReset = NO;
 	}
 
 	// The Structure view follows when it is shown (or next time it is)
-	if (!table || ![table isEqualToString:[structureController table]] || ![schema isEqualToString:[structureController schema]]) structureNeedsReset = YES;
+	if (!table || ![table isEqualToString:[structureController table]] || ![schema isEqualToString:[structureController schema]] || [structureController isStale]) structureNeedsReset = YES;
 	if ([currentPane isEqualToString:SPPostgresPaneStructure]) [self _refreshStructureIfStale];
 
 	// So do Relations and Triggers (for a table only)
 	NSString *paneTable = [sidebar selectionIsTable] ? table : nil;
-	if (!paneTable || ![paneTable isEqualToString:[relationsController table]] || ![schema isEqualToString:[relationsController schema]]) relationsNeedReset = YES;
-	if (!paneTable || ![paneTable isEqualToString:[triggersController table]] || ![schema isEqualToString:[triggersController schema]]) triggersNeedReset = YES;
+	if (!paneTable || ![paneTable isEqualToString:[relationsController table]] || ![schema isEqualToString:[relationsController schema]] || [relationsController isStale]) relationsNeedReset = YES;
+	if (!paneTable || ![paneTable isEqualToString:[triggersController table]] || ![schema isEqualToString:[triggersController schema]] || [triggersController isStale]) triggersNeedReset = YES;
 	if ([currentPane isEqualToString:SPPostgresPaneRelations]) [self _refreshRelationsIfStale];
 	if ([currentPane isEqualToString:SPPostgresPaneTriggers]) [self _refreshTriggersIfStale];
 
 	// So does Table Info (for a table or view)
-	if (!table || ![table isEqualToString:[infoController table]] || ![schema isEqualToString:[infoController schema]]) infoNeedsReset = YES;
+	if (!table || ![table isEqualToString:[infoController table]] || ![schema isEqualToString:[infoController schema]] || [infoController isStale]) infoNeedsReset = YES;
 	if ([currentPane isEqualToString:SPPostgresPaneInfo]) [self _refreshInfoIfStale];
 
 	// A sequence has its own pane, shown whenever one is selected; when none is selected any more, the pane before
