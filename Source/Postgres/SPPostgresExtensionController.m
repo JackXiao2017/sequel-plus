@@ -1,5 +1,6 @@
 #import "SPPostgresExtensionController.h"
 #import "SPPostgresExtensions.h"
+#import "SPPostgresPaneLoader.h"
 #import <PostgresKit/PostgresKit.h>
 
 // As the Sequence pane: right-aligned labels at x 20, values from x 128
@@ -14,6 +15,7 @@ static const CGFloat SPPostgresExtensionPopupWidth = 220;
 @property (readwrite, retain) SPPostgresExtension *extension;
 
 - (void)_buildView;
+- (void)_loadSwitching:(BOOL)switching;
 - (void)_load;
 
 @end
@@ -22,6 +24,7 @@ static const CGFloat SPPostgresExtensionPopupWidth = 220;
 {
 	PGPostgresConnection *connection;
 	SPPostgresExtensions *extensions;
+	SPPostgresPaneLoader *loader; // the runner, the load generation, staleness, and refusing changes while busy
 
 	NSView *view;
 	NSTextField *nameField;
@@ -49,10 +52,11 @@ static const CGFloat SPPostgresExtensionPopupWidth = 220;
 {
 	if ((self = [super init])) {
 		connection = [theConnection retain];
+		loader = [[SPPostgresPaneLoader alloc] initWithConnection:theConnection];
 		extensions = [self newExtensionsWithConnection:connection];
 		[extensions setLockTimeout:5];
 		[self _buildView];
-		[self _load];
+		[self _applyExtension:nil targets:nil targetsError:nil];
 	}
 	return self;
 }
@@ -62,6 +66,7 @@ static const CGFloat SPPostgresExtensionPopupWidth = 220;
 	[self invalidate];
 
 	[connection release];
+	[loader release];
 	[extensions release];
 	[extensionName release];
 	[extension release];
@@ -84,6 +89,7 @@ static const CGFloat SPPostgresExtensionPopupWidth = 220;
 {
 	if (invalidated) return;
 	invalidated = YES;
+	[loader invalidate];
 	delegate = nil;
 	for (NSControl *control in @[updatePopup, updateButton, dropButton]) [control setTarget:nil];
 
@@ -228,31 +234,110 @@ static const CGFloat SPPostgresExtensionPopupWidth = 220;
 
 #pragma mark Loading
 
+/// The runner's thread: the extension and its update targets, read through extensions alone. nil (with *error) when
+/// the extension can't be read; otherwise "extension" (absent when it isn't installed) and "targets" (absent, with
+/// "targetsError", when they can't be read).
+static NSDictionary *SPPostgresExtensionRead(SPPostgresExtensions *extensions, NSString *name, NSError **error)
+{
+	NSError *readError = nil, *targetsError = nil;
+	SPPostgresExtension *loaded = [extensions extensionNamed:name error:&readError];
+	if (!loaded) {
+		if (readError) {
+			if (error) *error = readError;
+			return nil;
+		}
+		return @{};
+	}
+	NSArray *targets = [extensions updateTargetsForExtension:name error:&targetsError];
+	NSMutableDictionary *result = [NSMutableDictionary dictionaryWithObject:loaded forKey:@"extension"];
+	if (targets) [result setObject:targets forKey:@"targets"];
+	else if (targetsError) [result setObject:targetsError forKey:@"targetsError"];
+	return result;
+}
+
+// A load (a switch, -reload) goes through the pane loader (SPPostgresPaneLoader). On the runner's thread the work uses
+// only the extensions object (made on the main thread, where nothing uses it while the runner is busy: changes are
+// refused then) and a copy of the name. Update reads the extension again at once, on the main thread, as part of the
+// change (-_load).
+
+- (SPPostgresTaskRunner *)taskRunner
+{
+	return [loader taskRunner];
+}
+
+- (void)setTaskRunner:(SPPostgresTaskRunner *)runner
+{
+	[loader setTaskRunner:runner];
+}
+
+- (BOOL)isStale
+{
+	return [loader isStale];
+}
+
 - (void)showExtension:(NSString *)name
 {
 	if (invalidated) return;
 	[self setExtensionName:name];
-	[self _load];
+
+	// The previous extension goes at once
+	[self _applyExtension:nil targets:nil targetsError:nil];
+	[self _loadSwitching:YES];
 }
 
 - (void)reload
 {
 	if (invalidated) return;
-	[self _load];
+	[self _loadSwitching:NO];
 }
 
-/// Reads the extension and its update targets; an extension that isn't installed (any more) empties the pane, and
-/// a read error is shown. When only the update targets can't be read, the details and Drop stay (Drop doesn't need
-/// them), Update is off, and the error is shown.
+/// Reads the extension through the runner (see -_applyResult:error:).
+- (void)_loadSwitching:(BOOL)switching
+{
+	if (![extensionName length]) {
+		[loader loadNothing];
+		[self _applyExtension:nil targets:nil targetsError:nil];
+		return;
+	}
+
+	SPPostgresExtensions *target = extensions;
+	NSString *name = [[extensionName copy] autorelease];
+	[loader loadSwitching:switching work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		return SPPostgresExtensionRead(target, name, error);
+	} apply:^(id result, NSError *error) {
+		[self _applyResult:result error:error];
+	}];
+}
+
+/// Reads the extension on the main thread and shows it: part of a change, which runs only while the runner is idle.
 - (void)_load
 {
-	NSError *error = nil, *targetsError = nil;
-	SPPostgresExtension *loaded = nil;
-	NSArray *targets = nil;
-	if ([extensionName length]) {
-		loaded = [extensions extensionNamed:extensionName error:&error];
-		if (loaded) targets = [extensions updateTargetsForExtension:extensionName error:&targetsError];
+	if (![extensionName length]) {
+		[self _applyExtension:nil targets:nil targetsError:nil];
+		return;
 	}
+	NSError *error = nil;
+	NSDictionary *result = SPPostgresExtensionRead(extensions, extensionName, &error);
+	[self _applyResult:result error:error];
+}
+
+/// Shows what was read (SPPostgresExtensionRead); nil: it couldn't be read.
+- (void)_applyResult:(NSDictionary *)result error:(NSError *)error
+{
+	if (!result) {
+		// Always an alert for a failed read ("An unknown error occurred." without a message)
+		[self _applyExtension:nil targets:nil targetsError:nil];
+		[self _presentError:error title:[NSString stringWithFormat:NSLocalizedString(@"Could not load the extension “%@”", @"Postgres extension: load failed"), extensionName]];
+		return;
+	}
+	[self _applyExtension:[result objectForKey:@"extension"] targets:[result objectForKey:@"targets"] targetsError:[result objectForKey:@"targetsError"]];
+}
+
+/// Shows loaded (nil: empty: no extension, one that isn't installed (any more), or a failed read) and its update
+/// targets. When only the update targets couldn't be read (loaded, no targets), the details
+/// and Drop stay (Drop doesn't need them), Update is off, and targetsError is shown.
+- (void)_applyExtension:(SPPostgresExtension *)loaded targets:(NSArray *)targets targetsError:(NSError *)targetsError
+{
 	[self setExtension:loaded];
 
 	[nameField setStringValue:[loaded name] ?: @""];
@@ -286,19 +371,23 @@ static const CGFloat SPPostgresExtensionPopupWidth = 220;
 	[updateButton setEnabled:hasTargets];
 	[dropButton setEnabled:(loaded != nil)];
 
-	if (!loaded && error) {
-		[self _presentError:error title:[NSString stringWithFormat:NSLocalizedString(@"Could not load the extension “%@”", @"Postgres extension: load failed"), extensionName]];
-	}
-	else if (loaded && !targets) {
+	if (loaded && !targets) {
 		[self _presentError:targetsError title:[NSString stringWithFormat:NSLocalizedString(@"Could not read the versions “%@” can be updated to", @"Postgres extension: update targets read failed"), extensionName]];
 	}
 }
 
 #pragma mark Actions
 
+/// YES (after NSBeep) while the runner is busy: a change runs on the main thread, so never while a load uses the
+/// connection.
+- (BOOL)_refuseChangeWhileBusy
+{
+	return [loader refuseChangeWhileBusy];
+}
+
 - (IBAction)update:(id)sender
 {
-	if (invalidated || !extension) return;
+	if (invalidated || !extension || [self _refuseChangeWhileBusy]) return;
 	NSString *version = [[updatePopup selectedItem] representedObject];
 	if (![version length]) return;
 
@@ -317,7 +406,7 @@ static const CGFloat SPPostgresExtensionPopupWidth = 220;
 
 - (IBAction)drop:(id)sender
 {
-	if (invalidated || !extension) return;
+	if (invalidated || !extension || [self _refuseChangeWhileBusy]) return;
 	[[self retain] autorelease];
 	[delegate extensionController:self wantsToDropExtension:[[extensionName copy] autorelease]];
 }

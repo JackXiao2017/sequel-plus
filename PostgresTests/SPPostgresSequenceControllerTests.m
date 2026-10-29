@@ -14,6 +14,7 @@
 #import "../Source/Postgres/SPPostgresHistory.h"
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
+#import "../Source/Postgres/SPPostgresTaskRunner.h"
 
 static const NSUInteger SPSequenceTestPort = 55418;
 
@@ -1225,6 +1226,120 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence);
 	XCTAssertEqualObjects(self.pane.sequenceName, @"seq_back");
 	XCTAssertFalse(self.document.history.canGoForward);
+}
+
+#pragma mark - Background loading
+
+/// The pane on the tab's background runner.
+- (SPPostgresSequenceController *)paneOnTabRunner
+{
+	SPPostgresSequenceController *pane = self.pane;
+	pane.taskRunner = self.document.taskRunner;
+	XCTAssertFalse(pane.taskRunner.isInline);
+	return pane;
+}
+
+- (NSArray *)shownValuesOf:(SPPostgresSequenceController *)pane
+{
+	return @[pane.nameField.stringValue, pane.typePopup.titleOfSelectedItem ?: @"", pane.startField.stringValue, pane.incrementField.stringValue,
+			 pane.minValueField.stringValue, pane.maxValueField.stringValue, pane.cacheField.stringValue, @(pane.cycleSwitch.state),
+			 pane.ownedByPopup.itemTitles, pane.ownedByPopup.titleOfSelectedItem ?: @"", pane.commentField.stringValue, pane.ownerField.stringValue,
+			 pane.currentValueField.stringValue, pane.identityNoteField.stringValue, pane.noticeText, @(pane.setValueButton.isEnabled),
+			 @(pane.startField.isEditable)];
+}
+
+- (void)testShowSequenceLoadsInBackground
+{
+	[self showSchema];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	SPPostgresSequenceController *pane = [self paneOnTabRunner];
+	[pane showSequence:@"seq_free" inSchema:@"structure_test"];
+	XCTAssertTrue(pane.taskRunner.isBusy, @"showSequence: returns while the sequence loads");
+	XCTAssertEqualObjects(pane.taskRunner.currentDescription, @"Reloading...");
+	XCTAssertEqualObjects(pane.taskRunner.currentCancelTitle, @"Cancel");
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:pane.taskRunner timeout:30]);
+
+	SPPostgresSequenceController *reference = [[SPPostgresSequenceController alloc] initWithConnection:self.other];
+	XCTAssertTrue(reference.taskRunner.isInline);
+	[reference showSequence:@"seq_free" inSchema:@"structure_test"];
+	XCTAssertFalse(reference.taskRunner.isBusy);
+
+	XCTAssertEqualObjects([self shownValuesOf:pane], [self shownValuesOf:reference]);
+	XCTAssertEqualObjects(pane.incrementField.stringValue, @"5");
+	XCTAssertEqualObjects(pane.commentField.stringValue, @"free");
+	XCTAssertNotNil(pane.sequence);
+	XCTAssertFalse(pane.hasPendingEdits);
+	XCTAssertFalse(pane.stale);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+	[reference invalidate];
+}
+
+- (void)testCancelledSwitchShowsEmptyPaneNoAlert
+{
+	[self showSchema];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	SPPostgresSequenceController *pane = [self paneOnTabRunner];
+	SPPostgresTaskRunner *runner = pane.taskRunner;
+	[pane showSequence:@"seq_free" inSchema:@"structure_test"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	XCTAssertEqualObjects(pane.incrementField.stringValue, @"5");
+
+	[SPPostgresTestServers queueSleep:1 onRunner:runner];
+	[pane showSequence:@"seq_used" inSchema:@"structure_test"];
+	XCTAssertTrue(runner.isBusy);
+	[runner cancelAll];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+
+	SPPostgresSequenceController *empty = [[SPPostgresSequenceController alloc] initWithConnection:self.other];
+	[empty showSequence:nil inSchema:nil];
+	XCTAssertEqualObjects(pane.sequenceName, @"seq_used");
+	XCTAssertNil(pane.sequence);
+	XCTAssertEqualObjects([self shownValuesOf:pane], [self shownValuesOf:empty], @"the pane is empty");
+	XCTAssertEqual(self.alerts.count, 0u, @"a cancelled load shows no alert");
+	XCTAssertTrue(pane.stale, @"the next show (or a reload) loads it");
+	[empty invalidate];
+
+	[pane reload];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	XCTAssertEqualObjects(pane.nameField.stringValue, @"seq_used");
+	XCTAssertNotNil(pane.sequence);
+	XCTAssertFalse(pane.stale);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+}
+
+/// Apply (Return, a key equivalent the task display's blocker doesn't stop), leaving, and Set Value… while a load
+/// runs are refused (nothing reaches the connection); the edits stay, and apply once idle.
+- (void)testApplyRefusedWhileBusy
+{
+	[self selectSequence:@"seq_free"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	SPPostgresSequenceController *pane = [self paneOnTabRunner];
+	SPPostgresTaskRunner *runner = pane.taskRunner;
+	[self.controller showWindow:nil];
+	[self type:@"9" into:pane.incrementField];
+	XCTAssertTrue(pane.hasPendingEdits);
+	XCTAssertTrue(pane.applyButton.isEnabled);
+
+	[SPPostgresTestServers queueSleep:1 onRunner:runner];
+	XCTAssertTrue(runner.isBusy);
+	NSEvent *returnKey = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:[self window].windowNumber
+										   context:nil characters:@"\r" charactersIgnoringModifiers:@"\r" isARepeat:NO keyCode:36];
+	XCTAssertTrue([pane.applyButton performKeyEquivalent:returnKey], @"Return reaches Apply");
+	[pane apply:nil];
+	XCTAssertFalse([pane commitPendingEdits]);
+	[pane setValue:nil];
+	XCTAssertNil(pane.setValueSheet, @"no Set Value sheet while busy");
+	XCTAssertTrue(pane.hasPendingEdits, @"the edits stay");
+	XCTAssertEqualObjects(pane.incrementField.stringValue, @"9");
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	XCTAssertEqualObjects([self serverValue:@"SELECT seqincrement::text FROM pg_sequence WHERE seqrelid = 'structure_test.seq_free'::regclass"], @"5");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+
+	// Once idle it applies
+	[pane apply:nil];
+	XCTAssertFalse(pane.hasPendingEdits);
+	XCTAssertEqualObjects([self serverValue:@"SELECT seqincrement::text FROM pg_sequence WHERE seqrelid = 'structure_test.seq_free'::regclass"], @"9");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 }
 
 @end

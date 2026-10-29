@@ -3,6 +3,7 @@
 #import "SPPostgresTestServers.h"
 #import "../Source/Postgres/SPPostgresExtensionController.h"
 #import "../Source/Postgres/SPPostgresExtensions.h"
+#import "../Source/Postgres/SPPostgresTaskRunner.h"
 
 /// A data layer whose update-targets read fails (the server can't be made to fail only that read).
 @interface SPFailingTargetsExtensions : SPPostgresExtensions
@@ -299,6 +300,119 @@
 		XCTAssertEqual(connection.transactionStatus, PGPostgresTransactionInError);
 		XCTAssertNotNil([connection execute:@"ROLLBACK"]);
 	}
+}
+
+#pragma mark - Background loading
+
+/// A background runner on connection, invalidated when the test ends.
+- (SPPostgresTaskRunner *)backgroundRunnerOn:(PGPostgresConnection *)connection
+{
+	SPPostgresTaskRunner *runner = [[SPPostgresTaskRunner alloc] initWithConnection:connection];
+	XCTAssertFalse(runner.isInline);
+	[self addTeardownBlock:^{
+		[SPPostgresTestServers waitForRunner:runner timeout:30];
+		[runner invalidateWithCompletion:nil];
+	}];
+	return runner;
+}
+
+- (NSArray *)shownValuesOf:(SPPostgresExtensionController *)pane
+{
+	return @[pane.nameField.stringValue, pane.versionField.stringValue, pane.schemaField.stringValue, pane.commentField.stringValue,
+			 pane.requiredByField.stringValue, @(pane.requiredByField.isHidden), pane.updatePopup.itemTitles, pane.updatePopup.titleOfSelectedItem ?: @"",
+			 @(pane.updatePopup.isHidden), @(pane.updateButton.isEnabled), @(pane.noUpdateLabel.isHidden), @(pane.dropButton.isEnabled)];
+}
+
+- (void)testShowExtensionLoadsInBackground
+{
+	PGPostgresConnection *connection = [self connectOn:@55418];
+	[self install:@"hstore" version:@"1.4" on:connection];
+	PGPostgresConnection *other = [SPPostgresTestServers connectedConnectionOnPort:55418 database:@"pgkit_ext"];
+	[self.openConnections addObject:other];
+
+	SPPostgresExtensionController *pane = [self paneOn:connection];
+	pane.taskRunner = [self backgroundRunnerOn:connection];
+	[pane showExtension:@"hstore"];
+	XCTAssertTrue(pane.taskRunner.isBusy, @"showExtension: returns while the extension loads");
+	XCTAssertEqualObjects(pane.taskRunner.currentDescription, @"Reloading...");
+	XCTAssertEqualObjects(pane.taskRunner.currentCancelTitle, @"Cancel");
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:pane.taskRunner timeout:30]);
+
+	SPPostgresExtensionController *reference = [self paneOn:other];
+	XCTAssertTrue(reference.taskRunner.isInline);
+	[reference showExtension:@"hstore"];
+	XCTAssertFalse(reference.taskRunner.isBusy);
+
+	XCTAssertEqualObjects([self shownValuesOf:pane], [self shownValuesOf:reference]);
+	XCTAssertEqualObjects(pane.versionField.stringValue, @"1.4");
+	XCTAssertTrue(pane.updateButton.isEnabled);
+	XCTAssertNotNil(pane.extension);
+	XCTAssertFalse(pane.stale);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+}
+
+- (void)testCancelledSwitchShowsEmptyPaneNoAlert
+{
+	PGPostgresConnection *connection = [self connectOn:@55418];
+	[self install:@"hstore" version:@"1.4" on:connection];
+	[self install:@"citext" version:nil on:connection];
+
+	SPPostgresExtensionController *pane = [self paneOn:connection];
+	SPPostgresTaskRunner *runner = [self backgroundRunnerOn:connection];
+	pane.taskRunner = runner;
+	[pane showExtension:@"hstore"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	XCTAssertEqualObjects(pane.nameField.stringValue, @"hstore");
+
+	[SPPostgresTestServers queueSleep:1 onRunner:runner];
+	[pane showExtension:@"citext"];
+	XCTAssertTrue(runner.isBusy);
+	[runner cancelAll];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+
+	SPPostgresExtensionController *empty = [self paneOn:connection];
+	XCTAssertEqualObjects(pane.extensionName, @"citext");
+	XCTAssertNil(pane.extension);
+	XCTAssertEqualObjects([self shownValuesOf:pane], [self shownValuesOf:empty], @"the pane is empty");
+	XCTAssertEqual(self.alerts.count, 0u, @"a cancelled load shows no alert");
+	XCTAssertTrue(pane.stale, @"the next show (or a reload) loads it");
+
+	[pane reload];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	XCTAssertEqualObjects(pane.nameField.stringValue, @"citext");
+	XCTAssertNotNil(pane.extension);
+	XCTAssertFalse(pane.stale);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+}
+
+/// Update and Drop… while a load runs are refused (nothing reaches the connection, the delegate isn't asked).
+- (void)testChangesRefusedWhileBusy
+{
+	PGPostgresConnection *connection = [self connectOn:@55418];
+	[self install:@"hstore" version:@"1.4" on:connection];
+
+	SPPostgresExtensionController *pane = [self paneOn:connection];
+	SPPostgresTaskRunner *runner = [self backgroundRunnerOn:connection];
+	pane.taskRunner = runner;
+	[pane showExtension:@"hstore"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	XCTAssertTrue(pane.updateButton.isEnabled);
+
+	[SPPostgresTestServers queueSleep:1 onRunner:runner];
+	[pane update:pane.updateButton];
+	[pane drop:pane.dropButton];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	XCTAssertEqualObjects(self.changed, @[]);
+	XCTAssertEqualObjects(self.dropRequests, @[]);
+	XCTAssertEqualObjects([[connection execute:@"SELECT extversion::text FROM pg_extension WHERE extname = 'hstore'"] textValueAtRow:0 column:0], @"1.4");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+
+	// Once idle both go ahead
+	[pane update:pane.updateButton];
+	XCTAssertEqualObjects(self.changed, @[@"hstore"]);
+	[pane drop:pane.dropButton];
+	XCTAssertEqualObjects(self.dropRequests, @[@"hstore"]);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 }
 
 @end
