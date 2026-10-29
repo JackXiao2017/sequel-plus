@@ -2431,7 +2431,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	if (action == @selector(showUserManager:)) return [self _canShowUsers];
 	if (action == @selector(export:)) return [self _canRunSheetJob];
 	if (action == @selector(import:)) return [self _canRunSheetJob];
-	if (action == @selector(showTransfer:)) return [self _canRunSheetJob];
+	if (action == @selector(showTransfer:)) return [self _canShowTransfer];
 
 	// View > Back/Forward In History (tags 0 and 1), as MySQL's
 	if (action == @selector(backForwardInHistory:)) {
@@ -2577,7 +2577,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}
 
 	if ([identifier isEqualToString:SPMainToolbarUserManager]) return [self _canShowUsers];
-	if ([identifier isEqualToString:SPMainToolbarTransfer]) return [self _canRunSheetJob];
+	if ([identifier isEqualToString:SPMainToolbarTransfer]) return [self _canShowTransfer];
 
 	// The pane items: see -_canShowPane:
 	NSString *pane = [self _paneForToolbarIdentifier:identifier];
@@ -2773,9 +2773,15 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 #pragma mark - Transfer
 
+/// The Transfer sheet can open: a sheet job can (see -_canRunSheetJob) and a database is selected (the one copied).
+- (BOOL)_canShowTransfer
+{
+	return [self _canRunSheetJob] && [currentDatabase length] > 0;
+}
+
 - (IBAction)showTransfer:(id)sender
 {
-	if (![self _canRunSheetJob] || ![currentDatabase length]) return;
+	if (![self _canShowTransfer]) return;
 
 	SPPostgresTransferController *controller = [[SPPostgresTransferController alloc] initWithDocument:self];
 	transferController = controller; // released when it ends
