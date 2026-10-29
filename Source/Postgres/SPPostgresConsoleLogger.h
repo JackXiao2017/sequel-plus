@@ -35,8 +35,9 @@ __attribute__((visibility("default")))
 + (SPPostgresConsoleLogger *)loggerForConnection:(PGPostgresConnection *)connection;
 
 /**
- * YES while the Query view runs the user's statements (set and reset on the main thread around the run): they
- * are logged as MySQL logs custom queries (the custom query logging preference) instead of as interface queries.
+ * YES while the Query view runs the user's statements: they are logged as MySQL logs custom queries (the custom
+ * query logging preference) instead of as interface queries. Set and reset by the run's work, on the thread that
+ * runs the statements (the thread that reads it, as each query is about to run). Atomic: readable from any thread.
  */
 @property (assign) BOOL loggingCustomQueries;
 

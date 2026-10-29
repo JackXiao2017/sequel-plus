@@ -92,7 +92,7 @@ static char SPPostgresConsoleLoggerKey;
 	// everything else as interface queries. The console is updated on the main thread (a background job's
 	// connection calls this from its own thread).
 	NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
-	NSString *kindKey = loggingCustomQueries ? SPConsoleEnableCustomQueryLogging : SPConsoleEnableInterfaceLogging;
+	NSString *kindKey = [self loggingCustomQueries] ? SPConsoleEnableCustomQueryLogging : SPConsoleEnableInterfaceLogging;
 	if ([text length] && [prefs boolForKey:SPConsoleEnableLogging] && [prefs boolForKey:kindKey]) {
 		[self _showInConsole:text isError:NO];
 	}

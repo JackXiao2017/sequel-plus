@@ -811,7 +811,6 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	[self.query runAllQueries:nil];
 	XCTAssertTrue(runner.isBusy, @"the run is on the runner's thread");
 	XCTAssertEqualObjects(runner.currentCancelTitle, @"Stop queries");
-	XCTAssertTrue(logger.loggingCustomQueries, @"the user's statements are logged as custom queries");
 
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
 	XCTAssertEqualObjects([self columnTitles], @[@"b"]);
@@ -836,7 +835,7 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 
 	[self setSQL:@"SELECT 5 AS before; SELECT pg_sleep(30)"];
 	[self.query runAllQueries:nil];
-	[self spinUntil:^BOOL{ return NO; } timeout:0.3];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [runner.currentDescription isEqualToString:@"Running query 2 of 2..."]; } timeout:10], @"%@", runner.currentDescription);
 	XCTAssertTrue(runner.isBusy);
 	[runner cancelAll];
 
@@ -947,6 +946,72 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	[self.query runAllQueries:nil];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
 	XCTAssertEqualObjects([self columnTitles], @[@"two"]);
+}
+
+- (void)testNextQueuedTaskIsNotLoggedAsCustomQuery
+{
+	[self overridePrefs:@{@"ConsoleEnableLogging": @YES, @"ConsoleEnableInterfaceLogging": @NO, @"ConsoleEnableCustomQueryLogging": @YES, @"ConsoleEnableErrorLogging": @YES}];
+	SPPostgresTaskRunner *runner = [self useBackgroundRunner];
+	SPPostgresConsoleLogger *logger = [SPPostgresConsoleLogger loggerForConnection:self.document.connection];
+	XCTAssertFalse(logger.loggingCustomQueries);
+
+	// The run's work, then at once (on the same worker, before the run's completion reaches the main thread) an
+	// interface task of the tab
+	[self setSQL:@"SELECT 8181 AS a"];
+	[self.query runAllQueries:nil];
+	__block BOOL flagInNextTask = YES;
+	[runner runTaskWithDescription:@"interface" cancelTitle:nil work:^id(PGPostgresConnection *connection, NSError **error) {
+		flagInNextTask = logger.loggingCustomQueries;
+		return [connection execute:@"SELECT 8282"];
+	} completion:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+	[self spinUntil:^BOOL{ return NO; } timeout:0.2]; // the console is updated from later main-thread turns
+
+	XCTAssertFalse(flagInNextTask, @"the flag covers only the run's own statements");
+	XCTAssertFalse(logger.loggingCustomQueries);
+	XCTAssertEqualObjects(self.query.statusText, @"1 row");
+
+	// Test-only read of the console's existing storage (no public accessor)
+	id console = [(id)NSClassFromString(@"SPQueryController") valueForKey:@"sharedQueryController"];
+	BOOL sawRun = NO, sawInterface = NO;
+	for (id message in [[console valueForKey:@"messagesFullSet"] copy]) {
+		NSString *text = [message valueForKey:@"message"];
+		if ([text containsString:@"8181"]) sawRun = YES;
+		if ([text containsString:@"8282"]) sawInterface = YES;
+	}
+	XCTAssertTrue(sawRun, @"the run's statement is logged as a custom query");
+	XCTAssertFalse(sawInterface, @"the next task's query is an interface query (interface logging is off)");
+}
+
+- (void)testLateCancelKeepsTheRunsStatus
+{
+	SPPostgresTaskRunner *runner = [self useBackgroundRunner];
+	__block NSUInteger calls = 0;
+	self.query.runDidChangeDatabase = ^(BOOL schemaChanged, BOOL dataChanged) { calls++; };
+	[self addTeardownBlock:^{
+		PGPostgresConnection *cleanup = [SPPostgresTestServers connectedConnectionOnPort:SPQueryTestPort];
+		[cleanup execute:@"DROP TABLE IF EXISTS sp_t8_late"];
+		[cleanup disconnect];
+	}];
+
+	// Every statement has run; the cancel comes before the completion is delivered
+	[self setSQL:@"CREATE TABLE sp_t8_late(a int); SELECT 4 AS d"];
+	[self.query runAllQueries:nil];
+	__block BOOL workDone = NO;
+	[runner runTaskWithDescription:@"marker" cancelTitle:nil work:^id(PGPostgresConnection *connection, NSError **error) {
+		workDone = YES;
+		return nil;
+	} completion:nil];
+	NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:10];
+	while (!workDone && [deadline timeIntervalSinceNow] > 0) usleep(1000); // main thread blocked: no completion yet
+	XCTAssertTrue(workDone);
+	[runner cancelAll];
+
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+	XCTAssertEqualObjects(self.query.statusText, @"1 row", @"everything ran: not \"Query cancelled.\"");
+	XCTAssertEqualObjects([self columnTitles], @[@"d"]);
+	XCTAssertEqual(calls, 1u);
+	XCTAssertEqual(self.alerts.count, 0u);
 }
 
 @end
