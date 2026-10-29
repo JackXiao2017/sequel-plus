@@ -5,6 +5,8 @@
 
 @implementation SPPostgresCatalog
 
+@synthesize connection = _connection;
+
 - (instancetype)initWithConnection:(PGPostgresConnection *)connection
 {
 	if ((self = [super init])) {

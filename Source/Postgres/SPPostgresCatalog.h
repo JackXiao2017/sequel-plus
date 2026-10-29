@@ -14,6 +14,9 @@ __attribute__((visibility("default")))
 
 - (instancetype)initWithConnection:(PGPostgresConnection *)connection;
 
+/// The connection the queries run on.
+@property (readonly) PGPostgresConnection *connection;
+
 /// The server_version setting (e.g. @"18.0"), or nil on failure.
 - (NSString *)serverVersionString;
 

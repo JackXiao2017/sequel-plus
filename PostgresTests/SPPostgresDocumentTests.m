@@ -1564,4 +1564,213 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	}
 }
 
+#pragma mark - Table list in the background
+
+/// The sidebar's runner and the tab's are idle (the sidebar keeps an inline runner until Stage 8 Task 7 hands it the
+/// tab's, so both are waited for).
+- (void)waitForLists
+{
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.sidebar.taskRunner timeout:30]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+}
+
+- (NSPopUpButton *)schemaPopupOf:(SPPostgresSidebarController *)sidebar
+{
+	NSMutableArray *queue = [NSMutableArray arrayWithObject:[sidebar view]];
+	while (queue.count) {
+		NSView *v = queue.firstObject; [queue removeObjectAtIndex:0];
+		if ([v isKindOfClass:[NSPopUpButton class]]) return (NSPopUpButton *)v;
+		[queue addObjectsFromArray:v.subviews];
+	}
+	return nil;
+}
+
+/// A history move to another database: the new database's lists load, then the entry's schema, then its table.
+- (void)testDatabaseSwitchAppliesHistoryAfterListLoads
+{
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	[sidebar reloadSchema:@"Sales Data"];
+	[self waitForLists];
+	XCTAssertTrue([sidebar selectTableNamed:@"Orders 2026"]);
+	[self waitForLists];
+
+	[self.document switchToDatabase:@"pgkit_nopublic"];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [[self.document windowTitleString] hasSuffix:@"/pgkit_nopublic"]; } timeout:20], @"%@", [self.document windowTitleString]);
+	[self waitForLists];
+	XCTAssertEqualObjects(sidebar.selectedSchema, @"app");
+
+	// Back: pgkit_test, "Sales Data"."Orders 2026"
+	[self.document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [[self.document windowTitleString] containsString:@"/pgkit_test"]; } timeout:20], @"%@", [self.document windowTitleString]);
+	[self waitForLists];
+	XCTAssertEqualObjects(sidebar.selectedSchema, @"Sales Data");
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"Orders 2026");
+	XCTAssertEqualObjects([sidebar itemTitlesInSection:@"TABLES"], (@[@"Orders 2026"]));
+	XCTAssertTrue([[self.document windowTitleString] hasSuffix:@"/pgkit_test/Sales Data.Orders 2026"], @"%@", [self.document windowTitleString]);
+	XCTAssertEqualObjects(self.document.contentController.table, @"Orders 2026");
+
+	// Restoring added no entry: forward goes back to pgkit_nopublic
+	XCTAssertTrue(self.document.history.canGoForward);
+	XCTAssertEqualObjects(self.document.history.currentEntry[@"table"], @"Orders 2026");
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+}
+
+/// DDL in the Query view lists the new table once the lists have reloaded, keeping the selected table.
+- (void)testQueryDDLReloadsListKeepingSelection
+{
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPPostgresDocumentTestPort];
+	[admin execute:@"DROP TABLE IF EXISTS public.sp_t8_new"];
+	[self addTeardownBlock:^{
+		[admin execute:@"DROP TABLE IF EXISTS public.sp_t8_new"];
+		[admin disconnect];
+	}];
+
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
+	[self waitForLists];
+	XCTAssertFalse([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"sp_t8_new"]);
+
+	[self.document viewQuery:nil];
+	SPPostgresQueryController *query = self.document.queryController;
+	[[query editor] setString:@"CREATE TABLE sp_t8_new(a int)"];
+	[query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:query.taskRunner timeout:30]);
+	[self waitForLists];
+
+	XCTAssertTrue([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"sp_t8_new"], @"%@", [sidebar itemTitlesInSection:@"TABLES"]);
+	XCTAssertEqualObjects(sidebar.selectedSchema, @"public");
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"customers");
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneQuery);
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+}
+
+/// Choosing another schema while a load runs, then Cancel: the lists and the pop-up stay as they were, no alert.
+- (void)testCancelSchemaSwitchKeepsList
+{
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	// The tab's background runner (as from Task 7); nothing else uses the connection until it is idle
+	SPPostgresTaskRunner *runner = self.document.taskRunner;
+	XCTAssertFalse(runner.isInline);
+	SPPostgresTaskRunner *previous = sidebar.taskRunner;
+	sidebar.taskRunner = runner;
+	[self addTeardownBlock:^{
+		sidebar.taskRunner = previous;
+	}];
+
+	NSArray *tables = [sidebar itemTitlesInSection:@"TABLES"];
+	NSArray *views = [sidebar itemTitlesInSection:@"VIEWS"];
+	NSPopUpButton *popup = [self schemaPopupOf:sidebar];
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"public");
+
+	[runner runTaskWithDescription:@"Loading..." cancelTitle:@"Cancel" work:^id(PGPostgresConnection *connection, NSError **error) {
+		return [connection execute:@"SELECT pg_sleep(1)"];
+	} completion:nil];
+
+	// As the user picks it in the schema pop-up: queued behind the sleep
+	[popup selectItemWithTitle:@"Sales Data"];
+	[NSApp sendAction:popup.action to:popup.target from:popup];
+	XCTAssertTrue(runner.isBusy);
+	XCTAssertEqualObjects(sidebar.selectedSchema, @"public", @"nothing is applied before the load completes");
+
+	[runner cancelAll];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+	[self spinUntil:^BOOL{ return NO; } timeout:0.2];
+
+	XCTAssertEqualObjects(sidebar.selectedSchema, @"public");
+	XCTAssertEqualObjects([sidebar itemTitlesInSection:@"TABLES"], tables);
+	XCTAssertEqualObjects([sidebar itemTitlesInSection:@"VIEWS"], views);
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"public");
+	XCTAssertNil(sidebar.lastError);
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+
+	// The pop-up works again afterwards
+	[popup selectItemWithTitle:@"Sales Data"];
+	[NSApp sendAction:popup.action to:popup.target from:popup];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+	XCTAssertEqualObjects(sidebar.selectedSchema, @"Sales Data");
+	XCTAssertEqualObjects([sidebar itemTitlesInSection:@"TABLES"], (@[@"Orders 2026"]));
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+}
+
+/// On a background runner a reload returns at once and applies the lists before its completion is called.
+- (void)testSchemaReloadAppliesBeforeCompletionOnBackgroundRunner
+{
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	SPPostgresTaskRunner *runner = self.document.taskRunner;
+	SPPostgresTaskRunner *previous = sidebar.taskRunner;
+	sidebar.taskRunner = runner;
+	[self addTeardownBlock:^{
+		sidebar.taskRunner = previous;
+	}];
+
+	__block NSString *schemaSeen = nil;
+	__block NSArray *tablesSeen = nil;
+	__block BOOL loadedSeen = NO;
+	__block NSUInteger calls = 0;
+	[sidebar reloadSchema:@"Sales Data" selectingSequence:nil completion:^(BOOL loaded) {
+		calls++;
+		loadedSeen = loaded;
+		schemaSeen = sidebar.selectedSchema;
+		tablesSeen = [sidebar itemTitlesInSection:@"TABLES"];
+	}];
+	XCTAssertTrue(runner.isBusy);
+	XCTAssertEqualObjects(runner.currentDescription, @"Reloading...");
+	XCTAssertEqualObjects(runner.currentCancelTitle, @"Cancel");
+	XCTAssertEqualObjects(sidebar.selectedSchema, @"public");
+	XCTAssertEqual(calls, 0u);
+
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+	XCTAssertEqual(calls, 1u);
+	XCTAssertTrue(loadedSeen);
+	XCTAssertEqualObjects(schemaSeen, @"Sales Data");
+	XCTAssertEqualObjects(tablesSeen, (@[@"Orders 2026"]));
+
+	// Keeping the selection: the completion sees the table still selected
+	XCTAssertTrue([sidebar selectTableNamed:@"Orders 2026"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+	__block NSString *tableSeen = nil;
+	[sidebar reloadKeepingSelection:^(BOOL loaded) {
+		loadedSeen = loaded;
+		tableSeen = sidebar.selectedTableName;
+	}];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+	XCTAssertTrue(loadedSeen);
+	XCTAssertEqualObjects(tableSeen, @"Orders 2026");
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"Orders 2026");
+}
+
+/// Rename Table…: the list reloads, then the renamed table is selected.
+- (void)testRenameSelectsRenamedTableAfterReload
+{
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self.controller showWindow:nil];
+	[self selectStructureTable:@"child"];
+	[self waitForLists];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+
+	NSMenu *menu = sidebar.tableMenu;
+	NSMenuItem *rename = menu.itemArray.lastObject;
+	XCTAssertEqualObjects(rename.title, @"Rename Table…");
+	[menu performActionForItemAtIndex:[menu indexOfItem:rename]];
+	NSWindow *sheet = [self window].attachedSheet;
+	XCTAssertNotNil(sheet);
+	NSTextField *name = [self viewWithIdentifier:@"renameTableName" in:sheet.contentView];
+	name.stringValue = @"child renamed";
+	[[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification object:name];
+	[(NSButton *)[self viewWithIdentifier:@"renameTableButton" in:sheet.contentView] performClick:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+	[self waitForLists];
+
+	XCTAssertEqualObjects(sidebar.selectedSchema, @"structure_test");
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"child renamed", @"%@", alerts.firstObject.informativeText);
+	XCTAssertTrue([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"child renamed"]);
+	XCTAssertFalse([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"child"]);
+	XCTAssertEqualObjects(self.document.contentController.table, @"child renamed");
+	XCTAssertEqualObjects(self.document.history.currentEntry[@"table"], @"child renamed");
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+}
+
 @end
