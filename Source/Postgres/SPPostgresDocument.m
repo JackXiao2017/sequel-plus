@@ -14,6 +14,8 @@
 #import "SPPostgresImportController.h"
 #import "SPPostgresTransferController.h"
 #import "SPPostgresBackgroundJob.h"
+#import "SPPostgresTaskRunner.h"
+#import "SPPostgresTaskDisplay.h"
 #import "SPPostgresSequences.h"
 #import "SPPostgresTableStructure.h"
 #import "SPPostgresQueryController.h"
@@ -43,6 +45,9 @@ static NSString * const SPPostgresDocumentToolbarIdentifier = @"TableWindowToolb
 static const CGFloat SPPostgresSidebarDefaultWidth = 214;
 static const NSSize SPPostgresSplitViewSize = {943, 549};
 
+/// The KVO context for observing the tab's runner (isProcessing follows its busy)
+static void *SPPostgresDocumentRunnerContext = &SPPostgresDocumentRunnerContext;
+
 NSString * const SPPostgresPaneStructure = @"structure";
 NSString * const SPPostgresPaneContent = @"content";
 NSString * const SPPostgresPaneRelations = @"relations";
@@ -60,6 +65,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 @property (readwrite, assign) NSTabViewItem *parentTabViewItem;
 
 - (void)_attachCurrentConnection;
+- (void)_setTaskRunner:(SPPostgresTaskRunner *)runner;
+- (void)_updateIsProcessing;
 - (void)_buildContent;
 - (void)_installContentController;
 - (void)_installStructureController;
@@ -158,6 +165,11 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	/// A database switch in progress (see -switchToDatabase:)
 	SPPostgresConnector *pendingConnector;
 
+	/// The current connection's runner, observed (its busy) while observingRunner, and its task display
+	SPPostgresTaskRunner *taskRunner;
+	BOOL observingRunner;
+	SPPostgresTaskDisplay *taskDisplay;
+
 	/// The history entry to show once the database switch in progress is done (a back/forward to another database)
 	NSDictionary *pendingHistoryEntry;
 	/// That move was back (else forward): undone if the switch fails
@@ -252,6 +264,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 @synthesize transferController;
 @synthesize currentDatabase;
 @synthesize isProcessing;
+@synthesize taskRunner;
 @synthesize parentWindowController;
 @synthesize parentWindow;
 @synthesize parentTabViewItem;
@@ -275,6 +288,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 		[self _buildContent];
 		[self _buildToolbar];
+		[taskDisplay setBlockedView:splitView];
 
 		// Where the tab starts is the first history entry
 		[self _recordHistory];
@@ -337,6 +351,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[exportController release];
 	[importController release];
 	[transferController release];
+	[taskRunner release];
+	[taskDisplay release];
 
 	[super dealloc];
 }
@@ -375,6 +391,59 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}
 	[serverVersion release];
 	serverVersion = [([version length] ? version : @"unknown") copy];
+
+	SPPostgresTaskRunner *runner = [[SPPostgresTaskRunner alloc] initWithConnection:connection];
+	[self _setTaskRunner:runner];
+	[runner release];
+}
+
+/**
+ * Makes runner the tab's (observing its busy for isProcessing) with a task display of its own. The previous runner,
+ * if any, is no longer observed: the caller has invalidated it.
+ */
+- (void)_setTaskRunner:(SPPostgresTaskRunner *)runner
+{
+	if (observingRunner) {
+		[taskRunner removeObserver:self forKeyPath:@"busy" context:SPPostgresDocumentRunnerContext];
+		observingRunner = NO;
+	}
+	[taskDisplay invalidate];
+	[taskDisplay release];
+	taskDisplay = nil;
+	[taskRunner release];
+	taskRunner = [runner retain];
+
+	if (taskRunner) {
+		[taskRunner addObserver:self forKeyPath:@"busy" options:0 context:SPPostgresDocumentRunnerContext];
+		observingRunner = YES;
+
+		taskDisplay = [[SPPostgresTaskDisplay alloc] initWithRunner:taskRunner];
+		[taskDisplay setBlockedView:splitView];
+		[taskDisplay setParentWindow:[self _isSelectedTab] ? parentWindow : nil];
+	}
+
+	[self _updateIsProcessing];
+}
+
+/// isProcessing: the runner is busy or a database switch is connecting (never once torn down).
+- (void)_updateIsProcessing
+{
+	BOOL processing = !tornDown && ([taskRunner isBusy] || pendingConnector);
+	if (processing == isProcessing) return;
+	[self setIsProcessing:processing];
+
+	// What isProcessing disables (as MySQL's task start and end revalidate the toolbar)
+	[self _updateHistoryControl];
+	if (!tornDown && [parentWindow toolbar] == toolbar) [toolbar validateVisibleItems];
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context
+{
+	if (context == SPPostgresDocumentRunnerContext) {
+		if (object == taskRunner) [self _updateIsProcessing];
+		return;
+	}
+	[super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
 }
 
 - (NSString *)_connectionName
@@ -1235,12 +1304,16 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[self _updateDatabaseToolbarItemWidth];
 	[self _updateHistoryControl];
 
+	// The task display is shown in this window while the tab is active (as MySQL's progress window)
+	[taskDisplay setParentWindow:parentWindow];
+
 	[self _presentPendingAlert];
 }
 
 - (void)willResignActiveTabInWindow
 {
-	// Nothing to take down: the next tab installs its own toolbar and title
+	// The next tab installs its own toolbar and title; the task display goes, as MySQL's progress window
+	[taskDisplay setParentWindow:nil];
 }
 
 - (void)tabDidBecomeKey
@@ -1441,7 +1514,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	pendingConnector = nil;
 	[pending cancel];
 	[pending release];
-	if (isProcessing) [self setIsProcessing:NO];
+	[self _updateIsProcessing]; // NO from now on
 	[pendingHistoryEntry release];
 	pendingHistoryEntry = nil;
 
@@ -1460,7 +1533,17 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	// A Duplicate Table sheet still up (its completion sees tornDown)
 	if (duplicateSheet) [[duplicateSheet sheetParent] endSheet:duplicateSheet returnCode:NSModalResponseCancel];
 
-	[connector disconnect];
+	// A load still running is cancelled and its completion never called; the connection (and SSH tunnel) is closed
+	// once the worker has left it, without waiting here. The block keeps the connector.
+	[taskDisplay invalidate];
+	if (observingRunner) {
+		[taskRunner removeObserver:self forKeyPath:@"busy" context:SPPostgresDocumentRunnerContext];
+		observingRunner = NO;
+	}
+	SPPostgresConnector *theConnector = connector;
+	[taskRunner invalidateWithCompletion:^{
+		[theConnector disconnect];
+	}];
 
 	[sidebar invalidate];
 	[sidebar setDelegate:nil];
@@ -1898,7 +1981,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[previous release];
 
 	[databasePopup setEnabled:NO];
-	if (!isProcessing) [self setIsProcessing:YES];
+	[self _updateIsProcessing];
 	[self _updateHistoryControl];
 
 	// The connector keeps the completion until it is called (always exactly once), which also keeps self
@@ -1917,7 +2000,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	SPPostgresConnector *newConnector = pendingConnector; // takes over our reference
 	pendingConnector = nil;
 	[databasePopup setEnabled:YES];
-	[self setIsProcessing:NO];
+	[self _updateIsProcessing];
 
 	if (!newConnection) {
 		[newConnector release];
@@ -1938,6 +2021,14 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}
 
 	SPPostgresConnector *oldConnector = connector;
+
+	// The previous session's loads are cancelled (their completions never called), and it is closed once its worker
+	// has left it (the block keeps the connector). -_attachCurrentConnection gives the new connection a runner.
+	SPPostgresTaskRunner *oldRunner = [[taskRunner retain] autorelease];
+	[self _setTaskRunner:nil];
+	[oldRunner invalidateWithCompletion:^{
+		[oldConnector disconnect];
+	}];
 
 	connector = newConnector;
 	[connection release];
@@ -1971,8 +2062,6 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[self updateWindowTitle:self];
 	[self _updateHistoryControl];
 
-	// Only now let the previous session go
-	[oldConnector disconnect];
 	[oldConnector release];
 }
 
