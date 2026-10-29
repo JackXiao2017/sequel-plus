@@ -33,7 +33,8 @@ __attribute__((visibility("default")))
 /// No table: a load in progress is dropped and the pane isn't stale (the pane clears itself).
 - (void)loadNothing;
 
-/// YES (after NSBeep) while the runner is busy: a change, which runs on the main thread, must not go ahead.
+/// YES (after NSBeep) while the runner is busy, or once it is invalidated (the tab dropped it with its connection): a
+/// change, which runs on the main thread, must not go ahead.
 - (BOOL)refuseChangeWhileBusy;
 
 /// No result is applied after this (the pane's -invalidate).

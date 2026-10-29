@@ -833,7 +833,8 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 /// The short writes (add, delete, a cell edit) run on the main thread, so never while a load is using the connection.
 - (BOOL)_refuseWriteWhileBusy
 {
-	if (![taskRunner isBusy]) return NO;
+	// Also once the runner is invalidated (a database switch dropped it with its connection)
+	if (![taskRunner isBusy] && ![taskRunner isInvalidated]) return NO;
 	NSBeep();
 	return YES;
 }

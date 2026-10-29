@@ -42,6 +42,8 @@ __attribute__((visibility("default")))
 - (void)updateDescription:(NSString *)description; // callable from the work block's thread; applied on main
 - (void)cancelAll;                                   // main thread
 - (BOOL)isCancelled;                                 // work blocks may poll it (any thread)
+/// YES once -invalidateWithCompletion: was called (any thread): nothing it runs or guards may use its connection.
+- (BOOL)isInvalidated;
 /// Cancels everything; no completion is called after this. afterIdle runs on the main thread once the worker
 /// is no longer inside a work block (at once, from a later run loop turn, if idle). Idempotent.
 - (void)invalidateWithCompletion:(void (^)(void))afterIdle;

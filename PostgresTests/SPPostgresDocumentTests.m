@@ -2204,4 +2204,36 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	XCTAssertTrue(popup.isEnabled);
 }
 
+/// While the tab's runner is busy, the pane items (toolbar and View menu) are off, as MySQL's controls during a task:
+/// a pane switched to meanwhile would queue its load behind the running one, and a Stop would cancel both. The console
+/// stays available. Once idle, they are on again.
+- (void)testPaneItemsDisabledWhileBusy
+{
+	[self selectStructureTable:@"t"];
+	NSArray *identifiers = @[SPDocumentTestToolbarStructure, SPDocumentTestToolbarContent, SPDocumentTestToolbarRelations,
+							 SPDocumentTestToolbarTriggers, SPDocumentTestToolbarInfo, SPDocumentTestToolbarQuery];
+	NSArray *menuItems = @[[self menuItem:@selector(viewStructure:) key:@"1"], [self menuItem:@selector(viewContent:) key:@"2"],
+						   [self menuItem:@selector(viewRelations:) key:@"3"], [self menuItem:@selector(viewTriggers:) key:@"4"],
+						   [self menuItem:@selector(viewStatus:) key:@"5"], [self menuItem:@selector(viewQuery:) key:@"6"]];
+	for (NSString *identifier in identifiers) XCTAssertTrue([self.document validateToolbarItem:[self toolbarItem:identifier of:self.document]], @"%@ idle", identifier);
+	for (NSMenuItem *item in menuItems) XCTAssertTrue([self.controller validateMenuItem:item], @"%@ idle", item.title);
+
+	SPPostgresTaskRunner *runner = self.document.taskRunner;
+	[SPPostgresTestServers queueSleep:1 onRunner:runner];
+	XCTAssertTrue(self.document.isProcessing);
+	for (NSString *identifier in identifiers) XCTAssertFalse([self.document validateToolbarItem:[self toolbarItem:identifier of:self.document]], @"%@ busy", identifier);
+	for (NSMenuItem *item in menuItems) XCTAssertFalse([self.controller validateMenuItem:item], @"%@ busy", item.title);
+	XCTAssertTrue([self.document validateToolbarItem:[self toolbarItem:@"ShowConsoleIdentifier" of:self.document]], @"the console stays available");
+	XCTAssertTrue([self.document validateMenuItem:[self menuItem:@selector(toggleConsole:) key:@""]]);
+
+	// A pane switch asked for meanwhile (a direct call) does nothing
+	NSString *pane = self.document.currentPane;
+	[self.document viewQuery:nil];
+	XCTAssertEqualObjects(self.document.currentPane, pane);
+
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	for (NSString *identifier in identifiers) XCTAssertTrue([self.document validateToolbarItem:[self toolbarItem:identifier of:self.document]], @"%@ idle again", identifier);
+	for (NSMenuItem *item in menuItems) XCTAssertTrue([self.controller validateMenuItem:item], @"%@ idle again", item.title);
+}
+
 @end

@@ -55,7 +55,8 @@
 
 - (BOOL)refuseChangeWhileBusy
 {
-	if (![taskRunner isBusy]) return NO;
+	// Also once the runner is invalidated (a database switch dropped it; the pane goes when the new one is installed)
+	if (![taskRunner isBusy] && ![taskRunner isInvalidated]) return NO;
 	NSBeep();
 	return YES;
 }

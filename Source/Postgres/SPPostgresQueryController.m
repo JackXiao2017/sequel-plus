@@ -660,7 +660,12 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
  */
 - (void)_runStatements:(NSArray *)statements
 {
-	if (invalidated || running || [taskRunner isBusy] || ![statements count]) return;
+	if (invalidated || ![statements count]) return;
+	// A run while the runner is busy (a key equivalent the task display's blocker doesn't stop) is refused
+	if (running || [taskRunner isBusy] || [taskRunner isInvalidated]) {
+		NSBeep();
+		return;
+	}
 
 	// Hold on: an action may arrive from a view whose tab closes while the run's alerts or callbacks spin (the
 	// inline runner calls the completion before the blocks are copied)
