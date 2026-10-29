@@ -62,10 +62,71 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 
 @end
 
+/// The New Database… prompt's text field: enables its button only while it holds a name PostgreSQL accepts in length
+/// (1 to 63 bytes in UTF-8), as typed or as set by -setStringValue:.
+@interface SPPostgresTransferNewNameField : NSTextField
+{
+	NSButton *button; // not retained: the alert holds both
+}
+- (void)setButton:(NSButton *)theButton;
+@end
+
+@implementation SPPostgresTransferNewNameField
+
+- (void)_updateButton
+{
+	NSUInteger bytes = [[self stringValue] lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+	[button setEnabled:bytes > 0 && bytes <= 63];
+}
+
+- (void)setButton:(NSButton *)theButton
+{
+	button = theButton;
+	[self _updateButton];
+}
+
+- (void)setStringValue:(NSString *)value
+{
+	[super setStringValue:value];
+	[self _updateButton];
+}
+
+- (void)textDidChange:(NSNotification *)notification
+{
+	[super textDidChange:notification];
+	[self _updateButton];
+}
+
+@end
+
+/// The database menu's "New Database…" item
+static const NSInteger SPPostgresTransferNewDatabaseTag = 1;
+
+typedef NS_ENUM(NSInteger, SPPostgresTransferTargetState) {
+	SPPostgresTransferTargetNone = 0, // no favorite
+	SPPostgresTransferTargetConnecting,
+	SPPostgresTransferTargetConnected,
+	SPPostgresTransferTargetFailed
+};
+
+/// Closes a session: its connection, and its token when that can disconnect (the default's connector, which takes
+/// its SSH tunnel down with it).
+static void SPPostgresTransferCloseSession(PGPostgresConnection *connection, id token)
+{
+	[connection disconnect];
+	if ([token respondsToSelector:@selector(disconnect)]) [token disconnect];
+}
+
+static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
+{
+	return [[error domain] isEqualToString:SPPostgresErrorDomain] && [error code] == code;
+}
+
 @interface SPPostgresTransferController ()
-- (void)_beginProgressTo:(SPPostgresFavorite *)favorite database:(NSString *)targetDatabase password:(NSString *)password mode:(SPPostgresTransferMode)mode tables:(NSArray *)tables;
+- (void)_beginProgressTo:(SPPostgresFavorite *)favorite database:(NSString *)targetDatabase mode:(SPPostgresTransferMode)mode tables:(NSArray *)tables;
 - (void)_updateControls;
 - (void)_finish;
+- (void)_closeSession;
 @end
 
 @implementation SPPostgresTransferController
@@ -79,15 +140,30 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 	SPPostgresCheckList *tablesList;
 	NSPopUpButton *favoritePopup;
 	NSTextField *targetDescriptionField;
-	NSTextField *databaseField;
-	NSSecureTextField *passwordField;
+	NSPopUpButton *databasePopup;
+	NSTextField *targetStatusField;
+	NSButton *retryButton;
 	NSButton *emptyModeRadio;
 	NSButton *overwriteModeRadio;
 	NSButton *transferButton;
 	NSButton *cancelButton;
 
-	/// The user typed in the Database field: it no longer follows the favorite
-	BOOL databaseEdited;
+	NSString *selectedDatabase;
+
+	/// The session to the chosen favorite: lists its databases, creates one, and carries the transfer's connection
+	/// (its SSH tunnel and password). Open from choosing the favorite until the controller finishes.
+	SPPostgresFavorite *sessionFavorite; // the favorites' element it was opened for
+	NSString *sessionPassword; // asked for in this sheet (nil: the Keychain's)
+	PGPostgresConnection *sessionConnection;
+	id sessionToken;
+	SPPostgresConnector *connectingSession; // the default targetConnect's session connector, while it connects
+	/// Bumped whenever a session is closed or another opened: older answers are ignored
+	NSUInteger sessionGeneration;
+	SPPostgresTransferTargetState targetState;
+	/// Created in this sheet (on the session's favorite): no Empty mode confirmation for these
+	NSMutableSet *createdDatabases;
+	/// The password or New Database… prompt is up
+	BOOL prompting;
 
 	SPPostgresProgressSheet *progressSheet;
 	SPPostgresBackgroundJob *job;
@@ -107,7 +183,9 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 
 @synthesize didEnd;
 @synthesize favorites;
-@synthesize targetProviderForFavorite;
+@synthesize targetConnect;
+@synthesize passwordPrompt;
+@synthesize newDatabasePrompt;
 @synthesize emptyConfirmation;
 @synthesize progressObserver;
 @synthesize temporaryDirectory;
@@ -117,8 +195,10 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 @synthesize tablesList;
 @synthesize favoritePopup;
 @synthesize targetDescriptionField;
-@synthesize databaseField;
-@synthesize passwordField;
+@synthesize databasePopup;
+@synthesize targetStatusField;
+@synthesize retryButton;
+@synthesize selectedDatabase;
 @synthesize emptyModeRadio;
 @synthesize overwriteModeRadio;
 @synthesize transferButton;
@@ -132,6 +212,7 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 	if ((self = [super init])) {
 		document = [theDocument retain];
 		database = [[theDocument currentDatabase] copy];
+		createdDatabases = [[NSMutableSet alloc] init];
 	}
 	return self;
 }
@@ -139,12 +220,15 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 - (void)dealloc
 {
 	[tablesList setChecksChanged:nil];
-	for (NSControl *control in [NSArray arrayWithObjects:wholeDatabaseRadio, selectedTablesRadio, favoritePopup, emptyModeRadio, overwriteModeRadio, transferButton, cancelButton, nil]) [control setTarget:nil];
-	[databaseField setDelegate:nil];
+	for (NSControl *control in [NSArray arrayWithObjects:wholeDatabaseRadio, selectedTablesRadio, favoritePopup, databasePopup, retryButton, emptyModeRadio, overwriteModeRadio, transferButton, cancelButton, nil]) [control setTarget:nil];
+	// Normally closed by -_finish; a connecting session holds the controller, so none is pending here
+	SPPostgresTransferCloseSession(sessionConnection, sessionToken);
 
 	[didEnd release];
 	[favorites release];
-	[targetProviderForFavorite release];
+	[targetConnect release];
+	[passwordPrompt release];
+	[newDatabasePrompt release];
 	[emptyConfirmation release];
 	[progressObserver release];
 	[temporaryDirectory release];
@@ -154,8 +238,16 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 	[tablesList release];
 	[favoritePopup release];
 	[targetDescriptionField release];
-	[databaseField release];
-	[passwordField release];
+	[databasePopup release];
+	[targetStatusField release];
+	[retryButton release];
+	[selectedDatabase release];
+	[sessionFavorite release];
+	[sessionPassword release];
+	[sessionConnection release];
+	[sessionToken release];
+	[connectingSession release];
+	[createdDatabases release];
 	[emptyModeRadio release];
 	[overwriteModeRadio release];
 	[transferButton release];
@@ -288,18 +380,30 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 	NSTextField *databaseLabel = [self _labelWithFrame:NSMakeRect(20, 160, 80, 18) text:NSLocalizedString(@"Database:", @"Postgres transfer sheet: target database label")];
 	[databaseLabel setAutoresizingMask:NSViewMaxYMargin];
 	[content addSubview:databaseLabel];
-	databaseField = [[NSTextField alloc] initWithFrame:NSMakeRect(108, 158, 240, 22)];
-	[databaseField setDelegate:self];
-	[databaseField setAutoresizingMask:NSViewMaxYMargin];
-	[content addSubview:databaseField];
+	databasePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(104, 155, 280, 26) pullsDown:NO];
+	[[databasePopup menu] setAutoenablesItems:NO];
+	[databasePopup setTarget:self];
+	[databasePopup setAction:@selector(_databaseChanged:)];
+	[databasePopup setAutoresizingMask:NSViewMaxYMargin];
+	[content addSubview:databasePopup];
 
-	NSTextField *passwordLabel = [self _labelWithFrame:NSMakeRect(20, 128, 80, 18) text:NSLocalizedString(@"Password:", @"Postgres transfer sheet: target password label")];
-	[passwordLabel setAutoresizingMask:NSViewMaxYMargin];
-	[content addSubview:passwordLabel];
-	passwordField = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(108, 126, 240, 22)];
-	[passwordField setPlaceholderString:NSLocalizedString(@"Saved in Keychain", @"Postgres transfer sheet: password placeholder")];
-	[passwordField setAutoresizingMask:NSViewMaxYMargin];
-	[content addSubview:passwordField];
+	// The session's error, and Retry next to it
+	targetStatusField = [[self _labelWithFrame:NSMakeRect(108, 118, width - 128 - 96, 32) text:@""] retain];
+	[targetStatusField setAlignment:NSTextAlignmentLeft];
+	[targetStatusField setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+	[targetStatusField setTextColor:[NSColor systemRedColor]];
+	[[targetStatusField cell] setWraps:YES];
+	[[targetStatusField cell] setTruncatesLastVisibleLine:YES];
+	[targetStatusField setAutoresizingMask:NSViewWidthSizable | NSViewMaxYMargin];
+	[content addSubview:targetStatusField];
+	retryButton = [[NSButton alloc] initWithFrame:NSMakeRect(width - 20 - 90, 120, 90, 28)];
+	[retryButton setBezelStyle:NSBezelStyleRounded];
+	[retryButton setTitle:NSLocalizedString(@"Retry", @"Postgres transfer sheet: connect to the target again")];
+	[retryButton setTarget:self];
+	[retryButton setAction:@selector(_retry:)];
+	[retryButton setHidden:YES];
+	[retryButton setAutoresizingMask:NSViewMinXMargin | NSViewMaxYMargin];
+	[content addSubview:retryButton];
 
 	// Mode
 	emptyModeRadio = [self _radioWithFrame:NSMakeRect(20, 88, width - 40, 20) title:NSLocalizedString(@"Empty the target database first", @"Postgres transfer sheet: mode") action:@selector(_modeChanged:) on:YES];
@@ -360,7 +464,7 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 		if (preselected < 0 && !own) preselected = (NSInteger)index;
 	}
 	if ([favorites count]) [favoritePopup selectItemAtIndex:preselected >= 0 ? preselected : 0];
-	[self _favoriteChanged:nil];
+	[self _showFavorite];
 	return error;
 }
 
@@ -385,14 +489,16 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 - (BOOL)_canTransfer
 {
 	if (finished || running || confirming) return NO;
-	if (![self _selectedFavorite] || ![[databaseField stringValue] length]) return NO;
+	if (prompting || ![self _selectedFavorite] || targetState != SPPostgresTransferTargetConnected || ![selectedDatabase length]) return NO;
 	return [self _wholeDatabase] || [[tablesList checkedItems] count] > 0;
 }
 
 - (void)_updateControls
 {
 	[[tablesList tableView] setEnabled:![self _wholeDatabase]];
-	[favoritePopup setEnabled:[favorites count] > 0];
+	[favoritePopup setEnabled:[favorites count] > 0 && !prompting];
+	[databasePopup setEnabled:targetState != SPPostgresTransferTargetNone && !prompting];
+	[retryButton setHidden:targetState != SPPostgresTransferTargetFailed];
 	[transferButton setEnabled:[self _canTransfer]];
 }
 
@@ -412,19 +518,371 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 	[self _updateControls];
 }
 
-/// The target line follows the favorite; so does the Database field, until it is edited.
+- (void)_showFavorite
+{
+	[targetDescriptionField setStringValue:[[self class] targetDescriptionForFavorite:[self _selectedFavorite]]];
+}
+
+/// The target line follows the favorite; a session to it replaces the previous favorite's.
 - (void)_favoriteChanged:(id)sender
 {
+	[self _showFavorite];
 	SPPostgresFavorite *favorite = [self _selectedFavorite];
-	[targetDescriptionField setStringValue:[[self class] targetDescriptionForFavorite:favorite]];
-	if (!databaseEdited) [databaseField setStringValue:[favorite database] ?: @""];
+	if (favorite == sessionFavorite && targetState != SPPostgresTransferTargetFailed && targetState != SPPostgresTransferTargetNone) {
+		[self _updateControls];
+		return;
+	}
+	[self _closeSession];
+	[sessionFavorite release];
+	sessionFavorite = [favorite retain];
+	[sessionPassword release];
+	sessionPassword = nil;
+	[createdDatabases removeAllObjects];
+	[self _openSession];
+}
+
+#pragma mark - Session
+
+- (void)_setSelectedDatabase:(NSString *)name
+{
+	if (name == selectedDatabase) return;
+	[selectedDatabase release];
+	selectedDatabase = [name copy];
+}
+
+/// One disabled item ("Connecting…", "Not connected") or none, and the line under the menu.
+- (void)_setTargetState:(SPPostgresTransferTargetState)state message:(NSString *)message
+{
+	targetState = state;
+	[self _setSelectedDatabase:nil];
+	[databasePopup removeAllItems];
+	NSString *title = nil;
+	if (state == SPPostgresTransferTargetConnecting) title = NSLocalizedString(@"Connecting…", @"Postgres transfer sheet: database menu while the target connects");
+	else if (state == SPPostgresTransferTargetFailed) title = NSLocalizedString(@"Not connected", @"Postgres transfer sheet: database menu when the target couldn't be connected");
+	if (title) {
+		NSMenuItem *item = [[databasePopup menu] addItemWithTitle:title action:NULL keyEquivalent:@""];
+		[item setEnabled:NO];
+		[databasePopup selectItem:item];
+	}
+	[targetStatusField setStringValue:message ?: @""];
 	[self _updateControls];
 }
 
-- (void)controlTextDidChange:(NSNotification *)notification
+/// The session's databases, a separator and "New Database…"; selects name when listed, else the first.
+- (void)_showDatabases:(NSArray *)names selecting:(NSString *)name
 {
-	if ([notification object] == databaseField) databaseEdited = YES;
+	targetState = SPPostgresTransferTargetConnected;
+	[databasePopup removeAllItems];
+	NSMenu *menu = [databasePopup menu];
+	NSMenuItem *selected = nil;
+	for (NSString *each in names) {
+		// One item per name (the pop-up's own -addItemWithTitle: would merge equal titles)
+		NSMenuItem *item = [menu addItemWithTitle:each action:NULL keyEquivalent:@""];
+		[item setRepresentedObject:each];
+		if (!selected && [each isEqualToString:name]) selected = item;
+	}
+	if (!selected && [names count]) selected = [menu itemAtIndex:0];
+	[menu addItem:[NSMenuItem separatorItem]];
+	NSMenuItem *newItem = [menu addItemWithTitle:NSLocalizedString(@"New Database…", @"Postgres transfer sheet: database menu item creating a database on the target") action:NULL keyEquivalent:@""];
+	[newItem setTag:SPPostgresTransferNewDatabaseTag];
+	[databasePopup selectItem:selected];
+	[self _setSelectedDatabase:[selected representedObject]];
+	[targetStatusField setStringValue:@""];
 	[self _updateControls];
+}
+
+/// Selects the database name again (after New Database… was cancelled or failed).
+- (void)_reselectDatabase:(NSString *)name
+{
+	NSInteger index = name ? [databasePopup indexOfItemWithRepresentedObject:name] : -1;
+	if (index >= 0) [databasePopup selectItemAtIndex:index];
+	else [databasePopup selectItem:nil];
+	[self _setSelectedDatabase:index >= 0 ? name : nil];
+	[self _updateControls];
+}
+
+/// Closes the session (and abandons one connecting); answers still on their way are ignored.
+- (void)_closeSession
+{
+	sessionGeneration++;
+	SPPostgresConnector *connecting = connectingSession;
+	connectingSession = nil;
+	[connecting cancel];
+	[connecting release];
+	PGPostgresConnection *connection = sessionConnection;
+	id token = sessionToken;
+	sessionConnection = nil;
+	sessionToken = nil;
+	SPPostgresTransferCloseSession(connection, token);
+	[connection release];
+	[token release];
+}
+
+/// The favorite's database, or postgres when it has none.
+- (NSString *)_sessionDatabase
+{
+	NSString *name = [sessionFavorite database];
+	return [name length] ? name : @"postgres";
+}
+
+/// Connects the session for sessionFavorite (with sessionPassword, if one was asked for).
+- (void)_openSession
+{
+	[self _closeSession];
+	if (!sessionFavorite || finished) {
+		[self _setTargetState:SPPostgresTransferTargetNone message:nil];
+		return;
+	}
+	[self _setTargetState:SPPostgresTransferTargetConnecting message:nil];
+	NSString *name = [self _sessionDatabase];
+	[self _connectSessionTo:name retryOnPostgres:![name isEqualToString:@"postgres"]];
+}
+
+- (void)_connectSessionTo:(NSString *)name retryOnPostgres:(BOOL)retry
+{
+	NSUInteger generation = sessionGeneration;
+	[self _connectFavorite:sessionFavorite database:name password:sessionPassword sessionToken:nil completion:^(PGPostgresConnection *connection, id token, NSError *error) {
+		if (finished || generation != sessionGeneration) {
+			// Another favorite was chosen, or the controller has finished: this answer is too late
+			SPPostgresTransferCloseSession(connection, token);
+			return;
+		}
+		if (connection) {
+			[self _sessionOpened:connection token:token];
+		}
+		else if (SPPostgresTransferErrorIs(error, SPPostgresErrorPasswordRequired)) {
+			[self _askPasswordAfter:error];
+		}
+		else if (retry && !SPPostgresTransferErrorIs(error, SPPostgresErrorSSHTunnelFailed) && !SPPostgresTransferErrorIs(error, SPPostgresErrorCancelled)) {
+			// The favorite's database may be gone: postgres usually isn't
+			[self _connectSessionTo:@"postgres" retryOnPostgres:NO];
+		}
+		else {
+			[self _setTargetState:SPPostgresTransferTargetFailed message:[error localizedDescription]];
+		}
+	}];
+}
+
+- (void)_sessionOpened:(PGPostgresConnection *)connection token:(id)token
+{
+	sessionConnection = [connection retain];
+	sessionToken = [token retain];
+	NSError *error = nil;
+	SPPostgresCatalog *catalog = [[[SPPostgresCatalog alloc] initWithConnection:connection] autorelease];
+	NSArray *names = [catalog databaseNames:&error];
+	if (!names) {
+		[self _closeSession];
+		[self _setTargetState:SPPostgresTransferTargetFailed message:[error localizedDescription]];
+		return;
+	}
+	[self _showDatabases:names selecting:[sessionFavorite database]];
+}
+
+/// The server wants a password: ask (once per failed attempt); Cancel leaves "Not connected" with Retry.
+- (void)_askPasswordAfter:(NSError *)error
+{
+	NSUInteger generation = sessionGeneration;
+	SPPostgresFavorite *favorite = [[sessionFavorite retain] autorelease];
+	NSString *message = [[[error localizedDescription] copy] autorelease];
+	prompting = YES;
+	[self _updateControls];
+	__block BOOL answered = NO;
+	void (^answer)(NSString *) = [[^(NSString *password) {
+		if (answered) return;
+		answered = YES;
+		prompting = NO;
+		if (finished || generation != sessionGeneration) return;
+		if (!password) {
+			[self _setTargetState:SPPostgresTransferTargetFailed message:message];
+			return;
+		}
+		// For this sheet's session and transfer only: never saved
+		[sessionPassword release];
+		sessionPassword = [password copy];
+		[self _setTargetState:SPPostgresTransferTargetConnecting message:nil];
+		NSString *name = [self _sessionDatabase];
+		[self _connectSessionTo:name retryOnPostgres:![name isEqualToString:@"postgres"]];
+	} copy] autorelease];
+
+	if (passwordPrompt) {
+		passwordPrompt(favorite, answer);
+		return;
+	}
+	NSAlert *alert = [self passwordAlertForFavorite:favorite];
+	NSTextField *field = (NSTextField *)[alert accessoryView];
+	[alert beginSheetModalForWindow:sheet completionHandler:^(NSModalResponse response) {
+		answer(response == NSAlertFirstButtonReturn ? [[[field stringValue] copy] autorelease] : nil);
+	}];
+	[[alert window] makeFirstResponder:field];
+}
+
+- (void)_retry:(id)sender
+{
+	if (finished || targetState != SPPostgresTransferTargetFailed) return;
+	[self _openSession];
+}
+
+- (NSAlert *)passwordAlertForFavorite:(SPPostgresFavorite *)favorite
+{
+	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+	[alert setMessageText:[NSString stringWithFormat:NSLocalizedString(@"Password for %@ on “%@”", @"Postgres transfer: password prompt title (user, favorite)"), [favorite user] ?: @"", [favorite name] ?: @""]];
+	[alert setInformativeText:NSLocalizedString(@"The server asked for a password. It is used for this transfer only and isn't saved.", @"Postgres transfer: password prompt text")];
+	[alert addButtonWithTitle:NSLocalizedString(@"Connect", @"Postgres transfer: password prompt button")];
+	NSButton *cancel = [alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"cancel button")];
+	[cancel setKeyEquivalent:@"\e"];
+	NSSecureTextField *field = [[[NSSecureTextField alloc] initWithFrame:NSMakeRect(0, 0, 260, 22)] autorelease];
+	[alert setAccessoryView:field];
+	return alert;
+}
+
+#pragma mark - Target database
+
+- (void)_databaseChanged:(id)sender
+{
+	NSMenuItem *item = [databasePopup selectedItem];
+	if ([item tag] == SPPostgresTransferNewDatabaseTag) {
+		[self _newDatabase];
+		return;
+	}
+	[self _setSelectedDatabase:[item representedObject]];
+	[self _updateControls];
+}
+
+- (void)_newDatabase
+{
+	NSString *previous = [[selectedDatabase copy] autorelease];
+	if (targetState != SPPostgresTransferTargetConnected || prompting || finished) {
+		[self _reselectDatabase:previous];
+		return;
+	}
+	NSUInteger generation = sessionGeneration;
+	SPPostgresFavorite *favorite = [[sessionFavorite retain] autorelease];
+	prompting = YES;
+	[self _updateControls];
+	__block BOOL answered = NO;
+	void (^answer)(NSString *) = [[^(NSString *name) {
+		if (answered) return;
+		answered = YES;
+		prompting = NO;
+		if (finished || generation != sessionGeneration) return;
+		if (![name length]) {
+			[self _reselectDatabase:previous];
+			return;
+		}
+		[self _createDatabase:name favorite:favorite previous:previous];
+	} copy] autorelease];
+
+	if (newDatabasePrompt) {
+		newDatabasePrompt(favorite, answer);
+		return;
+	}
+	NSAlert *alert = [self createDatabaseAlertForFavorite:favorite];
+	NSTextField *field = (NSTextField *)[alert accessoryView];
+	[alert beginSheetModalForWindow:sheet completionHandler:^(NSModalResponse response) {
+		answer(response == NSAlertFirstButtonReturn ? [[[field stringValue] copy] autorelease] : nil);
+	}];
+	[[alert window] makeFirstResponder:field];
+}
+
+/// CREATE DATABASE on the session (the server's default template and encoding, owned by the favorite's user), then
+/// the menu again with it selected. A server error is shown and the previous selection comes back.
+- (void)_createDatabase:(NSString *)name favorite:(SPPostgresFavorite *)favorite previous:(NSString *)previous
+{
+	SPPostgresCatalog *catalog = [[[SPPostgresCatalog alloc] initWithConnection:sessionConnection] autorelease];
+	NSError *error = nil;
+	if (![catalog createDatabase:name error:&error]) {
+		[self _reselectDatabase:previous];
+		NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+		[alert setMessageText:[NSString stringWithFormat:NSLocalizedString(@"“%@” couldn't be created on “%@”", @"Postgres transfer: CREATE DATABASE failed (database, favorite)"), name, [favorite name] ?: @""]];
+		[alert setInformativeText:[error localizedDescription] ?: @""];
+		[alert addButtonWithTitle:NSLocalizedString(@"OK", @"OK button")];
+		// On the sheet (no presenter set); otherwise as the document shows its alerts
+		if ([sheet sheetParent] && ![document alertPresenter]) [alert beginSheetModalForWindow:sheet completionHandler:nil];
+		else [document presentAlert:alert];
+		return;
+	}
+	[createdDatabases addObject:name];
+	NSArray *names = [catalog databaseNames:&error];
+	if (!names) {
+		// Listed before, so the menu's names plus the new one
+		NSMutableArray *listed = [NSMutableArray array];
+		for (NSMenuItem *item in [databasePopup itemArray]) if ([item representedObject]) [listed addObject:[item representedObject]];
+		if (![listed containsObject:name]) [listed addObject:name];
+		names = [listed sortedArrayUsingSelector:@selector(compare:)];
+	}
+	[self _showDatabases:names selecting:name];
+}
+
+- (NSAlert *)createDatabaseAlertForFavorite:(SPPostgresFavorite *)favorite
+{
+	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+	[alert setMessageText:[NSString stringWithFormat:NSLocalizedString(@"New database on “%@”", @"Postgres transfer: New Database… prompt title (favorite)"), [favorite name] ?: @""]];
+	[alert setInformativeText:NSLocalizedString(@"The database is created now, owned by the favorite's user, with the server's default template and encoding.", @"Postgres transfer: New Database… prompt text")];
+	NSButton *create = [alert addButtonWithTitle:NSLocalizedString(@"Create", @"Postgres transfer: New Database… prompt button")];
+	NSButton *cancel = [alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"cancel button")];
+	[cancel setKeyEquivalent:@"\e"];
+	SPPostgresTransferNewNameField *field = [[[SPPostgresTransferNewNameField alloc] initWithFrame:NSMakeRect(0, 0, 260, 22)] autorelease];
+	[field setButton:create];
+	[alert setAccessoryView:field];
+	return alert;
+}
+
+#pragma mark - Target connections
+
+/// targetConnect, or the default (see the property).
+- (void)_connectFavorite:(SPPostgresFavorite *)favorite database:(NSString *)name password:(NSString *)password sessionToken:(id)token completion:(void (^)(PGPostgresConnection *, id, NSError *))completion
+{
+	if (targetConnect) {
+		targetConnect(favorite, name, password, token, completion);
+		return;
+	}
+	void (^done)(PGPostgresConnection *, id, NSError *) = [[completion copy] autorelease];
+	SPPostgresFavorite *target = [[favorite copy] autorelease];
+	[target setDatabase:name];
+	NSString *favoriteName = [[([favorite name] ?: @"") copy] autorelease];
+
+	if (!token) {
+		// The session: the Keychain's password (read now) unless one was asked for; its SSH prompts on this sheet.
+		// The Keychain items are named after the favorite as saved (its database included)
+		NSString *thePassword = password;
+		if (![thePassword length]) {
+			SPKeychain *keychain = [[[SPKeychain alloc] init] autorelease];
+			thePassword = [keychain getPasswordForName:[favorite keychainName] account:[favorite keychainAccount]];
+		}
+		SPPostgresConnector *connector = [[[SPPostgresConnector alloc] initWithFavorite:target password:[thePassword length] ? thePassword : nil sshPassword:nil parentWindow:sheet] autorelease];
+		[connectingSession release];
+		connectingSession = [connector retain];
+		[connector connectWithCompletion:^(PGPostgresConnection *connection, NSError *error) {
+			if (connectingSession == connector) {
+				[connectingSession autorelease];
+				connectingSession = nil;
+			}
+			if (connection) {
+				// Its statements go to the Console under the favorite's name
+				SPPostgresConsoleLogger *logger = [[[SPPostgresConsoleLogger alloc] initWithConnectionName:favoriteName database:name] autorelease];
+				[logger attachToConnection:connection];
+			}
+			done(connection, connection ? connector : nil, error);
+		}];
+		return;
+	}
+
+	// The transfer's connection: through the session's SSH tunnel, with its password; kept until the job ends
+	NSString *thePassword = [password length] ? password : ([token isKindOfClass:[SPPostgresConnector class]] ? [(SPPostgresConnector *)token password] : nil);
+	SPPostgresConnector *connector = [token isKindOfClass:[SPPostgresConnector class]]
+		? [[[SPPostgresConnector alloc] initWithFavorite:target password:thePassword sharingTunnelOf:token] autorelease]
+		: [[[SPPostgresConnector alloc] initWithFavorite:target password:thePassword sshPassword:nil parentWindow:nil] autorelease];
+	[self _setPendingConnector:connector];
+	[connector connectWithCompletion:^(PGPostgresConnection *connection, NSError *error) {
+		if (connection) {
+			// Its statements go to the Console under the target favorite's name (COPY data never does)
+			SPPostgresConsoleLogger *logger = [[[SPPostgresConsoleLogger alloc] initWithConnectionName:favoriteName database:name] autorelease];
+			[logger attachToConnection:connection];
+			[SPPostgresBackgroundJob keepOwner:connector untilJobEndsOnConnection:connection];
+		}
+		if (pendingConnector == connector) [self _setPendingConnector:nil];
+		done(connection, token, error);
+	}];
 }
 
 #pragma mark - Sheet
@@ -448,6 +906,8 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 		afterSheetEnds = nil;
 		if (next) next();
 	}];
+	// The session to the chosen favorite (its SSH prompts, if any, on this sheet)
+	[self _favoriteChanged:nil];
 
 	// The tables couldn't be read: say why, rather than show an empty list. On the sheet (no presenter set);
 	// otherwise as the document shows its alerts
@@ -485,7 +945,7 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 		[self _finish];
 		return;
 	}
-	// The confirmation sheet, if up, ends as Cancel (its answer is ignored once finished)
+	// The confirmation or a prompt, if up, ends as Cancel (its answer is ignored once finished)
 	NSWindow *alertWindow = [sheet attachedSheet];
 	if (alertWindow) [sheet endSheet:alertWindow returnCode:NSAlertSecondButtonReturn];
 	[self _endSheet];
@@ -497,6 +957,8 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 	if (finished) return;
 	finished = YES;
 	[self _endSheet];
+	// After any job has ended: the transfer's connection used the session's tunnel
+	[self _closeSession];
 
 	void (^theDidEnd)(void) = [didEnd autorelease];
 	didEnd = nil; // it may hold the document, which holds this controller
@@ -531,17 +993,17 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 	if (![self _canTransfer]) return;
 
 	SPPostgresFavorite *favorite = [[[self _selectedFavorite] copy] autorelease];
-	NSString *targetDatabase = [[[databaseField stringValue] copy] autorelease];
-	NSString *password = [[[passwordField stringValue] copy] autorelease];
+	NSString *targetDatabase = [[selectedDatabase copy] autorelease];
 	SPPostgresTransferMode mode = [self _mode];
 	NSArray *tables = [self _wholeDatabase] ? nil : [[[tablesList checkedItems] copy] autorelease];
 
-	if (mode != SPPostgresTransferEmptyTarget) {
-		[self _startTransferTo:favorite database:targetDatabase password:password mode:mode tables:tables];
+	// A database created in this sheet has nothing to lose: no confirmation
+	if (mode != SPPostgresTransferEmptyTarget || [createdDatabases containsObject:targetDatabase]) {
+		[self _startTransferTo:favorite database:targetDatabase mode:mode tables:tables];
 		return;
 	}
 
-	// Empty mode: confirmed first, before any connection is opened
+	// Empty mode: confirmed first, before the transfer's connections are opened
 	confirming = YES;
 	[self _updateControls];
 	__block BOOL answered = NO;
@@ -550,7 +1012,7 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 		answered = YES;
 		confirming = NO;
 		if (finished) return;
-		if (confirmed) [self _startTransferTo:favorite database:targetDatabase password:password mode:mode tables:tables];
+		if (confirmed) [self _startTransferTo:favorite database:targetDatabase mode:mode tables:tables];
 		else [self _updateControls];
 	} copy] autorelease];
 
@@ -567,46 +1029,12 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 	[[alert window] makeFirstResponder:[alert accessoryView]];
 }
 
-/// The target's default provider: a connector for a copy of the favorite with the database asked for, the typed
-/// password or else the Keychain's (read now, as the transfer starts), the Keychain's SSH password, its SSH prompts on
-/// the progress sheet, and a console logger named after the favorite; kept until the job ends.
-- (SPPostgresConnectionProvider)_defaultTargetProviderForFavorite:(SPPostgresFavorite *)favorite password:(NSString *)typed sheetWindow:(NSWindow *)window
-{
-	SPPostgresFavorite *base = [[favorite copy] autorelease];
-	NSString *typedPassword = [[typed copy] autorelease];
-	SPPostgresConnectionProvider provider = ^(NSString *targetDatabase, void (^completion)(PGPostgresConnection *, NSError *)) {
-		SPKeychain *keychain = [[[SPKeychain alloc] init] autorelease];
-		// The Keychain items are named after the favorite as saved (its database included)
-		NSString *thePassword = [typedPassword length] ? typedPassword : [keychain getPasswordForName:[base keychainName] account:[base keychainAccount]];
-		NSString *theSSHPassword = ([base type] == SPPostgresSSHConnection) ? [keychain getPasswordForName:[base sshKeychainName] account:[base sshKeychainAccount]] : nil;
-		SPPostgresFavorite *target = [[base copy] autorelease];
-		[target setDatabase:targetDatabase];
-		SPPostgresConnector *connector = [[[SPPostgresConnector alloc] initWithFavorite:target
-																			  password:[thePassword length] ? thePassword : nil
-																		   sshPassword:[theSSHPassword length] ? theSSHPassword : nil
-																		  parentWindow:window] autorelease];
-		[self _setPendingConnector:connector];
-		void (^done)(PGPostgresConnection *, NSError *) = [[completion copy] autorelease];
-		[connector connectWithCompletion:^(PGPostgresConnection *connection, NSError *error) {
-			if (connection) {
-				// Its statements go to the Console under the target favorite's name (COPY data never does)
-				SPPostgresConsoleLogger *logger = [[[SPPostgresConsoleLogger alloc] initWithConnectionName:[base name] ?: @"" database:targetDatabase] autorelease];
-				[logger attachToConnection:connection];
-				[SPPostgresBackgroundJob keepOwner:connector untilJobEndsOnConnection:connection];
-			}
-			if (pendingConnector == connector) [self _setPendingConnector:nil];
-			done(connection, error);
-		}];
-	};
-	return [[provider copy] autorelease];
-}
-
 static NSError *SPPostgresTransferCancelledError(void)
 {
 	return SPPostgresMakeError(SPPostgresErrorCancelled, NSLocalizedString(@"The transfer was cancelled.", @"Postgres transfer: cancelled"), nil);
 }
 
-- (void)_startTransferTo:(SPPostgresFavorite *)favorite database:(NSString *)targetDatabase password:(NSString *)password mode:(SPPostgresTransferMode)mode tables:(NSArray *)tables
+- (void)_startTransferTo:(SPPostgresFavorite *)favorite database:(NSString *)targetDatabase mode:(SPPostgresTransferMode)mode tables:(NSArray *)tables
 {
 	running = YES;
 	[self _setLastErrorMessage:nil];
@@ -614,7 +1042,7 @@ static NSError *SPPostgresTransferCancelledError(void)
 
 	// The progress sheet begins once the Transfer sheet has ended (AppKit queues a sheet begun while another is attached)
 	void (^next)(void) = ^{
-		[self _beginProgressTo:favorite database:targetDatabase password:password mode:mode tables:tables];
+		[self _beginProgressTo:favorite database:targetDatabase mode:mode tables:tables];
 	};
 	if ([sheet sheetParent]) {
 		[afterSheetEnds release];
@@ -626,7 +1054,7 @@ static NSError *SPPostgresTransferCancelledError(void)
 	}
 }
 
-- (void)_beginProgressTo:(SPPostgresFavorite *)favorite database:(NSString *)targetDatabase password:(NSString *)password mode:(SPPostgresTransferMode)mode tables:(NSArray *)tables
+- (void)_beginProgressTo:(SPPostgresFavorite *)favorite database:(NSString *)targetDatabase mode:(SPPostgresTransferMode)mode tables:(NSArray *)tables
 {
 	if (finished || cancelRequested) return;
 	NSString *title = [NSString stringWithFormat:NSLocalizedString(@"Transferring “%@” to “%@”…", @"Postgres transfer: progress title (source database, target database)"), database, targetDatabase];
@@ -642,8 +1070,15 @@ static NSError *SPPostgresTransferCancelledError(void)
 	} connecting:^(SPPostgresConnector *connector) {
 		[self _setPendingConnector:connector];
 	}];
-	SPPostgresConnectionProvider targetProvider = targetProviderForFavorite ? targetProviderForFavorite(favorite, password)
-		: [self _defaultTargetProviderForFavorite:favorite password:password sheetWindow:progressWindow];
+	// The target through the session (its SSH tunnel and password: no prompt), which stays open until the job ends
+	id token = [[sessionToken retain] autorelease];
+	NSString *password = [[sessionPassword copy] autorelease];
+	SPPostgresConnectionProvider targetProvider = ^(NSString *theDatabase, void (^completion)(PGPostgresConnection *, NSError *)) {
+		void (^done)(PGPostgresConnection *, NSError *) = [[completion copy] autorelease];
+		[self _connectFavorite:favorite database:theDatabase password:password sessionToken:token completion:^(PGPostgresConnection *connection, id theToken, NSError *error) {
+			done(connection, error);
+		}];
+	};
 
 	// Cleared by the progress sheet's -end: not capturing self
 	__block SPPostgresTransferController *controller = self;
