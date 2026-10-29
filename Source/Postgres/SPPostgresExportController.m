@@ -3,6 +3,7 @@
 #import "SPPostgresQueryController.h"
 #import "SPPostgresSidebarController.h"
 #import "SPPostgresCatalog.h"
+#import "SPPostgresCheckList.h"
 #import "SPPostgresDumpWriter.h"
 #import "SPPostgresTableData.h"
 #import "SPPostgresCSV.h"
@@ -25,8 +26,6 @@ typedef NS_ENUM(NSInteger, SPPostgresExportSource) {
 	SPPostgresExportSourceQueryResult = 3
 };
 
-static NSString * const SPPostgresExportCheckColumn = @"check";
-static NSString * const SPPostgresExportNameColumn = @"name";
 /// The delimiter pop-up's items: , ; Tab | Custom
 static const NSInteger SPPostgresExportCustomDelimiterIndex = 4;
 
@@ -52,8 +51,8 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 	NSPanel *sheet;
 	NSSegmentedControl *formatControl;
 	NSPopUpButton *sourcePopup;
-	NSTableView *schemasTable;
-	NSTableView *tablesTable;
+	SPPostgresCheckList *schemasList;
+	SPPostgresCheckList *tablesList;
 	NSTextField *sourceNote;
 	NSView *sqlOptions;
 	NSView *csvOptions;
@@ -72,8 +71,6 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 	NSArray *schemaNames;
 	/// The Selected tables list: NSString (a schema's group row) or @[schema, table]
 	NSArray *tableRows;
-	NSMutableArray *checkedSchemaList;
-	NSMutableArray *checkedTableList;
 
 	NSArray *queryColumnNames;
 	NSUInteger queryRowCount;
@@ -99,8 +96,6 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 @synthesize sheet;
 @synthesize formatControl;
 @synthesize sourcePopup;
-@synthesize schemasTable;
-@synthesize tablesTable;
 @synthesize structureCheckbox;
 @synthesize dataCheckbox;
 @synthesize compressCheckbox;
@@ -123,18 +118,14 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 	if ((self = [super init])) {
 		document = [theDocument retain];
 		database = [[theDocument currentDatabase] copy];
-		checkedSchemaList = [[NSMutableArray alloc] init];
-		checkedTableList = [[NSMutableArray alloc] init];
 	}
 	return self;
 }
 
 - (void)dealloc
 {
-	[schemasTable setDataSource:nil];
-	[schemasTable setDelegate:nil];
-	[tablesTable setDataSource:nil];
-	[tablesTable setDelegate:nil];
+	[schemasList setChecksChanged:nil];
+	[tablesList setChecksChanged:nil];
 	for (NSControl *control in [NSArray arrayWithObjects:formatControl, sourcePopup, delimiterPopup, structureCheckbox, dataCheckbox, compressCheckbox, headerCheckbox, exportButton, cancelButton, nil]) [control setTarget:nil];
 	[quoteField setDelegate:nil];
 	[customDelimiterField setDelegate:nil];
@@ -146,8 +137,8 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 	[sheet release];
 	[formatControl release];
 	[sourcePopup release];
-	[schemasTable release];
-	[tablesTable release];
+	[schemasList release];
+	[tablesList release];
 	[sourceNote release];
 	[sqlOptions release];
 	[csvOptions release];
@@ -164,8 +155,6 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 	[cancelButton release];
 	[schemaNames release];
 	[tableRows release];
-	[checkedSchemaList release];
-	[checkedTableList release];
 	[queryColumnNames release];
 	[progressSheet release];
 	[job release];
@@ -225,45 +214,6 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 	return field;
 }
 
-- (NSTableView *)_checkListWithFrame:(NSRect)frame inView:(NSView *)content
-{
-	NSScrollView *scrollView = [[[NSScrollView alloc] initWithFrame:frame] autorelease];
-	[scrollView setHasVerticalScroller:YES];
-	[scrollView setAutohidesScrollers:YES];
-	[scrollView setBorderType:NSBezelBorder];
-	[scrollView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
-
-	NSTableView *tableView = [[NSTableView alloc] initWithFrame:[[scrollView contentView] bounds]];
-	[tableView setHeaderView:nil];
-	[tableView setAllowsEmptySelection:YES];
-	[tableView setFocusRingType:NSFocusRingTypeNone];
-	[tableView setColumnAutoresizingStyle:NSTableViewLastColumnOnlyAutoresizingStyle];
-
-	NSTableColumn *checkColumn = [[[NSTableColumn alloc] initWithIdentifier:SPPostgresExportCheckColumn] autorelease];
-	NSButtonCell *checkCell = [[[NSButtonCell alloc] init] autorelease];
-	[checkCell setButtonType:NSButtonTypeSwitch];
-	[checkCell setTitle:@""];
-	[checkColumn setDataCell:checkCell];
-	[checkColumn setWidth:22];
-	[checkColumn setResizingMask:NSTableColumnNoResizing];
-	[tableView addTableColumn:checkColumn];
-
-	NSTableColumn *nameColumn = [[[NSTableColumn alloc] initWithIdentifier:SPPostgresExportNameColumn] autorelease];
-	NSTextFieldCell *nameCell = [[[NSTextFieldCell alloc] initTextCell:@""] autorelease];
-	[nameCell setEditable:NO];
-	[nameCell setLineBreakMode:NSLineBreakByTruncatingTail];
-	[nameColumn setDataCell:nameCell];
-	[nameColumn setEditable:NO];
-	[nameColumn setWidth:frame.size.width - 40];
-	[tableView addTableColumn:nameColumn];
-
-	[tableView setDataSource:self];
-	[tableView setDelegate:self];
-	[scrollView setDocumentView:tableView];
-	[content addSubview:scrollView];
-	return tableView;
-}
-
 - (void)_buildSheet
 {
 	if (sheet) return;
@@ -314,8 +264,12 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 
 	// The lists (one shown at a time), or a note in their place
 	NSRect listFrame = NSMakeRect(20, 200, width - 40, height - 320);
-	schemasTable = [[self _checkListWithFrame:listFrame inView:content] retain];
-	tablesTable = [[self _checkListWithFrame:listFrame inView:content] retain];
+	schemasList = [[SPPostgresCheckList alloc] initWithFrame:listFrame inView:content];
+	tablesList = [[SPPostgresCheckList alloc] initWithFrame:listFrame inView:content];
+	[tablesList setGroupsByFirstElement:YES];
+	void (^changed)(void) = ^{ [self _updateControls]; };
+	[schemasList setChecksChanged:changed];
+	[tablesList setChecksChanged:changed];
 	sourceNote = [[self _labelWithFrame:NSMakeRect(20, 200 + listFrame.size.height - 24, width - 40, 18) text:@""] retain];
 	[sourceNote setAlignment:NSTextAlignmentLeft];
 	[sourceNote setTextColor:[NSColor secondaryLabelColor]];
@@ -390,19 +344,8 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 {
 	SPPostgresCatalog *catalog = [[[SPPostgresCatalog alloc] initWithConnection:[document connection]] autorelease];
 	NSError *error = nil;
-	NSArray *schemas = [catalog schemaNames:&error];
-	NSMutableArray *rows = [NSMutableArray array];
-	for (NSString *schema in schemas) {
-		NSError *tablesError = nil;
-		NSArray *tables = [catalog tableNamesInSchema:schema error:&tablesError];
-		if (!tables) {
-			if (!error) error = tablesError;
-			continue;
-		}
-		if (![tables count]) continue;
-		[rows addObject:schema];
-		for (NSString *table in tables) [rows addObject:@[schema, table]];
-	}
+	NSArray *rows = [SPPostgresCheckList groupedRowsForCatalog:catalog error:&error];
+	NSArray *schemas = [catalog schemaNames:NULL];
 	if (error) [self _setLastErrorMessage:[error localizedDescription]];
 
 	// Which of them are partitioned (a failure leaves the set empty)
@@ -419,14 +362,16 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 	schemaNames = [(schemas ?: @[]) copy];
 	[tableRows release];
 	tableRows = [rows copy];
+	[schemasList setRows:schemaNames];
+	[tablesList setRows:tableRows];
 
 	SPPostgresSidebarController *sidebar = [document sidebar];
 	NSString *selectedSchema = [sidebar selectedSchema];
 	NSString *selectedTable = [sidebar selectionIsTable] ? [sidebar selectedTableName] : nil;
 	if (selectedTable && selectedSchema && [tableRows containsObject:@[selectedSchema, selectedTable]]) {
-		[checkedTableList addObject:@[selectedSchema, selectedTable]];
+		[tablesList setChecked:YES item:@[selectedSchema, selectedTable]];
 	}
-	if (selectedSchema && [schemaNames containsObject:selectedSchema]) [checkedSchemaList addObject:selectedSchema];
+	if (selectedSchema && [schemaNames containsObject:selectedSchema]) [schemasList setChecked:YES item:selectedSchema];
 
 	// Only whether the Query view holds a result, and how many rows: the rows are read when the result is exported
 	SPPostgresQueryController *query = [document queryController];
@@ -434,113 +379,37 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 	queryColumnNames = [[query lastResultColumnNames] copy];
 	queryRowCount = queryColumnNames ? [query lastResultRowCount] : 0;
 
-	[schemasTable reloadData];
-	[tablesTable reloadData];
+}
+
+- (NSTableView *)schemasTable
+{
+	return [schemasList tableView];
+}
+
+- (NSTableView *)tablesTable
+{
+	return [tablesList tableView];
 }
 
 - (NSArray *)checkedSchemas
 {
-	NSMutableArray *result = [NSMutableArray array];
-	for (NSString *schema in schemaNames) if ([checkedSchemaList containsObject:schema]) [result addObject:schema];
-	return result;
+	return [schemasList checkedItems];
 }
 
 - (NSArray *)checkedTables
 {
-	NSMutableArray *result = [NSMutableArray array];
-	for (id row in tableRows) if ([row isKindOfClass:[NSArray class]] && [checkedTableList containsObject:row]) [result addObject:row];
-	return result;
+	return [tablesList checkedItems];
 }
 
 - (void)setChecked:(BOOL)checked schema:(NSString *)schema
 {
-	if (!schema) return;
-	[checkedSchemaList removeObject:schema];
-	if (checked) [checkedSchemaList addObject:schema];
-	[schemasTable reloadData];
-	[self _updateControls];
+	[schemasList setChecked:checked item:schema];
 }
 
 - (void)setChecked:(BOOL)checked table:(NSString *)table schema:(NSString *)schema
 {
 	if (!table || !schema) return;
-	NSArray *pair = @[schema, table];
-	[checkedTableList removeObject:pair];
-	if (checked) [checkedTableList addObject:pair];
-	[tablesTable reloadData];
-	[self _updateControls];
-}
-
-#pragma mark - Table views
-
-- (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView
-{
-	if (tableView == schemasTable) return (NSInteger)[schemaNames count];
-	if (tableView == tablesTable) return (NSInteger)[tableRows count];
-	return 0;
-}
-
-- (id)tableView:(NSTableView *)tableView objectValueForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row
-{
-	BOOL isCheck = [[tableColumn identifier] isEqualToString:SPPostgresExportCheckColumn];
-	if (tableView == schemasTable) {
-		if (row < 0 || row >= (NSInteger)[schemaNames count]) return nil;
-		NSString *schema = [schemaNames objectAtIndex:(NSUInteger)row];
-		return isCheck ? @([checkedSchemaList containsObject:schema]) : schema;
-	}
-	if (tableView == tablesTable) {
-		if (row < 0 || row >= (NSInteger)[tableRows count]) return nil;
-		id entry = [tableRows objectAtIndex:(NSUInteger)row];
-		if ([entry isKindOfClass:[NSString class]]) return isCheck ? nil : entry;
-		return isCheck ? @([checkedTableList containsObject:entry]) : [entry objectAtIndex:1];
-	}
-	return nil;
-}
-
-- (void)tableView:(NSTableView *)tableView setObjectValue:(id)object forTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row
-{
-	if (![[tableColumn identifier] isEqualToString:SPPostgresExportCheckColumn]) return;
-	BOOL checked = [object boolValue];
-	if (tableView == schemasTable && row >= 0 && row < (NSInteger)[schemaNames count]) {
-		[self setChecked:checked schema:[schemaNames objectAtIndex:(NSUInteger)row]];
-	}
-	else if (tableView == tablesTable && row >= 0 && row < (NSInteger)[tableRows count]) {
-		id entry = [tableRows objectAtIndex:(NSUInteger)row];
-		if ([entry isKindOfClass:[NSArray class]]) [self setChecked:checked table:[entry objectAtIndex:1] schema:[entry objectAtIndex:0]];
-	}
-}
-
-- (BOOL)tableView:(NSTableView *)tableView isGroupRow:(NSInteger)row
-{
-	if (tableView != tablesTable || row < 0 || row >= (NSInteger)[tableRows count]) return NO;
-	return [[tableRows objectAtIndex:(NSUInteger)row] isKindOfClass:[NSString class]];
-}
-
-- (NSCell *)tableView:(NSTableView *)tableView dataCellForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row
-{
-	// A group row spans the columns with its schema name
-	if (!tableColumn && [self tableView:tableView isGroupRow:row]) {
-		NSTextFieldCell *cell = [[[NSTextFieldCell alloc] initTextCell:@""] autorelease];
-		[cell setFont:[NSFont boldSystemFontOfSize:[NSFont smallSystemFontSize]]];
-		return cell;
-	}
-	return [tableColumn dataCellForRow:row];
-}
-
-- (BOOL)tableView:(NSTableView *)tableView shouldEditTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row
-{
-	return NO;
-}
-
-- (BOOL)tableView:(NSTableView *)tableView shouldTrackCell:(NSCell *)cell forTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row
-{
-	// The checkboxes toggle though rows can't be selected
-	return [[tableColumn identifier] isEqualToString:SPPostgresExportCheckColumn] && ![self tableView:tableView isGroupRow:row];
-}
-
-- (BOOL)tableView:(NSTableView *)tableView shouldSelectRow:(NSInteger)row
-{
-	return NO;
+	[tablesList setChecked:checked item:@[schema, table]];
 }
 
 #pragma mark - Controls
@@ -631,8 +500,8 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 	if ([self _source] == SPPostgresExportSourceQueryResult && ![queryItem isEnabled]) [sourcePopup selectItemAtIndex:SPPostgresExportSourceDatabase];
 
 	SPPostgresExportSource source = [self _source];
-	[[schemasTable enclosingScrollView] setHidden:source != SPPostgresExportSourceSchemas];
-	[[tablesTable enclosingScrollView] setHidden:source != SPPostgresExportSourceTables];
+	[[[schemasList tableView] enclosingScrollView] setHidden:source != SPPostgresExportSourceSchemas];
+	[[[tablesList tableView] enclosingScrollView] setHidden:source != SPPostgresExportSourceTables];
 
 	NSString *note = @"";
 	if (source == SPPostgresExportSourceDatabase) {
