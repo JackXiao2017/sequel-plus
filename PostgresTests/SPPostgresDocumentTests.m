@@ -13,6 +13,7 @@
 #import "../Source/Postgres/SPPostgresFavorite.h"
 #import "../Source/Postgres/SPPostgresExtensionController.h"
 #import "../Source/Postgres/SPPostgresInstallExtensionSheet.h"
+#import "../Source/Postgres/SPPostgresTaskRunner.h"
 
 static const NSUInteger SPPostgresDocumentTestPort = 55418;
 
@@ -280,6 +281,82 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	[[self tabView] removeTabViewItem:self.document.parentTabViewItem];
 	XCTAssertTrue([self spinUntil:^BOOL{ return !connection.isConnected; } timeout:2]);
 	XCTAssertNil([self.controller selectedDocument]);
+}
+
+#pragma mark - Background tasks
+
+- (void)testIsProcessingFollowsRunner
+{
+	SPPostgresTaskRunner *runner = self.document.taskRunner;
+	XCTAssertNotNil(runner);
+	XCTAssertFalse(runner.isInline);
+	XCTAssertEqual(runner.connection, self.document.connection);
+	XCTAssertFalse(self.document.isProcessing);
+
+	XCTestExpectation *on = [[XCTKVOExpectation alloc] initWithKeyPath:@"isProcessing" object:self.document expectedValue:@YES];
+	[runner runTaskWithDescription:@"Loading..." cancelTitle:nil work:^id(PGPostgresConnection *connection, NSError **error) {
+		return [connection execute:@"SELECT pg_sleep(0.3)"];
+	} completion:nil];
+	XCTAssertTrue(self.document.isProcessing, @"the tab shows progress while its runner is busy");
+	[self waitForExpectations:@[on] timeout:0];
+
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+	XCTAssertFalse(self.document.isProcessing);
+}
+
+- (void)testDatabaseSwitchReplacesRunner
+{
+	SPPostgresTaskRunner *oldRunner = self.document.taskRunner;
+	[self.document switchToDatabase:@"pgkit_nopublic"];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [[self.document windowTitleString] hasSuffix:@"/pgkit_nopublic"] && !self.document.isProcessing; } timeout:20]);
+	SPPostgresTaskRunner *newRunner = self.document.taskRunner;
+	XCTAssertNotEqual(newRunner, oldRunner);
+	XCTAssertEqual(newRunner.connection, self.document.connection);
+
+	// isProcessing follows the new runner, not the old one
+	[newRunner runTaskWithDescription:@"Loading..." cancelTitle:nil work:^id(PGPostgresConnection *connection, NSError **error) {
+		return [connection execute:@"SELECT pg_sleep(0.2)"];
+	} completion:nil];
+	XCTAssertTrue(self.document.isProcessing);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:newRunner timeout:10]);
+	XCTAssertFalse(self.document.isProcessing);
+}
+
+/// Closing the tab while a load runs: no wait, the connection closed only once the worker has left libpq (the
+/// statement cancelled), and the load's completion never runs.
+- (void)testCloseTabDuringLoadClosesConnectionAfterWorker
+{
+	PGPostgresConnection *connection = self.connection;
+	NSUInteger pid = [connection serverProcessId];
+	XCTAssertGreaterThan(pid, 0u);
+
+	__block BOOL completed = NO;
+	[self.document.taskRunner runTaskWithDescription:@"Loading..." cancelTitle:@"Cancel" work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		return [theConnection execute:@"SELECT pg_sleep(30)"];
+	} completion:^(id result, NSError *error, BOOL cancelled) {
+		completed = YES;
+	}];
+	[self spinUntil:^BOOL{ return NO; } timeout:0.3]; // the statement is running
+
+	NSDate *start = [NSDate date];
+	[[self tabView] removeTabViewItem:self.document.parentTabViewItem];
+	XCTAssertLessThan(-[start timeIntervalSinceNow], 0.5, @"closing doesn't wait for the worker");
+	XCTAssertFalse(self.document.isProcessing);
+
+	// The document may go now; the connection is closed after the worker
+	self.document = nil;
+	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPPostgresDocumentTestPort];
+	NSString *query = [NSString stringWithFormat:@"SELECT count(*) FROM pg_stat_activity WHERE pid = %lu", (unsigned long)pid];
+	BOOL gone = [self spinUntil:^BOOL{
+		PGPostgresResult *result = [admin execute:query];
+		return [[[[result rowAsArray] firstObject] description] isEqualToString:@"0"];
+	} timeout:5];
+	[admin disconnect];
+	XCTAssertTrue(gone, @"the server backend is gone");
+	XCTAssertFalse(connection.isConnected);
+
+	[self spinUntil:^BOOL{ return NO; } timeout:0.3];
+	XCTAssertFalse(completed, @"no completion touches the torn-down tab");
 }
 
 - (void)testMenuValidationDisablesUnsupportedActions
@@ -967,7 +1044,8 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	XCTAssertEqual(asked.count, 1u);
 	XCTAssertTrue([self spinUntil:^BOOL{ return [[self.document windowTitleString] hasSuffix:@"/pgkit_nopublic"] && !self.document.isProcessing; } timeout:20]);
 	XCTAssertNotEqual(self.document.connection, oldConnection);
-	XCTAssertFalse(oldConnection.isConnected);
+	// Closed once the old runner's worker is idle (from a later run loop turn)
+	XCTAssertTrue([self spinUntil:^BOOL{ return !oldConnection.isConnected; } timeout:5]);
 }
 
 - (void)testFailedDatabaseSwitchKeepsConnectionAndShowsSheet

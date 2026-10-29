@@ -19,6 +19,7 @@
 @class SPPostgresExportController;
 @class SPPostgresImportController;
 @class SPPostgresTransferController;
+@class SPPostgresTaskRunner;
 
 /**
  * Hands out a connection of its own to database: calls completion exactly once, on the main thread (synchronously or
@@ -228,8 +229,16 @@ __attribute__((visibility("default")))
 @property (readonly) PGPostgresConnection *connection;
 @property (readonly) SPPostgresFavorite *favorite;
 
-/// YES while a database switch is connecting. KVO-compliant (drives the tab's progress indicator).
+/// YES while the tab's runner is busy (a load runs) or a database switch is connecting. KVO-compliant, changes posted on
+/// the main thread (drives the tab's progress indicator).
 @property (readonly) BOOL isProcessing;
+
+/**
+ * Runs the tab's loads on its connection in the background (one per connection: replaced when a database switch
+ * completes, the previous one invalidated and its connection closed once its worker is idle). While it is busy the
+ * tab shows MySQL's task display (SPPostgresTaskDisplay) and blocks input to its view, and isProcessing is YES.
+ */
+@property (readonly) SPPostgresTaskRunner *taskRunner;
 
 @property (readonly, assign) SPWindowController *parentWindowController;
 @property (readonly, assign) NSWindow *parentWindow;
