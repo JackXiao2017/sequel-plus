@@ -342,6 +342,20 @@
 	}];
 }
 
+- (void)testControllerDeallocatesAfterCancel
+{
+	[self onEachPort:^(NSNumber *port) {
+		__weak SPPostgresExportController *weakController = nil;
+		@autoreleasepool {
+			SPPostgresExportController *controller = [self openExportSheet];
+			weakController = controller;
+			[controller cancel:nil];
+		}
+		XCTAssertTrue([self spinUntil:^BOOL{ return self.document.exportController == nil && [self window].attachedSheet == nil; } timeout:5]);
+		XCTAssertTrue([self spinUntil:^BOOL{ @autoreleasepool { return weakController == nil; } } timeout:5], @"no retain cycle through the lists' checksChanged blocks");
+	}];
+}
+
 - (void)testExportUsesItsOwnConnection
 {
 	[self onEachPort:^(NSNumber *port) {

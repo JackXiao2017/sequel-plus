@@ -122,8 +122,18 @@ static NSString * const SPPostgresCheckListNameColumn = @"name";
 
 + (NSArray *)groupedRowsForCatalog:(SPPostgresCatalog *)catalog error:(NSError **)error
 {
+	NSError *schemasError = nil;
+	NSArray *schemas = [catalog schemaNames:&schemasError];
+	NSError *rowsError = nil;
+	NSArray *result = [self groupedRowsForSchemas:schemas inCatalog:catalog error:&rowsError];
+	NSError *first = schemasError ?: rowsError;
+	if (first && error) *error = first;
+	return result;
+}
+
++ (NSArray *)groupedRowsForSchemas:(NSArray *)schemas inCatalog:(SPPostgresCatalog *)catalog error:(NSError **)error
+{
 	NSError *firstError = nil;
-	NSArray *schemas = [catalog schemaNames:&firstError];
 	NSMutableArray *result = [NSMutableArray array];
 	for (NSString *schema in schemas) {
 		NSError *tablesError = nil;
@@ -136,7 +146,7 @@ static NSString * const SPPostgresCheckListNameColumn = @"name";
 		[result addObject:schema];
 		for (NSString *table in tables) [result addObject:@[schema, table]];
 	}
-	if (firstError && error) *error = firstError;
+	if (firstError && error && !*error) *error = firstError;
 	return result;
 }
 
