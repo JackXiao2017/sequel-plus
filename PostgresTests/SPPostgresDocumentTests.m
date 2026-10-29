@@ -1899,9 +1899,7 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 - (void)cancelSwitchTo:(NSString *)table
 {
 	SPPostgresTaskRunner *runner = self.document.taskRunner;
-	[runner runTaskWithDescription:@"Sleeping..." cancelTitle:@"Cancel" work:^id(PGPostgresConnection *connection, NSError **error) {
-		return [connection execute:@"SELECT pg_sleep(1)"];
-	} completion:nil];
+	[SPPostgresTestServers queueSleep:1 onRunner:runner];
 	XCTAssertTrue([self.document.sidebar selectTableNamed:table], @"%@", table);
 	XCTAssertTrue(runner.isBusy);
 	[runner cancelAll];

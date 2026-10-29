@@ -1,7 +1,7 @@
 #import "SPPostgresTriggersController.h"
 #import "SPPostgresTableStructure.h"
 #import "SPPostgresTableDuplicator.h"
-#import "SPPostgresTaskRunner.h"
+#import "SPPostgresPaneLoader.h"
 #import "SPTableView.h"
 #import "SPButtonBar.h"
 #import "SPConstants.h"
@@ -393,10 +393,7 @@ static const CGFloat SPPostgresTriggerSheetMargin = 20;
 	BOOL loaded;
 	NSTimeInterval lockTimeout;
 
-	SPPostgresTaskRunner *taskRunner;
-	NSUInteger loadGeneration; // taken by each load (and by -invalidate): only the latest one's completion is applied
-	BOOL switchPending;        // -showTable:inSchema: asked for a table not loaded yet (a cancel leaves the view stale)
-	BOOL stale;
+	SPPostgresPaneLoader *loader; // the runner, the load generation, staleness, and refusing changes while busy
 
 	NSView *view;
 	NSSplitView *split;     // the grid and its bar over the function source (hidden under an empty state)
@@ -421,8 +418,6 @@ static const CGFloat SPPostgresTriggerSheetMargin = 20;
 @synthesize alertPresenter;
 @synthesize confirmationPresenter;
 @synthesize triggerSheetPresenter;
-@synthesize taskRunner;
-@synthesize stale;
 
 #pragma mark - Setup
 
@@ -430,7 +425,7 @@ static const CGFloat SPPostgresTriggerSheetMargin = 20;
 {
 	if ((self = [super init])) {
 		connection = [theConnection retain];
-		taskRunner = [[SPPostgresTaskRunner inlineRunnerWithConnection:theConnection] retain];
+		loader = [[SPPostgresPaneLoader alloc] initWithConnection:theConnection];
 		triggers = [@[] retain];
 		noticeText = [@"" copy];
 		emptyStateText = [@"" copy];
@@ -446,7 +441,7 @@ static const CGFloat SPPostgresTriggerSheetMargin = 20;
 	[self invalidate];
 
 	[connection release];
-	[taskRunner release];
+	[loader release];
 	[structure release];
 	[triggers release];
 	[schema release];
@@ -472,7 +467,7 @@ static const CGFloat SPPostgresTriggerSheetMargin = 20;
 {
 	if (invalidated) return;
 	invalidated = YES;
-	loadGeneration++;
+	[loader invalidate];
 
 	[triggersView setDataSource:nil];
 	[triggersView setDelegate:nil];
@@ -725,11 +720,25 @@ static const CGFloat SPPostgresTriggerSheetMargin = 20;
 
 #pragma mark - Loading
 
-// A load (a switch, -reload, Refresh) takes a new load generation; on the runner's thread the work uses only the
-// structure object (made on the main thread, where nothing uses it while the runner is busy: the changes are refused
-// then). Back on the main thread the completion is dropped if the controller was invalidated or a newer load was asked
-// for; a cancelled load shows no alert (a cancelled switch leaves the view stale); a failed one shows the error. A
-// change reads the triggers again at once, on the main thread, as part of the change (-_load).
+// A load (a switch, -reload, Refresh) goes through the pane loader (SPPostgresPaneLoader); on the runner's thread the
+// work uses only the structure object (made on the main thread, where nothing uses it while the runner is busy: the
+// changes are refused then). A change reads the triggers again at once, on the main thread, as part of the change
+// (-_load).
+
+- (SPPostgresTaskRunner *)taskRunner
+{
+	return [loader taskRunner];
+}
+
+- (void)setTaskRunner:(SPPostgresTaskRunner *)runner
+{
+	[loader setTaskRunner:runner];
+}
+
+- (BOOL)isStale
+{
+	return [loader isStale];
+}
 
 - (void)showTable:(NSString *)theTable inSchema:(NSString *)theSchema
 {
@@ -746,15 +755,14 @@ static const CGFloat SPPostgresTriggerSheetMargin = 20;
 	[triggersView deselectAll:nil];
 
 	// The previous table's triggers go at once
-	[self _showTriggers:nil error:nil showError:NO];
-	switchPending = (structure != nil);
-	[self _loadInBackground];
+	[self _clearTriggers];
+	[self _loadSwitching:YES];
 }
 
 - (void)reload
 {
 	if (invalidated) return;
-	[self _loadInBackground];
+	[self _loadSwitching:NO];
 }
 
 - (IBAction)refresh:(id)sender
@@ -774,27 +782,17 @@ static const CGFloat SPPostgresTriggerSheetMargin = 20;
 }
 
 /// Reads the triggers through the runner and shows them (see -_showTriggers:error:showError:).
-- (void)_loadInBackground
+- (void)_loadSwitching:(BOOL)switching
 {
-	NSUInteger generation = ++loadGeneration;
-	stale = NO;
 	if (!structure) {
-		switchPending = NO;
-		[self _showTriggers:nil error:nil showError:NO];
+		[loader loadNothing];
+		[self _clearTriggers];
 		return;
 	}
-
 	SPPostgresTableStructure *target = structure;
-	[taskRunner runTaskWithDescription:NSLocalizedString(@"Reloading...", @"Reloading table task string") cancelTitle:NSLocalizedString(@"Cancel", @"cancel button") work:^id(PGPostgresConnection *theConnection, NSError **error) {
+	[loader loadSwitching:switching work:^id(PGPostgresConnection *theConnection, NSError **error) {
 		return [target triggers:error];
-	} completion:^(id result, NSError *error, BOOL cancelled) {
-		if (invalidated || generation != loadGeneration) return;
-		if (cancelled) {
-			if (switchPending) stale = YES;
-			[self _updateButtons];
-			return;
-		}
-		switchPending = NO;
+	} apply:^(id result, NSError *error) {
 		[self _showTriggers:result error:error showError:YES];
 	}];
 }
@@ -810,16 +808,34 @@ static const CGFloat SPPostgresTriggerSheetMargin = 20;
 /// shown its alert, so one failure never gives two alerts).
 - (void)_loadShowingError:(BOOL)showError
 {
+	if (!structure) {
+		[self _clearTriggers];
+		return;
+	}
 	NSError *error = nil;
-	NSArray *newTriggers = structure ? [structure triggers:&error] : nil;
+	NSArray *newTriggers = [structure triggers:&error];
 	[self _showTriggers:newTriggers error:error showError:showError];
 }
 
-/// Shows what was read (SPPostgresTrigger). nil with an error: the grid empties, the bottom bar says why, and (if
-/// showError) so does an alert; nil without one empties the grid.
+/// An empty grid, no notice (no table, or before a switch's table has loaded).
+- (void)_clearTriggers
+{
+	loaded = NO;
+	[triggers release];
+	triggers = [@[] retain];
+	[self setNoticeText:@""];
+	[noticeField setStringValue:@""];
+	[triggersView reloadData];
+	[triggersView deselectAll:nil];
+	[self _showSelectedSource];
+	[self _updateButtons];
+}
+
+/// Shows what was read (SPPostgresTrigger). nil means they couldn't be read: the grid empties, the bottom bar says
+/// why, and (if showError) so does an alert.
 - (void)_showTriggers:(NSArray *)newTriggers error:(NSError *)error showError:(BOOL)showError
 {
-	BOOL failed = structure && !newTriggers && error;
+	BOOL failed = (newTriggers == nil);
 	loaded = (newTriggers != nil);
 
 	NSInteger selectedRow = [triggersView selectedRow];
@@ -833,7 +849,7 @@ static const CGFloat SPPostgresTriggerSheetMargin = 20;
 		NSString *detail = [[[[error localizedDescription] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsSeparatedByString:@"\n"] firstObject];
 		notice = [NSString stringWithFormat:NSLocalizedString(@"Could not load the triggers: %@", @"Postgres triggers: load failed notice"), [detail length] ? detail : NSLocalizedString(@"An unknown error occurred.", @"Postgres structure: unknown error")];
 	}
-	else if (structure && loaded) {
+	else {
 		notice = [NSString stringWithFormat:NSLocalizedString(@"Triggers for table: %@", @"Postgres triggers: subtitle showing table name"), table];
 	}
 	[self setNoticeText:notice];
@@ -868,13 +884,10 @@ static const CGFloat SPPostgresTriggerSheetMargin = 20;
 
 #pragma mark - Changes
 
-/// The changes run on the main thread, so never while a load is using the connection: refused (NSBeep) while the
-/// runner is busy.
+/// The changes run on the main thread, so never while a load is using the connection (see SPPostgresPaneLoader).
 - (BOOL)_refuseChangeWhileBusy
 {
-	if (![taskRunner isBusy]) return NO;
-	NSBeep();
-	return YES;
+	return [loader refuseChangeWhileBusy];
 }
 
 - (IBAction)addTrigger:(id)sender
@@ -1017,7 +1030,7 @@ static const CGFloat SPPostgresTriggerSheetMargin = 20;
 
 - (BOOL)tableView:(NSTableView *)grid shouldEditTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row
 {
-	return !invalidated && structure && loaded && ![taskRunner isBusy] && row >= 0 && row < (NSInteger)[triggers count] && [[tableColumn identifier] isEqualToString:@"enabled"];
+	return !invalidated && structure && loaded && ![[loader taskRunner] isBusy] && row >= 0 && row < (NSInteger)[triggers count] && [[tableColumn identifier] isEqualToString:@"enabled"];
 }
 
 /// The checkbox follows the same rule as text cells.

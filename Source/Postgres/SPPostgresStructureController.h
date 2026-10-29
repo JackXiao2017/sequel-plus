@@ -25,7 +25,8 @@
  * at once and the end state they document holds once the runner is idle. A cancelled load shows no alert: a cancelled
  * table switch leaves the grids empty and the view stale (Refresh, or the tab showing it again, loads it); a cancelled
  * reload keeps what was shown. The changes (cell edits, + and − for columns, indexes and constraints, saving a draft)
- * run on the main thread, reading the structure again there, and are refused (NSBeep) while the runner is busy.
+ * run on the main thread, reading the structure again there, and are refused (NSBeep) while the runner is busy; a
+ * cell edit doesn't end then (its text stays, and -commitPendingEdits returns NO).
  */
 __attribute__((visibility("default")))
 @interface SPPostgresStructureController : NSObject <NSTableViewDataSource, NSTableViewDelegate>
@@ -40,7 +41,8 @@ __attribute__((visibility("default")))
 /// error is shown, as an alert and in the bottom bar.
 - (void)showTable:(NSString *)table inSchema:(NSString *)schema;
 
-/// Reads the structure again (keeping a draft column and the selection where it still fits).
+/// Reads the structure again (keeping a draft column and the selection where it still fits), after ending a cell
+/// edit; not while the edit can't end (its text stays).
 - (void)reload;
 
 /// Ends a cell edit in progress and saves a draft column. NO if either can't be done (the draft stays, and the

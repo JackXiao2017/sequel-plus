@@ -3,7 +3,7 @@
 #import "SPPostgresTableData.h"
 #import "SPPostgresConstraintSheet.h"
 #import "SPPostgresErrors.h"
-#import "SPPostgresTaskRunner.h"
+#import "SPPostgresPaneLoader.h"
 #import "SPTableView.h"
 #import "SPButtonBar.h"
 #import "SPConstants.h"
@@ -37,10 +37,7 @@ static NSString * const SPPostgresStructureComment = @"comment";
 	BOOL loaded;            // the current relation's structure was read
 	BOOL editable;
 
-	SPPostgresTaskRunner *taskRunner;
-	NSUInteger loadGeneration; // taken by each load (and by -invalidate): only the latest one's completion is applied
-	BOOL switchPending;        // -showTable:inSchema: asked for a table not loaded yet (a cancel leaves the view stale)
-	BOOL stale;
+	SPPostgresPaneLoader *loader; // the runner, the load generation, staleness, and refusing changes while busy
 
 	/// The + column not saved yet: the last row of the columns grid
 	SPPostgresColumnDefinition *draft;
@@ -80,8 +77,6 @@ static NSString * const SPPostgresStructureComment = @"comment";
 @synthesize usingPresenter;
 @synthesize constraintSheetPresenter;
 @synthesize structureDidChange;
-@synthesize taskRunner;
-@synthesize stale;
 
 #pragma mark - Setup
 
@@ -89,7 +84,7 @@ static NSString * const SPPostgresStructureComment = @"comment";
 {
 	if ((self = [super init])) {
 		connection = [theConnection retain];
-		taskRunner = [[SPPostgresTaskRunner inlineRunnerWithConnection:theConnection] retain];
+		loader = [[SPPostgresPaneLoader alloc] initWithConnection:theConnection];
 		columns = [@[] retain];
 		indexes = [@[] retain];
 		constraints = [@[] retain];
@@ -105,7 +100,7 @@ static NSString * const SPPostgresStructureComment = @"comment";
 	[self invalidate];
 
 	[connection release];
-	[taskRunner release];
+	[loader release];
 	[structure release];
 	[columns release];
 	[indexes release];
@@ -138,7 +133,7 @@ static NSString * const SPPostgresStructureComment = @"comment";
 {
 	if (invalidated) return;
 	invalidated = YES;
-	loadGeneration++;
+	[loader invalidate];
 
 	// An edit in progress must not call back into a controller that is going away
 	for (NSTableView *grid in @[columnsView, indexesView, constraintsView]) {
@@ -478,11 +473,24 @@ static NSDictionary *SPPostgresStructureRead(SPPostgresTableStructure *structure
 }
 
 // A load (a switch, -reload, Refresh) ends the cell edit first (so a change it commits is sent while the runner is
-// idle) and takes a new load generation. On the runner's thread the work uses only the structure object (made on the
-// main thread, where nothing uses it while the runner is busy: the changes are refused then). Back on the main thread
-// the completion is dropped if the controller was invalidated or a newer load was asked for; a cancelled load shows no
-// alert (a cancelled switch leaves the view stale); a failed one shows the error. A change reads the structure again
-// at once, on the main thread, as part of the change (-_load).
+// idle) and goes through the pane loader (SPPostgresPaneLoader). On the runner's thread the work uses only the
+// structure object (made on the main thread, where nothing uses it while the runner is busy: the changes are refused
+// then). A change reads the structure again at once, on the main thread, as part of the change (-_load).
+
+- (SPPostgresTaskRunner *)taskRunner
+{
+	return [loader taskRunner];
+}
+
+- (void)setTaskRunner:(SPPostgresTaskRunner *)runner
+{
+	[loader setTaskRunner:runner];
+}
+
+- (BOOL)isStale
+{
+	return [loader isStale];
+}
 
 - (void)showTable:(NSString *)theTable inSchema:(NSString *)theSchema
 {
@@ -508,40 +516,29 @@ static NSDictionary *SPPostgresStructureRead(SPPostgresTableStructure *structure
 	[constraintsView deselectAll:nil];
 
 	// The previous table's structure goes at once
-	[self _showStructure:nil error:nil];
-	switchPending = (structure != nil);
-	[self _loadInBackground];
+	[self _clearStructure];
+	[self _loadSwitching:YES];
 }
 
+/// As Refresh: not while a cell edit can't end (its text stays).
 - (void)reload
 {
-	if (invalidated) return;
-	if (![self _endEditing]) [columnsView abortEditing];
-	[self _loadInBackground];
+	if (invalidated || ![self _endEditing]) return;
+	[self _loadSwitching:NO];
 }
 
 /// Reads the structure through the runner and shows it (see -_showStructure:error:).
-- (void)_loadInBackground
+- (void)_loadSwitching:(BOOL)switching
 {
-	NSUInteger generation = ++loadGeneration;
-	stale = NO;
 	if (!structure) {
-		switchPending = NO;
-		[self _showStructure:nil error:nil];
+		[loader loadNothing];
+		[self _clearStructure];
 		return;
 	}
-
 	SPPostgresTableStructure *target = structure;
-	[taskRunner runTaskWithDescription:NSLocalizedString(@"Reloading...", @"Reloading table task string") cancelTitle:NSLocalizedString(@"Cancel", @"cancel button") work:^id(PGPostgresConnection *theConnection, NSError **error) {
+	[loader loadSwitching:switching work:^id(PGPostgresConnection *theConnection, NSError **error) {
 		return SPPostgresStructureRead(target, error);
-	} completion:^(id result, NSError *error, BOOL cancelled) {
-		if (invalidated || generation != loadGeneration) return;
-		if (cancelled) {
-			if (switchPending) stale = YES;
-			[self _updateButtons];
-			return;
-		}
-		switchPending = NO;
+	} apply:^(id result, NSError *error) {
 		[self _showStructure:result error:error];
 	}];
 }
@@ -549,15 +546,25 @@ static NSDictionary *SPPostgresStructureRead(SPPostgresTableStructure *structure
 /// Reads the structure on the main thread and shows it: part of a change, which runs only while the runner is idle.
 - (void)_load
 {
+	if (!structure) {
+		[self _clearStructure];
+		return;
+	}
 	NSError *error = nil;
-	NSDictionary *result = structure ? SPPostgresStructureRead(structure, &error) : nil;
+	NSDictionary *result = SPPostgresStructureRead(structure, &error);
 	[self _showStructure:result error:error];
 }
 
+/// Empty grids, no notice (no table, or before a switch's table has loaded).
+- (void)_clearStructure
+{
+	[self _showStructure:@{} error:nil];
+}
+
 /**
- * Shows what was read (SPPostgresStructureRead). nil with a structure means it couldn't be read (the relation is
- * gone, the connection lost, the transaction aborted): the grids are emptied, and the error shown as an alert and in
- * the bottom bar; nil with error nil empties the grids.
+ * Shows what was read (SPPostgresStructureRead; an empty dictionary: nothing). nil means it couldn't be read (the
+ * relation is gone, the connection lost, the transaction aborted): the grids are emptied, and the error shown as an
+ * alert and in the bottom bar.
  */
 - (void)_showStructure:(NSDictionary *)result error:(NSError *)error
 {
@@ -565,9 +572,9 @@ static NSDictionary *SPPostgresStructureRead(SPPostgresTableStructure *structure
 	NSArray *newColumns = [result objectForKey:@"columns"];
 	NSArray *newIndexes = [result objectForKey:@"indexes"];
 	NSArray *newConstraints = [result objectForKey:@"constraints"];
-	BOOL failed = structure && !result && error;
+	BOOL failed = (result == nil);
 
-	loaded = (result != nil);
+	loaded = (kind != nil);
 	editable = loaded && ([kind isEqualToString:@"table"] || [kind isEqualToString:@"partitioned table"]);
 
 	[columns release];
@@ -587,7 +594,7 @@ static NSDictionary *SPPostgresStructureRead(SPPostgresTableStructure *structure
 		NSString *detail = [[[error localizedDescription] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsSeparatedByString:@"\n"].firstObject;
 		notice = [NSString stringWithFormat:NSLocalizedString(@"Could not load the structure: %@", @"Postgres structure: load failed notice"), [detail length] ? detail : NSLocalizedString(@"An unknown error occurred.", @"Postgres structure: unknown error")];
 	}
-	else if (structure && loaded && !editable) {
+	else if (loaded && !editable) {
 		notice = NSLocalizedString(@"Views can't be edited here.", @"Postgres structure: read-only notice");
 	}
 	[self setNoticeText:notice];
@@ -632,27 +639,26 @@ static NSDictionary *SPPostgresStructureRead(SPPostgresTableStructure *structure
 	if (structureDidChange && !invalidated) structureDidChange(columnsChanged);
 }
 
-/// The changes run on the main thread, so never while a load is using the connection: refused (NSBeep) while the
-/// runner is busy.
+/// The changes run on the main thread, so never while a load is using the connection (see SPPostgresPaneLoader).
 - (BOOL)_refuseChangeWhileBusy
 {
-	if (![taskRunner isBusy]) return NO;
-	NSBeep();
-	return YES;
+	return [loader refuseChangeWhileBusy];
 }
 
 /// Commits a cell edit in progress (before an action that reloads the grids). NO if the editor can't end: the
-/// edit stays, and the action shouldn't go ahead.
+/// edit stays, and the action shouldn't go ahead. While the runner is busy it doesn't end (NSBeep): its change would
+/// be refused, so the text stays, as Table Info's comment does.
 - (BOOL)_endEditing
 {
 	if (![columnsView currentEditor]) return YES;
+	if ([self _refuseChangeWhileBusy]) return NO;
 	return [[columnsView window] makeFirstResponder:columnsView];
 }
 
 - (BOOL)commitPendingEdits
 {
 	if (invalidated) return YES;
-	if ([columnsView currentEditor] && ![[columnsView window] makeFirstResponder:columnsView]) return NO;
+	if (![self _endEditing]) return NO;
 	if (draft) return [self _saveDraftSelectingRow:-1];
 	return YES;
 }
@@ -660,7 +666,7 @@ static NSDictionary *SPPostgresStructureRead(SPPostgresTableStructure *structure
 - (IBAction)refresh:(id)sender
 {
 	if (invalidated || ![self _endEditing]) return;
-	[self _loadInBackground];
+	[self _loadSwitching:NO];
 }
 
 #pragma mark - Columns
@@ -1241,7 +1247,7 @@ static NSDictionary *SPPostgresStructureRead(SPPostgresTableStructure *structure
 
 - (BOOL)tableView:(NSTableView *)grid shouldEditTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row
 {
-	if (invalidated || grid != columnsView || !structure || !loaded || !editable || row < 0 || [taskRunner isBusy]) return NO;
+	if (invalidated || grid != columnsView || !structure || !loaded || !editable || row < 0 || [[loader taskRunner] isBusy]) return NO;
 	if ([self _isDraftRow:row]) return YES;
 	if (row >= (NSInteger)[columns count]) return NO;
 	return [self _canEditColumn:[columns objectAtIndex:(NSUInteger)row] identifier:[tableColumn identifier]];
