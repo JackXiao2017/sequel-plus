@@ -13,6 +13,7 @@
 #import "SPPostgresFavorite.h"
 #import "SPPostgresFavoritesStore.h"
 #import "SPKeychain.h"
+#import "SPSSHTunnel.h"
 #import <PostgresKit/PostgresKit.h>
 
 static const NSUInteger SPPostgresTransferDefaultPort = 5432;
@@ -63,7 +64,8 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 @end
 
 /// The New Database… prompt's text field: enables its button only while it holds a name PostgreSQL accepts in length
-/// (1 to 63 bytes in UTF-8), as typed or as set by -setStringValue:.
+/// (1 to 63 bytes in UTF-8) with no leading or trailing whitespace (never trimmed silently), as typed or as set by
+/// -setStringValue:.
 @interface SPPostgresTransferNewNameField : NSTextField
 {
 	NSButton *button; // not retained: the alert holds both
@@ -75,8 +77,10 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 
 - (void)_updateButton
 {
-	NSUInteger bytes = [[self stringValue] lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
-	[button setEnabled:bytes > 0 && bytes <= 63];
+	NSString *name = [self stringValue];
+	NSUInteger bytes = [name lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+	BOOL trimmed = [[name stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] isEqualToString:name];
+	[button setEnabled:bytes > 0 && bytes <= 63 && trimmed];
 }
 
 - (void)setButton:(NSButton *)theButton
@@ -115,6 +119,28 @@ static void SPPostgresTransferCloseSession(PGPostgresConnection *connection, id 
 {
 	[connection disconnect];
 	if ([token respondsToSelector:@selector(disconnect)]) [token disconnect];
+}
+
+/// An SSH tunnel's password or host-key sheet (SPSSHTunnel's SSHQuestionDialog) answered as Cancel/No through its own
+/// button's action, so the tunnel's worker, which waits for that answer, carries on. NO for any other window.
+static BOOL SPPostgresTransferCancelTunnelSheet(NSWindow *window)
+{
+	NSMutableArray *views = [NSMutableArray array];
+	if ([window contentView]) [views addObject:[window contentView]];
+	while ([views count]) {
+		NSView *view = [views lastObject];
+		[views removeLastObject];
+		[views addObjectsFromArray:[view subviews]];
+		if (![view isKindOfClass:[NSButton class]]) continue;
+		NSButton *button = (NSButton *)view;
+		SEL action = [button action];
+		// Tag 1 is the tunnel's OK/Yes
+		if ((action == @selector(closeSSHPasswordSheet:) || action == @selector(closeSSHQuestionSheet:)) && [button tag] != 1 && [button target]) {
+			[NSApp sendAction:action to:[button target] from:button];
+			return YES;
+		}
+	}
+	return NO;
 }
 
 static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
@@ -164,6 +190,8 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 	NSMutableSet *createdDatabases;
 	/// The password or New Database… prompt is up
 	BOOL prompting;
+	/// This controller's alerts while they are up as sheets on the Transfer sheet (their windows)
+	NSMutableArray *ownAlertWindows;
 
 	SPPostgresProgressSheet *progressSheet;
 	SPPostgresBackgroundJob *job;
@@ -213,6 +241,7 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 		document = [theDocument retain];
 		database = [[theDocument currentDatabase] copy];
 		createdDatabases = [[NSMutableSet alloc] init];
+		ownAlertWindows = [[NSMutableArray alloc] init];
 	}
 	return self;
 }
@@ -248,6 +277,7 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 	[sessionToken release];
 	[connectingSession release];
 	[createdDatabases release];
+	[ownAlertWindows release];
 	[emptyModeRadio release];
 	[overwriteModeRadio release];
 	[transferButton release];
@@ -282,6 +312,18 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 	if (connector == pendingConnector) return;
 	[pendingConnector release];
 	pendingConnector = [connector retain];
+}
+
+/// Shows one of this controller's alerts as a sheet on the Transfer sheet (Cancel ends it as its second button).
+- (void)_beginAlert:(NSAlert *)alert completion:(void (^)(NSModalResponse response))handler
+{
+	NSWindow *alertWindow = [alert window];
+	[ownAlertWindows addObject:alertWindow];
+	void (^theHandler)(NSModalResponse) = [[handler copy] autorelease];
+	[alert beginSheetModalForWindow:sheet completionHandler:^(NSModalResponse response) {
+		[ownAlertWindows removeObject:alertWindow];
+		if (theHandler) theHandler(response);
+	}];
 }
 
 #pragma mark - Target description
@@ -568,7 +610,8 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 	[self _updateControls];
 }
 
-/// The session's databases, a separator and "New Database…"; selects name when listed, else the first.
+/// The session's databases, a separator and "New Database…"; selects name when listed, else nothing (no database is
+/// chosen for the user: Transfer stays disabled until one is picked).
 - (void)_showDatabases:(NSArray *)names selecting:(NSString *)name
 {
 	targetState = SPPostgresTransferTargetConnected;
@@ -581,7 +624,6 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 		[item setRepresentedObject:each];
 		if (!selected && [each isEqualToString:name]) selected = item;
 	}
-	if (!selected && [names count]) selected = [menu itemAtIndex:0];
 	[menu addItem:[NSMenuItem separatorItem]];
 	NSMenuItem *newItem = [menu addItemWithTitle:NSLocalizedString(@"New Database…", @"Postgres transfer sheet: database menu item creating a database on the target") action:NULL keyEquivalent:@""];
 	[newItem setTag:SPPostgresTransferNewDatabaseTag];
@@ -710,7 +752,7 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 	}
 	NSAlert *alert = [self passwordAlertForFavorite:favorite];
 	NSTextField *field = (NSTextField *)[alert accessoryView];
-	[alert beginSheetModalForWindow:sheet completionHandler:^(NSModalResponse response) {
+	[self _beginAlert:alert completion:^(NSModalResponse response) {
 		answer(response == NSAlertFirstButtonReturn ? [[[field stringValue] copy] autorelease] : nil);
 	}];
 	[[alert window] makeFirstResponder:field];
@@ -778,7 +820,7 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 	}
 	NSAlert *alert = [self createDatabaseAlertForFavorite:favorite];
 	NSTextField *field = (NSTextField *)[alert accessoryView];
-	[alert beginSheetModalForWindow:sheet completionHandler:^(NSModalResponse response) {
+	[self _beginAlert:alert completion:^(NSModalResponse response) {
 		answer(response == NSAlertFirstButtonReturn ? [[[field stringValue] copy] autorelease] : nil);
 	}];
 	[[alert window] makeFirstResponder:field];
@@ -797,7 +839,7 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 		[alert setInformativeText:[error localizedDescription] ?: @""];
 		[alert addButtonWithTitle:NSLocalizedString(@"OK", @"OK button")];
 		// On the sheet (no presenter set); otherwise as the document shows its alerts
-		if ([sheet sheetParent] && ![document alertPresenter]) [alert beginSheetModalForWindow:sheet completionHandler:nil];
+		if ([sheet sheetParent] && ![document alertPresenter]) [self _beginAlert:alert completion:nil];
 		else [document presentAlert:alert];
 		return;
 	}
@@ -916,7 +958,7 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 		[alert setMessageText:NSLocalizedString(@"The tables couldn't be read", @"Postgres transfer: error title, the tables list failed to load")];
 		[alert setInformativeText:[tablesError localizedDescription] ?: @""];
 		[alert addButtonWithTitle:NSLocalizedString(@"OK", @"OK button")];
-		if ([sheet sheetParent] && ![document alertPresenter]) [alert beginSheetModalForWindow:sheet completionHandler:nil];
+		if ([sheet sheetParent] && ![document alertPresenter]) [self _beginAlert:alert completion:nil];
 		else [document presentAlert:alert];
 	}
 }
@@ -945,9 +987,23 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 		[self _finish];
 		return;
 	}
-	// The confirmation or a prompt, if up, ends as Cancel (its answer is ignored once finished)
-	NSWindow *alertWindow = [sheet attachedSheet];
-	if (alertWindow) [sheet endSheet:alertWindow returnCode:NSAlertSecondButtonReturn];
+	NSWindow *attached = [sheet attachedSheet];
+	if (attached && [ownAlertWindows containsObject:attached]) {
+		// The confirmation, a prompt or an error of this controller ends as Cancel (its answer is ignored once finished)
+		[sheet endSheet:attached returnCode:NSAlertSecondButtonReturn];
+	}
+	else if (attached) {
+		// The session's SSH password or host-key sheet: answered as Cancel through the tunnel, so its worker stops
+		// waiting; then the connecting session (and its tunnel) is cancelled
+		SPPostgresTransferCancelTunnelSheet(attached);
+	}
+	[self _closeSession];
+	// Anything else still on the sheet
+	attached = [sheet attachedSheet];
+	if (attached) {
+		[sheet endSheet:attached];
+		[attached orderOut:nil];
+	}
 	[self _endSheet];
 	[self _finish];
 }
@@ -1023,7 +1079,7 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 		return;
 	}
 	NSAlert *alert = [self emptyConfirmationAlertForDatabase:targetDatabase targetDescription:description];
-	[alert beginSheetModalForWindow:sheet completionHandler:^(NSModalResponse response) {
+	[self _beginAlert:alert completion:^(NSModalResponse response) {
 		answer(response == NSAlertFirstButtonReturn);
 	}];
 	[[alert window] makeFirstResponder:[alert accessoryView]];
