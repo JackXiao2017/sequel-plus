@@ -215,6 +215,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	BOOL deferringSidebarReloads;
 	/// A reload waits (see deferringSidebarReloads)
 	BOOL sidebarReloadDeferred;
+	/// The schema shown when the reload was deferred: it is for that schema's lists only
+	NSString *deferredReloadSchema;
 	/// The sequence renamed meanwhile, its old and new names: if the old name is still the selection when the reload
 	/// comes, the new name is selected
 	NSString *deferredRenameFrom;
@@ -341,6 +343,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[installExtensionSheet release];
 	[deferredRenameFrom release];
 	[deferredRenameTo release];
+	[deferredReloadSchema release];
 	[renameSheet release];
 	[renameNameField release];
 	[renameButton release];
@@ -1029,7 +1032,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	sequenceNeedsReset = YES;
 	extensionNeedsReset = YES;
 
-	if (listsNeedReload && [connection transactionStatus] != PGPostgresTransactionInError) {
+	// The status the run's work read on the runner's thread (libpq's, read here, could be a later task's: ACTIVE)
+	if (listsNeedReload && [queryController lastRunTransactionStatus] != PGPostgresTransactionInError) {
 		listsNeedReload = NO;
 		contentNeedsReset = YES; // its columns may have changed
 
@@ -1073,7 +1077,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 {
 	if (tornDown) return;
 	if (deferringSidebarReloads) {
-		sidebarReloadDeferred = YES;
+		[self _deferSidebarReload];
 		if (then) then();
 		return;
 	}
@@ -1085,8 +1089,20 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}]];
 }
 
+/// A sidebar reload waits for the selection change (see deferringSidebarReloads), for the schema shown now.
+- (void)_deferSidebarReload
+{
+	if (!sidebarReloadDeferred) {
+		[deferredReloadSchema release];
+		deferredReloadSchema = [[sidebar selectedSchema] copy];
+	}
+	sidebarReloadDeferred = YES;
+}
+
 /// The sidebar reload that waited for the selection change (see deferringSidebarReloads): the item the user went
-/// to stays selected; a renamed sequence still selected is selected under its new name.
+/// to stays selected; a renamed sequence still selected is selected under its new name. When the change was to
+/// another schema (shown, or being loaded), it is dropped: that schema's lists are read fresh, and a rename's History
+/// entries were rewritten already.
 - (void)_reloadDeferredSidebar
 {
 	[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(_reloadDeferredSidebar) object:nil];
@@ -1095,8 +1111,13 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 	NSString *renamedFrom = [deferredRenameFrom autorelease];
 	NSString *renamedTo = [deferredRenameTo autorelease];
+	NSString *forSchema = [deferredReloadSchema autorelease];
 	deferredRenameFrom = nil;
 	deferredRenameTo = nil;
+	deferredReloadSchema = nil;
+
+	NSString *schemaNext = [sidebar pendingSchema] ?: [sidebar selectedSchema];
+	if (forSchema != schemaNext && ![forSchema isEqualToString:schemaNext]) return;
 
 	if (renamedFrom && renamedTo && [renamedFrom isEqualToString:[sidebar selectedSequenceName]]) {
 		// As a rename applied without leaving (-_sequenceDidChange:)
@@ -1133,7 +1154,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 	// Inside the sidebar's should-change callback: listed again once the selection has changed
 	if (deferringSidebarReloads) {
-		sidebarReloadDeferred = YES;
+		[self _deferSidebarReload];
 		if (!deferredRenameFrom) deferredRenameFrom = [oldName copy];
 		[deferredRenameTo release];
 		deferredRenameTo = [name copy];
@@ -1581,6 +1602,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	// A deferred sidebar reload's fallback (it retains self)
 	[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(_reloadDeferredSidebar) object:nil];
 	sidebarReloadDeferred = NO;
+	[deferredReloadSchema release];
+	deferredReloadSchema = nil;
 
 	// A pending database switch completes (cancelled) and lets go of its block, which retains self
 	SPPostgresConnector *pending = pendingConnector;
@@ -2020,8 +2043,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 		[self _selectCurrentDatabaseInPopup];
 		return;
 	}
-	// Not while a load runs (the pop-up is disabled then): the open transaction can't be checked meanwhile
-	if ([taskRunner isBusy]) {
+	// Not while the tab is processing (the pop-up is disabled then): a load runs, or a switch is connecting
+	if (isProcessing) {
 		NSBeep();
 		[self _selectCurrentDatabaseInPopup];
 		return;
@@ -2050,7 +2073,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	void (^then)(BOOL) = [[completion copy] autorelease];
 	confirmingSwitch = YES;
 	[self _updateHistoryControl];
-	[taskRunner runTaskWithDescription:NSLocalizedString(@"Reloading...", @"Reloading table task string") cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
+	[taskRunner runTaskWithDescription:nil cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
 		return @([theConnection transactionStatus]);
 	} completion:^(id status, NSError *error, BOOL cancelled) {
 		confirmingSwitch = NO;
@@ -2162,6 +2185,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	SPPostgresTaskRunner *oldRunner = [[taskRunner retain] autorelease];
 	[self _setTaskRunner:nil];
 	quietSidebarReloads = 0; // their completions are never called now
+	confirmingSwitch = NO;   // nor a transaction check's
 	[oldRunner invalidateWithCompletion:^{
 		[oldConnector disconnect];
 	}];
@@ -3084,18 +3108,24 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	sequenceNeedsReset = YES;
 	extensionNeedsReset = YES;
 
-	// Inside the tab's aborted transaction the catalog can't be read: the lists wait for the Query view's next run
+	// Inside the tab's aborted transaction the catalog can't be read: the lists wait for the Query view's next run. The
+	// status is read on the runner (after what is queued; libpq's, read on the main thread, could be a task's: ACTIVE).
 	listsNeedReload = YES;
-	if ([connection transactionStatus] != PGPostgresTransactionInError) {
-		listsNeedReload = NO;
-		[self _reloadSidebarKeepingSelection:^{
-			[self _reloadDatabasePopup];
-			[self updateWindowTitle:self];
-			[self _refreshCurrentPaneIfStale];
-		}];
-		return;
-	}
-	[self _refreshCurrentPaneIfStale];
+	[taskRunner runTaskWithDescription:nil cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		return @([theConnection transactionStatus]);
+	} completion:^(id status, NSError *error, BOOL cancelled) {
+		if (tornDown) return;
+		if (!cancelled && [status integerValue] != PGPostgresTransactionInError) {
+			listsNeedReload = NO;
+			[self _reloadSidebarKeepingSelection:^{
+				[self _reloadDatabasePopup];
+				[self updateWindowTitle:self];
+				[self _refreshCurrentPaneIfStale];
+			}];
+			return;
+		}
+		[self _refreshCurrentPaneIfStale];
+	}];
 }
 
 - (void)unavailableInThisVersion:(id)sender

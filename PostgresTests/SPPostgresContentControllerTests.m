@@ -147,8 +147,7 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 
 #pragma mark - Helpers
 
-/// Gives the Content view the tab's background runner (the tab itself keeps it on an inline runner until Stage 8
-/// Task 7). Every test using it waits for the runner before anything else uses the connection.
+/// Gives the Content view the tab's background runner (as the tab does). Every test using it waits for the runner before anything else uses the connection.
 - (void)useTabRunner
 {
 	self.content.taskRunner = self.document.taskRunner;
@@ -1066,6 +1065,33 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	XCTAssertEqualObjects([self.alerts[0] messageText], @"This row was changed or deleted by someone else.");
 	XCTAssertFalse([[self idsInGrid] containsObject:@"6"]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.items"], @31);
+}
+
+/// With the tab's background runner, + while a cell is being edited saves the cell and adds the row in one click (as
+/// MySQL's and as on an inline runner); the saved cell is reloaded once the new row's edit ends.
+- (void)testAddWhileEditingAddsInOneClickWithBackgroundRunner
+{
+	[self.controller showWindow:nil];
+	[self selectTable:@"items"];
+	SPPostgresContentController *content = self.content;
+	XCTAssertFalse(content.taskRunner.isInline);
+	[self typeInCellAtRow:4 column:@"price" text:@"3.5"];
+
+	[content addRow:nil];
+	XCTAssertEqualObjects([self serverValue:@"SELECT price::text FROM content_test.items WHERE id = 5"], @"3.500000", @"the cell is saved");
+	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.items"], @31, @"and the row added, in one click");
+	XCTAssertEqual([[self grid] numberOfRows], 31);
+	XCTAssertEqual([[self grid] editedRow], 30, @"the new row is being edited");
+	XCTAssertFalse(content.taskRunner.isBusy, @"nothing queued while the new row is edited");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
+
+	// Its edit ends: the reload shows Postgres's own format
+	XCTAssertTrue([[[self grid] window] makeFirstResponder:nil]);
+	[self spinFor:0.1];
+	[self waitForContent];
+	XCTAssertEqualObjects([self valueAtRow:4 column:@"price"], @"3.500000");
+	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.items"], @31);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
 }
 
 @end

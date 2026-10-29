@@ -946,7 +946,7 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 
 #pragma mark - Background loading
 
-/// Gives the Structure view the tab's background runner (the tab keeps it on an inline runner until Stage 8 Task 7).
+/// Gives the Structure view the tab's background runner (as the tab does).
 /// Every test using it waits for the runner before anything else uses the connection; side SQL goes through `other`.
 - (SPPostgresStructureController *)structureOnTabRunner
 {

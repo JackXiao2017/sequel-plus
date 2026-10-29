@@ -843,10 +843,12 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	if (invalidated || !tableData || !editable || !loaded) return;
 	if ([self _refuseWriteWhileBusy]) return;
 
-	// A cell being edited is saved first, and the rows reloaded (as Postgres has them, also after a failed save)
+	// A cell being edited is saved first, and the rows reloaded (as Postgres has them, also after a failed save).
+	// Inline: now, before the add. On a background runner the insert runs first, in this same idle moment (nothing is
+	// queued yet, and a write never runs while busy), and the reload waits until the new row's edit ends (as after Tab).
 	if ([self _endEditing]) {
-		[self reload];
-		if ([self _refuseWriteWhileBusy]) return; // a background reload: add once it is done
+		if ([taskRunner isInline]) [self reload];
+		else reloadPending = YES;
 	}
 
 	// Every column gets its default (as MySQL's new row), then the user edits it in place
@@ -854,6 +856,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	NSArray *row = [tableData insertRowWithValues:@{} error:&error];
 	if (!row) {
 		[self _presentError:error title:NSLocalizedString(@"Could not add a row", @"Postgres content: insert failed")];
+		[self _reloadIfPending];
 		return;
 	}
 
@@ -880,6 +883,9 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 			}
 		}
 	}
+
+	// No edit started: the saved cell's reload runs now
+	[self _reloadIfPending];
 }
 
 - (IBAction)removeRows:(id)sender

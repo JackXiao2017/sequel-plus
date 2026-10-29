@@ -134,6 +134,9 @@ __attribute__((visibility("default")))
 - (NSMenu *)menuForRow:(NSInteger)row;
 
 @property (readonly) NSString *selectedSchema;
+/// The schema a schema reload (-reloadSchema:…) has been asked for and not yet completed, nil when none is queued: the
+/// schema about to be shown.
+@property (readonly, copy) NSString *pendingSchema;
 
 /// The selected table or view of the selected schema, or nil (also while a sequence or extension is selected).
 @property (readonly) NSString *selectedTableName;

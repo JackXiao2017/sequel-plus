@@ -1446,4 +1446,102 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 }
 
+#pragma mark - Deferred list reloads and schema changes
+
+/// Picks schema in the sidebar's pop-up as the user would (asking the tab first), then waits for the tab.
+- (void)chooseSchemaInPopup:(NSString *)schema
+{
+	NSPopUpButton *popup = [self.document.sidebar valueForKey:@"schemaPopup"];
+	XCTAssertNotNil([popup itemWithTitle:schema], @"%@", popup.itemTitles);
+	[popup selectItemWithTitle:schema];
+	[NSApp sendAction:popup.action to:popup.target from:popup];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	[self spinUntil:^BOOL{ return NO; } timeout:0.2]; // a reload deferred to the next turn
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+}
+
+/// The schema the sidebar shows, its pop-up and its lists are the other schema's.
+- (void)assertShowsSalesData
+{
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	XCTAssertEqualObjects(sidebar.selectedSchema, @"Sales Data");
+	XCTAssertEqualObjects([[sidebar valueForKey:@"schemaPopup"] titleOfSelectedItem], @"Sales Data");
+	XCTAssertTrue([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"Mixed Case"], @"%@", [sidebar itemTitlesInSection:@"TABLES"]);
+	XCTAssertFalse([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"t"]);
+}
+
+/// A sequence rename not applied yet, then another schema in the pop-up: the rename is applied, and the other schema
+/// is shown (the rename's list reload, deferred to after the change, doesn't bring the old schema back).
+- (void)testUnappliedRenameThenSchemaChangeShowsOtherSchema
+{
+	[self selectSequence:@"seq_free"];
+	[self type:@"seq_a" into:self.pane.nameField];
+	[self chooseSchemaInPopup:@"Sales Data"];
+
+	XCTAssertEqualObjects([self serverValue:@"SELECT to_regclass('structure_test.seq_a')::text"], @"structure_test.seq_a");
+	[self assertShowsSalesData];
+	XCTAssertNil(self.document.sidebar.selectedSequenceName);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+}
+
+/// The same with History Back to an entry in another schema: the entry is shown, and the entries ahead are kept.
+- (void)testUnappliedRenameThenHistoryBackToOtherSchema
+{
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	[sidebar reloadSchema:@"Sales Data"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertTrue([sidebar selectTableNamed:@"Mixed Case"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	// Straight to structure_test's seq_free (one selection change, one entry)
+	[sidebar reloadSchema:@"structure_test" selectingSequence:@"seq_free"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertEqualObjects(sidebar.selectedSequenceName, @"seq_free");
+	XCTAssertEqualObjects(self.document.history.currentEntry[@"table"], @"seq_free");
+	NSUInteger entries = [self historyCount];
+
+	[self type:@"seq_b" into:self.pane.nameField];
+	[self goBack:YES];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	[self spinUntil:^BOOL{ return NO; } timeout:0.2];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+
+	XCTAssertEqualObjects([self serverValue:@"SELECT to_regclass('structure_test.seq_b')::text"], @"structure_test.seq_b");
+	[self assertShowsSalesData];
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"Mixed Case");
+	XCTAssertTrue(self.document.history.canGoForward, @"the entries ahead are kept");
+	XCTAssertEqual([self historyCount], entries);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+
+	// Forward: the sequence, under its new name
+	[self goBack:NO];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertEqualObjects(sidebar.selectedSchema, @"structure_test");
+	XCTAssertEqualObjects(sidebar.selectedSequenceName, @"seq_b");
+}
+
+/// A Structure draft adding a serial column (its save reloads the lists for the new sequence), then another schema in
+/// the pop-up: the column is added, and the other schema is shown.
+- (void)testSerialDraftThenSchemaChangeShowsOtherSchema
+{
+	XCTAssertTrue([self clickTable:@"t"]);
+	[self.document viewStructure:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	SPPostgresStructureController *structure = self.document.structureController;
+	NSTableView *columns = structure.columnsView;
+
+	[structure addColumn:nil];
+	[[columns currentEditor] setString:@"counter2"];
+	[[columns window] makeFirstResponder:columns];
+	NSInteger draft = [columns numberOfRows] - 1;
+	id<NSTableViewDataSource> source = (id<NSTableViewDataSource>)columns.dataSource;
+	[source tableView:columns setObjectValue:@"integer" forTableColumn:[columns tableColumnWithIdentifier:@"type"] row:draft];
+	[source tableView:columns setObjectValue:@1 forTableColumn:[columns tableColumnWithIdentifier:@"auto"] row:draft]; // serial
+	XCTAssertTrue(structure.hasDraftColumn);
+
+	[self chooseSchemaInPopup:@"Sales Data"];
+	XCTAssertEqualObjects([self serverValue:@"SELECT to_regclass('structure_test.t_counter2_seq')::text"], @"structure_test.t_counter2_seq");
+	[self assertShowsSalesData];
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+}
+
 @end

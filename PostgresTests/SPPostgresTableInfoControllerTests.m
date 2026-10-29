@@ -495,7 +495,7 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 
 #pragma mark - Background loading
 
-/// Gives Table Info the tab's background runner (the tab keeps it on an inline runner until Stage 8 Task 7). Every
+/// Gives Table Info the tab's background runner (as the tab does). Every
 /// test using it waits for the runner before anything else uses the connection; side SQL goes through `other`.
 - (SPPostgresTableInfoController *)infoOnTabRunner
 {

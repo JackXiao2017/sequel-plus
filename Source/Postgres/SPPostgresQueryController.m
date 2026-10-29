@@ -76,6 +76,8 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 @property (assign) BOOL started;
 /// Raised during the run (e.g. by the test hook); the run stopped there.
 @property (retain) NSException *exception;
+/// The session's transaction status once the work had run (read on the runner's thread, where nothing else runs)
+@property (assign) PGPostgresTransactionStatus transactionStatus;
 @end
 
 @implementation SPPostgresQueryRun
@@ -87,6 +89,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 @synthesize cancelled;
 @synthesize started;
 @synthesize exception;
+@synthesize transactionStatus;
 
 - (instancetype)init
 {
@@ -114,6 +117,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 @implementation SPPostgresQueryController
 {
+	PGPostgresTransactionStatus lastRunTransactionStatus;
 	PGPostgresConnection *connection;
 
 	/// The row set the grid shows (nil: none). Values are read from it as the grid draws.
@@ -139,6 +143,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 @synthesize resultsView;
 @synthesize statusText;
 @synthesize runDidChangeDatabase;
+@synthesize lastRunTransactionStatus;
 @synthesize taskRunner;
 
 #pragma mark - Setup
@@ -679,6 +684,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 	[runner runTaskWithDescription:description cancelTitle:cancelTitle work:^id(PGPostgresConnection *theConnection, NSError **error) {
 		[SPPostgresQueryController _runStatements:theStatements onConnection:theConnection runner:runner logger:logger hook:hook into:run];
+		[run setTransactionStatus:[theConnection transactionStatus]];
 		return run;
 	} completion:^(id result, NSError *error, BOOL cancelled) {
 		// Whatever happens, the next run is possible (the work restored the logging flag itself)
@@ -694,6 +700,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 		BOOL stopped = [run cancelled] || (cancelled && ![run started]);
 		NSString *status = stopped ? NSLocalizedString(@"Query cancelled.", @"Query cancelled error") : ([run status] ?: @"");
 		[self _showResult:[run rowsResult]];
+		lastRunTransactionStatus = [run transactionStatus];
 		[self setStatusText:status];
 		[statusField setStringValue:status];
 		[statusField setToolTip:status];

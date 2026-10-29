@@ -840,7 +840,7 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 
 #pragma mark - Background loading
 
-/// The tab's background runner (the tab keeps the panes on inline runners until Stage 8 Task 7). Every test using it
+/// The tab's background runner (the panes' own, as the tab gives them). Every test using it
 /// waits for the runner before anything else uses the connection; side SQL goes through `other`.
 - (SPPostgresTaskRunner *)tabRunner
 {
