@@ -1,6 +1,7 @@
 #import "SPPostgresConstraintSheet.h"
 #import "SPPostgresCatalog.h"
 #import "SPPostgresTableDuplicator.h"
+#import "SPPostgresTaskRunner.h"
 #import <PostgresKit/PostgresKit.h>
 
 NSString * const SPPostgresConstraintSheetIndexKind = @"INDEX";
@@ -29,6 +30,9 @@ static const CGFloat SPPostgresConstraintSheetMargin = 20;
 	NSString *initialSchema;
 	PGPostgresConnection *connection;
 	SPPostgresCatalog *catalog;
+	SPPostgresTaskRunner *taskRunner; // the tab's (nil: none): no catalog read while it is busy
+	NSString *shownSchema;            // the schema whose tables are listed
+	NSString *shownTable;             // the table whose columns are listed
 	void (^completion)(SPPostgresConstraintDefinition *);
 
 	NSMutableArray *chosenColumns;      // in the order they were checked
@@ -64,6 +68,11 @@ static const CGFloat SPPostgresConstraintSheetMargin = 20;
 
 + (void)beginForKind:(NSString *)kind columns:(NSArray *)columnNames schema:(NSString *)schema connection:(PGPostgresConnection *)connection window:(NSWindow *)window completion:(void (^)(SPPostgresConstraintDefinition *))completion
 {
+	[self beginForKind:kind columns:columnNames schema:schema connection:connection taskRunner:nil window:window completion:completion];
+}
+
++ (void)beginForKind:(NSString *)kind columns:(NSArray *)columnNames schema:(NSString *)schema connection:(PGPostgresConnection *)connection taskRunner:(SPPostgresTaskRunner *)taskRunner window:(NSWindow *)window completion:(void (^)(SPPostgresConstraintDefinition *))completion
+{
 	if (!completion) return;
 	if (!window || [window attachedSheet]) {
 		completion(nil);
@@ -71,6 +80,7 @@ static const CGFloat SPPostgresConstraintSheetMargin = 20;
 	}
 
 	SPPostgresConstraintSheet *controller = [[self alloc] initWithKind:kind columns:columnNames schema:schema connection:connection completion:completion];
+	controller->taskRunner = [taskRunner retain];
 	[controller _beginOn:window]; // keeps itself until the sheet ends
 	[controller release];
 }
@@ -106,6 +116,9 @@ static const CGFloat SPPostgresConstraintSheetMargin = 20;
 	[initialSchema release];
 	[connection release];
 	[catalog release];
+	[taskRunner release];
+	[shownSchema release];
+	[shownTable release];
 	[completion release];
 	[chosenColumns release];
 	[referencedColumnNames release];
@@ -375,6 +388,8 @@ static const CGFloat SPPostgresConstraintSheetMargin = 20;
 - (void)_loadTables
 {
 	NSString *schema = [schemaPopup titleOfSelectedItem];
+	[shownSchema release];
+	shownSchema = [schema copy];
 	NSArray *tables = schema ? ([catalog tableNamesInSchema:schema error:NULL] ?: @[]) : @[];
 	[tablePopup removeAllItems];
 	[tablePopup addItemsWithTitles:tables];
@@ -385,6 +400,8 @@ static const CGFloat SPPostgresConstraintSheetMargin = 20;
 {
 	NSString *schema = [schemaPopup titleOfSelectedItem];
 	NSString *table = [tablePopup titleOfSelectedItem];
+	[shownTable release];
+	shownTable = [table copy];
 	NSArray *names = @[];
 	if ([schema length] && [table length]) {
 		SPPostgresTableStructure *structure = [[[SPPostgresTableStructure alloc] initWithConnection:connection schema:schema table:table] autorelease];
@@ -397,13 +414,30 @@ static const CGFloat SPPostgresConstraintSheetMargin = 20;
 	[self _validate];
 }
 
+/// YES (after NSBeep) while the tab's runner is busy: the catalog is read on the main thread, so never while a load
+/// uses the connection (the pop-up goes back to what is listed).
+- (BOOL)_refuseReadWhileBusy
+{
+	if (![taskRunner isBusy]) return NO;
+	NSBeep();
+	return YES;
+}
+
 - (void)_schemaChanged:(id)sender
 {
+	if ([self _refuseReadWhileBusy]) {
+		if (shownSchema) [schemaPopup selectItemWithTitle:shownSchema];
+		return;
+	}
 	[self _loadTables];
 }
 
 - (void)_tableChanged:(id)sender
 {
+	if ([self _refuseReadWhileBusy]) {
+		if (shownTable) [tablePopup selectItemWithTitle:shownTable];
+		return;
+	}
 	[self _loadReferencedColumns];
 }
 

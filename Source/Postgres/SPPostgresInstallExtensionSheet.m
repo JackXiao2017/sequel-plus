@@ -1,6 +1,7 @@
 #import "SPPostgresInstallExtensionSheet.h"
 #import "SPPostgresExtensions.h"
 #import "SPPostgresCatalog.h"
+#import "SPPostgresTaskRunner.h"
 #import <PostgresKit/PostgresKit.h>
 
 static const CGFloat SPPostgresInstallExtensionSheetWidth = 560;
@@ -40,6 +41,7 @@ static SPPostgresInstallExtensionSheet *SPPostgresCurrentInstallExtensionSheet =
 @synthesize cancelButton;
 @synthesize lastErrorMessage;
 @synthesize alertPresenter;
+@synthesize taskRunner;
 
 #pragma mark - Begin
 
@@ -99,6 +101,7 @@ static SPPostgresInstallExtensionSheet *SPPostgresCurrentInstallExtensionSheet =
 	[lastErrorMessage release];
 	[completion release];
 	[alertPresenter release];
+	[taskRunner release];
 
 	[sheet release];
 	[titleLabel release];
@@ -385,6 +388,7 @@ static SPPostgresInstallExtensionSheet *SPPostgresCurrentInstallExtensionSheet =
 - (void)_updateAlsoInstalls
 {
 	SPPostgresAvailableExtension *extension = [self _selectedExtension];
+	if ([taskRunner isBusy]) return; // never on the main thread while a load uses the connection
 	NSArray *missing = extension ? [extensions missingRequirementsForExtension:[extension name] version:[versionPopup titleOfSelectedItem] error:NULL] : nil;
 	if ([missing count]) {
 		[alsoInstallsLabel setStringValue:[NSString stringWithFormat:NSLocalizedString(@"Also installs: %@", @"Postgres install extension sheet: missing requirements"), [missing componentsJoinedByString:@", "]]];
@@ -501,7 +505,7 @@ static SPPostgresInstallExtensionSheet *SPPostgresCurrentInstallExtensionSheet =
 - (IBAction)install:(id)sender
 {
 	SPPostgresAvailableExtension *extension = [self _selectedExtension];
-	if (!completion || !extension) {
+	if (!completion || !extension || [taskRunner isBusy]) {
 		NSBeep();
 		return;
 	}

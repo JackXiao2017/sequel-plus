@@ -101,6 +101,7 @@
 		done = YES;
 	}];
 	XCTAssertTrue([self spinUntil:^BOOL{ return done; } timeout:20]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertNotNil(connection, @"%@", connectError);
 
 	self.document = [[SPPostgresDocument alloc] initWithConnection:connection connector:connector favorite:favorite];
@@ -121,6 +122,8 @@
 	};
 
 	[self.windowController addTabDocument:self.document atIndex:0 select:YES];
+	// The first loads run on the tab's runner
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	// A sheet attaches to the nib's window once it has been shown (kept off screen)
 	[[self window] setFrameOrigin:NSMakePoint(-10000, -10000)];
 	[self.windowController showWindow:nil];
@@ -155,6 +158,8 @@
 /// Opens the Export sheet through File ▸ Export…'s action; its save panel is replaced by a path in the directory.
 - (SPPostgresExportController *)openExportSheet
 {
+	// The tab's loads first (the sheet opens only while the tab isn't busy)
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.document export:nil];
 	SPPostgresExportController *controller = self.document.exportController;
 	XCTAssertNotNil(controller);
@@ -176,12 +181,14 @@
 	XCTAssertTrue([[popup itemAtIndex:index] isEnabled], @"%@ is enabled", [popup itemTitleAtIndex:index]);
 	[popup selectItemAtIndex:index];
 	[NSApp sendAction:popup.action to:popup.target from:popup];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 }
 
 - (void)chooseFormat:(NSInteger)segment in:(SPPostgresExportController *)controller
 {
 	[controller.formatControl setSelectedSegment:segment];
 	[NSApp sendAction:controller.formatControl.action to:controller.formatControl.target from:controller.formatControl];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 }
 
 /// Checks the row named table under schema in the Selected tables list (through its data source, as a click would).
@@ -199,6 +206,7 @@
 		}
 		if ([currentSchema isEqualToString:schema] && [name isEqualToString:table]) {
 			[tableView.dataSource tableView:tableView setObjectValue:@YES forTableColumn:checkColumn row:row];
+			XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 			return;
 		}
 	}
@@ -249,6 +257,7 @@
 	[self onEachPort:^(NSNumber *port) {
 		SPPostgresExportController *controller = [self openExportSheet];
 		[controller.compressCheckbox performClick:nil];
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		[self exportWith:controller];
 		XCTAssertNil(controller.lastErrorMessage);
 		XCTAssertEqualObjects(self.suggestedNames, @[@"pgkit_io_src.sql.gz"]);
@@ -288,6 +297,7 @@
 	[self onEachPort:^(NSNumber *port) {
 		// Preset to the sidebar's selected table
 		XCTAssertTrue([self.document.sidebar selectTableNamed:@"audit"]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		XCTAssertEqualObjects(self.document.sidebar.selectedSchema, @"public");
 		SPPostgresExportController *controller = [self openExportSheet];
 		XCTAssertEqualObjects(controller.checkedTables, (@[@[@"public", @"audit"]]));
@@ -312,6 +322,7 @@
 		XCTAssertNil([query lastResultRows]);
 		[query.editor setString:@"SELECT 1 AS a, NULL AS b"];
 		[query runAllQueries:nil];
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		XCTAssertEqualObjects([query lastResultColumnNames], (@[@"a", @"b"]));
 		XCTAssertEqualObjects([query lastResultRows], (@[@[@"1", [NSNull null]]]));
 
@@ -338,6 +349,7 @@
 		XCTAssertFalse([[controller.sourcePopup itemAtIndex:3] isEnabled], @"CSV only");
 		[controller cancel:nil];
 		XCTAssertTrue([self spinUntil:^BOOL{ return self.document.exportController == nil && [self window].attachedSheet == nil; } timeout:5]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		XCTAssertEqual(self.suggestedNames.count, 0u);
 	}];
 }
@@ -352,7 +364,9 @@
 			[controller cancel:nil];
 		}
 		XCTAssertTrue([self spinUntil:^BOOL{ return self.document.exportController == nil && [self window].attachedSheet == nil; } timeout:5]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		XCTAssertTrue([self spinUntil:^BOOL{ @autoreleasepool { return weakController == nil; } } timeout:5], @"no retain cycle through the lists' checksChanged blocks");
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	}];
 }
 
@@ -433,6 +447,7 @@
 		XCTAssertFalse([self.document validateMenuItem:export]);
 		[controller cancel:nil];
 		XCTAssertTrue([self spinUntil:^BOOL{ return self.document.exportController == nil && [self window].attachedSheet == nil; } timeout:5]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		XCTAssertTrue([self.document validateMenuItem:export]);
 	}];
 }
@@ -458,6 +473,7 @@
 		finished = YES;
 	}];
 	XCTAssertTrue([self spinUntil:^BOOL{ return finished; } timeout:20]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertFalse(workOnMain);
 	XCTAssertTrue(completionOnMain);
 	XCTAssertFalse(result);
@@ -477,6 +493,7 @@
 		finished = YES;
 	}];
 	XCTAssertTrue([self spinUntil:^BOOL{ return finished; } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertFalse(result);
 	XCTAssertEqual(failure.code, 9);
 }
@@ -517,6 +534,7 @@
 	XCTAssertEqual(dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)), 0);
 	XCTAssertFalse(logged(marker), @"appended on the main thread, not the caller's");
 	XCTAssertTrue([self spinUntil:^BOOL{ return logged(marker) && logged(errorMarker); } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 }
 
 #pragma mark - Fix round 1
@@ -535,6 +553,7 @@
 		XCTAssertEqual(connector.parentWindow, (NSWindow *)controller.progressSheet.panel);
 
 		XCTAssertTrue([self spinUntil:^BOOL{ return self.document.exportController == nil && [self window].attachedSheet == nil; } timeout:60]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		XCTAssertNil(controller.lastErrorMessage);
 		XCTAssertNil(controller.pendingConnector);
 		XCTAssertTrue([[self contentsOf:[self.directory stringByAppendingPathComponent:@"pgkit_io_src.sql"]] containsString:@"COPY \"Sales Data\".\"Orders 2026\""]);
@@ -554,9 +573,12 @@
 		XCTAssertNotNil(held);
 		SPPostgresProgressSheet *progress = controller.progressSheet;
 		XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == progress.panel; } timeout:5]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 		[progress.cancelButton performClick:nil];
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		XCTAssertTrue([self spinUntil:^BOOL{ return self.document.exportController == nil && [self window].attachedSheet == nil; } timeout:5], @"ends without the provider answering");
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		XCTAssertTrue(progress.cancelled);
 		XCTAssertEqual([[[NSFileManager defaultManager] contentsOfDirectoryAtPath:self.directory error:NULL] count], 0u);
 		XCTAssertEqual(self.alerts.count, 0u);
@@ -565,6 +587,7 @@
 		XCTAssertTrue(late.isConnected);
 		held(late, nil);
 		XCTAssertTrue([self spinUntil:^BOOL{ return !late.isConnected; } timeout:5], @"a late connection is closed unused");
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	}];
 }
 
@@ -611,6 +634,7 @@
 		[controller export:nil];
 		NSWindow *window = [self window];
 		XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet == controller.progressSheet.panel; } timeout:5]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 		// Another sheet waits behind the progress sheet, then the job fails
 		NSPanel *other = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 200, 100) styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:YES];
@@ -619,14 +643,18 @@
 		held(nil, SPPostgresMakeError(SPPostgresErrorConnectionFailed, @"no route to the server", nil));
 
 		XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet == other; } timeout:5], @"%@", window.attachedSheet);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		XCTAssertEqualObjects(controller.lastErrorMessage, @"no route to the server");
 		XCTAssertNil(self.document.exportController);
 		[window endSheet:other];
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		[other orderOut:nil];
 		XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet != nil && window.attachedSheet != other; } timeout:5], @"the alert shows once the window is free");
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		NSWindow *alertWindow = window.attachedSheet;
 		XCTAssertTrue([[self textsIn:alertWindow.contentView] containsObject:@"no route to the server"], @"%@", [self textsIn:alertWindow.contentView]);
 		[window endSheet:alertWindow];
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		[alertWindow orderOut:nil];
 	}];
 }
@@ -672,6 +700,7 @@
 		NSDate *cancelled = [NSDate date];
 		[controller.progressSheet cancel:nil];
 		XCTAssertTrue([self spinUntil:^BOOL{ return self.document.exportController == nil && [self window].attachedSheet == nil; } timeout:20]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		XCTAssertLessThan(-[cancelled timeIntervalSinceNow], 5.0, @"Cancel doesn't wait for the lock");
 		XCTAssertEqualObjects(controller.lastErrorMessage, @"The export was cancelled.");
 		XCTAssertEqual(self.alerts.count, 0u, @"a cancel isn't an error");
@@ -720,6 +749,7 @@
 			SPPostgresQueryController *query = self.document.queryController;
 			[query.editor setString:@"SELECT g AS n FROM generate_series(1, 3) g"];
 			[query runAllQueries:nil];
+			XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 			XCTAssertEqual([query lastResultRowCount], 3u);
 			reads = 0;
 

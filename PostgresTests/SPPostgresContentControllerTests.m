@@ -117,6 +117,8 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	self.alerts = alerts;
 	self.document.alertPresenter = ^(NSAlert *alert) { [alerts addObject:alert]; };
 	[self.controller addTabDocument:self.document atIndex:0 select:YES];
+	// The first loads run on the tab's runner
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	self.other = [SPPostgresTestServers connectedConnectionOnPort:SPContentTestPort];
 
@@ -151,6 +153,14 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 {
 	self.content.taskRunner = self.document.taskRunner;
 	XCTAssertFalse(self.content.taskRunner.isInline);
+}
+
+/// Gives the Content view an inline runner on the tab's connection (a load has finished when its method returns), for
+/// the tests of what happens inside a synchronous load.
+- (void)useInlineRunner
+{
+	self.content.taskRunner = [SPPostgresTaskRunner inlineRunnerWithConnection:self.document.connection];
+	XCTAssertTrue(self.content.taskRunner.isInline);
 }
 
 /// Waits until the tab's loads (Content's included) have finished.
@@ -189,7 +199,9 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 - (void)selectTable:(NSString *)table
 {
 	[self.document.sidebar reloadSchema:@"content_test"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self.document.sidebar selectTableNamed:table], @"%@", table);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self waitForContent];
 }
 
@@ -266,6 +278,7 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 
 	// Deselecting (a schema reload clears the selection) empties the grid
 	[self.document.sidebar reloadSchema:@"content_test"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual([[self grid] numberOfRows], 0);
 	XCTAssertEqual([[[self grid] tableColumns] count], 0u);
 	XCTAssertEqual(self.alerts.count, 0u);
@@ -332,6 +345,7 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	[comparisonPopup selectItemWithTitle:@"LIKE"];
 	[valueField setStringValue:@"item 1%"];
 	[filterButton performClick:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self waitForContent];
 
 	XCTAssertEqualObjects([self idsInGrid], (@[@"1", @"10", @"11", @"12", @"13", @"14", @"15", @"16", @"17", @"18", @"19"]));
@@ -343,6 +357,7 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	[comparisonPopup sendAction:[comparisonPopup action] to:[comparisonPopup target]];
 	XCTAssertFalse([valueField isEnabled]);
 	[filterButton performClick:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self waitForContent];
 	XCTAssertEqualObjects([self idsInGrid], (@[@"1"]));
 
@@ -352,6 +367,7 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	[comparisonPopup sendAction:[comparisonPopup action] to:[comparisonPopup target]];
 	[valueField setStringValue:@"not an array"];
 	[filterButton performClick:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self waitForContent];
 	XCTAssertEqual(self.alerts.count, 1u);
 	XCTAssertTrue([[self.alerts[0] informativeText] containsString:@"array"], @"%@", [self.alerts[0] informativeText]);
@@ -362,6 +378,7 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	[comparisonPopup selectItemWithTitle:@"="];
 	[valueField setStringValue:@""];
 	[filterButton performClick:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self waitForContent];
 	XCTAssertEqual([[self grid] numberOfRows], 30);
 	XCTAssertEqualObjects(content.countText, @"30 rows in table");
@@ -373,25 +390,30 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	XCTAssertTrue([self canEditRow:4 column:@"name"]);
 
 	[self setValue:@"edited" atRow:4 column:@"name"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT name FROM content_test.items WHERE id = 5"], @"edited");
 	XCTAssertEqualObjects([self valueAtRow:4 column:@"name"], @"edited");
 
 	// The NULL placeholder sets NULL; Postgres's own format comes back for the edited value
 	[self setValue:SPContentTestNull atRow:4 column:@"note"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT note IS NULL FROM content_test.items WHERE id = 5"], @YES);
 	XCTAssertEqualObjects([self valueAtRow:4 column:@"note"], SPContentTestNull);
 	[self setValue:@"2.50" atRow:4 column:@"price"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self valueAtRow:4 column:@"price"], @"2.500000");
 
 	// A value the server rejects: alert, and the row shows the server's value again
 	[self setValue:@"not a number" atRow:4 column:@"price"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 1u);
 	XCTAssertEqualObjects([self valueAtRow:4 column:@"price"], @"2.500000");
 
 	// The row was deleted by someone else: told so, and the grid reloaded
 	XCTAssertNotNil([self.other execute:@"DELETE FROM content_test.items WHERE id = 6"]);
 	[self setValue:@"too late" atRow:5 column:@"name"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 2u);
 	XCTAssertEqualObjects([self.alerts[1] messageText], @"This row was changed or deleted by someone else.");
 	XCTAssertEqual([[self grid] numberOfRows], 29);
@@ -410,8 +432,10 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 
 	PGPostgresConnection *oldConnection = self.document.connection;
 	[self.document switchToDatabase:@"postgres"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT name FROM content_test.items WHERE id = 5"], @"saved before switch");
 	XCTAssertTrue([self spinUntil:^BOOL{ return [[self.document windowTitleString] hasSuffix:@"/postgres"] && !self.document.isProcessing; } timeout:20]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertNotEqual(self.document.connection, oldConnection);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
 }
@@ -433,6 +457,7 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	XCTAssertFalse([[content valueForKey:@"removeButton"] isEnabled]);
 
 	[self setValue:@"changed" atRow:0 column:@"y"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.no_pk WHERE y = 'same'"], @2);
 
 	// A view is read-only too
@@ -451,6 +476,7 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	NSTableView *grid = standalone.tableView;
 	XCTAssertEqual([grid numberOfRows], 2);
 	[(id<NSTableViewDataSource>)[grid dataSource] tableView:grid setObjectValue:@"changed" forTableColumn:[grid tableColumns][1] row:0];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[standalone addRow:nil];
 	[grid selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
 	[standalone removeRows:nil];
@@ -472,10 +498,12 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 
 	// Even if asked, a generated column is not sent
 	[self setValue:@"99" atRow:0 column:@"doubled"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT doubled FROM content_test.generated_cols"], @6);
 	XCTAssertEqual(self.alerts.count, 0u);
 
 	[self setValue:@"5" atRow:0 column:@"a"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT doubled FROM content_test.generated_cols"], @10);
 	XCTAssertEqualObjects([self valueAtRow:0 column:@"doubled"], @"10");
 }
@@ -563,6 +591,7 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	// "Limit results" off: everything on one page
 	[self overridePrefs:@{SPLimitResults: @NO}];
 	[content reload];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self waitForContent];
 	XCTAssertEqual(content.pageCount, 1u);
 	XCTAssertEqual(content.currentPage, 1u);
@@ -580,6 +609,7 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	XCTAssertEqualObjects(content.countText, @"30 rows in table");
 
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"broken_view"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self waitForContent];
 	XCTAssertEqual(self.alerts.count, 1u);
 	XCTAssertTrue([[self.alerts[0] informativeText] containsString:@"division by zero"], @"%@", [self.alerts[0] informativeText]);
@@ -599,6 +629,7 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 
 	// Retrying still fails the same way, and still shows the error
 	[content refresh:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self waitForContent];
 	XCTAssertEqual(self.alerts.count, 2u);
 	XCTAssertEqual([[self grid] numberOfRows], 0);
@@ -705,6 +736,7 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	XCTAssertTrue([self.document validateToolbarItem:item]);
 
 	[self.document.sidebar reloadSchema:@"content_test"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertFalse([self.document validateToolbarItem:item]);
 }
 
@@ -969,6 +1001,7 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 - (void)testTabToNextCellKeepsEditingAfterReload
 {
 	[self selectTable:@"items"];
+	[self useInlineRunner];
 	NSTableView *grid = [self grid];
 	[self typeInCellAtRow:4 column:@"price" text:@"2.50"];
 
@@ -1014,6 +1047,7 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 - (void)testAddRowReloadsCommittedCellFirst
 {
 	[self selectTable:@"items"];
+	[self useInlineRunner];
 	SPPostgresContentController *content = self.content;
 	[self typeInCellAtRow:4 column:@"price" text:@"3.5"];
 	[content addRow:nil];

@@ -126,6 +126,7 @@
 		done = YES;
 	}];
 	XCTAssertTrue([self spinUntil:^BOOL{ return done; } timeout:20]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertNotNil(connection, @"%@", connectError);
 
 	self.document = [[SPPostgresDocument alloc] initWithConnection:connection connector:connector favorite:favorite];
@@ -146,6 +147,8 @@
 	};
 
 	[self.windowController addTabDocument:self.document atIndex:0 select:YES];
+	// The first loads run on the tab's runner
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	// A sheet attaches to the nib's window once it has been shown (kept off screen)
 	[[self window] setFrameOrigin:NSMakePoint(-10000, -10000)];
 	[self.windowController showWindow:nil];
@@ -185,6 +188,8 @@
 /// A new import controller for the document, its end recorded.
 - (SPPostgresImportController *)newController
 {
+	// The tab's loads first (an import starts only while the tab isn't busy)
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	SPPostgresImportController *controller = [[SPPostgresImportController alloc] initWithDocument:self.document];
 	self.controller = controller;
 	self.controllerEnded = NO;
@@ -195,13 +200,16 @@
 
 - (BOOL)waitForEnd
 {
-	return [self spinUntil:^BOOL{ return self.controllerEnded; } timeout:60];
+	BOOL ended = [self spinUntil:^BOOL{ return self.controllerEnded; } timeout:60];
+	// And the tab's reloads after it
+	return [SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30] && ended;
 }
 
 /// The Query pane is shown and every pane marked fresh, so a stale mark afterwards comes from the import.
 - (void)markPanesFresh
 {
 	[self.document showPane:SPPostgresPaneQuery];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	for (NSString *flag in @[@"contentNeedsReset", @"contentNeedsReload", @"structureNeedsReset", @"relationsNeedReset", @"triggersNeedReset", @"infoNeedsReset"]) {
 		[self.document setValue:@NO forKey:flag];
 	}
@@ -222,12 +230,14 @@
 {
 	[popup selectItemAtIndex:index];
 	[NSApp sendAction:popup.action to:popup.target from:popup];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 }
 
 - (void)click:(NSButton *)button
 {
 	XCTAssertTrue(button.isEnabled, @"%@ is enabled", button.title);
 	[NSApp sendAction:button.action to:button.target from:button];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 }
 
 /// Shows the mapping sheet for path through the controller (as after the open panel).
@@ -238,6 +248,7 @@
 	SPPostgresCSVMappingSheet *sheet = controller.mappingSheet;
 	XCTAssertNotNil(sheet);
 	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == sheet.sheet; } timeout:5], @"the mapping sheet is on the window");
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	return sheet;
 }
 
@@ -281,6 +292,7 @@
 			XCTAssertTrue([self flag:flag], @"%@", flag);
 		}
 		[self.document.sidebar reloadSchema:@"Sales Data"];
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		XCTAssertTrue([[self.document.sidebar itemTitlesInSection:@"TABLES"] containsObject:@"Orders 2026"], @"%@", [self.document.sidebar itemTitlesInSection:@"TABLES"]);
 
 		PGPostgresConnection *destination = [self destinationOn:port];
@@ -361,6 +373,7 @@
 		[self run:@"CREATE TABLE public.t (a int, b text, c text)" on:connection];
 	} body:^(NSNumber *port) {
 		XCTAssertTrue([self.document.sidebar selectTableNamed:@"t"]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		NSMutableString *csv = [NSMutableString stringWithString:@"B,a,zzz\n"];
 		for (NSUInteger i = 1; i <= 12; i++) [csv appendFormat:@"b%lu,%lu,z%lu\n", (unsigned long)i, (unsigned long)i, (unsigned long)i];
 		NSString *path = [self write:csv named:@"mapped.csv"];
@@ -412,6 +425,7 @@
 		[self run:@"CREATE TABLE public.t (a int, b text, c text DEFAULT 'dflt')" on:connection];
 	} body:^(NSNumber *port) {
 		XCTAssertTrue([self.document.sidebar selectTableNamed:@"t"]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		NSString *path = [self write:@"B,a,zzz\nx,1,p\n\"y, why\",2,q\n" named:@"rows.csv"];
 		[self markPanesFresh];
 
@@ -552,9 +566,12 @@
 		NSPanel *other = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 200, 100) styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:YES];
 		[[self window] beginSheet:other completionHandler:nil];
 		XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == other; } timeout:5]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		XCTAssertFalse([self.document validateMenuItem:import]);
 		[[self window] endSheet:other];
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		XCTAssertTrue([self.document validateMenuItem:import]);
 
 		// The format follows the extension

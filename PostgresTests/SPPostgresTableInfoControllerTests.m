@@ -20,6 +20,7 @@ static NSString * const SPInfoTestToolbarInfo = @"SwitchToTableInfoToolbarItemId
 static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 
 @interface SPPostgresDocument (SPPostgresTableInfoControllerTests)
+- (void)refreshDatabases:(id)sender;
 - (IBAction)backForwardInHistory:(id)sender;
 - (BOOL)parentTabShouldClose;
 @end
@@ -96,6 +97,8 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	self.document.alertPresenter = ^(NSAlert *alert) { [alerts addObject:alert]; };
 	self.document.confirmationPresenter = ^(NSAlert *alert, void (^completion)(BOOL)) { completion(YES); };
 	[self.controller addTabDocument:self.document atIndex:0 select:YES];
+	// The first loads run on the tab's runner
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	self.other = [SPPostgresTestServers connectedConnectionOnPort:SPInfoTestPort];
 }
@@ -127,13 +130,16 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 - (void)select:(NSString *)table
 {
 	[self.document.sidebar reloadSchema:@"structure_test"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self.document.sidebar selectTableNamed:table], @"%@", table);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 }
 
 - (void)showInfoOf:(NSString *)table
 {
 	[self select:table];
 	[self.document viewStatus:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneInfo);
 	XCTAssertEqualObjects(self.info.table, table);
 }
@@ -174,6 +180,7 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	[self.document viewQuery:nil];
 	[[self.document.queryController editor] setString:sql];
 	[self.document.queryController runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 }
 
 /// Types text into the comment box (replacing what is there), as the user would, with the box focused.
@@ -218,19 +225,24 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	// The estimate after ANALYZE, shown when the pane is next shown
 	[self serverRun:@"ANALYZE structure_test.fresh"];
 	[self.document viewContent:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.document viewStatus:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([info.rowsField stringValue], @"~2");
 
 	// A view
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"t_view"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(info.table, @"t_view");
 	XCTAssertEqualObjects([info.typeField stringValue], @"view");
 	XCTAssertEqualObjects([info.rowsField stringValue], @"Unknown (not analyzed)");
 
 	// Gone elsewhere: the alert and the bottom line
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"fresh"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self serverRun:@"DROP TABLE structure_test.fresh"];
 	[info reload];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 1u);
 	XCTAssertEqualObjects(self.alerts[0].messageText, @"Could not load the information of “fresh”");
 	XCTAssertEqualObjects(info.noticeText, @"Could not load the information: There is no table “fresh” in schema “structure_test”.");
@@ -251,6 +263,7 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	[self typeComment:@"it's new"];
 	XCTAssertTrue(info.hasPendingComment);
 	[self.document viewContent:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneContent);
 	XCTAssertEqualObjects([self serverValue:@"SELECT obj_description('structure_test.t'::regclass, 'pg_class')"], @"it's new");
 	XCTAssertTrue([self flag:@"structureNeedsReset"]);
@@ -259,6 +272,7 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 
 	// The box losing the focus ends it too; the create syntax follows
 	[self.document viewStatus:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([box string], @"it's new");
 	[self typeComment:@"  second  "];
 	XCTAssertTrue([[box window] makeFirstResponder:nil]);
@@ -271,6 +285,7 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	[self serverRun:@"LOCK TABLE structure_test.t IN ACCESS EXCLUSIVE MODE"];
 	[self typeComment:@"locked out"];
 	[self.document viewStructure:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneInfo, @"the failed edit keeps the pane");
 	XCTAssertEqual(self.alerts.count, 1u);
 	XCTAssertEqualObjects(self.alerts[0].messageText, @"Could not change the comment of “t”");
@@ -288,18 +303,22 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	// Once the lock is gone it saves
 	[self serverRun:@"ROLLBACK"];
 	[self.document viewStructure:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
 	XCTAssertEqualObjects([self serverValue:@"SELECT obj_description('structure_test.t'::regclass, 'pg_class')"], @"locked out");
 	XCTAssertEqual(self.alerts.count, 3u);
 
 	// Escape puts the saved comment back; an empty comment removes it
 	[self.document viewStatus:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self typeComment:@"never mind"];
 	[box doCommandBySelector:@selector(cancelOperation:)];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([box string], @"locked out");
 	XCTAssertFalse(info.hasPendingComment);
 	[self typeComment:@""];
 	XCTAssertTrue([info commitPendingEdits]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT obj_description('structure_test.t'::regclass, 'pg_class')"], [NSNull null]);
 	XCTAssertEqual(self.alerts.count, 3u);
 }
@@ -331,6 +350,7 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	XCTAssertFalse(info.hasPendingComment, @"only viewed");
 	XCTAssertTrue([[info.commentView window] makeFirstResponder:info.commentView], @"focused, not edited");
 	[self.document viewContent:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneContent);
 	NSPredicate *commentOn = [NSPredicate predicateWithFormat:@"SELF CONTAINS 'COMMENT ON'"];
 	XCTAssertEqualObjects([[self loggedMessagesContaining:marker] filteredArrayUsingPredicate:commentOn], @[], @"no COMMENT ON was sent");
@@ -341,23 +361,29 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	[self serverRun:@"BEGIN"];
 	[self serverRun:@"LOCK TABLE structure_test.t IN SHARE MODE"];
 	[self.document viewStatus:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([info.commentView string], padded);
 	XCTAssertTrue([[info.commentView window] makeFirstResponder:info.commentView]);
 	[self.document viewStructure:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure, @"not vetoed");
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 
 	// A real edit that fails vetoes leaving; Escape gives it up, and then leaving works
 	[self.document viewStatus:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self typeComment:@"changed"];
 	XCTAssertTrue(info.hasPendingComment);
 	[self.document viewContent:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneInfo, @"vetoed");
 	XCTAssertEqual(self.alerts.count, 1u);
 	[info.commentView doCommandBySelector:@selector(cancelOperation:)];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([info.commentView string], padded);
 	XCTAssertFalse(info.hasPendingComment);
 	[self.document viewContent:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneContent);
 	XCTAssertEqual(self.alerts.count, 1u);
 	[self serverRun:@"ROLLBACK"];
@@ -365,8 +391,10 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 
 	// A real edit is sent (and logged)
 	[self.document viewStatus:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self typeComment:[marker stringByAppendingString:@" edited"]];
 	[self.document viewContent:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual([[[self loggedMessagesContaining:[marker stringByAppendingString:@" edited"]] filteredArrayUsingPredicate:commentOn] count], 1u, @"the log does show COMMENT ON");
 }
 
@@ -392,6 +420,7 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	XCTAssertEqual([[syntax font] pointSize], 15.0);
 
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"t_view"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([[syntax string] hasPrefix:@"CREATE VIEW \"structure_test\".\"t_view\" AS\n"], @"%@", [syntax string]);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 }
@@ -400,6 +429,7 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 {
 	[self showInfoOf:@"t"];
 	[self.document viewStructure:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self runQuery:@"ALTER TABLE structure_test.t ADD COLUMN z int"];
 	for (NSString *flag in @[@"structureNeedsReset", @"relationsNeedReset", @"triggersNeedReset", @"infoNeedsReset"]) {
 		XCTAssertTrue([self flag:flag], @"%@", flag);
@@ -409,6 +439,7 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	NSMenuItem *structureItem = [self menuItem:@selector(viewStructure:) key:@"1"];
 	XCTAssertTrue([self.controller validateMenuItem:structureItem]);
 	[self.controller performSelector:@selector(viewStructure:) withObject:structureItem];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
 	NSTableView *columns = self.document.structureController.columnsView;
 	NSMutableArray *names = [NSMutableArray array];
@@ -419,6 +450,7 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 
 	// And Table Info's create syntax
 	[self.document viewStatus:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([[self.info.createSyntaxView string] containsString:@"\n    \"z\" integer\n"] || [[self.info.createSyntaxView string] containsString:@"\n    \"z\" integer,\n"],
 				  @"%@", [self.info.createSyntaxView string]);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
@@ -432,6 +464,7 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	[self select:@"t_view"];
 	XCTAssertTrue([self.controller validateMenuItem:infoItem], @"views too");
 	[self.controller performSelector:@selector(viewStatus:) withObject:infoItem];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneInfo);
 	XCTAssertNotNil([[self.info view] window]);
 	XCTAssertEqualObjects([[self.document toolbar] selectedItemIdentifier], SPInfoTestToolbarInfo);
@@ -439,6 +472,7 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 
 	// The selection follows while the pane is shown
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"t"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.info.table, @"t");
 	XCTAssertEqualObjects([self.info.typeField stringValue], @"table");
 	XCTAssertEqualObjects([self.info.commentView string], @"the t table");
@@ -447,12 +481,14 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	NSMenuItem *back = [[NSMenuItem alloc] initWithTitle:@"Back" action:@selector(backForwardInHistory:) keyEquivalent:@""];
 	back.tag = 0;
 	[self.document backForwardInHistory:back];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"t_view");
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneInfo);
 	XCTAssertEqualObjects([self.info.typeField stringValue], @"view");
 
 	// Another pane takes it out of the window
 	[self.document viewContent:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertNil([[self.info view] window]);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 }
@@ -546,6 +582,22 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	// Once idle it saves
 	XCTAssertTrue([info commitPendingEdits]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT obj_description('structure_test.t'::regclass, 'pg_class')"], @"while busy");
+}
+
+/// A load the tab asks for (here Refresh Databases) saves the comment being edited first, while the runner is idle:
+/// the busy state's focus change can't lose it.
+- (void)testTabLoadSavesCommentEditFirst
+{
+	[self showInfoOf:@"t"];
+	[self.controller showWindow:nil];
+	[self typeComment:@"saved before the load"];
+	XCTAssertTrue(self.info.hasPendingComment);
+
+	[self.document refreshDatabases:nil];
+	XCTAssertFalse(self.info.hasPendingComment, @"saved before the task was queued");
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertEqualObjects([self serverValue:@"SELECT obj_description('structure_test.t'::regclass, 'pg_class')"], @"saved before the load");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 }
 
 @end

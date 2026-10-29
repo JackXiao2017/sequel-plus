@@ -2,6 +2,7 @@
 #import "SPPostgresTableStructure.h"
 
 @class PGPostgresConnection;
+@class SPPostgresTaskRunner;
 
 /// The kind SPPostgresConstraintSheet takes for an index (the others are SPPostgresConstraintDefinition's kinds).
 extern NSString * const SPPostgresConstraintSheetIndexKind __attribute__((visibility("default")));
@@ -41,5 +42,12 @@ __attribute__((visibility("default")))
 
 /// Same, with the referenced schema starting as `schema` (the table's own), when it is listed.
 + (void)beginForKind:(NSString *)kind columns:(NSArray *)columnNames schema:(NSString *)schema connection:(PGPostgresConnection *)connection window:(NSWindow *)window completion:(void (^)(SPPostgresConstraintDefinition *definitionOrNil))completion;
+
+/**
+ * Same, for a pane on the tab's runner: the sheet reads the catalog on the main thread (when it opens, which the pane
+ * allows only while the runner is idle, and as the referenced schema or table is changed), so a change of schema or
+ * table while the runner is busy is refused (NSBeep; the pop-up goes back to what is listed).
+ */
++ (void)beginForKind:(NSString *)kind columns:(NSArray *)columnNames schema:(NSString *)schema connection:(PGPostgresConnection *)connection taskRunner:(SPPostgresTaskRunner *)taskRunner window:(NSWindow *)window completion:(void (^)(SPPostgresConstraintDefinition *definitionOrNil))completion;
 
 @end

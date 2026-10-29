@@ -201,6 +201,7 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 		done = YES;
 	}];
 	XCTAssertTrue([self spinUntil:^BOOL{ return done; } timeout:20]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertNotNil(connection, @"%@", connectError);
 
 	self.document = [[SPPostgresDocument alloc] initWithConnection:connection connector:connector favorite:favorite];
@@ -222,6 +223,8 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 	};
 
 	[self.windowController addTabDocument:self.document atIndex:0 select:YES];
+	// The first loads run on the tab's runner
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[[self window] setFrameOrigin:NSMakePoint(-10000, -10000)];
 	[self.windowController showWindow:nil];
 	return target;
@@ -308,6 +311,8 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 /// A Transfer sheet with the test's favorites and targetConnect; waits for its session unless connects are held.
 - (SPPostgresTransferController *)openSheetWithFavorites:(NSArray *)favorites
 {
+	// The tab's loads first (the sheet opens only while the tab isn't busy)
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	SPPostgresTransferController *controller = [[SPPostgresTransferController alloc] initWithDocument:self.document];
 	self.controller = controller;
 	self.ended = NO;
@@ -322,6 +327,7 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 - (void)waitForSession:(SPPostgresTransferController *)controller
 {
 	XCTAssertTrue([self spinUntil:^BOOL{ return ![controller.databasePopup.titleOfSelectedItem isEqualToString:@"Connecting…"] && controller.databasePopup.numberOfItems > 0; } timeout:20]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 }
 
 /// The database menu's titles, the separator as "-".
@@ -339,6 +345,7 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 	XCTAssertGreaterThanOrEqual([popup indexOfItemWithTitle:title], 0, @"%@ is listed", title);
 	[popup selectItemWithTitle:title];
 	[NSApp sendAction:popup.action to:popup.target from:popup];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 }
 
 /// Runs the held targetConnect answer at index.
@@ -358,6 +365,7 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 {
 	XCTAssertTrue(button.isEnabled, @"%@ is enabled", button.title);
 	[button performClick:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 }
 
 - (void)chooseFavorite:(NSInteger)index in:(SPPostgresTransferController *)controller
@@ -365,6 +373,7 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 	NSPopUpButton *popup = controller.favoritePopup;
 	[popup selectItemAtIndex:index];
 	[NSApp sendAction:popup.action to:popup.target from:popup];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 }
 
 - (void)uncheckAll:(SPPostgresTransferController *)controller
@@ -473,6 +482,7 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 
 		[controller cancel:nil];
 		XCTAssertTrue([self spinUntil:^BOOL{ return self.ended && [self window].attachedSheet == nil; } timeout:5]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 		// Readable again: no alert
 		[self.alerts removeAllObjects];
@@ -481,6 +491,7 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 		XCTAssertGreaterThan(controller.tablesList.rows.count, 0u);
 		[controller cancel:nil];
 		XCTAssertTrue([self spinUntil:^BOOL{ return self.ended && [self window].attachedSheet == nil; } timeout:5]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	}];
 }
 
@@ -502,6 +513,7 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 
 		[controller cancel:nil];
 		XCTAssertTrue([self spinUntil:^BOOL{ return self.ended && [self window].attachedSheet == nil; } timeout:5]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 		NSUInteger requests = self.targetRequests.count;
 		controller = [self openSheetWithFavorites:@[]];
@@ -513,6 +525,7 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 		XCTAssertEqual(self.targetRequests.count, requests, @"no favorite: nothing connects");
 		[controller cancel:nil];
 		XCTAssertTrue([self spinUntil:^BOOL{ return self.ended && [self window].attachedSheet == nil; } timeout:5]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	}];
 }
 
@@ -619,8 +632,10 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 		SPPostgresTransferController *controller = [self openSheet];
 		[controller transfer:nil];
 		XCTAssertTrue([self spinUntil:^BOOL{ return controller.sheet.attachedSheet != nil; } timeout:5], @"the confirmation is a sheet on the Transfer sheet");
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		NSWindow *alertWindow = controller.sheet.attachedSheet;
 		[controller.sheet endSheet:alertWindow returnCode:NSAlertSecondButtonReturn];
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		[self spinUntil:^BOOL{ return NO; } timeout:0.5];
 		XCTAssertEqual(self.providedDatabases.count, 0u);
 		XCTAssertEqual(self.targetRequests.count, 1u, @"the session only");
@@ -745,6 +760,7 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 			XCTAssertEqualObjects(connector.password, @"pgkit", @"the session's password");
 			XCTAssertNil(connector.parentWindow);
 			XCTAssertTrue([self spinUntil:^BOOL{ return self.ended && [self window].attachedSheet == nil; } timeout:120]);
+			XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 			XCTAssertNil(controller.lastErrorMessage);
 			XCTAssertNil(controller.pendingConnector);
 			XCTAssertTrue([controller.completionNote hasPrefix:@"Copied 5 tables"], @"%@", controller.completionNote);
@@ -841,8 +857,10 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 			self.controller = nil;
 		}
 		XCTAssertTrue([self spinUntil:^BOOL{ return self.ended && [self window].attachedSheet == nil; } timeout:30]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		XCTAssertNil([self window].attachedSheet, @"no progress sheet attached");
 		XCTAssertTrue([self spinUntil:^BOOL{ @autoreleasepool { return weakController == nil; } } timeout:10], @"the controller deallocates");
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	}];
 }
 
@@ -858,7 +876,9 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 			self.controller = nil;
 		}
 		XCTAssertTrue([self spinUntil:^BOOL{ return self.ended && [self window].attachedSheet == nil; } timeout:5]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		XCTAssertTrue([self spinUntil:^BOOL{ @autoreleasepool { return weakController == nil; } } timeout:5], @"no retain cycle through stored blocks");
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	}];
 }
 
@@ -875,6 +895,7 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 			self.controller = nil;
 		}
 		XCTAssertTrue([self spinUntil:^BOOL{ @autoreleasepool { return weakController == nil; } } timeout:5], @"no retain cycle through stored blocks");
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	}];
 }
 
@@ -935,6 +956,7 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 		// (-performClick: may run the run loop, which would answer already)
 		XCTAssertTrue(controller.retryButton.isEnabled);
 		[NSApp sendAction:controller.retryButton.action to:controller.retryButton.target from:controller.retryButton];
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		XCTAssertEqualObjects([self menuTitles:controller], @[@"Connecting…"]);
 		XCTAssertTrue(controller.retryButton.isHidden);
 		[self waitForSession:controller];
@@ -988,12 +1010,14 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 			XCTAssertEqual(controller.databasePopup.indexOfSelectedItem, -1, @"no item selected");
 			XCTAssertFalse(controller.transferButton.isEnabled);
 			[NSApp sendAction:controller.overwriteModeRadio.action to:controller.overwriteModeRadio.target from:controller.overwriteModeRadio];
+			XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 			XCTAssertFalse(controller.transferButton.isEnabled, @"Overwrite mode too");
 			NSUInteger requests = self.targetRequests.count;
 			[controller transfer:nil];
 			XCTAssertNil(controller.progressSheet, @"nothing to transfer into");
 			XCTAssertEqual(self.targetRequests.count, requests);
 			[NSApp sendAction:controller.emptyModeRadio.action to:controller.emptyModeRadio.target from:controller.emptyModeRadio];
+			XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 			// Picked: it is the target
 			[self chooseDatabase:@"pgkit_io_dst" in:controller];
@@ -1179,7 +1203,9 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 		controller.newDatabasePrompt = nil;
 		[self chooseDatabase:@"New Database…" in:controller];
 		XCTAssertTrue([self spinUntil:^BOOL{ return controller.sheet.attachedSheet != nil; } timeout:5]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		[controller.sheet endSheet:controller.sheet.attachedSheet returnCode:NSAlertSecondButtonReturn];
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		[self spinUntil:^BOOL{ return controller.sheet.attachedSheet == nil; } timeout:5];
 		XCTAssertEqualObjects(controller.selectedDatabase, @"pgkit_io_src");
 		XCTAssertEqualObjects(controller.databasePopup.titleOfSelectedItem, @"pgkit_io_src");
@@ -1242,6 +1268,7 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 		NSTabView *tabView = [self.windowController valueForKey:@"tabView"];
 		[tabView removeTabViewItem:self.document.parentTabViewItem];
 		XCTAssertTrue([self spinUntil:^BOOL{ return self.ended; } timeout:5]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		XCTAssertFalse(session.isConnected, @"the session is closed");
 		XCTAssertNil(self.document.transferController);
 	}];
@@ -1262,10 +1289,12 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 			XCTAssertNotNil(dialog);
 			[tunnel show:dialog on:controller.sheet];
 			XCTAssertTrue([self spinUntil:^BOOL{ return controller.sheet.attachedSheet == dialog; } timeout:5]);
+			XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 			[controller cancel:nil];
 			XCTAssertEqualObjects(tunnel.answers, (@[[kind stringByAppendingString:@" no"]]), @"answered once, as Cancel/No");
 			XCTAssertTrue([self spinUntil:^BOOL{ return self.ended && controller.sheet.attachedSheet == nil && [self window].attachedSheet == nil; } timeout:5]);
+			XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 			XCTAssertFalse(dialog.isVisible);
 			self.controller = nil;
 			self.heldConnects = nil;
@@ -1305,6 +1334,7 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 		XCTAssertFalse([self.document validateMenuItem:menuItem]);
 		[self.document.exportController cancel:nil];
 		XCTAssertTrue([self spinUntil:^BOOL{ return self.document.exportController == nil && [self window].attachedSheet == nil; } timeout:5]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		XCTAssertTrue([self.document validateToolbarItem:item]);
 		XCTAssertFalse(item.isBordered, @"as MySQL's");
 
@@ -1323,6 +1353,7 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 			XCTAssertFalse([self.document validateToolbarItem:item], @"not while Transfer is up");
 			[opened cancel:nil];
 			XCTAssertTrue([self spinUntil:^BOOL{ return self.document.transferController == nil && [self window].attachedSheet == nil; } timeout:5]);
+			XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		}
 		@finally {
 			method_setImplementation(shared, original);

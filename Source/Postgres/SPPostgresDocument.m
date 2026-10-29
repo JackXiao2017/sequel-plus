@@ -132,6 +132,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 - (void)_showRenameTableSheetForTable:(NSString *)table;
 - (void)_renameTable:(NSString *)table inSchema:(NSString *)schema toName:(NSString *)newName;
 - (void)_validateNameSheets;
+- (BOOL)_refuseWriteWhileBusy;
+- (void)_showDatabaseNames:(NSArray *)names error:(NSError *)error;
 
 @end
 
@@ -443,6 +445,9 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	if (processing == isProcessing) return;
 	[self setIsProcessing:processing];
 
+	// As MySQL's database pop-up during a task
+	[databasePopup setEnabled:!processing];
+
 	// What isProcessing disables (as MySQL's task start and end revalidate the toolbar)
 	[self _updateHistoryControl];
 	if (!tornDown && [parentWindow toolbar] == toolbar) [toolbar validateVisibleItems];
@@ -509,11 +514,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// The sidebar's runner for the current connection.
 - (void)_installSidebarRunner
 {
-	// The sidebar keeps an inline runner on the tab's connection for now (its reloads have been applied when the call
-	// returns): Task 7 switches every controller to the tab's background runner at once, after Query, the sidebar and
-	// the panes are converted (until then they use the connection on the main thread, so no load may run on the
-	// runner's thread). The chained calls below already wait for the reloads' completions.
-	[sidebar setTaskRunner:[SPPostgresTaskRunner inlineRunnerWithConnection:connection]];
+	// The tab's background runner, as every pane's: one statement at a time on the connection, off the main thread
+	[sidebar setTaskRunner:taskRunner];
 }
 
 /**
@@ -546,9 +548,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}
 
 	contentController = [[SPPostgresContentController alloc] initWithConnection:connection];
-	// Content keeps its own inline runner on the tab's connection for now: Task 7 switches every controller to the tab's
-	// background runner at once, after Query, the sidebar and the panes are converted (until then they use the
-	// connection on the main thread, so no load may run on the runner's thread)
+	// Its loads run on the tab's background runner (as every pane's and the sidebar's: one at a time on the connection)
+	[contentController setTaskRunner:taskRunner];
 
 	// Through the tab's own presenter (a test's, or a sheet once the tab is visible). Unretained: the
 	// controller is this document's, and -_tearDown drops the block.
@@ -582,8 +583,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}
 
 	structureController = [[SPPostgresStructureController alloc] initWithConnection:connection];
-	// Keeps its own inline runner on the tab's connection for now, as Content (see -_installContentController): Task 7
-	// switches every controller to the tab's background runner at once
+	[structureController setTaskRunner:taskRunner]; // the tab's, as Content's
 
 	// Unretained, as the Content controller's presenter: -invalidate (on replace or teardown) drops the blocks
 	__block SPPostgresDocument *document = self;
@@ -623,8 +623,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}
 
 	relationsController = [[SPPostgresRelationsController alloc] initWithConnection:connection];
-	// Keeps its own inline runner on the tab's connection for now, as Content (see -_installContentController): Task 7
-	// switches every controller to the tab's background runner at once
+	[relationsController setTaskRunner:taskRunner]; // the tab's, as Content's
 
 	// Unretained, as the Content controller's presenter: -invalidate (on replace or teardown) drops the blocks
 	__block SPPostgresDocument *document = self;
@@ -665,8 +664,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}
 
 	triggersController = [[SPPostgresTriggersController alloc] initWithConnection:connection];
-	// Keeps its own inline runner on the tab's connection for now, as Content (see -_installContentController): Task 7
-	// switches every controller to the tab's background runner at once
+	[triggersController setTaskRunner:taskRunner]; // the tab's, as Content's
 
 	// Unretained, as the Content controller's presenter: -invalidate (on replace or teardown) drops the blocks
 	__block SPPostgresDocument *document = self;
@@ -704,8 +702,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}
 
 	infoController = [[SPPostgresTableInfoController alloc] initWithConnection:connection];
-	// Keeps its own inline runner on the tab's connection for now, as Content (see -_installContentController): Task 7
-	// switches every controller to the tab's background runner at once
+	[infoController setTaskRunner:taskRunner]; // the tab's, as Content's
 
 	// Unretained, as the Content controller's presenter: -invalidate (on replace or teardown) drops the blocks
 	__block SPPostgresDocument *document = self;
@@ -742,6 +739,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}
 
 	sequenceController = [[SPPostgresSequenceController alloc] initWithConnection:connection];
+	[sequenceController setTaskRunner:taskRunner]; // the tab's, as Content's
 
 	// Unretained, as the Content controller's presenter: -invalidate (on replace or teardown) drops the blocks
 	__block SPPostgresDocument *document = self;
@@ -778,6 +776,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}
 
 	extensionController = [[SPPostgresExtensionController alloc] initWithConnection:connection];
+	[extensionController setTaskRunner:taskRunner]; // the tab's, as Content's
 	[extensionController setDelegate:self];
 
 	// Unretained, as the Content controller's presenter: -invalidate (on replace or teardown) drops the block
@@ -813,8 +812,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}
 
 	queryController = [[SPPostgresQueryController alloc] initWithConnection:connection];
-	// Query keeps its own inline runner on the tab's connection for now, as Content (see -_installContentController):
-	// Task 7 switches every controller to the tab's background runner at once
+	[queryController setTaskRunner:taskRunner]; // the tab's, as Content's
 	if ([text length]) [[queryController editor] setString:text];
 
 	// Unretained, as the Content controller's presenter: -invalidate (on replace or teardown) drops the block
@@ -916,6 +914,18 @@ NSString * const SPPostgresPaneExtension = @"extension";
 - (BOOL)_endPaneEditing
 {
 	return [self _endEditingInPane:currentPane];
+}
+
+/**
+ * YES (after NSBeep) while the tab's runner is busy: the tab's own changes (add, drop, rename, duplicate) run on the
+ * main thread, so never while a load uses the connection. Their menus check isProcessing first; this covers a change
+ * confirmed (a sheet or an alert answered) after something was queued meanwhile.
+ */
+- (BOOL)_refuseWriteWhileBusy
+{
+	if (![taskRunner isBusy]) return NO;
+	NSBeep();
+	return YES;
 }
 
 /**
@@ -1266,9 +1276,12 @@ NSString * const SPPostgresPaneExtension = @"extension";
 			paneBeforeSequence = [([currentPane isEqualToString:SPPostgresPaneExtension] ? (paneBeforeExtension ?: SPPostgresPaneContent) : currentPane) copy];
 		}
 		sequenceSelected = YES;
-		if (![sequence isEqualToString:[sequenceController sequenceName]] || ![schema isEqualToString:[sequenceController schema]] || [sequenceController isStale]) sequenceNeedsReset = YES;
-		if (![currentPane isEqualToString:SPPostgresPaneSequence]) [self showPane:SPPostgresPaneSequence];
-		else [self _refreshSequenceIfStale];
+		BOOL sameSequence = [sequence isEqualToString:[sequenceController sequenceName]] && [schema isEqualToString:[sequenceController schema]];
+		if (!sameSequence || [sequenceController isStale]) sequenceNeedsReset = YES;
+		// The sequence the pane shows, listed again (renamed by Apply, or on leaving for the Query view, whose list
+		// reload runs after the pane changed): the Query view stays
+		if ([currentPane isEqualToString:SPPostgresPaneSequence]) [self _refreshSequenceIfStale];
+		else if (!(sameSequence && [currentPane isEqualToString:SPPostgresPaneQuery])) [self showPane:SPPostgresPaneSequence];
 	}
 	else {
 		sequenceSelected = NO;
@@ -1304,6 +1317,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[databasePopup setToolTip:NSLocalizedString(@"Select a database to view", @"PostgreSQL window: database picker tooltip")];
 	[databasePopup setTarget:self];
 	[databasePopup setAction:@selector(chooseDatabase:)];
+	[databasePopup setEnabled:!isProcessing];
 	[self _reloadDatabasePopup];
 
 	// Back and forward through the tab's history, as MySQL's control (SPHistoryController)
@@ -1723,6 +1737,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// Creates the sequence; on success lists and selects it, else shows the server's message.
 - (void)_createSequence:(SPPostgresSequenceDefinition *)definition inSchema:(NSString *)schema
 {
+	if ([self _refuseWriteWhileBusy]) return;
 	SPPostgresSequences *sequences = [[[SPPostgresSequences alloc] initWithConnection:connection schema:schema] autorelease];
 	NSError *error = nil;
 	if (![sequences createSequence:definition error:&error]) {
@@ -1770,6 +1785,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// Drops the sequence (never CASCADE); on success the lists reload (the selection is kept unless it was the one).
 - (void)_dropSequence:(NSString *)name inSchema:(NSString *)schema
 {
+	if ([self _refuseWriteWhileBusy]) return;
 	SPPostgresSequences *sequences = [[[SPPostgresSequences alloc] initWithConnection:connection schema:schema] autorelease];
 	NSError *error = nil;
 	if (![sequences dropSequence:name error:&error]) {
@@ -1814,6 +1830,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	installExtensionSheet = [sheet retain];
 	// The tab's alerts go where its other alerts go (tests)
 	if (alertPresenter) [[SPPostgresInstallExtensionSheet currentSheet] setAlertPresenter:alertPresenter];
+	// It reads and installs on the main thread: not while the tab's runner is busy
+	[[SPPostgresInstallExtensionSheet currentSheet] setTaskRunner:taskRunner];
 }
 
 /// After an install: the lists reload (it may have brought tables, views, types), and the new extension is selected
@@ -1863,6 +1881,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// message (or the objects that depend on it, one per line) is shown.
 - (void)_dropExtension:(NSString *)name
 {
+	if ([self _refuseWriteWhileBusy]) return;
 	// Only the dropped extension's own selection goes (a table, sequence or another extension stays selected)
 	BOOL wasSelected = [name isEqualToString:[sidebar selectedExtensionName]];
 
@@ -1935,11 +1954,24 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 #pragma mark - Databases
 
+/// Lists the databases again, through the tab's runner (one task, "Reloading...", not cancellable on its own; a cancel of
+/// everything queued keeps what is listed).
 - (void)_reloadDatabasePopup
 {
-	NSError *error = nil;
-	NSArray *names = [catalog databaseNames:&error];
+	if (tornDown) return;
+	SPPostgresCatalog *theCatalog = catalog;
+	[taskRunner runTaskWithDescription:NSLocalizedString(@"Reloading...", @"Reloading table task string") cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		return [theCatalog databaseNames:error];
+	} completion:^(id names, NSError *error, BOOL cancelled) {
+		if (tornDown || cancelled || theCatalog != catalog) return;
+		[self _showDatabaseNames:names error:error];
+	}];
+}
 
+/// The pop-up lists names (nil: they couldn't be read: the error is reported, and the databases listed stay), the
+/// tab's database selected.
+- (void)_showDatabaseNames:(NSArray *)names error:(NSError *)error
+{
 	if (!names) {
 		// Keep the databases that were listed (the separator and "Refresh Databases" follow them)
 		NSInteger listed = [databasePopup numberOfItems] - 2;
@@ -1961,6 +1993,11 @@ NSString * const SPPostgresPaneExtension = @"extension";
 - (void)refreshDatabases:(id)sender
 {
 	if (tornDown) return;
+	// A cell or field edit is saved first, while nothing else uses the connection (the busy state would end it)
+	if (![self _endPaneEditing]) {
+		[self _selectCurrentDatabaseInPopup];
+		return;
+	}
 	[self _reloadDatabasePopup];
 }
 
@@ -1983,6 +2020,12 @@ NSString * const SPPostgresPaneExtension = @"extension";
 		[self _selectCurrentDatabaseInPopup];
 		return;
 	}
+	// Not while a load runs (the pop-up is disabled then): the open transaction can't be checked meanwhile
+	if ([taskRunner isBusy]) {
+		NSBeep();
+		[self _selectCurrentDatabaseInPopup];
+		return;
+	}
 
 	// As MySQL's (couldCommitCurrentViewActions): an edit in progress in the shown pane is saved first
 	if (![self _endPaneEditing]) {
@@ -2002,7 +2045,27 @@ NSString * const SPPostgresPaneExtension = @"extension";
  */
 - (void)_confirmLeavingSession:(void (^)(BOOL proceed))completion
 {
-	PGPostgresTransactionStatus status = [connection transactionStatus];
+	// Read on the tab's runner, once what is queued (e.g. a reload after saving an edit) is done: libpq's status isn't
+	// the session's while a statement runs. Cancelled: no switch.
+	void (^then)(BOOL) = [[completion copy] autorelease];
+	confirmingSwitch = YES;
+	[self _updateHistoryControl];
+	[taskRunner runTaskWithDescription:NSLocalizedString(@"Reloading...", @"Reloading table task string") cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		return @([theConnection transactionStatus]);
+	} completion:^(id status, NSError *error, BOOL cancelled) {
+		confirmingSwitch = NO;
+		[self _updateHistoryControl];
+		if (tornDown || cancelled) {
+			then(NO);
+			return;
+		}
+		[self _confirmLeavingSessionWithStatus:(PGPostgresTransactionStatus)[status integerValue] completion:then];
+	}];
+}
+
+/// The rest of -_confirmLeavingSession: with the session's transaction status.
+- (void)_confirmLeavingSessionWithStatus:(PGPostgresTransactionStatus)status completion:(void (^)(BOOL proceed))completion
+{
 	if (status != PGPostgresTransactionInTransaction && status != PGPostgresTransactionInError) {
 		completion(YES);
 		return;
@@ -2054,8 +2117,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[previous cancel];
 	[previous release];
 
-	[databasePopup setEnabled:NO];
-	[self _updateIsProcessing];
+	[self _updateIsProcessing]; // disables the pop-up
 	[self _updateHistoryControl];
 
 	// The connector keeps the completion until it is called (always exactly once), which also keeps self
@@ -2073,8 +2135,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 	SPPostgresConnector *newConnector = pendingConnector; // takes over our reference
 	pendingConnector = nil;
-	[databasePopup setEnabled:YES];
-	[self _updateIsProcessing];
+	[self _updateIsProcessing]; // the pop-up follows
 
 	if (!newConnection) {
 		[newConnector release];
@@ -2100,6 +2161,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	// has left it (the block keeps the connector). -_attachCurrentConnection gives the new connection a runner.
 	SPPostgresTaskRunner *oldRunner = [[taskRunner retain] autorelease];
 	[self _setTaskRunner:nil];
+	quietSidebarReloads = 0; // their completions are never called now
 	[oldRunner invalidateWithCompletion:^{
 		[oldConnector disconnect];
 	}];
@@ -2193,11 +2255,23 @@ NSString * const SPPostgresPaneExtension = @"extension";
 {
 	if (tornDown || isProcessing || confirmingSwitch) return;
 
-	// As MySQL's (couldCommitCurrentViewActions): an edit in progress in the shown pane is ended (saved) first
-	if (![self _endPaneEditing]) return;
+	// As MySQL's (couldCommitCurrentViewActions): an edit in progress in the shown pane is ended (saved) first. A list
+	// reload that saving asks for (a sequence renamed) runs once the entry is shown, so it can't select the renamed
+	// sequence after the entry's selection is made (it keeps the entry's).
+	BOOL wasDeferring = deferringSidebarReloads;
+	deferringSidebarReloads = YES;
+	BOOL ended = [self _endPaneEditing];
+	deferringSidebarReloads = wasDeferring;
+	if (!ended) {
+		[self _reloadDeferredSidebar];
+		return;
+	}
 
 	NSDictionary *entry = back ? [history goBack] : [history goForward];
-	if (!entry) return;
+	if (!entry) {
+		[self _reloadDeferredSidebar];
+		return;
+	}
 
 	NSString *database = [entry objectForKey:@"database"];
 	if ([database length] && ![database isEqualToString:currentDatabase]) {
@@ -2217,6 +2291,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	else {
 		[self _applyHistoryEntry:entry];
 	}
+	[self _reloadDeferredSidebar];
 	[self _updateHistoryControl];
 }
 
@@ -2394,6 +2469,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// Duplicates the table; on success lists and selects the copy, else shows the server's message.
 - (void)_duplicateTable:(NSString *)table inSchema:(NSString *)schema toName:(NSString *)newName withContent:(BOOL)withContent
 {
+	if ([self _refuseWriteWhileBusy]) return;
 	NSError *error = nil;
 	if (![SPPostgresTableDuplicator duplicateTable:table inSchema:schema toName:newName withContent:withContent connection:connection error:&error]) {
 		NSAlert *alert = [[[NSAlert alloc] init] autorelease];
@@ -2514,6 +2590,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// Renames the table (ALTER TABLE … RENAME TO, as a structure change); on success the lists reload, keeping the selection on it.
 - (void)_renameTable:(NSString *)table inSchema:(NSString *)schema toName:(NSString *)newName
 {
+	if ([self _refuseWriteWhileBusy]) return;
 	SPPostgresTableStructure *tableStructure = [[[SPPostgresTableStructure alloc] initWithConnection:connection schema:schema table:table] autorelease];
 	NSError *error = nil;
 	if (![tableStructure renameTableTo:newName error:&error]) {
@@ -2982,6 +3059,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 - (IBAction)import:(id)sender
 {
 	if (![self _canRunSheetJob] || ![currentDatabase length]) return;
+	// An edit in progress is saved first: the import's end reloads the lists and panes (see -importDidChangeDatabase)
+	if (![self _endPaneEditing]) return;
 
 	SPPostgresImportController *controller = [[SPPostgresImportController alloc] initWithDocument:self];
 	importController = controller; // released when it ends

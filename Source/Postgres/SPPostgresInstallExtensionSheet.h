@@ -1,6 +1,7 @@
 #import <Cocoa/Cocoa.h>
 
 @class PGPostgresConnection;
+@class SPPostgresTaskRunner;
 
 /**
  * The Install Extension sheet, built in code (560×420, resizable): the extensions the server offers that are not
@@ -37,6 +38,10 @@ __attribute__((visibility("default")))
 
 /// Shows an alert (a failed Install); nil: as a sheet on this sheet.
 @property (copy) void (^alertPresenter)(NSAlert *alert);
+
+/// The tab's runner (nil: none). The sheet reads and installs on the main thread, so while it is busy Install is
+/// refused (NSBeep) and "Also installs" isn't read (it is read again on the next change of extension or version).
+@property (retain) SPPostgresTaskRunner *taskRunner;
 
 /// Selects the listed extension (clearing the filter if it hides it); NO when it isn't offered.
 - (BOOL)selectExtensionNamed:(NSString *)name;

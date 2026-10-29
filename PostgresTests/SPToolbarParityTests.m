@@ -5,6 +5,7 @@
 #import <dlfcn.h>
 #import <stdatomic.h>
 #import "SPTestPrefsGuard.h"
+#import "SPPostgresTestServers.h"
 #import "../Source/NSWindow+SPCompactChrome.h"
 #import "../Source/SPToolbarTransferItem.h"
 #import "../Source/SPWindowController.h"
@@ -182,6 +183,7 @@ static CGRect SPDifference(NSData *a, NSData *b, size_t width, size_t height)
 	[self.postgresDocuments addObject:document];
 	[self.controller addTabDocument:document atIndex:(NSUInteger)[[self tabView] numberOfTabViewItems] select:YES];
 	XCTAssertEqual([self.controller selectedDocument], document);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:document.taskRunner timeout:30]);
 	return document;
 }
 
