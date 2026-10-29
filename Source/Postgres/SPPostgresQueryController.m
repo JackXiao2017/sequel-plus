@@ -69,8 +69,11 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 @property (copy) NSString *status;
 @property (assign) BOOL schemaChanged;
 @property (assign) BOOL dataChanged;
-/// The run stopped because the runner was cancelled.
+/// The run stopped because the runner was cancelled (as MySQL's lastQueryWasCancelled: not when the cancel came after
+/// every statement had run).
 @property (assign) BOOL cancelled;
+/// The work ran (NO: the runner skipped it, cancelled before it started).
+@property (assign) BOOL started;
 /// Raised during the run (e.g. by the test hook); the run stopped there.
 @property (retain) NSException *exception;
 @end
@@ -82,6 +85,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 @synthesize schemaChanged;
 @synthesize dataChanged;
 @synthesize cancelled;
+@synthesize started;
 @synthesize exception;
 
 - (instancetype)init
@@ -126,10 +130,6 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 	BOOL running;                   // YES from a run's enqueue until its completion
 	BOOL invalidated;
-
-	/// The connection's logger while a run logs the user's statements as custom queries (nil: none), and what to restore
-	SPPostgresConsoleLogger *runLogger;
-	BOOL runLoggerWasLoggingCustomQueries;
 
 	/// Test seam: called on the runner's thread before each statement runs (see the tests' SPPostgresQueryController (Testing))
 	void (^statementWillRunHook)(NSString *statement);
@@ -190,9 +190,6 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	// Tooltip owners aren't retained
 	[runAllButton removeAllToolTips];
 	[runCurrentButton removeAllToolTips];
-
-	// A run's completion may never come (the tab's runner is invalidated when the tab closes)
-	[self _restoreRunLogging];
 
 	// The block may capture the tab
 	[runDidChangeDatabase release];
@@ -561,6 +558,15 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	NSUInteger number = 0;
 	NSUInteger shownStatement = 0; // the statement whose rows the grid will show (0: none)
 
+	[run setStarted:YES];
+
+	// The run's own statements, and only them, are logged as custom queries: the flag is set and restored here, on
+	// the thread that runs them (the logger reads it there, as each query is about to run), so the next task on the
+	// runner is logged as an interface query again even before this run's completion reaches the main thread. This
+	// work owns the flag: nothing on the main thread sets or restores it.
+	BOOL wasLoggingCustomQueries = [logger loggingCustomQueries];
+	[logger setLoggingCustomQueries:YES];
+
 	// An exception (from the hook, or a lost connection's) stops the run like an error: what ran is still shown
 	@try {
 		for (NSString *statement in statements) {
@@ -636,15 +642,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	@catch (NSException *exception) {
 		[run setException:exception];
 	}
-}
-
-/// Gives the interface's own queries back their logging, once per run (from the completion, or -invalidate if it never comes).
-- (void)_restoreRunLogging
-{
-	if (!runLogger) return;
-	[runLogger setLoggingCustomQueries:runLoggerWasLoggingCustomQueries];
-	[runLogger release];
-	runLogger = nil;
+	@finally {
+		[logger setLoggingCustomQueries:wasLoggingCustomQueries];
+	}
 }
 
 /**
@@ -665,10 +665,6 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	SPPostgresConsoleLogger *logger = [SPPostgresConsoleLogger loggerForConnection:[runner connection]];
 
 	running = YES;
-	[self _restoreRunLogging];
-	runLogger = [logger retain];
-	runLoggerWasLoggingCustomQueries = [logger loggingCustomQueries];
-	[logger setLoggingCustomQueries:YES];
 
 	// Everything the work needs, so it never reads this controller
 	NSArray *theStatements = [[statements copy] autorelease];
@@ -685,8 +681,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 		[SPPostgresQueryController _runStatements:theStatements onConnection:theConnection runner:runner logger:logger hook:hook into:run];
 		return run;
 	} completion:^(id result, NSError *error, BOOL cancelled) {
-		// Whatever happens, the interface's own queries are logged as such again and the next run is possible
-		[self _restoreRunLogging];
+		// Whatever happens, the next run is possible (the work restored the logging flag itself)
 		running = NO;
 
 		// Raised on the runner's thread: the inline runner's caller rethrows it below; otherwise it is reported here
@@ -694,7 +689,10 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 		if (invalidated) return;
 
-		NSString *status = (cancelled || [run cancelled]) ? NSLocalizedString(@"Query cancelled.", @"Query cancelled error") : ([run status] ?: @"");
+		// "Query cancelled." only when the cancel stopped the run (as MySQL's lastQueryWasCancelled), or kept it from
+		// starting; a cancel after every statement had run keeps the run's own status
+		BOOL stopped = [run cancelled] || (cancelled && ![run started]);
+		NSString *status = stopped ? NSLocalizedString(@"Query cancelled.", @"Query cancelled error") : ([run status] ?: @"");
 		[self _showResult:[run rowsResult]];
 		[self setStatusText:status];
 		[statusField setStringValue:status];
