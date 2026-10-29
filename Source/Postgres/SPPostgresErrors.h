@@ -29,7 +29,10 @@ typedef NS_ENUM(NSInteger, SPPostgresErrorCode) {
 	/// A transfer (SPPostgresTransfer) refused to start, before changing anything: the localized description says why
 	/// (the target is the database being copied, or extensions the copy needs aren't available on the target); the
 	/// objects concerned, if any, are listed under SPPostgresObjectsErrorKey.
-	SPPostgresErrorTransferRefused = 10
+	SPPostgresErrorTransferRefused = 10,
+	/// The server wants a password and none was given, or the one given was rejected ("password authentication
+	/// failed"). The server's message is the localized description; asking for the password and retrying can succeed.
+	SPPostgresErrorPasswordRequired = 11
 };
 
 /// userInfo key of SPPostgresErrorHasDependents: an NSArray of NSString, one description per dependent object.

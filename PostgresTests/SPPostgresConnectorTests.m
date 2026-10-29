@@ -118,15 +118,86 @@
 	}
 }
 
-- (void)testWrongPasswordReportsConnectionFailedWithServerMessage
-{
-	SPPostgresConnector *connector = [[SPPostgresConnector alloc] initWithFavorite:[self favoriteOnPort:55412] password:@"wrong" sshPassword:nil parentWindow:nil];
-	SPPGConnectOutcome *outcome = [self connect:connector timeout:15];
+#pragma mark - Password required
 
+- (void)testMissingPasswordReportsPasswordRequired
+{
+	for (NSNumber *port in @[@55412, @55418]) {
+		SPPostgresConnector *connector = [[SPPostgresConnector alloc] initWithFavorite:[self favoriteOnPort:port.unsignedIntegerValue] password:nil sshPassword:nil parentWindow:nil];
+		SPPGConnectOutcome *outcome = [self connect:connector timeout:15];
+
+		XCTAssertNil(outcome.connection, @"port %@", port);
+		XCTAssertEqualObjects(outcome.error.domain, SPPostgresErrorDomain);
+		XCTAssertEqual(outcome.error.code, SPPostgresErrorPasswordRequired, @"port %@: %@", port, outcome.error);
+		XCTAssertTrue(outcome.error.localizedDescription.length > 0);
+	}
+}
+
+- (void)testWrongPasswordReportsPasswordRequired
+{
+	for (NSNumber *port in @[@55412, @55418]) {
+		SPPostgresConnector *connector = [[SPPostgresConnector alloc] initWithFavorite:[self favoriteOnPort:port.unsignedIntegerValue] password:@"wrong" sshPassword:nil parentWindow:nil];
+		SPPGConnectOutcome *outcome = [self connect:connector timeout:15];
+
+		XCTAssertNil(outcome.connection, @"port %@", port);
+		XCTAssertEqualObjects(outcome.error.domain, SPPostgresErrorDomain);
+		XCTAssertEqual(outcome.error.code, SPPostgresErrorPasswordRequired, @"port %@: %@", port, outcome.error);
+		// The server's own message
+		XCTAssertTrue([outcome.error.localizedDescription containsString:@"password authentication failed"], @"%@", outcome.error.localizedDescription);
+	}
+}
+
+- (void)testMissingDatabaseIsNotPasswordRequired
+{
+	for (NSNumber *port in @[@55412, @55418]) {
+		SPPostgresFavorite *favorite = [self favoriteOnPort:port.unsignedIntegerValue];
+		favorite.database = @"sp_t7_missing";
+		SPPostgresConnector *connector = [[SPPostgresConnector alloc] initWithFavorite:favorite password:@"pgkit" sshPassword:nil parentWindow:nil];
+		SPPGConnectOutcome *outcome = [self connect:connector timeout:15];
+
+		XCTAssertNil(outcome.connection, @"port %@", port);
+		XCTAssertEqual(outcome.error.code, SPPostgresErrorConnectionFailed, @"port %@: %@", port, outcome.error);
+		XCTAssertTrue([outcome.error.localizedDescription containsString:@"sp_t7_missing"], @"%@", outcome.error.localizedDescription);
+	}
+}
+
+#pragma mark - Sharing another connector's tunnel
+
+- (void)testSharingConnectorOnTCPConnectsAndLeavesOtherOpen
+{
+	for (NSNumber *port in @[@55412, @55418]) {
+		SPPostgresConnector *a = [[SPPostgresConnector alloc] initWithFavorite:[self favoriteOnPort:port.unsignedIntegerValue] password:@"pgkit" sshPassword:nil parentWindow:nil];
+		SPPGConnectOutcome *first = [self connect:a timeout:15];
+		XCTAssertNil(first.error, @"port %@", port);
+
+		SPPostgresConnector *b = [[SPPostgresConnector alloc] initWithFavorite:[self favoriteOnPort:port.unsignedIntegerValue] password:@"pgkit" sharingTunnelOf:a];
+		XCTAssertEqualObjects(b.password, @"pgkit");
+		SPPGConnectOutcome *second = [self connect:b timeout:15];
+		XCTAssertNil(second.error, @"port %@: %@", port, second.error);
+		XCTAssertTrue(second.connection.isConnected);
+		XCTAssertNotEqual(first.connection, second.connection);
+
+		[b disconnect];
+		XCTAssertFalse(second.connection.isConnected);
+		XCTAssertTrue(first.connection.isConnected, @"port %@: -disconnect of the sharing connector closed the other", port);
+		XCTAssertNotNil([first.connection execute:@"SELECT 1"]);
+
+		[a disconnect];
+	}
+}
+
+- (void)testSharingConnectorForSSHFavoriteWithoutTunnelFails
+{
+	// `other` was never connected, so it has no tunnel to share
+	SPPostgresConnector *a = [[SPPostgresConnector alloc] initWithFavorite:[self sshFavorite] password:@"pgkit" sshPassword:@"sshtest" parentWindow:nil];
+	SPPostgresConnector *b = [[SPPostgresConnector alloc] initWithFavorite:[self sshFavorite] password:@"pgkit" sharingTunnelOf:a];
+	SPPGConnectOutcome *outcome = [self connect:b timeout:10];
 	XCTAssertNil(outcome.connection);
-	XCTAssertEqualObjects(outcome.error.domain, SPPostgresErrorDomain);
-	XCTAssertEqual(outcome.error.code, SPPostgresErrorConnectionFailed);
-	XCTAssertTrue([outcome.error.localizedDescription containsString:@"password authentication failed"], @"%@", outcome.error.localizedDescription);
+	XCTAssertEqual(outcome.error.code, SPPostgresErrorSSHTunnelFailed, @"%@", outcome.error);
+
+	SPPostgresConnector *orphan = [[SPPostgresConnector alloc] initWithFavorite:[self sshFavorite] password:@"pgkit" sharingTunnelOf:nil];
+	outcome = [self connect:orphan timeout:10];
+	XCTAssertEqual(outcome.error.code, SPPostgresErrorSSHTunnelFailed, @"%@", outcome.error);
 }
 
 - (void)testUnreachableHostFailsWithinTimeout
@@ -459,6 +530,36 @@
 	SPPostgresConnector *connector = [[SPPostgresConnector alloc] initWithFavorite:[self sshFavorite] password:@"pgkit" sshPassword:@"sshtest" parentWindow:nil];
 	SPPGConnectOutcome *outcome = [self connect:connector timeout:10];
 	XCTAssertEqual(outcome.error.code, SPPostgresErrorSSHTunnelFailed);
+}
+
+- (void)testSharingConnectorUsesTheOtherSSHTunnelAndLeavesItOpen
+{
+	[self useTestSSHClient];
+	NSWindow *window = [self parentWindow];
+	SPPostgresConnector *a = [[SPPostgresConnector alloc] initWithFavorite:[self sshFavorite] password:@"pgkit" sshPassword:@"sshtest" parentWindow:window];
+	SPPGConnectOutcome *first = [self connect:a timeout:30];
+	XCTAssertNil(first.error);
+	id tunnel = a.tunnel;
+	XCTAssertNotNil(tunnel);
+	NSInteger connectedState = 3; // SPMySQLProxyConnected (SPMySQL isn't imported by this target)
+	XCTAssertEqual([[tunnel valueForKey:@"state"] integerValue], connectedState);
+
+	SPPostgresConnector *b = [[SPPostgresConnector alloc] initWithFavorite:[self sshFavorite] password:@"pgkit" sharingTunnelOf:a];
+	SPPGConnectOutcome *second = [self connect:b timeout:15];
+	XCTAssertNil(second.error, @"%@", second.error);
+	XCTAssertNil(b.tunnel, @"the sharing connector opens no tunnel of its own");
+	NSString *version = [[[[second.connection execute:@"SELECT version()"] rowAsArray] firstObject] description];
+	XCTAssertTrue([version hasPrefix:@"PostgreSQL 18"], @"%@", version);
+
+	[b disconnect];
+	XCTAssertFalse(second.connection.isConnected);
+	XCTAssertEqual(a.tunnel, tunnel);
+	XCTAssertEqual([[tunnel valueForKey:@"state"] integerValue], connectedState, @"the other's tunnel was closed");
+	[self spinFor:1.5 until:nil]; // past the connector's delayed second tunnel disconnect
+	XCTAssertEqual([[tunnel valueForKey:@"state"] integerValue], connectedState, @"the other's tunnel was closed");
+	XCTAssertNotNil([first.connection execute:@"SELECT 1"]);
+
+	[a disconnect];
 }
 
 @end

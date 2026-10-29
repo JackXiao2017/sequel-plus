@@ -10,7 +10,7 @@
  *
  * Use from the main thread. The connector owns the session: keep it alive for as long as the
  * returned connection is in use. Releasing it (or calling -disconnect) closes the connection and
- * the SSH tunnel.
+ * its own SSH tunnel (a connector sharing another's tunnel never closes that tunnel).
  */
 __attribute__((visibility("default")))
 @interface SPPostgresConnector : NSObject
@@ -20,6 +20,18 @@ __attribute__((visibility("default")))
 						password:(NSString *)password
 					 sshPassword:(NSString *)sshPassword
 					parentWindow:(NSWindow *)parentWindow;
+
+/**
+ * A connector that reuses `other`'s SSH tunnel instead of opening one (so no second SSH prompt), with no parent
+ * window. For an SSH favorite it connects to 127.0.0.1:<other's tunnel local port>; if `other` has no connected
+ * tunnel the attempt fails with SPPostgresErrorSSHTunnelFailed. `other` (and so its tunnel) is retained until this
+ * connector disconnects or is released; this connector's -disconnect/-cancel never close `other`'s tunnel (but
+ * if `other` is disconnected explicitly, this connection loses its tunnel). For other favorites this is the
+ * normal initializer with no SSH password and no parent window.
+ */
+- (instancetype)initWithFavorite:(SPPostgresFavorite *)favorite
+						password:(NSString *)password
+				 sharingTunnelOf:(SPPostgresConnector *)other;
 
 /**
  * Starts connecting. The completion is always called exactly once, on the main thread, and never

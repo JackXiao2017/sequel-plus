@@ -104,6 +104,11 @@ static char SPPostgresConnectorProxyKey;
 	SPPostgresConnectorProxy *proxy;
 	PGPostgresConnection *connection;
 	SPSSHTunnel *tunnel;
+
+	// An SSH favorite's connector whose session goes through another connector's tunnel: retained (and with it
+	// that connector's tunnel) until this one disconnects. Its tunnel is never closed from here.
+	SPPostgresConnector *tunnelOwner;
+	BOOL sharesTunnel;
 	dispatch_queue_t connectQueue;
 
 	void (^completion)(PGPostgresConnection *, NSError *);
@@ -135,11 +140,23 @@ static char SPPostgresConnectorProxyKey;
 	return self;
 }
 
+- (instancetype)initWithFavorite:(SPPostgresFavorite *)theFavorite password:(NSString *)thePassword sharingTunnelOf:(SPPostgresConnector *)other
+{
+	if ((self = [self initWithFavorite:theFavorite password:thePassword sshPassword:nil parentWindow:nil])) {
+		if ([favorite type] == SPPostgresSSHConnection) {
+			sharesTunnel = YES;
+			tunnelOwner = [other retain];
+		}
+	}
+	return self;
+}
+
 - (void)dealloc
 {
 	[proxy abandon];
 	[self _closeTunnel];
 	[self _closeConnectionWaiting:NO];
+	[self _releaseTunnelOwner];
 
 	// Released while an attempt was pending: the completion is still owed exactly one call. Deliver it
 	// from a later main-queue turn (never from inside dealloc, nor re-entrantly). The block takes over
@@ -246,7 +263,8 @@ static char SPPostgresConnectorProxyKey;
 			break;
 		}
 		case SPPostgresSSHConnection:
-			[self _startTunnelToPort:port];
+			if (sharesTunnel) [self _startThroughSharedTunnel];
+			else [self _startTunnelToPort:port];
 			break;
 		case SPPostgresTCPIPConnection:
 		default:
@@ -338,6 +356,20 @@ static char SPPostgresConnectorProxyKey;
 	[tunnel connect];
 }
 
+/// Connects through the tunnel owner's tunnel, which must be up already; never opens or closes a tunnel.
+- (void)_startThroughSharedTunnel
+{
+	SPSSHTunnel *sharedTunnel = [tunnelOwner tunnel];
+
+	if (!sharedTunnel || [sharedTunnel state] != SPMySQLProxyConnected || ![sharedTunnel localPort]) {
+		[self _releaseTunnelOwner];
+		[self _finishLaterWithError:[[self class] _errorWithCode:SPPostgresErrorSSHTunnelFailed message:NSLocalizedString(@"The SSH tunnel of this favorite's session is not connected.", @"PostgreSQL shared SSH tunnel is not connected")]];
+		return;
+	}
+
+	[self _startPostgresWithHost:@"127.0.0.1" port:[sharedTunnel localPort] useSocket:NO];
+}
+
 #pragma mark - Callbacks (main thread, via the proxy)
 
 - (void)_sshTunnelStateChanged:(SPSSHTunnel *)theTunnel
@@ -378,7 +410,12 @@ static char SPPostgresConnectorProxyKey;
 		return;
 	}
 
-	[self _finishWithConnection:nil error:[[self class] _errorWithCode:SPPostgresErrorConnectionFailed message:message]];
+	// The server wants a password: none was given, or the one sent was rejected. The caller may ask for one.
+	BOOL needed = [theConnection connectionNeededPassword];
+	BOOL rejected = [theConnection connectionUsedPassword] && [message rangeOfString:@"password authentication failed"].location != NSNotFound;
+	SPPostgresErrorCode code = (needed || rejected) ? SPPostgresErrorPasswordRequired : SPPostgresErrorConnectionFailed;
+
+	[self _finishWithConnection:nil error:[[self class] _errorWithCode:code message:message]];
 }
 
 #pragma mark - Finishing and tearing down
@@ -404,6 +441,7 @@ static char SPPostgresConnectorProxyKey;
 		[proxy abandon];
 		[self _closeTunnel];
 		[self _closeConnectionWaiting:NO];
+		[self _releaseTunnelOwner];
 	}
 	else if (tunnel && parentWindow) {
 		// The tunnel only needs the window for its password and host-key sheets, which come up while
@@ -441,6 +479,15 @@ static char SPPostgresConnectorProxyKey;
 	});
 
 	[theTunnel release];
+}
+
+/// Lets go of the connector whose tunnel this one shares (after this one's connection is closed or closing).
+/// Its tunnel is its own business: it closes when that connector disconnects or is released.
+- (void)_releaseTunnelOwner
+{
+	SPPostgresConnector *owner = tunnelOwner;
+	tunnelOwner = nil;
+	[owner release];
 }
 
 /// `wait`: block until the connection is closed (it waits for an in-flight -connect call to return).
@@ -486,6 +533,7 @@ static char SPPostgresConnectorProxyKey;
 	[proxy abandon];
 	[self _closeConnectionWaiting:YES];
 	[self _closeTunnel];
+	[self _releaseTunnelOwner];
 
 	if (started && !finished) {
 		[self _finishWithConnection:nil error:[[self class] _errorWithCode:SPPostgresErrorCancelled message:nil]];
