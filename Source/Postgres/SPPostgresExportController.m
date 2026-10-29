@@ -267,7 +267,9 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 	schemasList = [[SPPostgresCheckList alloc] initWithFrame:listFrame inView:content];
 	tablesList = [[SPPostgresCheckList alloc] initWithFrame:listFrame inView:content];
 	[tablesList setGroupsByFirstElement:YES];
-	void (^changed)(void) = ^{ [self _updateControls]; };
+	// Not capturing self: the lists keep the block, and the controller keeps the lists
+	__block SPPostgresExportController *controller = self;
+	void (^changed)(void) = ^{ [controller _updateControls]; };
 	[schemasList setChecksChanged:changed];
 	[tablesList setChecksChanged:changed];
 	sourceNote = [[self _labelWithFrame:NSMakeRect(20, 200 + listFrame.size.height - 24, width - 40, 18) text:@""] retain];
@@ -344,8 +346,8 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 {
 	SPPostgresCatalog *catalog = [[[SPPostgresCatalog alloc] initWithConnection:[document connection]] autorelease];
 	NSError *error = nil;
-	NSArray *rows = [SPPostgresCheckList groupedRowsForCatalog:catalog error:&error];
-	NSArray *schemas = [catalog schemaNames:NULL];
+	NSArray *schemas = [catalog schemaNames:&error];
+	NSArray *rows = [SPPostgresCheckList groupedRowsForSchemas:schemas inCatalog:catalog error:&error];
 	if (error) [self _setLastErrorMessage:[error localizedDescription]];
 
 	// Which of them are partitioned (a failure leaves the set empty)
@@ -365,6 +367,12 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 	[schemasList setRows:schemaNames];
 	[tablesList setRows:tableRows];
 
+	// Only whether the Query view holds a result, and how many rows: the rows are read when the result is exported
+	SPPostgresQueryController *query = [document queryController];
+	[queryColumnNames release];
+	queryColumnNames = [[query lastResultColumnNames] copy];
+	queryRowCount = queryColumnNames ? [query lastResultRowCount] : 0;
+
 	SPPostgresSidebarController *sidebar = [document sidebar];
 	NSString *selectedSchema = [sidebar selectedSchema];
 	NSString *selectedTable = [sidebar selectionIsTable] ? [sidebar selectedTableName] : nil;
@@ -372,12 +380,6 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 		[tablesList setChecked:YES item:@[selectedSchema, selectedTable]];
 	}
 	if (selectedSchema && [schemaNames containsObject:selectedSchema]) [schemasList setChecked:YES item:selectedSchema];
-
-	// Only whether the Query view holds a result, and how many rows: the rows are read when the result is exported
-	SPPostgresQueryController *query = [document queryController];
-	[queryColumnNames release];
-	queryColumnNames = [[query lastResultColumnNames] copy];
-	queryRowCount = queryColumnNames ? [query lastResultRowCount] : 0;
 
 }
 
