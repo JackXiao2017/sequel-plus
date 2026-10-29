@@ -7,6 +7,9 @@
 #import "../Source/Postgres/SPPostgresSidebarController.h"
 #import "../Source/Postgres/SPPostgresStructureController.h"
 #import "../Source/Postgres/SPPostgresContentController.h"
+#import "../Source/Postgres/SPPostgresRelationsController.h"
+#import "../Source/Postgres/SPPostgresTriggersController.h"
+#import "../Source/Postgres/SPPostgresTableInfoController.h"
 #import "../Source/Postgres/SPPostgresHistory.h"
 #import "../Source/Postgres/SPPostgresQueryController.h"
 #import "../Source/Postgres/SPPostgresConnector.h"
@@ -1865,6 +1868,118 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	XCTAssertEqualObjects(sidebar.selectedSchema, @"app");
 	XCTAssertTrue([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"items"]);
 	XCTAssertFalse([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"customers"]);
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+}
+
+#pragma mark - Panes in the background
+
+/// The table panes on the tab's background runner (the tab keeps them on inline runners until Stage 8 Task 7), put
+/// back on their own when the test ends. The test waits for the runner before anything else uses the connection.
+- (void)putPanesOnTabRunner
+{
+	SPPostgresTaskRunner *runner = self.document.taskRunner;
+	XCTAssertFalse(runner.isInline);
+	NSArray *panes = @[self.document.contentController, self.document.structureController, self.document.relationsController,
+					   self.document.triggersController, self.document.infoController];
+	for (id pane in panes) {
+		SPPostgresTaskRunner *previous = [pane taskRunner];
+		[pane setTaskRunner:runner];
+		[self addTeardownBlock:^{
+			[pane setTaskRunner:previous];
+		}];
+	}
+}
+
+- (void)waitForTab
+{
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+}
+
+/// Selects structure_test.<table> while a one-second statement runs, then cancels: the switch's loads are cancelled.
+- (void)cancelSwitchTo:(NSString *)table
+{
+	SPPostgresTaskRunner *runner = self.document.taskRunner;
+	[runner runTaskWithDescription:@"Sleeping..." cancelTitle:@"Cancel" work:^id(PGPostgresConnection *connection, NSError **error) {
+		return [connection execute:@"SELECT pg_sleep(1)"];
+	} completion:nil];
+	XCTAssertTrue([self.document.sidebar selectTableNamed:table], @"%@", table);
+	XCTAssertTrue(runner.isBusy);
+	[runner cancelAll];
+	[self waitForTab];
+}
+
+/// Shows a pane (by its menu action) and waits for its load.
+- (void)show:(SEL)action
+{
+	[NSApp sendAction:action to:self.document from:nil];
+	[self waitForTab];
+}
+
+/// A table switch cancelled leaves the shown pane empty, without an alert, and stale: it loads the table when it is
+/// next shown. Content (which loads on every switch) too.
+- (void)testCancelledPaneReloadsWhenShownAgain
+{
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self selectStructureTable:@"child"];
+	[self putPanesOnTabRunner];
+	SPPostgresDocument *document = self.document;
+
+	// Structure (and Content, behind it)
+	[self show:@selector(viewStructure:)];
+	XCTAssertEqual([document.structureController.columnsView numberOfRows], 2);
+	[self cancelSwitchTo:@"t"];
+	XCTAssertEqualObjects(document.structureController.table, @"t");
+	XCTAssertEqual([document.structureController.columnsView numberOfRows], 0);
+	XCTAssertEqualObjects(document.contentController.table, @"t");
+	XCTAssertEqual([document.contentController.tableView numberOfRows], 0);
+	[self show:@selector(viewContent:)];
+	XCTAssertEqual([document.contentController.tableView numberOfRows], 2, @"Content loads the table when shown");
+	[self show:@selector(viewStructure:)];
+	XCTAssertEqual([document.structureController.columnsView numberOfRows], 8, @"Structure loads the table when shown again");
+
+	// Relations
+	[self show:@selector(viewRelations:)];
+	XCTAssertEqualObjects(document.relationsController.noticeText, @"Relations for table: t");
+	[self cancelSwitchTo:@"child"];
+	XCTAssertEqualObjects(document.relationsController.table, @"child");
+	XCTAssertEqualObjects(document.relationsController.noticeText, @"");
+	XCTAssertEqual([document.relationsController.relationsView numberOfRows], 0);
+	[self show:@selector(viewStructure:)];
+	[self show:@selector(viewRelations:)];
+	XCTAssertEqual([document.relationsController.relationsView numberOfRows], 1);
+
+	// Triggers
+	[self show:@selector(viewTriggers:)];
+	XCTAssertEqualObjects(document.triggersController.noticeText, @"Triggers for table: child");
+	[self cancelSwitchTo:@"t"];
+	XCTAssertEqualObjects(document.triggersController.table, @"t");
+	XCTAssertEqualObjects(document.triggersController.noticeText, @"");
+	XCTAssertEqual([document.triggersController.triggersView numberOfRows], 0);
+	[self show:@selector(viewStructure:)];
+	[self show:@selector(viewTriggers:)];
+	XCTAssertEqual([document.triggersController.triggersView numberOfRows], 2);
+
+	// Table Info
+	[self show:@selector(viewStatus:)];
+	XCTAssertEqualObjects([document.infoController.commentView string], @"the t table");
+	[self cancelSwitchTo:@"child"];
+	XCTAssertEqualObjects(document.infoController.table, @"child");
+	XCTAssertEqualObjects([document.infoController.typeField stringValue], @"");
+	[self show:@selector(viewStructure:)];
+	[self show:@selector(viewStatus:)];
+	XCTAssertEqualObjects([document.infoController.typeField stringValue], @"table");
+	XCTAssertTrue([[document.infoController.createSyntaxView string] containsString:@"child"]);
+
+	// Content
+	[self show:@selector(viewContent:)];
+	XCTAssertEqualObjects(document.contentController.table, @"child");
+	[self cancelSwitchTo:@"t"];
+	XCTAssertEqualObjects(document.contentController.table, @"t");
+	XCTAssertEqual([document.contentController.tableView numberOfRows], 0);
+	[self show:@selector(viewStructure:)];
+	[self show:@selector(viewContent:)];
+	XCTAssertEqual([document.contentController.tableView numberOfRows], 2, @"Content loads the table when shown again");
+
 	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
 }
 
