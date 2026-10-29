@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 
 @class PGPostgresConnection;
+@class SPPostgresTaskRunner;
 @protocol PGPostgresConnectionDelegate;
 
 /// Helpers for the Docker test servers started by Scripts/pg-test-servers.sh
@@ -64,5 +65,9 @@
 /// Returns a connection to database pgkit_ext (created when missing) after dropping every extension installed there
 /// except plpgsql, dependents first (test code only: DROP EXTENSION … CASCADE), or fails the current test.
 + (PGPostgresConnection *)extensionTestConnectionOnPort:(NSUInteger)port;
+
+/// Spins the main run loop until runner is no longer busy (its last queued completion has returned). YES if it went
+/// idle within timeout seconds.
++ (BOOL)waitForRunner:(SPPostgresTaskRunner *)runner timeout:(NSTimeInterval)timeout;
 
 @end

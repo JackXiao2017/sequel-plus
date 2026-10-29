@@ -1,6 +1,7 @@
 #import "SPPostgresTestServers.h"
 #import <XCTest/XCTest.h>
 #import <PostgresKit/PostgresKit.h>
+#import "../Source/Postgres/SPPostgresTaskRunner.h"
 
 @implementation SPPostgresTestServers
 
@@ -353,6 +354,17 @@ static NSString * const SPUserSchemas = @"nspname NOT LIKE 'pg\\_%' AND nspname 
 	}
 	[connection execute:@"RESET lock_timeout"];
 	return connection;
+}
+
+#pragma mark - Task runner
+
++ (BOOL)waitForRunner:(SPPostgresTaskRunner *)runner timeout:(NSTimeInterval)timeout
+{
+	NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
+	while (runner.isBusy && [deadline timeIntervalSinceNow] > 0) {
+		[[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+	}
+	return !runner.isBusy;
 }
 
 @end
