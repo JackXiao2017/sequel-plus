@@ -662,6 +662,28 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 	}];
 }
 
+/// Cancel right after Transfer, before the Transfer sheet's completion handler could have run: the job never starts
+/// (when the progress sheet hasn't begun yet) and the controller ends cleanly.
+- (void)testCancelRightAfterTransferEndsCleanly
+{
+	[self onEachPort:^(NSNumber *port, PGPostgresConnection *target) {
+		__weak SPPostgresTransferController *weakController = nil;
+		@autoreleasepool {
+			SPPostgresTransferController *controller = [self openSheet];
+			weakController = controller;
+			controller.emptyConfirmation = ^(NSString *database, NSString *targetDescription, void (^answer)(BOOL)) { answer(YES); };
+			[controller transfer:nil];
+			BOOL progressBegan = controller.progressSheet != nil;
+			[controller cancel:nil];
+			if (!progressBegan) XCTAssertEqual(self.targetRequests.count, 0u, @"no provider asked");
+			self.controller = nil;
+		}
+		XCTAssertTrue([self spinUntil:^BOOL{ return self.ended && [self window].attachedSheet == nil; } timeout:30]);
+		XCTAssertNil([self window].attachedSheet, @"no progress sheet attached");
+		XCTAssertTrue([self spinUntil:^BOOL{ @autoreleasepool { return weakController == nil; } } timeout:10], @"the controller deallocates");
+	}];
+}
+
 - (void)testControllerDeallocatesAfterCancel
 {
 	[self onEachPort:^(NSNumber *port, PGPostgresConnection *target) {
