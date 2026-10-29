@@ -41,6 +41,8 @@ __attribute__((visibility("default")))
 	NSArray *dependenciesCreated;
 	NSArray *foreignTablesSkipped;
 	NSArray *skippedSettings;
+	NSUInteger readingTableIndex;
+	NSUInteger readingTableCount;
 }
 
 - (instancetype)initWithSource:(PGPostgresConnection *)source target:(PGPostgresConnection *)target;
@@ -61,6 +63,11 @@ __attribute__((visibility("default")))
  * Writing while the dump loads (fraction bytes read / dump size, detail nil). Returning NO cancels.
  */
 @property (copy) BOOL (^progress)(SPPostgresTransferPhase phase, double fraction, NSString *detail);
+
+/// During a Reading report (read them from the progress block): the table being read, from 1, and how many tables the
+/// dump reads (partitioned parents included); 0 before the first Reading report.
+@property (readonly) NSUInteger readingTableIndex;
+@property (readonly) NSUInteger readingTableCount;
 
 /**
  * Runs the transfer, synchronously: same-database check, the copy's objects and dependencies on the source, the

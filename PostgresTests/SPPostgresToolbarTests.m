@@ -425,8 +425,8 @@ static NSString * const SPTestUsers = @"SwitchToUserManagerToolbarItemIdentifier
 		if ([[item itemIdentifier] hasPrefix:@"NSToolbar"]) continue;
 		if ([self isEnabled:item forDocument:postgres]) [enabled addObject:[item itemIdentifier]];
 	}
-	// Content needs a selected table; Query works without one; Users opens the Users sheet
-	XCTAssertEqualObjects(enabled, (@[SPTestDatabase, SPTestQuery, SPTestUsers, SPTestShowConsole]));
+	// Content needs a selected table; Query works without one; Users opens the Users sheet, Transfer the Transfer sheet
+	XCTAssertEqualObjects(enabled, (@[SPTestDatabase, SPTestQuery, SPTestUsers, SPTestTransfer, SPTestShowConsole]));
 
 	// History is a view item with both segments disabled (as on a MySQL connection screen)
 	NSToolbarItem *history = [self itemWithIdentifier:SPTestHistory inToolbar:toolbar];
