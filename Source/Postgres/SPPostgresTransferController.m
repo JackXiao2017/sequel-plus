@@ -324,8 +324,9 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 }
 
 /// The tables of this tab's database (catalog queries on the tab's connection), preset to the sidebar's selected table;
-/// the favorites, the first that isn't this tab's selected.
-- (void)_loadContents
+/// the favorites, the first that isn't this tab's selected. Returns the error reading the tables, if any (the list is
+/// then empty).
+- (NSError *)_loadContents
 {
 	SPPostgresCatalog *catalog = [[[SPPostgresCatalog alloc] initWithConnection:[document connection]] autorelease];
 	NSError *error = nil;
@@ -354,6 +355,7 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 	}
 	if ([favorites count]) [favoritePopup selectItemAtIndex:preselected >= 0 ? preselected : 0];
 	[self _favoriteChanged:nil];
+	return error;
 }
 
 #pragma mark - Controls
@@ -433,9 +435,20 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 	[self retain]; // until -_finish
 
 	[self _buildSheet];
-	[self _loadContents];
+	NSError *tablesError = [self _loadContents];
 	[self _updateControls];
 	[window beginSheet:sheet completionHandler:nil];
+
+	// The tables couldn't be read: say why, rather than show an empty list. On the sheet (no presenter set);
+	// otherwise as the document shows its alerts
+	if (tablesError) {
+		NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+		[alert setMessageText:NSLocalizedString(@"The tables couldn't be read", @"Postgres transfer: error title, the tables list failed to load")];
+		[alert setInformativeText:[tablesError localizedDescription] ?: @""];
+		[alert addButtonWithTitle:NSLocalizedString(@"OK", @"OK button")];
+		if ([sheet sheetParent] && ![document alertPresenter]) [alert beginSheetModalForWindow:sheet completionHandler:nil];
+		else [document presentAlert:alert];
+	}
 }
 
 /// Takes the sheet off the window (the controller stays).

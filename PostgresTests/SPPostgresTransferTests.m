@@ -4,6 +4,8 @@
 #import "../Source/Postgres/SPPostgresTransfer.h"
 #import "../Source/Postgres/SPPostgresDumpObject.h"
 #import "../Source/Postgres/SPPostgresErrors.h"
+#import "../Source/Postgres/SPPostgresDocument.h"
+#import "../Source/Postgres/SPPostgresBackgroundJob.h"
 
 /// A transfer whose target lacks one available extension.
 @interface SPPostgresTransferWithoutExtension : SPPostgresTransfer
@@ -20,6 +22,11 @@
 	[names removeObject:self.unavailable];
 	return names;
 }
+@end
+
+/// The same-database check's identity (private).
+@interface SPPostgresTransfer (IdentityForTests)
+- (NSArray *)_identityOf:(PGPostgresConnection *)connection;
 @end
 
 /// SPPostgresTransfer between pgkit_io_src (io_source.sql) and pgkit_io_dst, on both ports and across them.
@@ -94,6 +101,15 @@
 	SPPostgresTransfer *transfer = [[SPPostgresTransfer alloc] initWithSource:source target:target];
 	transfer.temporaryDirectory = self.directory;
 	return transfer;
+}
+
+- (BOOL)spinUntil:(BOOL (^)(void))condition timeout:(NSTimeInterval)timeout
+{
+	NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
+	while (!condition() && [deadline timeIntervalSinceNow] > 0) {
+		[[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+	}
+	return condition();
 }
 
 - (void)assertTemporaryDirectoryEmpty
@@ -402,6 +418,32 @@ static NSString *const SPPublicComment = @"schema public = standard public schem
 	}
 }
 
+/// The identity is the system identifier, the postmaster's start time (a physical clone shares the identifier but
+/// not the running server) and the database: equal for two sessions on one database, different across databases.
+- (void)testIdentityIncludesServerStartTime
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *source = [self kept:[SPPostgresTestServers ioConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_io_src"]];
+		PGPostgresConnection *again = [self kept:[SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_io_src"]];
+		PGPostgresConnection *target = [self targetOn:port];
+		// A different time zone on one session doesn't change the start time read
+		[self run:@"SET TIME ZONE 'Pacific/Kiritimati'" on:again];
+		SPPostgresTransfer *transfer = [self transferFrom:source to:target];
+		NSArray *identity = [transfer _identityOf:source];
+		XCTAssertEqual(identity.count, 3u, @"%@", identity);
+		XCTAssertEqualObjects(identity[0], [self text:@"SELECT system_identifier::text FROM pg_catalog.pg_control_system()" on:source]);
+		XCTAssertEqualObjects(identity[1], [self text:@"SELECT (EXTRACT(EPOCH FROM pg_catalog.pg_postmaster_start_time()) * 1000000)::bigint::text" on:source]);
+		XCTAssertEqualObjects(identity[2], @"pgkit_io_src");
+		XCTAssertEqualObjects([transfer _identityOf:again], identity);
+		NSArray *targetIdentity = [transfer _identityOf:target];
+		XCTAssertEqualObjects([targetIdentity subarrayWithRange:NSMakeRange(0, 2)], [identity subarrayWithRange:NSMakeRange(0, 2)]);
+		XCTAssertEqualObjects(targetIdentity[2], @"pgkit_io_dst");
+		[self assertIdle:source];
+		[self assertIdle:again];
+		[self assertIdle:target];
+	}
+}
+
 - (void)testMissingExtensionRefused
 {
 	for (NSNumber *port in [SPPostgresTestServers ports]) {
@@ -499,6 +541,111 @@ static NSString *const SPPublicComment = @"schema public = standard public schem
 		[self assertIdle:target];
 		[self assertTemporaryDirectoryEmpty];
 		[self assertMarkerOn:target];
+		[SPPostgresTestServers assertDescription:[self describe:target] equals:before context:[NSString stringWithFormat:@"port %@", port]];
+	}
+}
+
+/// Empty mode, cancelled from the progress block once the load has started (the emptying statements, with their
+/// CASCADE, already ran in the target's transaction): everything rolls back.
+- (void)testCancelWhileWritingLeavesTargetUnchanged
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *source = [self sourceOn:port];
+		PGPostgresConnection *target = [self targetOn:port];
+		[self addMarkerTo:target];
+		NSDictionary *before = [self describe:target];
+
+		SPPostgresTransfer *transfer = [self transferFrom:source to:target];
+		transfer.wholeDatabase = YES;
+		XCTAssertEqual(transfer.mode, SPPostgresTransferEmptyTarget);
+		__block BOOL cancelled = NO;
+		__block BOOL markerGoneInTransaction = NO;
+		transfer.progress = ^BOOL(SPPostgresTransferPhase phase, double fraction, NSString *detail) {
+			if (phase == SPPostgresTransferWriting && fraction > 0) {
+				// The emptying ran: inside the load's transaction the marker is gone
+				markerGoneInTransaction = target.transactionStatus == PGPostgresTransactionInTransaction
+					&& [[self text:@"SELECT count(*)::text FROM pg_catalog.pg_class WHERE relname = 'marker'" on:target] isEqualToString:@"0"];
+				cancelled = YES;
+				return NO;
+			}
+			return YES;
+		};
+		NSError *error = nil;
+		XCTAssertFalse([transfer run:&error]);
+		XCTAssertTrue(cancelled, @"cancelled while writing");
+		XCTAssertTrue(markerGoneInTransaction, @"the emptying statements had run when the cancel came");
+		XCTAssertEqualObjects(error.domain, SPPostgresErrorDomain);
+		XCTAssertEqual(error.code, SPPostgresErrorCancelled, @"%@", error.localizedDescription);
+		[self assertIdle:source];
+		[self assertIdle:target];
+		[self assertTemporaryDirectoryEmpty];
+		[self assertMarkerOn:target];
+		[SPPostgresTestServers assertDescription:[self describe:target] equals:before context:[NSString stringWithFormat:@"port %@", port]];
+	}
+}
+
+/// The same through SPPostgresBackgroundJob, as the sheet runs it: Cancel (the flag, then -cancel) comes while a
+/// statement of the load is running on the target (a CHECK that sleeps there), and PQcancel interrupts it.
+- (void)testJobCancelWhileWritingInterruptsLoad
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *source = [self sourceOn:port];
+		// Sleeps only when evaluated in pgkit_io_dst, i.e. while the load fills public.slow there
+		[self run:@"CREATE FUNCTION public.slow_on_target(i integer) RETURNS boolean LANGUAGE sql"
+		 " AS $$SELECT CASE WHEN current_database() = 'pgkit_io_dst' THEN pg_sleep(60) IS NOT NULL ELSE true END$$" on:source];
+		[self run:@"CREATE TABLE public.slow (i integer CHECK (public.slow_on_target(i)))" on:source];
+		[self run:@"INSERT INTO public.slow VALUES (1)" on:source];
+		PGPostgresConnection *target = [self targetOn:port];
+		[self addMarkerTo:target];
+		NSDictionary *before = [self describe:target];
+
+		SPPostgresConnectionProvider (^provider)(void) = ^SPPostgresConnectionProvider(void) {
+			return ^(NSString *database, void (^completion)(PGPostgresConnection *, NSError *)) {
+				completion([self kept:[SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue database:database]], nil);
+			};
+		};
+		__block volatile BOOL cancelRequested = NO;
+		__block volatile BOOL writing = NO;
+		__block BOOL finished = NO, ok = YES, targetIdleAfterRun = NO;
+		__block NSError *failure = nil;
+		NSString *directory = self.directory;
+		SPPostgresBackgroundJob *job = [SPPostgresBackgroundJob runOnDatabase:@"pgkit_io_src" provider:provider() targetDatabase:@"pgkit_io_dst" targetProvider:provider() work:^BOOL(PGPostgresConnection *jobSource, PGPostgresConnection *jobTarget, NSError **error) {
+			SPPostgresTransfer *transfer = [[SPPostgresTransfer alloc] initWithSource:jobSource target:jobTarget];
+			transfer.temporaryDirectory = directory;
+			transfer.wholeDatabase = YES;
+			transfer.progress = ^BOOL(SPPostgresTransferPhase phase, double fraction, NSString *detail) {
+				if (phase == SPPostgresTransferWriting && fraction > 0) writing = YES;
+				return !cancelRequested;
+			};
+			BOOL transferred = [transfer run:error];
+			targetIdleAfterRun = jobTarget.transactionStatus == PGPostgresTransactionIdle;
+			return transferred;
+		} completion:^(BOOL done, NSError *error) {
+			ok = done;
+			failure = error;
+			finished = YES;
+		}];
+
+		// Once the load is under way and the target's backend sleeps in the CHECK
+		PGPostgresConnection *monitor = [self kept:[SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_io_src"]];
+		BOOL sleeping = [self spinUntil:^BOOL{
+			return writing && [[self text:@"SELECT count(*)::text FROM pg_catalog.pg_stat_activity WHERE datname = 'pgkit_io_dst' AND wait_event = 'PgSleep'" on:monitor] isEqualToString:@"1"];
+		} timeout:60];
+		XCTAssertTrue(sleeping, @"the load runs the sleeping CHECK (finished: %d, %@)", finished, failure.localizedDescription);
+
+		NSDate *cancelledAt = [NSDate date];
+		cancelRequested = YES;
+		[job cancel];
+		XCTAssertTrue([self spinUntil:^BOOL{ return finished; } timeout:10], @"the job ends soon after Cancel");
+		XCTAssertLessThan(-[cancelledAt timeIntervalSinceNow], 10.0, @"the running statement was interrupted");
+		XCTAssertFalse(ok);
+		XCTAssertEqualObjects(failure.domain, SPPostgresErrorDomain);
+		XCTAssertEqual(failure.code, SPPostgresErrorCancelled, @"%@", failure.localizedDescription);
+		XCTAssertTrue(targetIdleAfterRun, @"no transaction left open on the target");
+		[self assertTemporaryDirectoryEmpty];
+		[self assertIdle:target];
+		[self assertMarkerOn:target];
+		XCTAssertEqualObjects([self text:@"SELECT count(*)::text FROM pg_catalog.pg_stat_activity WHERE datname = 'pgkit_io_dst' AND state LIKE 'idle in transaction%'" on:monitor], @"0");
 		[SPPostgresTestServers assertDescription:[self describe:target] equals:before context:[NSString stringWithFormat:@"port %@", port]];
 	}
 }

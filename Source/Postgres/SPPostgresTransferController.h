@@ -28,6 +28,7 @@ __attribute__((visibility("default")))
 - (instancetype)initWithDocument:(SPPostgresDocument *)document;
 
 /// Shows the sheet on the document's window. The controller keeps itself alive until the transfer (or Cancel) ends.
+/// When the tables can't be read, an alert says why (on the sheet, or through the document's alertPresenter when set).
 - (void)beginSheet;
 
 /// Called on the main thread once the sheet and any transfer it started have ended.

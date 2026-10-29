@@ -183,12 +183,15 @@ static void SPTransferRollBack(PGPostgresConnection *connection)
 	return error;
 }
 
-/// @[system identifier, database] of the connection's database, or nil when the identifier can't be read.
+/// @[system identifier, postmaster start time, database] of the connection's database, or nil when the identifier
+/// can't be read. The start time tells a physical clone (pg_basebackup, a promoted standby), which shares the system
+/// identifier, from the cluster it was copied from: equal only within one running server.
 - (NSArray *)_identityOf:(PGPostgresConnection *)connection
 {
-	NSArray *rows = SPTransferRows(connection, @"SELECT (SELECT s.system_identifier::text FROM pg_catalog.pg_control_system() s), pg_catalog.current_database()::text", nil, NULL);
+	NSArray *rows = SPTransferRows(connection, @"SELECT (SELECT s.system_identifier::text FROM pg_catalog.pg_control_system() s),"
+								   " (EXTRACT(EPOCH FROM pg_catalog.pg_postmaster_start_time()) * 1000000)::bigint::text, pg_catalog.current_database()::text", nil, NULL);
 	if ([connection transactionStatus] != PGPostgresTransactionIdle) SPTransferRollBack(connection);
-	if ([rows count] != 1 || !SPTransferText(rows[0][0]) || !SPTransferText(rows[0][1])) return nil;
+	if ([rows count] != 1 || !SPTransferText(rows[0][0]) || !SPTransferText(rows[0][1]) || !SPTransferText(rows[0][2])) return nil;
 	return rows[0];
 }
 
@@ -380,7 +383,7 @@ static void SPTransferRollBack(PGPostgresConnection *connection)
 		return NO;
 	}
 
-	// Same database of the same cluster (skipped when either identifier can't be read)
+	// Same database of the same running cluster (skipped when either identifier can't be read)
 	NSArray *sourceIdentity = [self _identityOf:source];
 	NSArray *targetIdentity = [self _identityOf:target];
 	if (sourceIdentity && targetIdentity && [sourceIdentity isEqualToArray:targetIdentity]) {

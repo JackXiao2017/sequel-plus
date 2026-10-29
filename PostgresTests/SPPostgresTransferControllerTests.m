@@ -312,6 +312,37 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 	XCTAssertEqualObjects([SPPostgresTransferController targetDescriptionForFavorite:favorite], @"ann@127.0.0.1:5432 via SSH bob@gate.example.com");
 }
 
+/// A catalog error while the tables list loads is shown (an alert), not just an empty list.
+- (void)testTablesListErrorIsShown
+{
+	[self onEachPort:^(NSNumber *port, PGPostgresConnection *target) {
+		// The tab's session in a failed transaction: the catalog queries fail
+		PGPostgresConnection *tab = self.document.connection;
+		[self run:@"BEGIN" on:tab];
+		XCTAssertNil([tab execute:@"SELECT 1/0"]);
+		[self.alerts removeAllObjects];
+		SPPostgresTransferController *controller = [self openSheet];
+		XCTAssertEqual(self.alerts.count, 1u, @"%@", [self.alerts valueForKey:@"messageText"]);
+		NSAlert *alert = self.alerts.firstObject;
+		XCTAssertEqualObjects(alert.messageText, @"The tables couldn't be read");
+		XCTAssertTrue([alert.informativeText containsString:@"current transaction is aborted"], @"%@", alert.informativeText);
+		XCTAssertEqualObjects(controller.lastErrorMessage, alert.informativeText);
+		XCTAssertEqual(controller.tablesList.rows.count, 0u);
+		[self run:@"ROLLBACK" on:tab];
+
+		[controller cancel:nil];
+		XCTAssertTrue([self spinUntil:^BOOL{ return self.ended && [self window].attachedSheet == nil; } timeout:5]);
+
+		// Readable again: no alert
+		[self.alerts removeAllObjects];
+		controller = [self openSheet];
+		XCTAssertEqual(self.alerts.count, 0u);
+		XCTAssertGreaterThan(controller.tablesList.rows.count, 0u);
+		[controller cancel:nil];
+		XCTAssertTrue([self spinUntil:^BOOL{ return self.ended && [self window].attachedSheet == nil; } timeout:5]);
+	}];
+}
+
 - (void)testTransferDisabledWithoutTablesOrDatabase
 {
 	[self onEachPort:^(NSNumber *port, PGPostgresConnection *target) {

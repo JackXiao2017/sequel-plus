@@ -364,6 +364,33 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	XCTAssertNotNil(consoleItem.image);
 }
 
+/// With no database selected the Transfer item and menu item are disabled (showTransfer: would do nothing); Export's
+/// validation is unchanged.
+- (void)testTransferNeedsADatabase
+{
+	NSToolbarItem *transferItem = nil;
+	for (NSToolbarItem *item in [self window].toolbar.items) {
+		if ([item.itemIdentifier isEqualToString:@"TransferToolbarItemIdentifier"]) transferItem = item;
+	}
+	XCTAssertNotNil(transferItem);
+	NSMenuItem *transferMenuItem = [[NSMenuItem alloc] initWithTitle:@"Transfer" action:NSSelectorFromString(@"showTransfer:") keyEquivalent:@""];
+	NSMenuItem *exportMenuItem = [[NSMenuItem alloc] initWithTitle:@"Export" action:NSSelectorFromString(@"export:") keyEquivalent:@""];
+	XCTAssertTrue([self.document validateToolbarItem:transferItem]);
+	XCTAssertTrue([self.document validateMenuItem:transferMenuItem]);
+
+	NSString *database = self.document.currentDatabase;
+	XCTAssertEqualObjects(database, @"pgkit_test");
+	[(id)self.document setValue:@"" forKey:@"currentDatabase"];
+	[self addTeardownBlock:^{ [(id)self.document setValue:database forKey:@"currentDatabase"]; }];
+	XCTAssertFalse([self.document validateToolbarItem:transferItem]);
+	XCTAssertFalse([self.document validateMenuItem:transferMenuItem]);
+	XCTAssertTrue([self.document validateMenuItem:exportMenuItem], @"Export's validation is unchanged");
+
+	[(id)self.document setValue:database forKey:@"currentDatabase"];
+	XCTAssertTrue([self.document validateToolbarItem:transferItem]);
+	XCTAssertTrue([self.document validateMenuItem:transferMenuItem]);
+}
+
 #pragma mark - Title
 
 - (void)testTitleIncludesVersionFavoriteAndDatabase
