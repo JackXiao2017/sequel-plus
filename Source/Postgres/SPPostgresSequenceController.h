@@ -1,6 +1,7 @@
 #import <Cocoa/Cocoa.h>
 
 @class PGPostgresConnection;
+@class SPPostgresTaskRunner;
 @class SPPostgresSequence;
 @class SPPostgresSequenceDefinition;
 
@@ -17,6 +18,12 @@
  * -[SPPostgresSequences alterSequence:to:error:], which sends only what differs from the server. If that fails, an
  * alert shows the server's message, the fields keep what was typed, and -commitPendingEdits returns NO. Revert and
  * Escape in a field give the edits up and read the sequence again.
+ *
+ * Loads (-showSequence:inSchema:, -reload, Revert) run through taskRunner: with the tab's background runner they
+ * return at once and the end state they document holds once the runner is idle. A cancelled load shows no alert: a
+ * cancelled switch leaves the pane empty and stale (a reload, or the tab showing it again, loads it); a cancelled
+ * reload keeps what was shown. The changes (Apply, -commitPendingEdits, Set Value…) run on the main thread and are
+ * refused (NSBeep; the edits stay, -commitPendingEdits returns NO) while the runner is busy.
  */
 __attribute__((visibility("default")))
 @interface SPPostgresSequenceController : NSObject <NSTextFieldDelegate>
@@ -79,6 +86,11 @@ __attribute__((visibility("default")))
 
 /// Seconds a change waits for a lock held elsewhere before it fails (default 5).
 @property (nonatomic) NSTimeInterval lockTimeout;
+
+/// Runs the loads (default: an inline runner on the connection, so a load has finished when its method returns).
+@property (nonatomic, retain) SPPostgresTaskRunner *taskRunner;
+/// A switch was cancelled before the sequence loaded: the pane is empty until a reload or the next show loads it.
+@property (readonly, getter=isStale) BOOL stale;
 
 /// Shows errors. nil (the default) shows them as sheets on the view's window.
 @property (copy) void (^alertPresenter)(NSAlert *alert);

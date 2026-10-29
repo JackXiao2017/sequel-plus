@@ -1190,7 +1190,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// Shows the selected sequence again (nothing selected: empty), dropping edits that weren't applied.
 - (void)_refreshSequenceIfStale
 {
-	if (!sequenceNeedsReset) return;
+	if (!sequenceNeedsReset && ![sequenceController isStale]) return;
 	sequenceNeedsReset = NO;
 	[sequenceController showSequence:[sidebar selectedSequenceName] inSchema:[sidebar selectedSchema]];
 }
@@ -1198,7 +1198,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// Shows the selected extension again (nothing selected: empty).
 - (void)_refreshExtensionIfStale
 {
-	if (!extensionNeedsReset) return;
+	if (!extensionNeedsReset && ![extensionController isStale]) return;
 	extensionNeedsReset = NO;
 	[extensionController showExtension:[sidebar selectedExtensionName]];
 }
@@ -1266,7 +1266,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 			paneBeforeSequence = [([currentPane isEqualToString:SPPostgresPaneExtension] ? (paneBeforeExtension ?: SPPostgresPaneContent) : currentPane) copy];
 		}
 		sequenceSelected = YES;
-		if (![sequence isEqualToString:[sequenceController sequenceName]] || ![schema isEqualToString:[sequenceController schema]]) sequenceNeedsReset = YES;
+		if (![sequence isEqualToString:[sequenceController sequenceName]] || ![schema isEqualToString:[sequenceController schema]] || [sequenceController isStale]) sequenceNeedsReset = YES;
 		if (![currentPane isEqualToString:SPPostgresPaneSequence]) [self showPane:SPPostgresPaneSequence];
 		else [self _refreshSequenceIfStale];
 	}
@@ -1280,7 +1280,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	// An extension has its own pane too, shown whenever one is selected (it has no edits to apply)
 	if ([extension length]) {
 		extensionSelected = YES;
-		if (![extension isEqualToString:[extensionController extensionName]]) extensionNeedsReset = YES;
+		if (![extension isEqualToString:[extensionController extensionName]] || [extensionController isStale]) extensionNeedsReset = YES;
 		if (![currentPane isEqualToString:SPPostgresPaneExtension]) [self showPane:SPPostgresPaneExtension];
 		else [self _refreshExtensionIfStale];
 	}

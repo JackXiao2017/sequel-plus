@@ -2,6 +2,7 @@
 #import "SPPostgresSequences.h"
 #import "SPPostgresTableDuplicator.h"
 #import "SPPostgresErrors.h"
+#import "SPPostgresPaneLoader.h"
 #import <PostgresKit/PostgresKit.h>
 
 // As the Table Info pane: right-aligned labels at x 20, values from x 128
@@ -331,6 +332,7 @@ static BOOL SPPostgresSequenceReadNumber(NSTextField *field, NSString *label, NS
 @property (readwrite, copy) NSString *noticeText;
 
 - (void)_buildView;
+- (void)_loadSwitching:(BOOL)switching;
 - (void)_load;
 - (void)_updateControls;
 
@@ -342,8 +344,12 @@ static BOOL SPPostgresSequenceReadNumber(NSTextField *field, NSString *label, NS
 	SPPostgresSequences *sequences;
 	NSTimeInterval lockTimeout;
 
+	SPPostgresPaneLoader *loader; // the runner, the load generation, staleness, and refusing changes while busy
+
 	/// The definition keys (@"increment", …) of the fields the user changed since the last load, apply or revert
 	NSMutableSet *editedKeys;
+	/// The Owned by candidates shown with the sequence
+	NSArray *shownCandidates;
 
 	NSView *view;
 	SPPostgresSequenceForm *form;
@@ -377,6 +383,7 @@ static BOOL SPPostgresSequenceReadNumber(NSTextField *field, NSString *label, NS
 {
 	if ((self = [super init])) {
 		connection = [theConnection retain];
+		loader = [[SPPostgresPaneLoader alloc] initWithConnection:theConnection];
 		editedKeys = [[NSMutableSet alloc] init];
 		noticeText = [@"" copy];
 		lockTimeout = 5;
@@ -391,8 +398,10 @@ static BOOL SPPostgresSequenceReadNumber(NSTextField *field, NSString *label, NS
 	[self invalidate];
 
 	[connection release];
+	[loader release];
 	[sequences release];
 	[editedKeys release];
+	[shownCandidates release];
 	[schema release];
 	[sequenceName release];
 	[sequence release];
@@ -419,6 +428,7 @@ static BOOL SPPostgresSequenceReadNumber(NSTextField *field, NSString *label, NS
 	if (setValueSheet) [[setValueSheet sheetParent] endSheet:setValueSheet returnCode:NSModalResponseCancel];
 
 	invalidated = YES;
+	[loader invalidate];
 	[form detach];
 	for (NSButton *button in @[applyButton, revertButton, setValueButton]) [button setTarget:nil];
 
@@ -579,6 +589,38 @@ static BOOL SPPostgresSequenceReadNumber(NSTextField *field, NSString *label, NS
 
 #pragma mark Loading
 
+/// The runner's thread: the sequence and the Owned by candidates, read through sequences alone (nil, with *error, if
+/// either can't be read).
+static NSDictionary *SPPostgresSequenceRead(SPPostgresSequences *sequences, NSString *name, NSError **error)
+{
+	SPPostgresSequence *loaded = [sequences sequenceNamed:name error:error];
+	if (!loaded) return nil;
+	NSArray *candidates = [sequences ownerColumnCandidates:error];
+	if (!candidates) return nil;
+	return @{@"sequence" : loaded, @"candidates" : candidates};
+}
+
+// A load (a switch, -reload, Revert) gives the edits up before it is asked for (the fields go back to what is shown),
+// so the busy state's focus change applies nothing, and goes through the pane loader (SPPostgresPaneLoader). On the
+// runner's thread the work uses only the sequences object (made on the main thread, where nothing uses it while the
+// runner is busy: changes are refused then) and a copy of the name. A change reads the sequence again at once, on the
+// main thread, as part of the change (-_load).
+
+- (SPPostgresTaskRunner *)taskRunner
+{
+	return [loader taskRunner];
+}
+
+- (void)setTaskRunner:(SPPostgresTaskRunner *)runner
+{
+	[loader setTaskRunner:runner];
+}
+
+- (BOOL)isStale
+{
+	return [loader isStale];
+}
+
 - (void)showSequence:(NSString *)name inSchema:(NSString *)theSchema
 {
 	if (invalidated) return;
@@ -591,13 +633,17 @@ static BOOL SPPostgresSequenceReadNumber(NSTextField *field, NSString *label, NS
 		sequences = [[SPPostgresSequences alloc] initWithConnection:connection schema:theSchema];
 		[sequences setLockTimeout:lockTimeout];
 	}
-	[self _load];
+
+	// The previous sequence goes at once
+	[self _abortFieldEditing];
+	[self _clearSequence];
+	[self _loadSwitching:YES];
 }
 
 - (void)reload
 {
 	if (invalidated) return;
-	[self _load];
+	[self _loadSwitching:NO];
 }
 
 /// Ends an edit in a field of the pane without keeping it (the fields are about to be set).
@@ -610,17 +656,81 @@ static BOOL SPPostgresSequenceReadNumber(NSTextField *field, NSString *label, NS
 	if ([field isKindOfClass:[NSTextField class]] && [form keyOfControl:field]) [(NSTextField *)field abortEditing];
 }
 
-/// Reads the sequence and the Owned by candidates; on failure the pane empties and the error is shown.
+/// Reads the sequence through the runner (see -_applySequence:error:), the edits given up first.
+- (void)_loadSwitching:(BOOL)switching
+{
+	if ([self hasPendingEdits] || [editedKeys count]) {
+		[self _abortFieldEditing];
+		[editedKeys removeAllObjects];
+		[self _showSequence:sequence candidates:shownCandidates];
+	}
+	if (!sequences) {
+		[loader loadNothing];
+		[self _clearSequence];
+		return;
+	}
+
+	SPPostgresSequences *target = sequences;
+	NSString *name = [[sequenceName copy] autorelease];
+	[loader loadSwitching:switching work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		return SPPostgresSequenceRead(target, name, error);
+	} apply:^(id result, NSError *error) {
+		[self _applySequence:result error:error];
+	}];
+}
+
+/// Reads the sequence on the main thread and shows it: part of a change, which runs only while the runner is idle.
 - (void)_load
 {
 	[self _abortFieldEditing];
 	[editedKeys removeAllObjects];
-
+	if (!sequences) {
+		[self _clearSequence];
+		return;
+	}
 	NSError *error = nil;
-	SPPostgresSequence *loaded = [sequences sequenceNamed:sequenceName error:&error];
-	NSArray *candidates = loaded ? [sequences ownerColumnCandidates:&error] : nil;
-	if (!candidates) loaded = nil;
+	NSDictionary *result = SPPostgresSequenceRead(sequences, sequenceName, &error);
+	[self _applySequence:result error:error];
+}
+
+/// An empty pane, no bottom line (no sequence, or before a switch's sequence has loaded).
+- (void)_clearSequence
+{
+	[editedKeys removeAllObjects];
+	[self _showSequence:nil candidates:nil];
+	[self setNoticeText:@""];
+	[noticeField setStringValue:@""];
+}
+
+/// Shows what was read (SPPostgresSequenceRead). nil means it couldn't be read: the pane empties and the error is
+/// shown, as an alert and in the bottom line.
+- (void)_applySequence:(NSDictionary *)result error:(NSError *)error
+{
+	[self _abortFieldEditing];
+	[editedKeys removeAllObjects];
+
+	if (result) {
+		[self _showSequence:[result objectForKey:@"sequence"] candidates:[result objectForKey:@"candidates"]];
+		[self setNoticeText:@""];
+		[noticeField setStringValue:@""];
+		return;
+	}
+
+	[self _showSequence:nil candidates:nil];
+	NSString *message = [[[[error localizedDescription] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsSeparatedByString:@"\n"] firstObject];
+	if (![message length]) message = NSLocalizedString(@"An unknown error occurred.", @"Postgres structure: unknown error");
+	[self setNoticeText:[NSString stringWithFormat:NSLocalizedString(@"Could not load the sequence: %@", @"Postgres sequence: bottom line on a read failure"), message]];
+	[noticeField setStringValue:noticeText];
+	[self _presentError:error title:[NSString stringWithFormat:NSLocalizedString(@"Could not load the sequence “%@”", @"Postgres sequence: load failed"), sequenceName]];
+}
+
+/// The fields show loaded (nil: empty) with candidates for Owned by.
+- (void)_showSequence:(SPPostgresSequence *)loaded candidates:(NSArray *)candidates
+{
 	[self setSequence:loaded];
+	NSArray *previous = shownCandidates; // candidates may be it
+	shownCandidates = [candidates copy];
+	[previous release];
 
 	SPPostgresSequenceDefinition *definition = loaded ? [SPPostgresSequenceDefinition definitionWithSequence:loaded] : [[[SPPostgresSequenceDefinition alloc] init] autorelease];
 	if ([loaded isIdentity]) [definition setOwnedBy:[loaded identityColumn]]; // shown, read-only
@@ -648,18 +758,6 @@ static BOOL SPPostgresSequenceReadNumber(NSTextField *field, NSString *label, NS
 	}
 	[identityNoteField setStringValue:note];
 
-	if (sequences && !loaded) {
-		NSString *message = [[[[error localizedDescription] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsSeparatedByString:@"\n"] firstObject];
-		if (![message length]) message = NSLocalizedString(@"An unknown error occurred.", @"Postgres structure: unknown error");
-		[self setNoticeText:[NSString stringWithFormat:NSLocalizedString(@"Could not load the sequence: %@", @"Postgres sequence: bottom line on a read failure"), message]];
-		[noticeField setStringValue:noticeText];
-		[self _presentError:error title:[NSString stringWithFormat:NSLocalizedString(@"Could not load the sequence “%@”", @"Postgres sequence: load failed"), sequenceName]];
-	}
-	else {
-		[self setNoticeText:@""];
-		[noticeField setStringValue:@""];
-	}
-
 	[self _updateControls];
 }
 
@@ -679,9 +777,17 @@ static BOOL SPPostgresSequenceReadNumber(NSTextField *field, NSString *label, NS
 	return definition;
 }
 
+/// YES (after NSBeep) while the runner is busy: a change runs on the main thread, so never while a load uses the
+/// connection.
+- (BOOL)_refuseChangeWhileBusy
+{
+	return [loader refuseChangeWhileBusy];
+}
+
 - (BOOL)commitPendingEdits
 {
 	if (invalidated || ![self hasPendingEdits]) return YES;
+	if ([self _refuseChangeWhileBusy]) return NO; // the edits stay
 
 	NSError *error = nil;
 	SPPostgresSequenceDefinition *definition = [self _editedDefinition:&error];
@@ -703,7 +809,8 @@ static BOOL SPPostgresSequenceReadNumber(NSTextField *field, NSString *label, NS
 
 - (IBAction)apply:(id)sender
 {
-	if (invalidated || !sequence) return;
+	// Return is its key equivalent, which the task display's blocker doesn't stop
+	if (invalidated || !sequence || [self _refuseChangeWhileBusy]) return;
 	NSWindow *window = [view window];
 	if (window && [[window firstResponder] isKindOfClass:[NSText class]] && ![window makeFirstResponder:nil]) return;
 	[self commitPendingEdits];
@@ -712,7 +819,7 @@ static BOOL SPPostgresSequenceReadNumber(NSTextField *field, NSString *label, NS
 - (IBAction)revert:(id)sender
 {
 	if (invalidated) return;
-	[self _load];
+	[self _loadSwitching:NO];
 }
 
 /// A field's text changed: that field is edited.
@@ -754,7 +861,7 @@ static BOOL SPPostgresSequenceReadNumber(NSTextField *field, NSString *label, NS
 - (IBAction)setValue:(id)sender
 {
 	NSWindow *window = [view window];
-	if (invalidated || !sequence || setValueSheet || !window || [window attachedSheet]) return;
+	if (invalidated || !sequence || setValueSheet || !window || [window attachedSheet] || [self _refuseChangeWhileBusy]) return;
 
 	// Edits are applied first (the value is set on what the server has)
 	if ([[window firstResponder] isKindOfClass:[NSText class]] && ![window makeFirstResponder:nil]) return;
@@ -821,7 +928,7 @@ static BOOL SPPostgresSequenceReadNumber(NSTextField *field, NSString *label, NS
 		[setValueNextCall release], setValueNextCall = nil;
 		[setValueOKButton release], setValueOKButton = nil;
 
-		if (ok && !invalidated && target == sequences) {
+		if (ok && !invalidated && target == sequences && ![self _refuseChangeWhileBusy]) {
 			NSError *error = nil;
 			if ([target setValue:value isCalled:isCalled ofSequence:name error:&error]) {
 				[self _load];

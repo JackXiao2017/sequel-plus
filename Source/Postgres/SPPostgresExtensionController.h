@@ -1,6 +1,7 @@
 #import <Cocoa/Cocoa.h>
 
 @class PGPostgresConnection;
+@class SPPostgresTaskRunner;
 @class SPPostgresExtension;
 @class SPPostgresExtensionController;
 
@@ -17,6 +18,11 @@
  * then the update targets (pg_extension_update_paths from the installed version, the server's default marked
  * "(default)" and preselected) with Update, or "No other version available" with Update disabled, and Drop.
  * Extensions are database-wide: the pane doesn't depend on the schema picker. Built in code. Use on the main thread.
+ *
+ * Loads (-showExtension:, -reload) run through taskRunner: with the tab's background runner they return at once and
+ * the end state they document holds once the runner is idle. A cancelled load shows no alert: a cancelled switch
+ * leaves the pane empty and stale (a reload, or the tab showing it again, loads it); a cancelled reload keeps what was
+ * shown. Update and Drop… run on the main thread and are refused (NSBeep) while the runner is busy.
  */
 __attribute__((visibility("default")))
 @interface SPPostgresExtensionController : NSObject
@@ -61,6 +67,11 @@ __attribute__((visibility("default")))
 
 /// Seconds a change waits for a lock held elsewhere before it fails (default 5).
 @property (nonatomic) NSTimeInterval lockTimeout;
+
+/// Runs the loads (default: an inline runner on the connection, so a load has finished when its method returns).
+@property (nonatomic, retain) SPPostgresTaskRunner *taskRunner;
+/// A switch was cancelled before the extension loaded: the pane is empty until a reload or the next show loads it.
+@property (readonly, getter=isStale) BOOL stale;
 
 /// Shows errors. nil (the default) shows them as sheets on the view's window.
 @property (copy) void (^alertPresenter)(NSAlert *alert);
