@@ -236,7 +236,8 @@ __attribute__((visibility("default")))
 /**
  * Runs the tab's loads on its connection in the background (one per connection: replaced when a database switch
  * completes, the previous one invalidated and its connection closed once its worker is idle). While it is busy the
- * tab shows MySQL's task display (SPPostgresTaskDisplay) and blocks input to its view, and isProcessing is YES.
+ * tab shows MySQL's task display (SPPostgresTaskDisplay) and blocks input to its view, and isProcessing is YES. The
+ * sidebar, the Query view and every pane load through it (none reads the connection on the main thread meanwhile).
  */
 @property (readonly) SPPostgresTaskRunner *taskRunner;
 

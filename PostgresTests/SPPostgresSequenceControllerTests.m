@@ -135,6 +135,8 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 		completion(weakSelf.confirmAnswer);
 	};
 	[self.controller addTabDocument:self.document atIndex:0 select:YES];
+	// The first loads run on the tab's runner
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	self.other = [SPPostgresTestServers connectedConnectionOnPort:SPSequenceTestPort];
 }
@@ -172,6 +174,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 - (void)showSchema
 {
 	if (![self.document.sidebar.selectedSchema isEqualToString:@"structure_test"]) [self.document.sidebar reloadSchema:@"structure_test"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 }
 
 /// Selects a sequence of structure_test as a click would (asking the tab first).
@@ -180,6 +183,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	[self showSchema];
 	XCTAssertTrue([self.document sidebarShouldChangeSelection:self.document.sidebar]);
 	XCTAssertTrue([self.document.sidebar selectSequenceNamed:name], @"%@", name);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence);
 	XCTAssertEqualObjects(self.pane.sequenceName, name);
 }
@@ -190,6 +194,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	[self showSchema];
 	if (![self.document sidebarShouldChangeSelection:self.document.sidebar]) return NO;
 	XCTAssertTrue([self.document.sidebar selectTableNamed:name], @"%@", name);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	return YES;
 }
 
@@ -244,6 +249,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	XCTAssertNotNil([popup itemWithTitle:title], @"%@ in %@", title, [popup itemTitles]);
 	[popup selectItemWithTitle:title];
 	[NSApp sendAction:[popup action] to:[popup target] from:popup];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 }
 
 - (void)runQuery:(NSString *)sql
@@ -251,6 +257,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	[self.document viewQuery:nil];
 	[[self.document.queryController editor] setString:sql];
 	[self.document.queryController runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 }
 
 - (NSArray *)loggedMessagesContaining:(NSString *)text
@@ -277,6 +284,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:@"History" action:@selector(backForwardInHistory:) keyEquivalent:@""];
 	item.tag = back ? 0 : 1;
 	[self.document backForwardInHistory:item];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 }
 
 /// Records -showPane: and Structure loads into SPSequenceTestPaneLog until the test ends.
@@ -349,8 +357,10 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	// Delete validates on a selected sequence only
 	NSMenuItem *delete = [self item:@"Delete Sequence…" in:sidebar.sequenceMenu];
 	XCTAssertTrue([sidebar selectTableNamed:@"t"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertFalse([(id<NSMenuItemValidation>)delete.target validateMenuItem:delete]);
 	XCTAssertTrue([sidebar selectSequenceNamed:@"seq_free"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([(id<NSMenuItemValidation>)delete.target validateMenuItem:delete]);
 	NSMenuItem *add = [self item:@"Add Sequence…" in:sidebar.sequenceMenu];
 	XCTAssertTrue([(id<NSMenuItemValidation>)add.target validateMenuItem:add]);
@@ -360,12 +370,14 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	XCTAssertNil(sidebar.selectedTableName);
 	XCTAssertFalse(sidebar.selectionIsTable);
 	XCTAssertTrue([sidebar selectTableNamed:@"t"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertNil(sidebar.selectedSequenceName);
 	XCTAssertFalse([sidebar selectSequenceNamed:@"t"], @"a table is not a sequence");
 	XCTAssertFalse([sidebar selectTableNamed:@"seq_free"], @"a sequence is not a table");
 
 	// Another schema: its own sequences
 	[sidebar reloadSchema:@"Sales Data"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([[sidebar itemTitlesInSection:@"SEQUENCES"] containsObject:@"Odd \"Seq\""]);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 }
@@ -376,6 +388,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 {
 	[self clickTable:@"t"];
 	[self.document viewStructure:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
 
 	[self selectSequence:@"seq_free"];
@@ -437,12 +450,18 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 
 	// The table panes' actions do nothing without a table (nil selectedTableName everywhere)
 	[self.document viewStructure:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.document viewContent:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.document viewRelations:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.document viewTriggers:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.document viewStatus:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence);
 	[self.document showPane:SPPostgresPaneContent];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence, @"no table pane while a sequence is selected");
 	XCTAssertNil(self.document.contentController.table);
 
@@ -451,11 +470,13 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneQuery);
 	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"seq_free");
 	[self.document showPane:SPPostgresPaneSequence];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence);
 
 	// The current value follows the server when the pane reads again
 	[self serverRun:@"SELECT nextval('structure_test.seq_free')"];
 	[pane revert:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(pane.currentValueField.stringValue, @"100");
 
 	// A serial's sequence: owned by its column
@@ -497,6 +518,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	[self serverRun:[NSString stringWithFormat:@"CREATE SEQUENCE structure_test.%@ AS integer", marker]];
 	[self serverRun:[NSString stringWithFormat:@"COMMENT ON SEQUENCE structure_test.%@ IS E' padded\\n'", marker]];
 	[self.document.sidebar reloadSchema:@"structure_test"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	[self selectSequence:marker];
 	SPPostgresSequenceController *pane = self.pane;
@@ -506,6 +528,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	[self.document viewQuery:nil];
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneQuery);
 	[self.document showPane:SPPostgresPaneSequence];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([[pane.commentField window] makeFirstResponder:pane.commentField]);
 	XCTAssertTrue([self clickTable:@"t"]);
 	XCTAssertTrue([self.document parentTabShouldClose]);
@@ -536,6 +559,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	}
 	XCTAssertNotNil(editor);
 	[editor doCommandBySelector:@selector(cancelOperation:)];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertFalse(pane.hasPendingEdits);
 	XCTAssertEqualObjects(pane.incrementField.stringValue, @"1");
 	XCTAssertTrue([self clickTable:@"t"]);
@@ -562,10 +586,12 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	[self type:@"" into:pane.maxValueField];
 	[self type:@"-50" into:pane.minValueField];
 	[pane.cycleSwitch performClick:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self choose:@"structure_test.used_t.n" in:pane.ownedByPopup];
 	[self type:@"edited" into:pane.commentField];
 	XCTAssertTrue(pane.hasPendingEdits);
 	[pane.applyButton performClick:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertFalse(pane.hasPendingEdits);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 	NSArray *row = [[self.other execute:@"SELECT seqincrement::text, seqmin::text, seqmax::text, seqcycle::text FROM pg_sequence WHERE seqrelid = 'structure_test.seq_free'::regclass"] rowAsArray];
@@ -577,18 +603,21 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	// The type
 	[self choose:@"integer" in:pane.typePopup];
 	[pane apply:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT seqtypid::regtype::text FROM pg_sequence WHERE seqrelid = 'structure_test.seq_free'::regclass"], @"integer");
 	XCTAssertEqualObjects(pane.maxValueField.stringValue, @"2147483647");
 
 	// Revert gives an edit up
 	[self type:@"99" into:pane.cacheField];
 	[pane.revertButton performClick:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertFalse(pane.hasPendingEdits);
 	XCTAssertEqualObjects(pane.cacheField.stringValue, @"1");
 
 	// A rename: the sidebar lists and selects the new name, the pane follows it
 	[self type:@"  seq renamed \n" into:pane.nameField]; // trimmed
 	[pane apply:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"seq renamed");
 	XCTAssertTrue([[self.document.sidebar itemTitlesInSection:@"SEQUENCES"] containsObject:@"seq renamed"]);
@@ -599,14 +628,17 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	// A failed Apply: the alert, the typed text stays
 	[self type:@"0" into:pane.incrementField];
 	[pane apply:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 1u);
 	XCTAssertEqualObjects(pane.incrementField.stringValue, @"0");
 	XCTAssertTrue(pane.hasPendingEdits);
 	[pane revert:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	// Set Value…: "next call returns this value"
 	[self.controller showWindow:nil];
 	[pane.setValueButton performClick:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	NSWindow *sheet = pane.setValueSheet;
 	XCTAssertNotNil(sheet);
 	XCTAssertEqual([self window].attachedSheet, sheet);
@@ -620,38 +652,49 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	nextCall.state = NSControlStateValueOn;
 	XCTAssertTrue(setButton.isEnabled);
 	[setButton performClick:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 1u, @"%@", self.alerts.lastObject.informativeText);
 	XCTAssertEqualObjects(pane.currentValueField.stringValue, @"77 (next call returns this)");
 	XCTAssertEqualObjects([self serverValue:@"SELECT nextval('structure_test.\"seq renamed\"')::text"], @"77");
 
 	// …and as the last value
 	[pane revert:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(pane.currentValueField.stringValue, @"77");
 	[pane setValue:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	sheet = pane.setValueSheet;
 	valueField = [self viewWithIdentifier:@"setValueField" in:sheet.contentView];
 	valueField.stringValue = @"-5";
 	[[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification object:valueField];
 	[(NSButton *)[self viewWithIdentifier:@"setValueButton" in:sheet.contentView] performClick:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(pane.currentValueField.stringValue, @"-5");
 
 	// Cancel sets nothing
 	[pane setValue:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	sheet = pane.setValueSheet;
 	[[self window] endSheet:sheet returnCode:NSModalResponseCancel];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertNil(pane.setValueSheet);
 	XCTAssertEqualObjects([self serverValue:@"SELECT last_value::text FROM structure_test.\"seq renamed\""], @"-5");
 
 	// The tab closing while the sheet is up ends it
 	[pane setValue:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertNotNil([self window].attachedSheet);
 	NSTabView *tabView = [self.controller valueForKey:@"tabView"];
 	for (NSTabViewItem *item in [tabView tabViewItems]) [tabView removeTabViewItem:item];
 	[self.document parentTabDidClose];
 	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertNil(pane.setValueSheet);
 }
 
@@ -667,6 +710,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 
 	// The sheet, prefilled with the defaults; Cancel does nothing
 	[menu performActionForItemAtIndex:[menu indexOfItem:add]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	NSWindow *sheet = [self window].attachedSheet;
 	XCTAssertNotNil(sheet);
 	NSTextField *name = [self viewWithIdentifier:@"sequenceName" in:sheet.contentView];
@@ -694,11 +738,14 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	XCTAssertNotNil(increment.formatter);
 	XCTAssertFalse(addButton.isEnabled, @"no name yet");
 	[[self window] endSheet:sheet returnCode:NSModalResponseCancel];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertFalse([[sidebar itemTitlesInSection:@"SEQUENCES"] containsObject:@"added"]);
 
 	// Add: created with what was typed, listed and selected, in its pane
 	[self.document sidebar:sidebar addSequenceInSchema:@"structure_test"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	sheet = [self window].attachedSheet;
 	name = [self viewWithIdentifier:@"sequenceName" in:sheet.contentView];
 	increment = [self viewWithIdentifier:@"sequenceIncrement" in:sheet.contentView];
@@ -715,7 +762,9 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	[ownedBy selectItemWithTitle:@"structure_test.used_t.n"];
 	comment.stringValue = @"new one";
 	[addButton performClick:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return [sidebar.selectedSequenceName isEqualToString:@"added"]; } timeout:5], @"%@", self.alerts.firstObject.informativeText);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence);
 	XCTAssertEqualObjects(self.pane.sequenceName, @"added");
 	XCTAssertEqualObjects(self.pane.incrementField.stringValue, @"3");
@@ -725,15 +774,19 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 
 	// A name that is taken: the server's message, nothing selected changes
 	[self.document sidebar:sidebar addSequenceInSchema:@"structure_test"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	sheet = [self window].attachedSheet;
 	[self type:@"seq_free" into:[self viewWithIdentifier:@"sequenceName" in:sheet.contentView]];
 	[(NSButton *)[self viewWithIdentifier:@"sequenceAddButton" in:sheet.contentView] performClick:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return self.alerts.count == 1; } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self.alerts.firstObject.informativeText containsString:@"already exists"], @"%@", self.alerts.firstObject.informativeText);
 	XCTAssertEqualObjects(sidebar.selectedSequenceName, @"added");
 
 	// The tab closing while the sheet is up ends it, and nothing is created
 	[self.document sidebar:sidebar addSequenceInSchema:@"structure_test"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	sheet = [self window].attachedSheet;
 	XCTAssertNotNil(sheet);
 	[self type:@"never" into:[self viewWithIdentifier:@"sequenceName" in:sheet.contentView]];
@@ -741,6 +794,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	for (NSTabViewItem *item in [tabView tabViewItems]) [tabView removeTabViewItem:item];
 	[self.document parentTabDidClose];
 	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT (to_regclass('structure_test.never') IS NULL)::text"], @"true");
 }
 
@@ -754,6 +808,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 
 	// In use: asked, then refused with the columns, one per line
 	[menu performActionForItemAtIndex:[menu indexOfItem:delete]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.confirmations.count, 1u);
 	XCTAssertEqualObjects(self.confirmations.lastObject.messageText, @"Delete sequence \"seq_used\"?");
 	XCTAssertEqual(self.alerts.count, 1u);
@@ -765,18 +820,21 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	// Two columns
 	[self serverRun:@"CREATE TABLE structure_test.used_too (m bigint DEFAULT nextval('structure_test.seq_used'))"];
 	[self.document sidebar:sidebar deleteSequenceNamed:@"seq_used"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.alerts.lastObject.informativeText, @"structure_test.used_t.n\nstructure_test.used_too.m");
 
 	// Answered No: nothing happens
 	self.confirmAnswer = NO;
 	[self selectSequence:@"seq_free"];
 	[self.document sidebar:sidebar deleteSequenceNamed:@"seq_free"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 2u);
 	XCTAssertTrue([[sidebar itemTitlesInSection:@"SEQUENCES"] containsObject:@"seq_free"]);
 
 	// A free one: dropped, unlisted, the selection gone and the table pane back
 	self.confirmAnswer = YES;
 	[menu performActionForItemAtIndex:[menu indexOfItem:delete]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 2u, @"%@", self.alerts.lastObject.informativeText);
 	XCTAssertFalse([[sidebar itemTitlesInSection:@"SEQUENCES"] containsObject:@"seq_free"]);
 	XCTAssertNil(sidebar.selectedSequenceName);
@@ -789,6 +847,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 {
 	[self selectSequence:@"seq_free"];
 	[self.document _renameTable:@"child" inSchema:@"structure_test" toName:@"child2"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([[self.document.sidebar itemTitlesInSection:@"TABLES"] containsObject:@"child2"]);
 	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"seq_free");
 	XCTAssertNil(self.document.sidebar.selectedTableName);
@@ -803,6 +862,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 {
 	[self clickTable:@"t"];
 	[self.document viewContent:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self selectSequence:@"seq_free"];
 	NSDictionary *entry = self.document.history.currentEntry;
 	XCTAssertEqualObjects(entry[@"pane"], @"sequence");
@@ -812,23 +872,28 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	XCTAssertTrue([self clickTable:@"child"]);
 
 	[self goBack:YES];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"t_id_seq");
 	XCTAssertNil(self.document.sidebar.selectedTableName);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence);
 	XCTAssertEqualObjects(self.pane.sequenceName, @"t_id_seq");
 	[self goBack:YES];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"seq_free");
 	XCTAssertEqualObjects(self.pane.sequenceName, @"seq_free");
 	[self goBack:YES];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"t");
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneContent);
 	[self goBack:NO];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"seq_free");
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence);
 
 	// An edit is applied before History moves on
 	[self type:@"6" into:self.pane.incrementField];
 	[self goBack:NO];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"t_id_seq");
 	XCTAssertEqualObjects([self serverValue:@"SELECT seqincrement::text FROM pg_sequence WHERE seqrelid = 'structure_test.seq_free'::regclass"], @"6");
 
@@ -836,6 +901,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	[self.document viewQuery:nil];
 	XCTAssertTrue([self clickTable:@"t"]);
 	[self goBack:YES];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"t_id_seq");
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneQuery);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
@@ -853,6 +919,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	[self runQuery:@"ALTER SEQUENCE structure_test.seq_free INCREMENT BY 9"];
 	XCTAssertTrue([[self.document valueForKey:@"sequenceNeedsReset"] boolValue]);
 	[self.document showPane:SPPostgresPaneSequence];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.pane.incrementField.stringValue, @"9");
 
 	// Dropped in SQL: the selection goes, and the pane with it
@@ -870,6 +937,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	PGPostgresConnection *oldConnection = self.document.connection;
 	[self.document switchToDatabase:@"postgres"];
 	XCTAssertTrue([self spinUntil:^BOOL{ return self.document.connection != oldConnection && !self.document.isProcessing; } timeout:20]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertNotEqual(self.pane, old);
 	XCTAssertNil([[old view] window]);
 	XCTAssertNil(self.document.sidebar.selectedSequenceName);
@@ -877,6 +945,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 
 	[self.document switchToDatabase:@"pgkit_test"];
 	XCTAssertTrue([self spinUntil:^BOOL{ return [[self.document windowTitleString] containsString:@"/pgkit_test"] && !self.document.isProcessing; } timeout:20]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self selectSequence:@"seq_free"];
 	XCTAssertEqualObjects(self.pane.incrementField.stringValue, @"5");
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
@@ -904,25 +973,33 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	// The Set Value prefill: the pending value, then the last value
 	[self.controller showWindow:nil];
 	[pane setValue:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	NSTextField *field = [self viewWithIdentifier:@"setValueField" in:pane.setValueSheet.contentView];
 	XCTAssertEqualObjects(field.stringValue, @"9007199254740993");
 	[[self window] endSheet:pane.setValueSheet returnCode:NSModalResponseCancel];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	[self serverRun:@"SELECT setval('structure_test.big', 9223372036854775806)"];
 	[pane revert:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(pane.currentValueField.stringValue, @"9223372036854775806");
 	[pane setValue:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	field = [self viewWithIdentifier:@"setValueField" in:pane.setValueSheet.contentView];
 	XCTAssertEqualObjects(field.stringValue, @"9223372036854775806");
 	NSButton *set = [self viewWithIdentifier:@"setValueButton" in:pane.setValueSheet.contentView];
 	[set performClick:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT last_value::text FROM structure_test.big"], @"9223372036854775806", @"set exactly what was shown");
 
 	// An edit elsewhere leaves the big values exact on the server
 	[self type:@"3" into:pane.cacheField];
 	[pane apply:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT seqmin::text || ' ' || seqstart::text FROM pg_sequence WHERE seqrelid = 'structure_test.big'::regclass"], @"9007199254740993 9007199254740993");
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 }
@@ -939,9 +1016,11 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 
 	[self serverRun:@"SELECT setval('structure_test.fresh', 40, false)"];
 	[pane revert:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(pane.currentValueField.stringValue, @"40 (next call returns this)");
 	[self.controller showWindow:nil];
 	[pane setValue:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	NSWindow *sheet = pane.setValueSheet;
 	NSTextField *field = [self viewWithIdentifier:@"setValueField" in:sheet.contentView];
 	NSButton *set = [self viewWithIdentifier:@"setValueButton" in:sheet.contentView];
@@ -959,10 +1038,13 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	[[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification object:field];
 	XCTAssertTrue(set.isEnabled);
 	[[self window] endSheet:sheet returnCode:NSModalResponseCancel];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	[self serverRun:@"SELECT nextval('structure_test.fresh')"];
 	[pane revert:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(pane.currentValueField.stringValue, @"40");
 	XCTAssertNil(pane.sequence.pendingValue);
 }
@@ -978,6 +1060,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	NSMenuItem *structureItem = [self menuItem:@selector(viewStructure:) key:@"1"];
 	XCTAssertTrue([self.controller validateMenuItem:structureItem]);
 	[self.controller performSelector:@selector(viewStructure:) withObject:structureItem];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence);
 	XCTAssertNotNil([[self.pane view] window]);
 	XCTAssertEqualObjects([[self.document toolbar] selectedItemIdentifier], SPSequenceTestToolbarStructure);
@@ -986,6 +1069,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	NSToolbarItem *toolbarItem = [self toolbarItem:SPSequenceTestToolbarStructure];
 	XCTAssertTrue([self.document validateToolbarItem:toolbarItem]);
 	[NSApp sendAction:toolbarItem.action to:toolbarItem.target from:toolbarItem];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence);
 	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"seq_free");
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
@@ -996,12 +1080,14 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 {
 	[self clickTable:@"t"];
 	[self.document viewStructure:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self selectSequence:@"seq_free"];
 	SPPostgresSequenceController *pane = self.pane;
 	[self recordPaneChanges];
 
 	[self type:@"seq_free2" into:pane.nameField];
 	[pane apply:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"seq_free2");
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence);
 	XCTAssertEqualObjects(pane.sequenceName, @"seq_free2");
@@ -1009,11 +1095,14 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 
 	[self.controller showWindow:nil];
 	[self.document sidebar:self.document.sidebar addSequenceInSchema:@"structure_test"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	NSWindow *sheet = [self window].attachedSheet;
 	XCTAssertNotNil(sheet);
 	[self type:@"added_quietly" into:[self viewWithIdentifier:@"sequenceName" in:sheet.contentView]];
 	[(NSButton *)[self viewWithIdentifier:@"sequenceAddButton" in:sheet.contentView] performClick:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return [self.document.sidebar.selectedSequenceName isEqualToString:@"added_quietly"]; } timeout:5], @"%@", self.alerts.firstObject.informativeText);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence);
 	XCTAssertEqualObjects(pane.sequenceName, @"added_quietly");
 	XCTAssertEqualObjects(SPSequenceTestPaneLog, @[], @"no pane change, no Structure load");
@@ -1031,11 +1120,14 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	PGPostgresConnection *oldConnection = self.document.connection;
 	[self.document switchToDatabase:@"postgres"];
 	XCTAssertTrue([self spinUntil:^BOOL{ return self.document.connection != oldConnection && !self.document.isProcessing; } timeout:20]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertNil(self.document.sidebar.selectedSequenceName);
 
 	PGPostgresConnection *postgresConnection = self.document.connection;
 	[self goBack:YES];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return self.document.connection != postgresConnection && !self.document.isProcessing; } timeout:20]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([[self.document windowTitleString] containsString:@"/pgkit_test/structure_test.seq_free"], @"%@", [self.document windowTitleString]);
 	XCTAssertEqualObjects(self.document.sidebar.selectedSchema, @"structure_test");
 	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"seq_free");
@@ -1105,6 +1197,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	XCTAssertTrue(self.pane.hasPendingEdits);
 
 	[self clickRow:[self rowOfSequence:@"seq_used" in:outline] in:outline];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
 
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
@@ -1118,6 +1211,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	// History: the renamed sequence under its new name, then the one clicked
 	XCTAssertEqualObjects(self.document.history.currentEntry[@"table"], @"seq_used");
 	[self goBack:YES];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"zz_seq");
 	XCTAssertEqualObjects(self.pane.sequenceName, @"zz_seq");
 }
@@ -1130,6 +1224,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	[self type:@"zz_seq" into:self.pane.nameField];
 
 	[self pressDownArrowIn:outline];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
 
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
@@ -1145,6 +1240,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 {
 	XCTAssertTrue([self clickTable:@"t"]);
 	[self.document viewStructure:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	SPPostgresStructureController *structure = self.document.structureController;
 	NSTableView *columns = structure.columnsView;
 	NSDictionary *entry = self.document.history.currentEntry;
@@ -1152,13 +1248,16 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	[self recordPaneChanges];
 
 	[structure addColumn:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[[columns currentEditor] setString:@"counter"];
 	[[columns window] makeFirstResponder:columns];
 	NSInteger draft = [columns numberOfRows] - 1;
 	id<NSTableViewDataSource> source = (id<NSTableViewDataSource>)columns.dataSource;
 	[source tableView:columns setObjectValue:@"integer" forTableColumn:[columns tableColumnWithIdentifier:@"type"] row:draft];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[source tableView:columns setObjectValue:@1 forTableColumn:[columns tableColumnWithIdentifier:@"auto"] row:draft]; // serial
 	XCTAssertTrue([structure commitPendingEdits]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 
 	XCTAssertTrue([[self.document.sidebar itemTitlesInSection:@"SEQUENCES"] containsObject:@"t_counter_seq"], @"%@", [self.document.sidebar itemTitlesInSection:@"SEQUENCES"]);
@@ -1175,6 +1274,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	XCTAssertGreaterThanOrEqual(row, 0);
 	[columns selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
 	[structure removeColumn:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 	XCTAssertEqualObjects([self serverValue:@"SELECT (to_regclass('structure_test.t_counter_seq') IS NULL)::text"], @"true");
 	XCTAssertFalse([[self.document.sidebar itemTitlesInSection:@"SEQUENCES"] containsObject:@"t_counter_seq"], @"%@", [self.document.sidebar itemTitlesInSection:@"SEQUENCES"]);
@@ -1194,6 +1294,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	[self recordPaneChanges];
 
 	[self.document _renameTable:@"child" inSchema:@"structure_test" toName:@"child2"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([[self.document.sidebar itemTitlesInSection:@"TABLES"] containsObject:@"child2"]);
 	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"seq_free");
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence);
@@ -1208,10 +1309,12 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 {
 	XCTAssertTrue([self clickTable:@"t"]);
 	[self.document viewContent:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self selectSequence:@"seq_free"];
 	[self type:@"seq_back" into:self.pane.nameField];
 
 	[self goBack:YES];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 	XCTAssertEqualObjects([self serverValue:@"SELECT to_regclass('structure_test.seq_back')::text"], @"structure_test.seq_back");
 	XCTAssertEqualObjects([self serverValue:@"SELECT (to_regclass('structure_test.seq_free') IS NULL)::text"], @"true");
@@ -1222,6 +1325,7 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 
 	// Forward: the sequence, under its new name
 	[self goBack:NO];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.sidebar.selectedSequenceName, @"seq_back");
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneSequence);
 	XCTAssertEqualObjects(self.pane.sequenceName, @"seq_back");

@@ -122,6 +122,8 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	self.alerts = alerts;
 	self.document.alertPresenter = ^(NSAlert *alert) { [alerts addObject:alert]; };
 	[self.controller addTabDocument:self.document atIndex:0 select:YES];
+	// The first loads run on the tab's runner
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	self.other = [SPPostgresTestServers connectedConnectionOnPort:SPQueryTestPort];
 }
@@ -217,6 +219,7 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 {
 	[self setSQL:@"SELECT 1; SELECT 2 AS two"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	XCTAssertEqualObjects([self columnTitles], @[@"two"]);
 	XCTAssertEqual([[self grid] numberOfRows], 1);
@@ -230,6 +233,7 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	[self setSQL:@"SELECT 1 AS one;\nSELECT 2 AS two;\nUPDATE content_test.items SET name = 'changed'"];
 	[self.query.editor setSelectedRange:NSMakeRange(3, 0)];
 	[self.query runCurrentQuery:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	XCTAssertEqualObjects([self columnTitles], @[@"one"]);
 	XCTAssertEqualObjects([self valueAtRow:0 column:@"one"], @"1");
@@ -239,6 +243,7 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	NSRange second = [self.query.editor.string rangeOfString:@"AS two"];
 	[self.query.editor setSelectedRange:NSMakeRange(second.location, 0)];
 	[self.query runCurrentQuery:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self columnTitles], @[@"two"]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.items WHERE name = 'changed'"], @0);
 
@@ -246,6 +251,7 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	NSString *text = self.query.editor.string;
 	[self.query.editor setSelectedRange:NSMakeRange(0, [text rangeOfString:@"two"].location + 3)];
 	[self.query runCurrentQuery:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self columnTitles], @[@"two"]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.items WHERE name = 'changed'"], @0);
 }
@@ -254,6 +260,7 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 {
 	[self setSQL:@"SELECT 1; SELEC 2; SELECT 3"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	XCTAssertTrue([self.query.statusText hasPrefix:@"Error in statement 2:"], @"%@", self.query.statusText);
 	XCTAssertTrue([self.query.statusText containsString:@"syntax error"], @"the server's message: %@", self.query.statusText);
@@ -264,6 +271,7 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	// Statement 3 never ran: an error in statement 1 leaves the grid empty
 	[self setSQL:@"SELECT 1/0; SELECT 3"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self.query.statusText hasPrefix:@"Error in statement 1: division by zero"], @"%@", self.query.statusText);
 	XCTAssertEqual([[[self grid] tableColumns] count], 0u);
 	XCTAssertEqual([[self grid] numberOfRows], 0);
@@ -274,27 +282,32 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 {
 	[self setSQL:@"UPDATE content_test.composite_pk SET v = v || '!'"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.query.statusText, @"3 rows affected");
 	XCTAssertEqualObjects([self serverValue:@"SELECT v FROM content_test.composite_pk WHERE a = 2"], @"v3!");
 	XCTAssertEqual([[[self grid] tableColumns] count], 0u, @"no result set");
 
 	[self setSQL:@"DELETE FROM content_test.no_pk WHERE x = 1 AND false"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.query.statusText, @"0 rows affected");
 
 	[self setSQL:@"UPDATE content_test.items SET name = 'one' WHERE id = 1"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.query.statusText, @"1 row affected");
 
 	// RETURNING gives rows
 	[self setSQL:@"UPDATE content_test.items SET name = 'two' WHERE id IN (1, 2) RETURNING id, name"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.query.statusText, @"2 rows");
 	XCTAssertEqualObjects([self columnTitles], (@[@"id", @"name"]));
 
 	// A query with no rows still shows its columns
 	[self setSQL:@"SELECT id FROM content_test.items WHERE false"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.query.statusText, @"0 rows");
 	XCTAssertEqualObjects([self columnTitles], @[@"id"]);
 }
@@ -303,6 +316,7 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 {
 	[self setSQL:@"SELECT note, price, tags, doc, blob, ts AT TIME ZONE 'UTC' AS ts, flags FROM content_test.items WHERE id IN (1, 4) ORDER BY id"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	XCTAssertEqualObjects(self.query.statusText, @"2 rows");
 	XCTAssertEqualObjects([self valueAtRow:0 column:@"note"], SPQueryTestNull);
@@ -329,11 +343,13 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 {
 	[self setSQL:@"BEGIN; UPDATE content_test.composite_pk SET v = 'x'; SELECT 1/0; SELECT 2"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.query.statusText, @"Error in statement 3: division by zero – the current transaction is aborted; ROLLBACK to continue");
 	XCTAssertEqual([self.document.connection transactionStatus], PGPostgresTransactionInError);
 
 	[self setSQL:@"ROLLBACK"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual([self.document.connection transactionStatus], PGPostgresTransactionIdle);
 	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.composite_pk WHERE v = 'x'"], @0);
 }
@@ -342,11 +358,13 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 {
 	[self setSQL:@"COPY content_test.no_pk FROM STDIN; SELECT 5 AS five"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self.query.statusText hasPrefix:@"Error in statement 1:"], @"%@", self.query.statusText);
 
 	// The connection is usable afterwards (by Query and Content alike)
 	[self setSQL:@"COPY (SELECT 1 UNION ALL SELECT 2) TO STDOUT; SELECT 5 AS five"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.query.statusText, @"1 row");
 	XCTAssertEqualObjects([self valueAtRow:0 column:@"five"], @"5");
 	XCTAssertNotNil([self.document.connection execute:@"SELECT 1"]);
@@ -356,8 +374,10 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 {
 	[self setSQL:@"  -- nothing here\n"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.query.statusText, @"");
 	[self.query runCurrentQuery:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.query.statusText, @"");
 }
 
@@ -365,16 +385,19 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 {
 	[self setSQL:@"SELECT a FROM content_test.composite_pk WHERE a = 1; UPDATE content_test.composite_pk SET v = v; SELECT 9 AS nine; DELETE FROM content_test.no_pk WHERE false"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.query.statusText, @"0 rows affected – results shown from statement 3");
 	XCTAssertEqualObjects([self columnTitles], @[@"nine"]);
 
 	[self setSQL:@"SELECT 1 AS one; UPDATE content_test.composite_pk SET v = v"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.query.statusText, @"3 rows affected – results shown from statement 1");
 
 	// Last statement is the one shown: no note
 	[self setSQL:@"UPDATE content_test.composite_pk SET v = v; SELECT 1 AS one"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.query.statusText, @"1 row");
 }
 
@@ -382,11 +405,13 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 {
 	[self setSQL:@"COPY (SELECT a FROM content_test.composite_pk) TO STDOUT"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.query.statusText, @"COPY 3 – output not shown");
 
 	// Only that statement's status says so
 	[self setSQL:@"COPY (SELECT 1) TO STDOUT; UPDATE content_test.composite_pk SET v = v"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.query.statusText, @"3 rows affected");
 }
 
@@ -394,11 +419,13 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 {
 	[self setSQL:@"INSERT INTO content_test.composite_pk (a, b, v) VALUES (1, 'a', 'dup')"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.query.statusText,
 						  @"Error in statement 1: duplicate key value violates unique constraint \"composite_pk_pkey\"\nDETAIL: Key (a, b)=(1, a) already exists.");
 
 	[self setSQL:@"SELECT 1; SELECT content_test.no_such_function(1)"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	NSArray *lines = [self.query.statusText componentsSeparatedByString:@"\n"];
 	XCTAssertEqual(lines.count, 2u, @"%@", self.query.statusText);
 	XCTAssertTrue([lines[0] hasPrefix:@"Error in statement 2: function content_test.no_such_function(integer) does not exist"], @"%@", lines[0]);
@@ -407,6 +434,7 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	// In a transaction, the note follows the message, before DETAIL
 	[self setSQL:@"BEGIN; INSERT INTO content_test.composite_pk (a, b, v) VALUES (1, 'a', 'dup')"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.query.statusText,
 						  @"Error in statement 2: duplicate key value violates unique constraint \"composite_pk_pkey\" – the current transaction is aborted; ROLLBACK to continue\nDETAIL: Key (a, b)=(1, a) already exists.");
 	XCTAssertNotNil([self.document.connection execute:@"ROLLBACK"]);
@@ -414,6 +442,8 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 
 - (void)testExceptionDuringRunRestoresState
 {
+	// The exception comes out of -runAllQueries: on an inline runner (see testExceptionInBackgroundRunRestoresState)
+	self.query.taskRunner = [SPPostgresTaskRunner inlineRunnerWithConnection:self.document.connection];
 	SPPostgresConsoleLogger *logger = [SPPostgresConsoleLogger loggerForConnection:self.document.connection];
 	XCTAssertNotNil(logger);
 	XCTAssertFalse(logger.loggingCustomQueries);
@@ -430,6 +460,7 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	// Not stuck "running": the next run runs
 	[self.query setStatementWillRunHook:nil];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self columnTitles], @[@"two"]);
 }
 
@@ -439,6 +470,7 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 
 	[self setSQL:@"SELECT 7171 AS a; SELECT 7272 AS b; SELEC 7373"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	// Test-only read of the console's existing storage (no public accessor)
 	id queryController = [(id)NSClassFromString(@"SPQueryController") valueForKey:@"sharedQueryController"];
@@ -447,7 +479,8 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	NSUInteger lastStatementIndex = NSNotFound;
 	for (NSUInteger i = 0; i < messages.count; i++) {
 		NSString *text = [messages[i] valueForKey:@"message"];
-		if ([text containsString:@"7171"] || [text containsString:@"7272"] || [text containsString:@"7373"]) {
+		// The statements themselves (another test's message may contain the digits, e.g. in a UUID)
+		if ([text hasPrefix:@"SELECT 7171"] || [text hasPrefix:@"SELECT 7272"] || [text hasPrefix:@"SELEC 7373"]) {
 			[found addObject:messages[i]];
 			lastStatementIndex = i;
 		}
@@ -520,8 +553,10 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 
 	// MySQL's default (DBView.xib's run popup): ⌘R runs Current, ⌥⌘R runs All
 	XCTAssertTrue([self pressKey:@"r" flags:NSEventModifierFlagCommand]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self columnTitles], @[@"one"], @"⌘R: Run Current");
 	XCTAssertTrue([self pressKey:@"r" flags:NSEventModifierFlagCommand | NSEventModifierFlagOption]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self columnTitles], @[@"two"], @"⌥⌘R: Run All");
 	XCTAssertTrue([[self toolTipOf:runCurrent] hasSuffix:@"(⌘R)"], @"%@", [self toolTipOf:runCurrent]);
 	XCTAssertTrue([[self toolTipOf:runAll] hasSuffix:@"(⌥⌘R)"], @"%@", [self toolTipOf:runAll]);
@@ -529,23 +564,31 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	// ⇧⌘R is MySQL's Refresh Databases menu item: not swallowed, it goes on to the main menu
 	[self.query.editor setSelectedRange:NSMakeRange(0, 0)];
 	[self.query runCurrentQuery:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertFalse([self pressKey:@"R" flags:NSEventModifierFlagCommand | NSEventModifierFlagShift]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self columnTitles], @[@"one"], @"nothing ran");
 	XCTAssertFalse([self pressKey:@"r" flags:NSEventModifierFlagCommand | NSEventModifierFlagControl], @"⌃⌘R (Refresh Tables) passes on too");
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	// The preference swaps them, read at the key press
 	[self overridePrefs:@{@"QueryPrimaryControlRunsAll": @YES}];
 	XCTAssertTrue([self pressKey:@"r" flags:NSEventModifierFlagCommand]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self columnTitles], @[@"two"], @"⌘R: Run All");
 	XCTAssertTrue([self pressKey:@"r" flags:NSEventModifierFlagCommand | NSEventModifierFlagOption]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self columnTitles], @[@"one"], @"⌥⌘R: Run Current");
 	XCTAssertTrue([[self toolTipOf:runAll] hasSuffix:@"(⌘R)"]);
 	XCTAssertTrue([[self toolTipOf:runCurrent] hasSuffix:@"(⌥⌘R)"]);
 
 	// Not in the window (Content showing): the keys aren't the Query view's
 	[self.document.sidebar reloadSchema:@"content_test"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"items"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.document viewContent:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self setSQL:@"SELECT 3 AS three"];
 	[self pressKey:@"r" flags:NSEventModifierFlagCommand];
 	XCTAssertEqualObjects([self columnTitles], @[@"one"]);
@@ -573,7 +616,9 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	XCTAssertEqual([queryItem action], @selector(viewQuery:));
 
 	[self.document.sidebar reloadSchema:@"content_test"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"items"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([[self.document.contentController view] isDescendantOf:[self pane]]);
 	XCTAssertFalse([[self.query view] isDescendantOf:[self pane]]);
 	XCTAssertEqualObjects([[self.document toolbar] selectedItemIdentifier], SPQueryTestToolbarContent);
@@ -587,9 +632,11 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 
 	[self setSQL:@"SELECT 42 AS answer"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	// Selecting another table keeps the Query view (as MySQL), the Content view follows the selection
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"composite_pk"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([[self.query view] isDescendantOf:[self pane]]);
 	XCTAssertEqualObjects([[self.document toolbar] selectedItemIdentifier], SPQueryTestToolbarQuery);
 	XCTAssertEqualObjects(self.document.contentController.table, @"composite_pk");
@@ -614,6 +661,7 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	XCTAssertTrue([(id<NSMenuItemValidation>)self.controller validateMenuItem:viewQuery]);
 	XCTAssertTrue([self.controller respondsToSelector:@selector(viewQuery:)]);
 	[NSApp sendAction:@selector(viewQuery:) to:self.controller from:viewQuery];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([[self.query view] isDescendantOf:[self pane]]);
 }
 
@@ -624,12 +672,15 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	PGPostgresConnection *oldConnection = self.document.connection;
 
 	[self.document switchToDatabase:@"pgkit_nopublic"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return self.document.connection != oldConnection; } timeout:20]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	XCTAssertEqualObjects(self.query.editor.string, @"SELECT current_database()");
 	XCTAssertTrue([[self.query view] isDescendantOf:[self pane]], @"still the Query view");
 	XCTAssertEqualObjects([[self.document toolbar] selectedItemIdentifier], SPQueryTestToolbarQuery);
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self valueAtRow:0 column:@"current_database"], @"pgkit_nopublic", @"runs on the new connection");
 }
 
@@ -662,7 +713,9 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 - (void)selectTableThenQuery:(NSString *)table
 {
 	[self.document.sidebar reloadSchema:@"content_test"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self.document.sidebar selectTableNamed:table], @"%@", table);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.document viewQuery:nil];
 }
 
@@ -670,6 +723,7 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 {
 	[self setSQL:sql];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertFalse([self.query.statusText hasPrefix:@"Error"], @"%@", self.query.statusText);
 }
 
@@ -735,6 +789,7 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	XCTAssertEqual([self.document.contentController.tableView numberOfRows], 0);
 
 	[self.document viewContent:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
 }
 
@@ -746,6 +801,7 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	// The key itself changes: an edit through the old row would match nothing ("changed by someone else")
 	[self run:@"UPDATE content_test.items SET id = 105 WHERE id = 5"];
 	[self.document viewContent:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	NSArray *ids = [self contentIds];
 	XCTAssertFalse([ids containsObject:@"5"], @"Content shows the rows as they are now");
 	NSUInteger row = [ids indexOfObject:@"105"];
@@ -757,6 +813,7 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 		if ([[[column headerCell] stringValue] isEqualToString:@"name"]) nameColumn = column;
 	}
 	[(id<NSTableViewDataSource>)[grid dataSource] tableView:grid setObjectValue:@"edited after query" forTableColumn:nameColumn row:(NSInteger)row];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT name FROM content_test.items WHERE id = 105"], @"edited after query");
 }
@@ -766,6 +823,7 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	[self selectTableThenQuery:@"items"];
 	[self run:@"ALTER TABLE content_test.items ADD COLUMN added_in_query text"];
 	[self.document viewContent:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([[self contentColumnTitles] containsObject:@"added_in_query"], @"%@", [self contentColumnTitles]);
 	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"items");
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
@@ -776,6 +834,7 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	[self selectTableThenQuery:@"items"];
 	[self setSQL:@"BEGIN; CREATE TABLE content_test.in_aborted (a int); SELECT 1/0"];
 	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self.query.statusText hasPrefix:@"Error"], @"%@", self.query.statusText);
 	XCTAssertEqual(self.alerts.count, 0u, @"no catalog reload inside the aborted transaction: %@", [self.alerts.firstObject informativeText]);
 	XCTAssertEqual([self.document.connection transactionStatus], PGPostgresTransactionInError);

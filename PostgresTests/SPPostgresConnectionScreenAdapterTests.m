@@ -1,4 +1,5 @@
 #import <XCTest/XCTest.h>
+#import "SPPostgresTestServers.h"
 #import "../Source/Postgres/SPPostgresConnectionScreenAdapter.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
 #import "../Source/Postgres/SPPostgresFavoritesStore.h"
@@ -566,6 +567,8 @@
 				  @"%@ (sheet: %@)", [controller tabDocuments], [[controller window] attachedSheet]);
 
 	SPPostgresDocument *document = [[controller tabDocuments] objectAtIndex:1];
+	// The tab's first loads run on its runner
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:document.taskRunner timeout:30]);
 	XCTAssertEqual((id)[controller selectedDocument], document);
 	XCTAssertNil([controller selectedTableDocument]);
 	XCTAssertEqual(document.parentWindowController, controller);

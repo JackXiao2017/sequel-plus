@@ -92,6 +92,8 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 		completion(weakSelf.confirmAnswer);
 	};
 	[self.controller addTabDocument:self.document atIndex:0 select:YES];
+	// The first loads run on the tab's runner
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	self.other = [SPPostgresTestServers connectedConnectionOnPort:SPRelationsTestPort];
 }
@@ -129,13 +131,16 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 - (void)select:(NSString *)table
 {
 	[self.document.sidebar reloadSchema:@"structure_test"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self.document.sidebar selectTableNamed:table], @"%@", table);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 }
 
 - (void)showRelationsOf:(NSString *)table
 {
 	[self select:table];
 	[self.document viewRelations:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneRelations);
 	XCTAssertEqualObjects(self.relations.table, table);
 }
@@ -144,6 +149,7 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 {
 	[self select:table];
 	[self.document viewTriggers:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneTriggers);
 	XCTAssertEqualObjects(self.triggers.table, table);
 }
@@ -228,6 +234,7 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 	[self.document viewQuery:nil];
 	[[self.document.queryController editor] setString:sql];
 	[self.document.queryController runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 }
 
 #pragma mark - Relations
@@ -252,6 +259,7 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 
 	// t has none of its own (child's key references it, which is child's relation, as MySQL's tab shows)
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"t"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.relations.table, @"t");
 	XCTAssertEqual([grid numberOfRows], 0);
 	XCTAssertFalse([[self.relations valueForKey:@"removeButton"] isEnabled]);
@@ -307,12 +315,15 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 
 	// The Structure view shows it when next shown
 	[self.document viewStructure:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	NSTableView *constraints = self.document.structureController.constraintsView;
 	XCTAssertTrue([[self valuesIn:constraints column:@"name"] containsObject:@"child_id_fkey"]);
 	[self.document viewRelations:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	// −: asks; Cancel keeps it, Delete drops it
 	[self selectRow:[self rowNamed:@"child_id_fkey" in:grid] in:grid];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	self.confirmAnswer = NO;
 	[relations removeRelation:nil];
 	XCTAssertEqual(self.confirmations.count, 1u);
@@ -341,7 +352,9 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 	NSView *kind = [self viewWithIdentifier:@"constraintKind" in:sheet.contentView];
 	XCTAssertTrue(kind.isHidden, @"FK mode has no kind pop-up");
 	[window endSheet:sheet returnCode:NSModalResponseCancel];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet == nil; } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertNil([self.relations valueForKey:@"activeSheet"]);
 	XCTAssertEqual([self.relations.relationsView numberOfRows], 1);
 }
@@ -375,6 +388,7 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 	XCTAssertTrue([[source font] isFixedPitch] || [[[source font] fontDescriptor] symbolicTraits] & NSFontDescriptorTraitMonoSpace, @"%@", [source font]);
 	XCTAssertEqualObjects([source string], @"");
 	[self selectRow:1 in:grid];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([[source string] containsString:@"RETURN NEW"], @"%@", [source string]);
 	XCTAssertTrue([[source string] containsString:@"structure_test.touch()"], @"%@", [source string]);
 	[grid deselectAll:nil];
@@ -412,6 +426,7 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 
 	// − asks, then drops
 	[self selectRow:[self rowNamed:@"t_new" in:grid] in:grid];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[triggers removeTrigger:nil];
 	XCTAssertEqual(self.confirmations.count, 1u);
 	XCTAssertEqualObjects(self.confirmations[0].messageText, @"Delete trigger \"t_new\"?");
@@ -428,9 +443,11 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 	XCTAssertTrue([(id<NSTableViewDelegate>)[grid delegate] tableView:grid shouldEditTableColumn:[self column:@"enabled" of:grid] row:audit]);
 
 	[self setValue:@YES in:grid row:audit column:@"enabled"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self tgenabled:@"t_audit"], @"O");
 	XCTAssertEqualObjects([self valueIn:grid row:audit column:@"enabled"], @YES);
 	[self setValue:@NO in:grid row:touch column:@"enabled"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self tgenabled:@"t_touch"], @"D");
 	XCTAssertEqualObjects([self valueIn:grid row:touch column:@"enabled"], @NO);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
@@ -440,6 +457,7 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 	XCTAssertNotNil([self.other execute:@"BEGIN"]);
 	XCTAssertNotNil([self.other execute:@"UPDATE structure_test.t SET qty = qty"]);
 	[self setValue:@YES in:grid row:touch column:@"enabled"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 1u);
 	XCTAssertEqualObjects(self.alerts[0].messageText, @"Could not change the trigger “t_touch”");
 	XCTAssertTrue([self.alerts[0].informativeText containsString:@"lock"], @"%@", self.alerts[0].informativeText);
@@ -450,6 +468,7 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 	// The trigger is gone (dropped elsewhere): the alert, and the grid shows what is there
 	XCTAssertNotNil([self.other execute:@"DROP TRIGGER t_touch ON structure_test.t"]);
 	[self setValue:@YES in:grid row:touch column:@"enabled"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 2u);
 	XCTAssertEqualObjects([self valuesIn:grid column:@"name"], @[@"t_audit"]);
 }
@@ -491,6 +510,7 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 	};
 	void (^click)(NSControl *) = ^(NSControl *control) {
 		[NSApp sendAction:[control action] to:[control target] from:control];
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	};
 
 	name.stringValue = @"t_sheet";
@@ -526,12 +546,15 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 
 	// Columns for UPDATE OF; unchecking UPDATE disables the list (and drops the choice)
 	[(id<NSTableViewDataSource>)[columns dataSource] tableView:columns setObjectValue:@YES forTableColumn:[columns tableColumnWithIdentifier:@"use"] row:2];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	insert.state = NSControlStateValueOn;
 	click(insert);
 	[timing selectItemWithTitle:@"AFTER"];
 	[function selectItemAtIndex:1];
 	[add performClick:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return calls == 1; } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(result.name, @"t_sheet");
 	XCTAssertEqualObjects(result.timing, @"AFTER");
 	XCTAssertEqualObjects(result.events, (@[@"INSERT", @"UPDATE"]));
@@ -559,7 +582,9 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 	XCTAssertFalse(hint.isHidden);
 	XCTAssertTrue([hint.stringValue containsString:@"Query"], @"%@", hint.stringValue);
 	[window endSheet:sheet returnCode:NSModalResponseCancel];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return calls == 1; } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertNil(result);
 }
 
@@ -575,6 +600,7 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 	[self select:@"child"];
 	XCTAssertTrue([self.controller validateMenuItem:relationsItem]);
 	[self.controller performSelector:@selector(viewRelations:) withObject:relationsItem];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneRelations);
 	XCTAssertNotNil([self.relations.relationsView window]);
 	XCTAssertEqual([[self.relations.relationsView window] firstResponder], self.relations.relationsView);
@@ -583,6 +609,7 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 
 	XCTAssertTrue([self.controller validateMenuItem:triggersItem]);
 	[self.controller performSelector:@selector(viewTriggers:) withObject:triggersItem];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneTriggers);
 	XCTAssertNil([self.relations.relationsView window], @"Relations is out of the window");
 	XCTAssertNotNil([self.triggers.triggersView window]);
@@ -592,30 +619,36 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 
 	// The selection follows while the pane is shown
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"t"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual([self.triggers.triggersView numberOfRows], 2);
 
 	// History: back to child's Relations
 	NSMenuItem *back = [[NSMenuItem alloc] initWithTitle:@"Back" action:@selector(backForwardInHistory:) keyEquivalent:@""];
 	back.tag = 0;
 	[self.document backForwardInHistory:back];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"child");
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneTriggers);
 	[self.document backForwardInHistory:back];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneRelations);
 	XCTAssertEqual([self.relations.relationsView numberOfRows], 1);
 
 	// A view: the empty state, with the grid hidden
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"t_view"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneRelations);
 	XCTAssertEqualObjects(self.relations.emptyStateText, @"Relations aren't available for views.");
 	XCTAssertTrue([self.relations.relationsView isHiddenOrHasHiddenAncestor]);
 	XCTAssertEqual([self.relations.relationsView numberOfRows], 0);
 	XCTAssertEqualObjects(self.triggers.emptyStateText, @"Triggers aren't available for views.");
 	[self.document viewTriggers:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneRelations, @"Triggers is disabled for a view");
 	XCTAssertTrue([self.triggers.triggersView isHiddenOrHasHiddenAncestor]);
 	XCTAssertEqual([self.triggers.triggersView numberOfRows], 0);
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"t"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.relations.emptyStateText, @"");
 	XCTAssertEqualObjects(self.triggers.emptyStateText, @"");
 	XCTAssertFalse([self.relations.relationsView isHiddenOrHasHiddenAncestor]);
@@ -628,30 +661,41 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 	[self showTriggersOf:@"t"];
 	[self runQuery:@"CREATE TRIGGER t_q AFTER INSERT ON structure_test.t FOR EACH ROW EXECUTE FUNCTION structure_test.touch()"];
 	[self.document viewTriggers:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self valuesIn:self.triggers.triggersView column:@"name"], (@[@"t_audit", @"t_q", @"t_touch"]));
 
 	[self showRelationsOf:@"child"];
 	[self runQuery:@"ALTER TABLE structure_test.child DROP CONSTRAINT child_t_id_fkey"];
 	[self.document viewRelations:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual([self.relations.relationsView numberOfRows], 0);
 	[self runQuery:@"ALTER TABLE structure_test.child ADD CONSTRAINT child_t_id_fkey FOREIGN KEY (t_id) REFERENCES structure_test.t (id)"];
 	[self.document viewRelations:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual([self.relations.relationsView numberOfRows], 1);
 
 	// A column renamed in the Structure view
 	[self.document viewStructure:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	NSTableView *columns = self.document.structureController.columnsView;
 	[self setValue:@"tid" in:columns row:[self rowNamed:@"t_id" in:columns] column:@"name"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.document viewRelations:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self valueIn:self.relations.relationsView row:0 column:@"columns"], @"tid");
 
 	// Same for the trigger's UPDATE OF column
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"t"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.document viewTriggers:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.document viewStructure:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	columns = self.document.structureController.columnsView;
 	[self setValue:@"the code" in:columns row:[self rowNamed:@"code" in:columns] column:@"name"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.document viewTriggers:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	NSTableView *grid = self.triggers.triggersView;
 	XCTAssertEqualObjects([self valueIn:grid row:[self rowNamed:@"t_touch" in:grid] column:@"event"], @"UPDATE OF \"the code\"");
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
@@ -669,14 +713,17 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 	SPPostgresTriggersController *triggers = self.triggers;
 	[triggers invalidate];
 	XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet == nil; } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertNil([triggers.triggersView dataSource]);
 
 	[self.document viewRelations:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.relations addRelation:nil];
 	XCTAssertNotNil(window.attachedSheet);
 	XCTAssertTrue([self.document parentTabShouldClose]);
 	[self.document parentTabDidClose];
 	XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet == nil; } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertNil([self.relations.relationsView dataSource]);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 }
@@ -694,6 +741,7 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 
 	XCTAssertNotNil([self.other execute:@"DROP TABLE structure_test.t_gone"]);
 	[self setValue:@NO in:grid row:0 column:@"enabled"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 1u, @"%@", [self.alerts valueForKey:@"messageText"]);
 	XCTAssertEqualObjects(self.alerts[0].messageText, @"Could not change the trigger “g_touch”");
 	XCTAssertTrue([self.triggers.noticeText hasPrefix:@"Could not load the triggers: "], @"%@", self.triggers.noticeText);
@@ -701,6 +749,7 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 
 	// A refresh on its own still shows its alert
 	[self.triggers refresh:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 2u);
 	XCTAssertEqualObjects(self.alerts[1].messageText, @"Could not load the triggers of “t_gone”");
 }
@@ -713,14 +762,17 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 	NSTableView *grid = self.relations.relationsView;
 	XCTAssertEqualObjects([self valuesIn:grid column:@"name"], (@[@"child_t_id_fkey", @"zz_fk"]));
 	[self selectRow:1 in:grid];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	XCTAssertNotNil([self.other execute:@"ALTER TABLE structure_test.child ADD CONSTRAINT aa_fk FOREIGN KEY (u) REFERENCES structure_test.t (id)"]);
 	[self.relations reload];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self valuesIn:grid column:@"name"], (@[@"aa_fk", @"child_t_id_fkey", @"zz_fk"]));
 	XCTAssertEqual([grid selectedRow], 2, @"still zz_fk");
 
 	XCTAssertNotNil([self.other execute:@"ALTER TABLE structure_test.child DROP CONSTRAINT zz_fk"]);
 	[self.relations reload];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual([grid selectedRow], -1, @"gone: nothing selected");
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 }
@@ -736,6 +788,7 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 
 	[self.document switchToDatabase:@"postgres"];
 	XCTAssertTrue([self spinUntil:^BOOL{ return self.document.connection != oldConnection && !self.document.isProcessing; } timeout:20]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertNotEqual(self.relations, oldRelations);
 	XCTAssertNotEqual(self.triggers, oldTriggers);
 	XCTAssertNotEqual([self.document valueForKey:@"infoController"], oldInfo);
@@ -746,12 +799,16 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 	// Back on pgkit_test: the new controllers read the new session
 	[self.document switchToDatabase:@"pgkit_test"];
 	XCTAssertTrue([self spinUntil:^BOOL{ return [[self.document windowTitleString] containsString:@"/pgkit_test"] && !self.document.isProcessing; } timeout:20]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self select:@"child"];
 	[self.document viewRelations:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertNotNil([self.relations.relationsView window]);
 	XCTAssertEqual([self.relations.relationsView numberOfRows], 1);
 	[self.document viewTriggers:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"t"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual([self.triggers.triggersView numberOfRows], 2);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 }
@@ -763,8 +820,10 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 {
 	[self select:@"t"];
 	[self.document viewStructure:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	SPPostgresStructureController *structure = self.document.structureController;
 	[structure addColumn:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	NSTableView *columns = structure.columnsView;
 	[[columns currentEditor] setString:@"id"]; // taken
 	[[columns window] makeFirstResponder:columns];
@@ -774,6 +833,7 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 
 	[self.document.connection disconnect];
 	XCTAssertTrue([self spinUntil:^BOOL{ return !self.document.connection.isConnected; } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self.document parentTabShouldClose]);
 	XCTAssertEqual(self.alerts.count, alerts, @"no attempt to save");
 }
@@ -936,6 +996,43 @@ static NSString * const SPRelationsTestToolbarTriggers = @"SwitchToTableTriggers
 	XCTAssertEqualObjects([self tgenabled:@"t_audit"], @"D");
 	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM pg_constraint WHERE conname = 'child_t_id_fkey'"], @1);
 	XCTAssertEqual([triggers.triggersView numberOfRows], 2);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+}
+
+/// The foreign key sheet reads the catalog on the main thread: while the tab's runner is busy a change of the
+/// referenced schema or table is refused (the pop-up goes back), and works again once idle.
+- (void)testForeignKeySheetRefusesCatalogReadWhileBusy
+{
+	[self.controller showWindow:nil];
+	[self showRelationsOf:@"child"];
+	SPPostgresTaskRunner *runner = self.document.taskRunner;
+	XCTAssertEqual(self.relations.taskRunner, runner);
+	[self.relations addRelation:nil];
+	NSWindow *window = [self.controller window];
+	NSWindow *sheet = window.attachedSheet;
+	XCTAssertNotNil(sheet);
+	NSPopUpButton *schemas = [self viewWithIdentifier:@"referencedSchema" in:sheet.contentView];
+	NSPopUpButton *tables = [self viewWithIdentifier:@"referencedTable" in:sheet.contentView];
+	XCTAssertEqualObjects([schemas titleOfSelectedItem], @"structure_test");
+	NSArray *structureTables = [tables itemTitles];
+	XCTAssertTrue([structureTables containsObject:@"t"], @"%@", structureTables);
+
+	[SPPostgresTestServers queueSleep:1 onRunner:runner];
+	[schemas selectItemWithTitle:@"public"];
+	[NSApp sendAction:schemas.action to:schemas.target from:schemas];
+	XCTAssertEqualObjects([schemas titleOfSelectedItem], @"structure_test", @"refused while busy");
+	XCTAssertEqualObjects([tables itemTitles], structureTables);
+	XCTAssertTrue(runner.isBusy);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+
+	[schemas selectItemWithTitle:@"public"];
+	[NSApp sendAction:schemas.action to:schemas.target from:schemas];
+	XCTAssertEqualObjects([schemas titleOfSelectedItem], @"public");
+	XCTAssertNotEqualObjects([tables itemTitles], structureTables);
+
+	[window endSheet:sheet returnCode:NSModalResponseCancel];
+	XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet == nil; } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 }
 

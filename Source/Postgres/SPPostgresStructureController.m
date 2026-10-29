@@ -1041,7 +1041,7 @@ static NSDictionary *SPPostgresStructureRead(SPPostgresTableStructure *structure
 		finish(nil);
 		return;
 	}
-	[SPPostgresConstraintSheet beginForKind:kind columns:names schema:schema connection:connection window:window completion:finish];
+	[SPPostgresConstraintSheet beginForKind:kind columns:names schema:schema connection:connection taskRunner:[self taskRunner] window:window completion:finish];
 	[activeSheet release];
 	activeSheet = [[window attachedSheet] retain];
 }

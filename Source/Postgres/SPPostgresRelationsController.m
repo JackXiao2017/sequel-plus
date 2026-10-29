@@ -504,7 +504,7 @@ static NSDictionary *SPPostgresRelationsRead(SPPostgresTableStructure *structure
 		finish(nil);
 		return;
 	}
-	[SPPostgresConstraintSheet beginForKind:@"FOREIGN KEY" columns:columnNames schema:schema connection:connection window:window completion:finish];
+	[SPPostgresConstraintSheet beginForKind:@"FOREIGN KEY" columns:columnNames schema:schema connection:connection taskRunner:[self taskRunner] window:window completion:finish];
 	if (!done) {
 		[activeSheet release];
 		activeSheet = [[window attachedSheet] retain];

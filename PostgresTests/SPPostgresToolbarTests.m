@@ -175,6 +175,7 @@ static NSString * const SPTestUsers = @"SwitchToUserManagerToolbarItemIdentifier
 	self.postgres = [[SPPostgresDocument alloc] initWithConnection:connection connector:connector favorite:favorite];
 	[self.controller addTabDocument:self.postgres atIndex:index select:YES];
 	XCTAssertEqual([self.controller selectedDocument], self.postgres);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.postgres.taskRunner timeout:30]);
 	return self.postgres;
 }
 

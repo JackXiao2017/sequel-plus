@@ -775,6 +775,8 @@ static NSString * const SPUsersTestToolbarUsers = @"SwitchToUserManagerToolbarIt
 	__weak SPPostgresUsersControllerTests *weakSelf = self;
 	self.document.alertPresenter = ^(NSAlert *alert) { [weakSelf.alerts addObject:alert]; };
 	[self.windowController addTabDocument:self.document atIndex:0 select:YES];
+	// The first loads run on the tab's runner
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	// As SPPostgresDocumentTests: a sheet attaches to the nib's window once it has been shown (kept off screen)
 	[[self.windowController window] setFrameOrigin:NSMakePoint(-10000, -10000)];

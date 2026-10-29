@@ -101,6 +101,8 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 		completion(weakSelf.confirmAnswer);
 	};
 	[self.controller addTabDocument:self.document atIndex:0 select:YES];
+	// The first loads run on the tab's runner
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	self.other = [SPPostgresTestServers connectedConnectionOnPort:SPStructureTestPort];
 }
@@ -133,8 +135,11 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 - (void)showStructureOf:(NSString *)table
 {
 	[self.document.sidebar reloadSchema:@"structure_test"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self.document.sidebar selectTableNamed:table], @"%@", table);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.document viewStructure:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
 	XCTAssertEqualObjects(self.structure.table, table);
 }
@@ -238,13 +243,16 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	XCTAssertFalse([self.document validateToolbarItem:[self toolbarItem:SPStructureTestToolbarStructure]]);
 
 	[self.document.sidebar reloadSchema:@"structure_test"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"t"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneContent);
 
 	// ⌘1 validates through the window (which asks the selected Postgres tab), and is forwarded to the tab
 	XCTAssertTrue([self.controller validateMenuItem:structureItem]);
 	XCTAssertTrue([self.controller respondsToSelector:@selector(viewStructure:)]);
 	[self.controller performSelector:@selector(viewStructure:) withObject:structureItem];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, @"structure");
 	XCTAssertEqualObjects(self.structure.table, @"t");
 	XCTAssertEqualObjects(self.structure.schema, @"structure_test");
@@ -260,6 +268,7 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	[self.document viewQuery:nil];
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneQuery);
 	[NSApp sendAction:[structureToolbarItem action] to:[structureToolbarItem target] from:structureToolbarItem];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
 
 	// Every pane item, and the names
@@ -276,6 +285,7 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 		NSToolbarItem *item = [self toolbarItem:identifier];
 		XCTAssertTrue([self.document validateToolbarItem:item], @"%@", identifier);
 		[NSApp sendAction:[item action] to:[item target] from:item];
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 		XCTAssertEqualObjects(self.document.currentPane, items[identifier], @"%@", identifier);
 		XCTAssertEqualObjects([[self.document toolbar] selectedItemIdentifier], identifier);
 	}
@@ -361,6 +371,7 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	NSInteger order = [self rowNamed:@"Order" in:columns];
 
 	[self setValue:@"bigint" in:columns row:order column:@"type"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self serverTypeOf:@"Order"], @"bigint");
 	XCTAssertEqualObjects([self valueIn:columns row:order column:@"type"], @"bigint", @"reloaded");
 
@@ -368,24 +379,30 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	// (Order's rows are NULL: amount's aren't)
 	NSInteger amount = [self rowNamed:@"amount" in:columns];
 	[self setValue:@NO in:columns row:amount column:@"nullable"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT attnotnull::text FROM pg_attribute WHERE attrelid = 'structure_test.t'::regclass AND attname = 'amount'"], @"true");
 	XCTAssertEqualObjects([self valueIn:columns row:amount column:@"nullable"], @NO);
 	[self setValue:@"42" in:columns row:order column:@"default"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self valueIn:columns row:order column:@"default"], @"42");
 	[self setValue:@"the order" in:columns row:order column:@"comment"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT col_description('structure_test.t'::regclass, 5)"], @"the order");
 	[self setValue:@"Order No" in:columns row:order column:@"name"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self valueIn:columns row:order column:@"name"], @"Order No");
 	XCTAssertEqualObjects([self serverTypeOf:@"Order No"], @"bigint");
 	XCTAssertEqualObjects(changes, (@[@YES, @YES, @YES, @NO, @YES]));
 
 	// Unchanged: nothing sent
 	[self setValue:@"bigint" in:columns row:order column:@"type"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(changes.count, 5u);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 
 	// The server refuses: its message, and the grid shows what the server has
 	[self setValue:@"no_such_function()" in:columns row:order column:@"default"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 1u);
 	XCTAssertTrue([self.alerts[0].informativeText containsString:@"no_such_function"], @"%@", self.alerts[0].informativeText);
 	XCTAssertEqualObjects([self valueIn:columns row:order column:@"default"], @"42");
@@ -407,16 +424,19 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 
 	// Cancel: the column keeps its type
 	[self setValue:@"integer" in:columns row:qty column:@"type"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(offers.count, 1u);
 	XCTAssertEqualObjects(offers[0][1], @"\"qty\"::integer");
 	XCTAssertTrue([offers[0][0] containsString:@"cannot be cast automatically"], @"%@", offers[0][0]);
 	pending(nil);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	pending = nil;
 	XCTAssertEqualObjects([self serverTypeOf:@"qty"], @"text");
 	XCTAssertEqualObjects([self valueIn:columns row:qty column:@"type"], @"text");
 
 	// A USING that fails again is offered again (with what was tried), until one works
 	[self setValue:@"integer" in:columns row:qty column:@"type"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(offers.count, 2u);
 	void (^answer)(NSString *) = pending;
 	pending = nil;
@@ -444,6 +464,7 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 
 	// + appends column_1 (text, nullable), its name being edited
 	[structure addColumn:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue(structure.hasDraftColumn);
 	XCTAssertEqual([columns numberOfRows], 9);
 	XCTAssertEqualObjects([self valueIn:columns row:8 column:@"name"], @"column_1");
@@ -458,6 +479,7 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	// Return saves it
 	[[columns currentEditor] setString:@"added_col"];
 	XCTAssertTrue([self sendCommand:@selector(insertNewline:) toEditorOf:columns]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertFalse(structure.hasDraftColumn);
 	XCTAssertEqualObjects([self serverTypeOf:@"added_col"], @"text");
 	XCTAssertEqual([columns numberOfRows], 9);
@@ -465,8 +487,10 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 
 	// Esc discards one
 	[structure addColumn:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual([columns numberOfRows], 10);
 	XCTAssertTrue([self sendCommand:@selector(cancelOperation:) toEditorOf:columns]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertFalse(structure.hasDraftColumn);
 	XCTAssertEqual([columns numberOfRows], 9);
 	XCTAssertNil([columns currentEditor]);
@@ -475,7 +499,9 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	// The lowest free N
 	[self.other execute:@"ALTER TABLE structure_test.t ADD COLUMN column_1 int"];
 	[structure refresh:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[structure addColumn:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self valueIn:columns row:10 column:@"name"], @"column_2");
 
 	// A failed save keeps the draft (the alert shows why); fixed, it is saved when the selection leaves it
@@ -483,8 +509,11 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	[[columns window] makeFirstResponder:columns]; // ends the cell edit
 	XCTAssertTrue(structure.hasDraftColumn);
 	[self setValue:@"no_such_type" in:columns row:10 column:@"type"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self setValue:@NO in:columns row:10 column:@"nullable"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertFalse([structure commitPendingEdits]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 1u);
 	XCTAssertTrue([self.alerts[0].informativeText containsString:@"no_such_type"], @"%@", self.alerts[0].informativeText);
 	XCTAssertTrue(structure.hasDraftColumn);
@@ -492,9 +521,13 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	XCTAssertEqualObjects([self valueIn:columns row:10 column:@"nullable"], @NO);
 
 	[self setValue:@"varchar(20)" in:columns row:10 column:@"type"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self setValue:@"'x'" in:columns row:10 column:@"default"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self setValue:@"a new one" in:columns row:10 column:@"comment"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self selectRow:2 in:columns];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertFalse(structure.hasDraftColumn);
 	XCTAssertEqual([columns selectedRow], 2, @"the selection stays on the row that was clicked");
 	XCTAssertEqualObjects([self serverTypeOf:@"typed_col"], @"character varying(20)");
@@ -503,23 +536,29 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 
 	// Esc without a cell being edited, and − on a draft, discard it too
 	[structure addColumn:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[[columns window] makeFirstResponder:columns];
 	XCTAssertTrue([(id)[columns delegate] cancelRowEditing]);
 	XCTAssertFalse(structure.hasDraftColumn);
 	[structure addColumn:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[[columns window] makeFirstResponder:columns];
 	[structure removeColumn:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertFalse(structure.hasDraftColumn);
 	XCTAssertEqual(self.confirmations.count, 0u, @"a draft goes without asking");
 
 	// A serial draft (Auto: a popup on the new row)
 	[structure addColumn:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[[columns currentEditor] setString:@"counter"];
 	[[columns window] makeFirstResponder:columns];
 	NSInteger draft = [columns numberOfRows] - 1;
 	[self setValue:@"integer" in:columns row:draft column:@"type"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self setValue:@1 in:columns row:draft column:@"auto"]; // "serial"
 	XCTAssertTrue([structure commitPendingEdits]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self valueIn:columns row:draft column:@"auto"], @"serial");
 	XCTAssertEqual(self.alerts.count, 1u, @"%@", self.alerts.lastObject.informativeText);
 }
@@ -530,7 +569,9 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	NSTableView *columns = self.structure.columnsView;
 
 	[self selectRow:[self rowNamed:@"code" in:columns] in:columns];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.structure removeColumn:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.confirmations.count, 1u);
 	XCTAssertEqualObjects(self.confirmations[0].messageText, @"Delete column \"code\"?");
 	XCTAssertEqual(self.alerts.count, 1u);
@@ -545,10 +586,13 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	// Cancel keeps it; confirmed, a column nothing depends on goes
 	self.confirmAnswer = NO;
 	[self selectRow:[self rowNamed:@"Order" in:columns] in:columns];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.structure removeColumn:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self serverTypeOf:@"Order"], @"integer");
 	self.confirmAnswer = YES;
 	[self.structure removeColumn:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertNil([self serverTypeOf:@"Order"]);
 	XCTAssertFalse([[self valuesIn:columns column:@"name"] containsObject:@"Order"]);
 	XCTAssertEqual(self.alerts.count, 1u);
@@ -581,6 +625,7 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	index.unique = YES;
 	index.method = @"btree";
 	pending(index);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	pending = nil;
 	NSTableView *indexes = structure.indexesView;
 	NSInteger row = [self rowNamed:@"t_code_qty_idx" in:indexes];
@@ -591,6 +636,7 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	[structure addIndex:nil];
 	NSInteger count = [indexes numberOfRows];
 	pending(nil);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual([indexes numberOfRows], count);
 
 	// A CHECK constraint
@@ -602,6 +648,7 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	check.name = @"t_qty_check";
 	check.checkExpression = @"qty <> ''";
 	pending(check);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	pending = nil;
 	NSTableView *constraints = structure.constraintsView;
 	row = [self rowNamed:@"t_qty_check" in:constraints];
@@ -614,14 +661,17 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	bad.kind = @"CHECK";
 	bad.checkExpression = @"qty <> 'a'::no_such_type";
 	pending(bad);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 1u);
 
 	// − asks, then drops
 	[self selectRow:[self rowNamed:@"t_qty_check" in:constraints] in:constraints];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[structure removeConstraint:nil];
 	XCTAssertEqualObjects(self.confirmations.lastObject.messageText, @"Delete constraint \"t_qty_check\"?");
 	XCTAssertFalse([[self valuesIn:constraints column:@"name"] containsObject:@"t_qty_check"]);
 	[self selectRow:[self rowNamed:@"t_code_qty_idx" in:indexes] in:indexes];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[structure removeIndex:nil];
 	XCTAssertEqualObjects(self.confirmations.lastObject.messageText, @"Delete index \"t_code_qty_idx\"?");
 	XCTAssertFalse([[self valuesIn:indexes column:@"name"] containsObject:@"t_code_qty_idx"]);
@@ -656,14 +706,19 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 
 	[tables selectItemWithTitle:@"t"];
 	[NSApp sendAction:[tables action] to:[tables target] from:tables];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual([referenced numberOfRows], 8);
 	XCTAssertEqualObjects([[referenced dataSource] tableView:referenced objectValueForTableColumn:[referenced tableColumnWithIdentifier:@"name"] row:0], @"id");
 
 	[(id<NSTableViewDataSource>)[ownColumns dataSource] tableView:ownColumns setObjectValue:@YES forTableColumn:[ownColumns tableColumnWithIdentifier:@"use"] row:1];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[(id<NSTableViewDataSource>)[referenced dataSource] tableView:referenced setObjectValue:@YES forTableColumn:[referenced tableColumnWithIdentifier:@"use"] row:0];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([add isEnabled]);
 	[add performClick:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return calls == 1; } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(result.kind, @"FOREIGN KEY");
 	XCTAssertEqualObjects(result.columns, @[@"t_id"]);
 	XCTAssertEqualObjects(result.referencedSchema, @"structure_test");
@@ -683,7 +738,9 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	XCTAssertNotNil([self viewWithIdentifier:@"indexMethod" in:sheet.contentView]);
 	XCTAssertNotNil([self viewWithIdentifier:@"indexUnique" in:sheet.contentView]);
 	[window endSheet:sheet returnCode:NSModalResponseCancel];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return calls == 1; } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertNil(result);
 }
 
@@ -706,6 +763,7 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	XCTAssertFalse([[structure valueForKey:@"addIndexButton"] isEnabled]);
 	XCTAssertFalse([[structure valueForKey:@"addConstraintButton"] isEnabled]);
 	[structure addColumn:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertFalse(structure.hasDraftColumn);
 	XCTAssertEqual(self.alerts.count, 0u);
 
@@ -719,13 +777,17 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	XCTAssertFalse([self.controller validateMenuItem:[self menuItem:@selector(viewTriggers:) key:@"4"]]);
 	XCTAssertTrue([self.controller validateMenuItem:[self menuItem:@selector(viewStatus:) key:@"5"]]);
 	[self.document viewRelations:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure, @"disabled: nothing happens");
 
 	// On Relations or Triggers, selecting a view shows the pane's empty-state text instead of switching
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"t"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.document viewRelations:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneRelations);
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"t_view"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneRelations);
 	NSView *pane = [[[self.document databaseView] subviews] lastObject];
 	NSTextField *empty = [self viewWithIdentifier:@"paneEmptyState" in:pane];
@@ -733,15 +795,19 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	XCTAssertFalse([empty isHiddenOrHasHiddenAncestor]);
 
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"t"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.document viewTriggers:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneTriggers);
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"t_view"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneTriggers);
 	empty = [self viewWithIdentifier:@"paneEmptyState" in:[[[self.document databaseView] subviews] lastObject]];
 	XCTAssertEqualObjects([empty stringValue], @"Triggers aren't available for views.");
 
 	// Back on a table, the text goes
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"t"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	empty = [self viewWithIdentifier:@"paneEmptyState" in:[[[self.document databaseView] subviews] lastObject]];
 	XCTAssertFalse([[empty stringValue] containsString:@"aren't available"]);
 }
@@ -752,6 +818,7 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	[self showStructureOf:@"child"];
 	XCTAssertNotNil([self.other execute:@"DROP TABLE structure_test.child"]);
 	[self.structure refresh:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(self.alerts.count, 1u);
 	XCTAssertTrue([self.structure.noticeText length] > 0);
 	XCTAssertNotEqualObjects(self.structure.noticeText, @"Views can't be edited here.");
@@ -771,9 +838,11 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	NSOutlineView *outline = [sidebar valueForKey:@"outlineView"];
 
 	[structure addColumn:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[[columns currentEditor] setString:@"id"]; // taken
 	[[columns window] makeFirstResponder:columns];
 	[self setValue:@"varchar(7)" in:columns row:8 column:@"type"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	// Clicking another table: the outline asks first
 	XCTAssertFalse([(id<NSOutlineViewDelegate>)[outline delegate] selectionShouldChangeInOutlineView:outline]);
@@ -788,6 +857,7 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	NSPopUpButton *schemas = [sidebar valueForKey:@"schemaPopup"];
 	[schemas selectItemWithTitle:@"public"];
 	[NSApp sendAction:[schemas action] to:[schemas target] from:schemas];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(sidebar.selectedSchema, @"structure_test");
 	XCTAssertEqualObjects([schemas titleOfSelectedItem], @"structure_test");
 	XCTAssertEqualObjects(sidebar.selectedTableName, @"t");
@@ -801,6 +871,7 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	NSMenuItem *back = [[NSMenuItem alloc] initWithTitle:@"Back" action:@selector(backForwardInHistory:) keyEquivalent:@""];
 	back.tag = 0;
 	[self.document backForwardInHistory:back];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(sidebar.selectedTableName, @"t");
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
 	XCTAssertTrue(structure.hasDraftColumn);
@@ -808,6 +879,7 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 
 	// Corrected, everything goes ahead
 	[self setValue:@"id_two" in:columns row:8 column:@"name"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([(id<NSOutlineViewDelegate>)[outline delegate] selectionShouldChangeInOutlineView:outline]);
 	XCTAssertFalse(structure.hasDraftColumn);
 	XCTAssertEqualObjects([self serverTypeOf:@"id_two"], @"character varying(7)");
@@ -828,6 +900,7 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	};
 
 	[self setValue:@"no_such_type" in:columns row:qty column:@"type"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(offers.count, 0u);
 	XCTAssertEqual(self.alerts.count, 1u);
 	XCTAssertTrue([self.alerts[0].informativeText containsString:@"no_such_type"], @"%@", self.alerts[0].informativeText);
@@ -843,6 +916,7 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 
 	// qty -> integer still asks; a USING failing on a row's value (class 22) asks again
 	[self setValue:@"integer" in:columns row:qty column:@"type"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(offers.count, 1u);
 	void (^answer)(NSString *) = pending;
 	answer(@"\"qty\"::integer");
@@ -864,7 +938,9 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	XCTAssertNotNil(sheet);
 	XCTAssertEqual([self.structure valueForKey:@"activeSheet"], sheet);
 	[window endSheet:sheet returnCode:NSModalResponseCancel];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet == nil; } timeout:5]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertNil([self.structure valueForKey:@"activeSheet"]);
 }
 

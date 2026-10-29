@@ -198,6 +198,8 @@ static NSDictionary *SPHistoryEntry(NSString *db, NSString *schema, NSString *ta
 	self.alerts = alerts;
 	self.document.alertPresenter = ^(NSAlert *alert) { [alerts addObject:alert]; };
 	[self.controller addTabDocument:self.document atIndex:0 select:YES];
+	// The first loads run on the tab's runner
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 }
 
 - (void)tearDown
@@ -258,6 +260,7 @@ static NSDictionary *SPHistoryEntry(NSString *db, NSString *schema, NSString *ta
 	XCTAssertFalse([control isEnabledForSegment:1]);
 
 	[document switchToDatabase:@"pgkit_nopublic"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:document.taskRunner timeout:30]);
 	XCTAssertTrue([self waitForTitleSuffix:@"/pgkit_nopublic"], @"%@ %@", [document windowTitleString], self.alerts);
 	XCTAssertTrue([document.sidebar selectTableNamed:@"items"]);
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
@@ -293,6 +296,7 @@ static NSDictionary *SPHistoryEntry(NSString *db, NSString *schema, NSString *ta
 
 	// Forward to the end: back in pgkit_nopublic, app.items, Query view
 	[document backForwardInHistory:[self historyMenuItemWithTag:1]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:document.taskRunner timeout:30]);
 	XCTAssertTrue([self waitForTitleSuffix:@"/pgkit_nopublic"], @"%@ %@", [document windowTitleString], self.alerts);
 	[document backForwardInHistory:[self historyMenuItemWithTag:1]];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
@@ -321,8 +325,10 @@ static NSDictionary *SPHistoryEntry(NSString *db, NSString *schema, NSString *ta
 	XCTAssertTrue([document.sidebar selectTableNamed:@"customers"]);
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[document switchToDatabase:@"sp_history_gone"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:document.taskRunner timeout:30]);
 	XCTAssertTrue([self waitForTitleSuffix:@"/sp_history_gone"], @"%@", self.alerts);
 	[document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:document.taskRunner timeout:30]);
 	XCTAssertTrue([self waitForTitleSuffix:@"/pgkit_test/public.customers"], @"%@", self.alerts);
 
 	XCTAssertNotNil([admin execute:@"DROP DATABASE sp_history_gone WITH (FORCE)"], @"%@", admin.lastError.errorPrimaryMessage);
@@ -332,6 +338,7 @@ static NSDictionary *SPHistoryEntry(NSString *db, NSString *schema, NSString *ta
 	[document backForwardInHistory:[self historyMenuItemWithTag:1]];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return self.alerts.count > 0 && !document.isProcessing; } timeout:20]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:document.taskRunner timeout:30]);
 	XCTAssertEqual(document.connection, kept);
 	XCTAssertTrue([[document windowTitleString] hasSuffix:@"/pgkit_test/public.customers"]);
 	XCTAssertTrue(document.history.canGoForward, @"the failed entry can be tried again");
@@ -346,6 +353,7 @@ static NSDictionary *SPHistoryEntry(NSString *db, NSString *schema, NSString *ta
 	XCTAssertTrue([document.sidebar selectTableNamed:@"customers"]);
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[document switchToDatabase:@"pgkit_nopublic"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:document.taskRunner timeout:30]);
 	XCTAssertTrue([self waitForTitleSuffix:@"/pgkit_nopublic"], @"%@", self.alerts);
 
 	__block BOOL answer = NO;
