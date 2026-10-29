@@ -189,6 +189,33 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 	}
 }
 
+- (BOOL)connectionNeededPassword
+{
+	@synchronized (self) {
+		return _connectionNeededPassword;
+	}
+}
+
+- (BOOL)connectionUsedPassword
+{
+	@synchronized (self) {
+		return _connectionUsedPassword;
+	}
+}
+
+/// Records libpq's password flags for a failed attempt (or clears them when conn is NULL). Call while the
+/// PGconn is still valid and owned by the caller.
+- (void)_recordPasswordFlagsOf:(PGconn *)conn
+{
+	BOOL needed = conn ? (PQconnectionNeedsPassword(conn) == 1) : NO;
+	BOOL used = conn ? (PQconnectionUsedPassword(conn) == 1) : NO;
+
+	@synchronized (self) {
+		_connectionNeededPassword = needed;
+		_connectionUsedPassword = used;
+	}
+}
+
 - (void)_setConnectionError:(NSString *)error
 {
 	@synchronized (self) {
@@ -322,6 +349,7 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 	}
 	
 	[self _setConnectionError:nil];
+	[self _recordPasswordFlagsOf:NULL];
 	
 	[self _createConnectionParameters];
 	
@@ -333,6 +361,7 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 		NSString *error = _connection ? [NSString stringWithUTF8String:PQerrorMessage(_connection)] : @"Out of memory";
 		
 		[self _setConnectionError:error];
+		[self _recordPasswordFlagsOf:_connection];
 		
 		if (_connection) PQfinish(_connection);
 		
@@ -858,6 +887,9 @@ static NSString *_PGCopyErrorMessage(const PGresult *result)
 			NSString *error = timedOut ? [NSString stringWithFormat:@"Connection timed out after %lu seconds", (unsigned long)_timeout] : [NSString stringWithUTF8String:(message && *message) ? message : "Connection failed"];
 			
 			[self _setConnectionError:error];
+
+			// Before _connecting clears: until then this thread owns the PGconn and -disconnect can't free it
+			[self _recordPasswordFlagsOf:_connection];
 
 			@synchronized (self) {
 				_connecting = NO;

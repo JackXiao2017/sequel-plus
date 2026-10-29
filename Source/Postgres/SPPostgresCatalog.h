@@ -2,7 +2,8 @@
 
 @class PGPostgresConnection;
 
-/// Read-only catalog queries that feed the Postgres window's database/schema/table lists.
+/// Catalog queries that feed the Postgres window's database/schema/table lists (read-only, except
+/// -createDatabase:error:).
 /// All names are passed to the server as bound parameters. Methods returning NSArray return nil
 /// and fill *error (domain SPPostgresErrorDomain, SPPostgresErrorQueryFailed) on failure.
 __attribute__((visibility("default")))
@@ -33,6 +34,14 @@ __attribute__((visibility("default")))
 
 /// Sequences (relkind S) in the schema, sorted.
 - (NSArray *)sequenceNamesInSchema:(NSString *)schema error:(NSError **)error;
+
+/**
+ * Sends `CREATE DATABASE <quoted name>` (owner: the connected user; the server's default template and encoding).
+ * An empty name, or one over 63 bytes in UTF-8, is refused with SPPostgresErrorInvalidSettings before anything is
+ * sent. A server error is SPPostgresErrorQueryFailed with the server's message followed by its DETAIL and HINT.
+ * The connection must not be inside a transaction block (the server refuses CREATE DATABASE there).
+ */
+- (BOOL)createDatabase:(NSString *)name error:(NSError **)error;
 
 /// Installed extensions as dictionaries with @"name" and @"version", sorted by name.
 - (NSArray *)installedExtensions:(NSError **)error;

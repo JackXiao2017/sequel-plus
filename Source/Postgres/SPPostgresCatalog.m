@@ -1,5 +1,6 @@
 #import "SPPostgresCatalog.h"
 #import "SPPostgresErrors.h"
+#import "SPPostgresTableData.h"
 #import <PostgresKit/PostgresKit.h>
 
 @implementation SPPostgresCatalog
@@ -114,6 +115,25 @@
 - (NSArray *)sequenceNamesInSchema:(NSString *)schema error:(NSError **)error
 {
 	return [self relationNamesInSchema:schema kinds:@"'S'" error:error];
+}
+
+- (BOOL)createDatabase:(NSString *)name error:(NSError **)error
+{
+	// The server's identifier limit (NAMEDATALEN - 1): a longer name would be silently truncated
+	NSUInteger bytes = [name lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+	if (!bytes || bytes > 63) {
+		if (error) {
+			NSString *message = bytes
+				? NSLocalizedString(@"A database name can be at most 63 bytes long.", @"Postgres new database: name too long")
+				: NSLocalizedString(@"Enter a name for the new database.", @"Postgres new database: empty name");
+			*error = SPPostgresMakeError(SPPostgresErrorInvalidSettings, message, nil);
+		}
+		return NO;
+	}
+
+	// The only CREATE DATABASE in the app: the connected user owns it, with the server's default template and encoding
+	NSString *sql = [@"CREATE DATABASE " stringByAppendingString:SPPostgresQuoteIdentifier(name)];
+	return SPPostgresExecuteWithDetails(_connection, sql, nil, error) != nil;
 }
 
 - (NSArray *)installedExtensions:(NSError **)error

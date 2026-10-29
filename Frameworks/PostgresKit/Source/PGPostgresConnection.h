@@ -117,6 +117,8 @@ PGConnectionErrorCode;
 	BOOL _connecting;
 	BOOL _disconnectRequested;
 	BOOL _sessionPending;
+	BOOL _connectionNeededPassword;
+	BOOL _connectionUsedPassword;
 	
 	NSMutableDictionary *_typeMap;
 	
@@ -150,6 +152,14 @@ PGConnectionErrorCode;
 
 @property (readonly) NSString *encoding;
 @property (readonly) NSString *connectionError;
+
+/**
+ * @property What libpq said about passwords when the last connect attempt failed (PQconnectionNeedsPassword:
+ *           the server asked for a password and none was given; PQconnectionUsedPassword: a password was sent).
+ *           Read from the PGconn before it is given up; NO after a successful connect or before any attempt.
+ */
+@property (readonly) BOOL connectionNeededPassword;
+@property (readonly) BOOL connectionUsedPassword;
 @property (readonly) PGPostgresError *lastError;
 @property (readonly) NSStringEncoding stringEncoding;
 @property (readonly) PGPostgresConnectionParameters *parameters;
