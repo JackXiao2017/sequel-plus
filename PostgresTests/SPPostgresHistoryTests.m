@@ -253,12 +253,14 @@ static NSDictionary *SPHistoryEntry(NSString *db, NSString *schema, NSString *ta
 
 	// pgkit_test public.customers (Content), then pgkit_nopublic app.items (Query)
 	XCTAssertTrue([document.sidebar selectTableNamed:@"customers"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([control isEnabledForSegment:0], @"back is enabled once there is somewhere to go back to");
 	XCTAssertFalse([control isEnabledForSegment:1]);
 
 	[document switchToDatabase:@"pgkit_nopublic"];
 	XCTAssertTrue([self waitForTitleSuffix:@"/pgkit_nopublic"], @"%@ %@", [document windowTitleString], self.alerts);
 	XCTAssertTrue([document.sidebar selectTableNamed:@"items"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[document viewQuery:nil];
 	XCTAssertTrue([[document windowTitleString] hasSuffix:@"/pgkit_nopublic/app.items"]);
 
@@ -268,6 +270,7 @@ static NSDictionary *SPHistoryEntry(NSString *db, NSString *schema, NSString *ta
 
 	// Back: the Content view of app.items (same database)
 	[document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([document toolbar].selectedItemIdentifier, @"SwitchToTableContentToolbarItemIdentifier");
 	XCTAssertEqualObjects(document.sidebar.selectedTableName, @"items");
 	XCTAssertTrue([control isEnabledForSegment:1]);
@@ -292,8 +295,11 @@ static NSDictionary *SPHistoryEntry(NSString *db, NSString *schema, NSString *ta
 	[document backForwardInHistory:[self historyMenuItemWithTag:1]];
 	XCTAssertTrue([self waitForTitleSuffix:@"/pgkit_nopublic"], @"%@ %@", [document windowTitleString], self.alerts);
 	[document backForwardInHistory:[self historyMenuItemWithTag:1]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[document backForwardInHistory:[self historyMenuItemWithTag:1]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[document backForwardInHistory:[self historyMenuItemWithTag:1]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([[document windowTitleString] hasSuffix:@"/pgkit_nopublic/app.items"], @"%@", [document windowTitleString]);
 	XCTAssertEqualObjects([document toolbar].selectedItemIdentifier, @"SwitchToRunQueryToolbarItemIdentifier");
 	XCTAssertFalse([control isEnabledForSegment:1]);
@@ -313,6 +319,7 @@ static NSDictionary *SPHistoryEntry(NSString *db, NSString *schema, NSString *ta
 	XCTAssertNotNil([admin execute:@"CREATE DATABASE sp_history_gone"], @"%@", admin.lastError.errorPrimaryMessage);
 
 	XCTAssertTrue([document.sidebar selectTableNamed:@"customers"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[document switchToDatabase:@"sp_history_gone"];
 	XCTAssertTrue([self waitForTitleSuffix:@"/sp_history_gone"], @"%@", self.alerts);
 	[document backForwardInHistory:[self historyMenuItemWithTag:0]];
@@ -323,6 +330,7 @@ static NSDictionary *SPHistoryEntry(NSString *db, NSString *schema, NSString *ta
 	NSSegmentedControl *control = [self historyControl];
 
 	[document backForwardInHistory:[self historyMenuItemWithTag:1]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return self.alerts.count > 0 && !document.isProcessing; } timeout:20]);
 	XCTAssertEqual(document.connection, kept);
 	XCTAssertTrue([[document windowTitleString] hasSuffix:@"/pgkit_test/public.customers"]);
@@ -336,6 +344,7 @@ static NSDictionary *SPHistoryEntry(NSString *db, NSString *schema, NSString *ta
 {
 	SPPostgresDocument *document = self.document;
 	XCTAssertTrue([document.sidebar selectTableNamed:@"customers"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[document switchToDatabase:@"pgkit_nopublic"];
 	XCTAssertTrue([self waitForTitleSuffix:@"/pgkit_nopublic"], @"%@", self.alerts);
 
@@ -350,6 +359,7 @@ static NSDictionary *SPHistoryEntry(NSString *db, NSString *schema, NSString *ta
 
 	// Cancelled: nothing moves, and the history (and its recording) carries on from where it was
 	[document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(asked.count, 1u);
 	XCTAssertFalse(document.isProcessing);
 	XCTAssertEqual(document.connection, kept);
@@ -359,13 +369,16 @@ static NSDictionary *SPHistoryEntry(NSString *db, NSString *schema, NSString *ta
 	XCTAssertFalse(document.history.canGoForward, @"the history index is unchanged");
 	XCTAssertTrue([[self historyControl] isEnabledForSegment:0]);
 	XCTAssertTrue([document.sidebar selectTableNamed:@"items"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([[document windowTitleString] hasSuffix:@"/pgkit_nopublic/app.items"]);
 
 	// Confirmed: back to the other database (two steps: app.items was recorded after the cancel)
 	answer = YES;
 	[document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(asked.count, 1u, @"same database: no switch, no question");
 	[document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqual(asked.count, 2u);
 	XCTAssertTrue([self waitForTitleSuffix:@"/pgkit_test/public.customers"], @"%@ %@", [document windowTitleString], self.alerts);
 	XCTAssertNotEqual(document.connection, kept);
@@ -376,6 +389,7 @@ static NSDictionary *SPHistoryEntry(NSString *db, NSString *schema, NSString *ta
 	SPPostgresDocument *document = self.document;
 	NSSegmentedControl *control = [self historyControl];
 	XCTAssertTrue([document.sidebar selectTableNamed:@"customers"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([control isEnabledForSegment:0]);
 
 	id mysql = [self.controller addNewConnection];

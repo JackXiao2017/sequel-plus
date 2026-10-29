@@ -511,6 +511,9 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}
 
 	contentController = [[SPPostgresContentController alloc] initWithConnection:connection];
+	// Content keeps its own inline runner on the tab's connection for now: Task 7 switches every controller to the tab's
+	// background runner at once, after Query, the sidebar and the panes are converted (until then they use the
+	// connection on the main thread, so no load may run on the runner's thread)
 
 	// Through the tab's own presenter (a test's, or a sheet once the tab is visible). Unretained: the
 	// controller is this document's, and -_tearDown drops the block.

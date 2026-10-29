@@ -484,6 +484,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 {
 	SPPostgresSidebarController *sidebar = self.document.sidebar;
 	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(sidebar.selectedTableName, @"customers");
 	XCTAssertTrue([[self.document windowTitleString] hasSuffix:@"/pgkit_test/public.customers"], @"%@", [self.document windowTitleString]);
 	XCTAssertEqualObjects([self window].title, [self.document windowTitleString]);
@@ -543,6 +544,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	XCTAssertTrue([[sidebar itemTitlesInSection:@"EXTENSIONS"] containsObject:@"pg_trgm"], @"extensions are per database");
 
 	XCTAssertTrue([sidebar selectTableNamed:@"Orders 2026"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([[self.document windowTitleString] hasSuffix:@"/pgkit_test/Sales Data.Orders 2026"], @"%@", [self.document windowTitleString]);
 	XCTAssertEqualObjects([self window].title, [self.document windowTitleString]);
 }
@@ -575,8 +577,10 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	// Only for a table: not a view, not without a selection
 	XCTAssertFalse([(id<NSMenuItemValidation>)duplicate.target validateMenuItem:duplicate]);
 	XCTAssertTrue([sidebar selectTableNamed:@"v_customers"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertFalse([(id<NSMenuItemValidation>)duplicate.target validateMenuItem:duplicate]);
 	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([(id<NSMenuItemValidation>)duplicate.target validateMenuItem:duplicate]);
 
 	// The sheet: <table>_copy, the content checkbox, Duplicate/Cancel
@@ -648,6 +652,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	}];
 	[self.document.sidebar reloadSchema:@"structure_test"];
 	XCTAssertTrue([self.document.sidebar selectTableNamed:table]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 }
 
 - (void)testRenameTableFromSidebarMenuReloadsAndKeepsSelection
@@ -664,8 +669,10 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 
 	// Only for a table
 	XCTAssertTrue([sidebar selectTableNamed:@"t_view"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertFalse([(id<NSMenuItemValidation>)rename.target validateMenuItem:rename]);
 	XCTAssertTrue([sidebar selectTableNamed:@"t"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertTrue([(id<NSMenuItemValidation>)rename.target validateMenuItem:rename]);
 
 	// The sheet, prefilled with the name; Cancel does nothing
@@ -730,8 +737,10 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	[self.document viewContent:nil];
 	[self.document viewStructure:nil];
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"child"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
 	[self.document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"t");
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
 
@@ -754,15 +763,18 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 
 	// Back: t2's Content
 	[self.document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(sidebar.selectedTableName, @"t2");
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneContent);
 
 	// Forward: t2's Structure, then child's
 	[self.document backForwardInHistory:[self historyMenuItemWithTag:1]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(sidebar.selectedTableName, @"t2");
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
 	XCTAssertEqualObjects(self.document.structureController.table, @"t2");
 	[self.document backForwardInHistory:[self historyMenuItemWithTag:1]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(sidebar.selectedTableName, @"child");
 	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
 }
@@ -802,6 +814,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	XCTAssertTrue([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"t"]);
 	XCTAssertFalse([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"t renamed"]);
 	XCTAssertTrue([sidebar selectTableNamed:@"t"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.document viewStructure:nil];
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
 	XCTAssertEqualObjects(self.document.structureController.table, @"t");
@@ -860,23 +873,30 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	[self.document viewQuery:nil];
 	XCTAssertEqualObjects(self.document.history.currentEntry[@"pane"], @"query");
 	XCTAssertTrue([self.document.sidebar selectTableNamed:@"child"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.document viewRelations:nil];
 	XCTAssertEqualObjects(self.document.history.currentEntry[@"pane"], @"relations");
 
 	// Back: Query, then Structure of t
 	[self.document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneQuery);
 	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"child");
 	[self.document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
 	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"t");
 	XCTAssertEqualObjects(self.document.structureController.table, @"t");
 
 	// Forward to Relations
 	[self.document backForwardInHistory:[self historyMenuItemWithTag:1]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.document backForwardInHistory:[self historyMenuItemWithTag:1]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self.document backForwardInHistory:[self historyMenuItemWithTag:1]];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneRelations);
 	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"child");
 
@@ -1296,6 +1316,7 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 		SPPostgresSidebarController *sidebar = document.sidebar;
 		XCTAssertTrue([[sidebar itemTitlesInSection:@"EXTENSIONS"] containsObject:@"citext"], @"%@", port);
 		XCTAssertTrue([sidebar selectTableNamed:@"sp_t5_items"]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:document.taskRunner timeout:30]);
 		[document viewStructure:nil];
 		NSDictionary *entry = document.history.currentEntry;
 
@@ -1343,6 +1364,7 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 		// Back to the table: the pane before the extension (Structure)
 		XCTAssertTrue([document sidebarShouldChangeSelection:sidebar]);
 		XCTAssertTrue([sidebar selectTableNamed:@"sp_t5_items"]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:document.taskRunner timeout:30]);
 		XCTAssertNil(sidebar.selectedExtensionName);
 		XCTAssertEqualObjects(document.currentPane, SPPostgresPaneStructure);
 		XCTAssertEqual(self.extensionAlerts.count, 0u, @"%@", self.extensionAlerts.firstObject.informativeText);
@@ -1434,6 +1456,7 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 		// Drop validates on an extension only
 		NSMenuItem *drop = [menu itemWithTitle:@"Drop Extension…"];
 		XCTAssertTrue([sidebar selectTableNamed:@"sp_t5_items"]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:document.taskRunner timeout:30]);
 		XCTAssertFalse([(id<NSMenuItemValidation>)drop.target validateMenuItem:drop]);
 	}
 }
@@ -1450,6 +1473,7 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 		SPPostgresSidebarController *sidebar = document.sidebar;
 		XCTAssertFalse([[sidebar itemTitlesInSection:@"EXTENSIONS"] containsObject:@"citext"], @"%@", port);
 		XCTAssertTrue([sidebar selectTableNamed:@"sp_t5_items"]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:document.taskRunner timeout:30]);
 		[document viewStructure:nil];
 
 		NSMenu *menu = sidebar.extensionMenu;
@@ -1493,6 +1517,7 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 		SPPostgresSidebarController *sidebar = document.sidebar;
 		XCTAssertTrue([document sidebarShouldChangeSelection:sidebar]);
 		XCTAssertTrue([sidebar selectTableNamed:@"sp_t5_items"]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:document.taskRunner timeout:30]);
 		[document viewStructure:nil];
 		XCTAssertEqualObjects(document.currentPane, SPPostgresPaneStructure);
 
