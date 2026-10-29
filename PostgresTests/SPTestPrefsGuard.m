@@ -5,6 +5,7 @@ NSString * const SPTestTransferAddedKey = @"SPToolbarTransferItemAdded";
 NSString * const SPTestSelectLastFavoriteUsedKey = @"SelectLastFavoriteUsed";
 NSString * const SPTestDefaultFavoriteKey = @"DefaultFavorite";
 NSString * const SPTestSparkleAutomaticChecksKey = @"SUEnableAutomaticChecks";
+NSString * const SPTestWindowAnimationsKey = @"NSAutomaticWindowAnimationsEnabled";
 
 static const void *SPRequestedAutosaveKey = &SPRequestedAutosaveKey;
 static const void *SPRequestedAutosaveNameKey = &SPRequestedAutosaveNameKey;
@@ -93,6 +94,10 @@ static const void *SPRequestedAutosaveNameKey = &SPRequestedAutosaveNameKey;
 	// Sparkle never checks for updates during the run: a check needs the bundle version, which test builds leave
 	// empty, and its SUNoVersionException would surface in whichever test is spinning the run loop
 	domain[SPTestSparkleAutomaticChecksKey] = @NO;
+	// Windows order in and out without AppKit's open/close animation: in the test host each such animation runs on a
+	// GCD worker that never finishes, so a full run exhausts the worker pool and blocks later dispatches (the task
+	// runner's cancel request among them)
+	domain[SPTestWindowAnimationsKey] = @NO;
 	[prefs removeVolatileDomainForName:NSArgumentDomain];
 	[prefs setVolatileDomain:domain forName:NSArgumentDomain];
 
