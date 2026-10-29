@@ -19,15 +19,26 @@
 static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifier";
 
 /// The Transfer sheet (SPPostgresTransferController) and the Transfer toolbar item of a Postgres tab connected to
-/// pgkit_io_src (io_source.sql), copying into pgkit_io_dst, on PG 12 and 18. The favorites and the target's provider
-/// are the test's (the favorites store and the Keychain are never read); the dump goes to a test-owned directory.
+/// pgkit_io_src (io_source.sql), copying into pgkit_io_dst (or an sp_t7_% database it creates), on PG 12 and 18. The
+/// favorites and targetConnect are the test's (the favorites store and the Keychain are never read); the dump goes to
+/// a test-owned directory.
 @interface SPPostgresTransferControllerTests : XCTestCase
 @property (strong) SPWindowController *windowController;
 @property (strong) SPPostgresDocument *document;
 @property (strong) NSNumber *port;
 @property (strong) NSMutableArray<NSString *> *providedDatabases;
-/// "<favorite name>|<password or (none)>|<database>" per target provider call
+/// "<favorite name>|<password or (none)>|<database>|<session, or the session token for a transfer connection>" per
+/// targetConnect call
 @property (strong) NSMutableArray<NSString *> *targetRequests;
+/// The sessions targetConnect opened, and their tokens ("token <n>")
+@property (strong) NSMutableArray<PGPostgresConnection *> *sessionConnections;
+@property (strong) NSMutableArray<NSString *> *sessionTokens;
+/// targetConnect answers PasswordRequired unless given this password (nil: none needed)
+@property (copy) NSString *requiredPassword;
+/// targetConnect fails (not a password or SSH error)
+@property BOOL failConnects;
+/// Non-nil: targetConnect's answers wait here (run them to answer); nil: answered on the next run loop turn
+@property (strong) NSMutableArray *heldConnects;
 @property (strong) NSMutableArray<PGPostgresConnection *> *providedConnections;
 @property (strong) NSMutableArray<NSAlert *> *alerts;
 @property (strong) NSMutableArray<PGPostgresConnection *> *openConnections;
@@ -51,11 +62,26 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 	[self closeDocument];
 	for (PGPostgresConnection *connection in self.openConnections) [connection disconnect];
 	self.openConnections = nil;
+	[self dropTestDatabases];
 	[[NSFileManager defaultManager] removeItemAtPath:self.directory error:NULL];
 	[super tearDown];
 }
 
 #pragma mark - Helpers
+
+/// Drops every sp_t7_% database the tests created (test code only: app code never drops databases).
+- (void)dropTestDatabases
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_test"];
+		PGPostgresResult *result = [connection execute:@"SELECT datname::text AS n FROM pg_database WHERE datname LIKE 'sp\\_t7\\_%'"];
+		for (NSDictionary *row in result) {
+			NSString *quoted = [NSString stringWithFormat:@"\"%@\"", [row[@"n"] stringByReplacingOccurrencesOfString:@"\"" withString:@"\"\""]];
+			XCTAssertNotNil([connection execute:[@"DROP DATABASE IF EXISTS " stringByAppendingString:quoted]], @"%@", connection.lastError.errorPrimaryMessage);
+		}
+		[connection disconnect];
+	}
+}
 
 - (BOOL)spinUntil:(BOOL (^)(void))condition timeout:(NSTimeInterval)timeout
 {
@@ -167,6 +193,7 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 	self.windowController = nil;
 	for (PGPostgresConnection *connection in self.providedConnections) [connection disconnect];
 	self.providedConnections = nil;
+	self.sessionConnections = nil;
 }
 
 /// Runs body once per test server, with a fresh document each time (body gets a connection to pgkit_io_dst).
@@ -179,31 +206,96 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 	}
 }
 
-/// A Transfer sheet with the test's favorites (default: "Test target" for pgkit_io_dst) and target provider.
+/// Sets the test's favorites (default: "Test target" for pgkit_io_dst), targetConnect and dump directory.
+- (void)configure:(SPPostgresTransferController *)controller favorites:(NSArray *)favorites
+{
+	controller.favorites = favorites ?: @[[self favoriteNamed:@"Test target" database:@"pgkit_io_dst"]];
+	controller.temporaryDirectory = self.directory;
+	self.sessionConnections = [NSMutableArray array];
+	self.sessionTokens = [NSMutableArray array];
+	NSMutableArray *requests = self.targetRequests;
+	NSMutableArray *connections = self.providedConnections;
+	NSMutableArray *sessions = self.sessionConnections;
+	NSMutableArray *tokens = self.sessionTokens;
+	NSUInteger thePort = self.port.unsignedIntegerValue;
+	__weak SPPostgresTransferControllerTests *weakSelf = self;
+	controller.targetConnect = ^(SPPostgresFavorite *favorite, NSString *database, NSString *password, id sessionToken, void (^completion)(PGPostgresConnection *, id, NSError *)) {
+		XCTAssertTrue([NSThread isMainThread]);
+		[requests addObject:[NSString stringWithFormat:@"%@|%@|%@|%@", favorite.name, password.length ? password : @"(none)", database, sessionToken ?: @"session"]];
+		NSMutableArray *held = weakSelf.heldConnects;
+		void (^answer)(void) = ^{
+			if (weakSelf.failConnects) {
+				completion(nil, nil, SPPostgresMakeError(SPPostgresErrorConnectionFailed, @"test: could not connect", nil));
+				return;
+			}
+			NSString *required = weakSelf.requiredPassword;
+			if (required && ![password isEqualToString:required]) {
+				completion(nil, nil, SPPostgresMakeError(SPPostgresErrorPasswordRequired, @"password authentication failed for user \"pgkit_test\"", nil));
+				return;
+			}
+			// Only the databases the tests may touch
+			if (!([database isEqualToString:@"pgkit_io_src"] || [database isEqualToString:@"pgkit_io_dst"] || [database hasPrefix:@"sp_t7_"])) {
+				completion(nil, nil, SPPostgresMakeError(SPPostgresErrorConnectionFailed, [NSString stringWithFormat:@"test: no database %@", database], nil));
+				return;
+			}
+			PGPostgresConnection *provided = [SPPostgresTestServers connectedConnectionOnPort:thePort database:database];
+			if (provided) [connections addObject:provided];
+			id token = sessionToken;
+			if (provided && !token) {
+				token = [NSString stringWithFormat:@"token %lu", (unsigned long)tokens.count + 1];
+				[sessions addObject:provided];
+				[tokens addObject:token];
+			}
+			completion(provided, token, provided ? nil : SPPostgresMakeError(SPPostgresErrorConnectionFailed, @"no connection", nil));
+		};
+		if (held) [held addObject:[answer copy]];
+		else dispatch_async(dispatch_get_main_queue(), answer);
+	};
+	controller.didEnd = ^{ weakSelf.ended = YES; };
+}
+
+/// A Transfer sheet with the test's favorites and targetConnect; waits for its session unless connects are held.
 - (SPPostgresTransferController *)openSheetWithFavorites:(NSArray *)favorites
 {
 	SPPostgresTransferController *controller = [[SPPostgresTransferController alloc] initWithDocument:self.document];
 	self.controller = controller;
 	self.ended = NO;
-	controller.favorites = favorites ?: @[[self favoriteNamed:@"Test target" database:@"pgkit_io_dst"]];
-	controller.temporaryDirectory = self.directory;
-	NSMutableArray *requests = self.targetRequests;
-	NSMutableArray *connections = self.providedConnections;
-	NSUInteger thePort = self.port.unsignedIntegerValue;
-	controller.targetProviderForFavorite = ^SPPostgresConnectionProvider(SPPostgresFavorite *favorite, NSString *password) {
-		NSString *name = favorite.name;
-		return ^(NSString *database, void (^completion)(PGPostgresConnection *, NSError *)) {
-			[requests addObject:[NSString stringWithFormat:@"%@|%@|%@", name, password.length ? password : @"(none)", database]];
-			PGPostgresConnection *provided = [SPPostgresTestServers connectedConnectionOnPort:thePort database:database];
-			if (provided) [connections addObject:provided];
-			completion(provided, provided ? nil : [NSError errorWithDomain:@"test" code:1 userInfo:@{NSLocalizedDescriptionKey: @"no connection"}]);
-		};
-	};
-	__weak SPPostgresTransferControllerTests *weakSelf = self;
-	controller.didEnd = ^{ weakSelf.ended = YES; };
+	[self configure:controller favorites:favorites];
 	[controller beginSheet];
 	XCTAssertEqual([self window].attachedSheet, controller.sheet, @"the Transfer sheet is shown");
+	if (!self.heldConnects && controller.favorites.count) [self waitForSession:controller];
 	return controller;
+}
+
+/// Waits until the session's connect has ended (the menu no longer says "Connecting…").
+- (void)waitForSession:(SPPostgresTransferController *)controller
+{
+	XCTAssertTrue([self spinUntil:^BOOL{ return ![controller.databasePopup.titleOfSelectedItem isEqualToString:@"Connecting…"] && controller.databasePopup.numberOfItems > 0; } timeout:20]);
+}
+
+/// The database menu's titles, the separator as "-".
+- (NSArray<NSString *> *)menuTitles:(SPPostgresTransferController *)controller
+{
+	NSMutableArray *titles = [NSMutableArray array];
+	for (NSMenuItem *item in controller.databasePopup.itemArray) [titles addObject:item.isSeparatorItem ? @"-" : item.title];
+	return titles;
+}
+
+/// Chooses a database menu item by title (as the user would).
+- (void)chooseDatabase:(NSString *)title in:(SPPostgresTransferController *)controller
+{
+	NSPopUpButton *popup = controller.databasePopup;
+	XCTAssertGreaterThanOrEqual([popup indexOfItemWithTitle:title], 0, @"%@ is listed", title);
+	[popup selectItemWithTitle:title];
+	[NSApp sendAction:popup.action to:popup.target from:popup];
+}
+
+/// Runs the held targetConnect answer at index.
+- (void)answerHeld:(NSUInteger)index
+{
+	XCTAssertGreaterThan(self.heldConnects.count, index);
+	void (^answer)(void) = self.heldConnects[index];
+	answer();
 }
 
 - (SPPostgresTransferController *)openSheet
@@ -215,12 +307,6 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 {
 	XCTAssertTrue(button.isEnabled, @"%@ is enabled", button.title);
 	[button performClick:nil];
-}
-
-- (void)type:(NSString *)text into:(NSTextField *)field
-{
-	field.stringValue = text;
-	[field.delegate controlTextDidChange:[NSNotification notificationWithName:NSControlTextDidChangeNotification object:field]];
 }
 
 - (void)chooseFavorite:(NSInteger)index in:(SPPostgresTransferController *)controller
@@ -281,14 +367,18 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 		XCTAssertEqualObjects(controller.overwriteModeRadio.title, @"Overwrite tables that already exist on the target");
 		XCTAssertEqualObjects(controller.favoritePopup.titleOfSelectedItem, @"Test target");
 		XCTAssertTrue(controller.favoritePopup.isEnabled);
-		XCTAssertEqualObjects(controller.databaseField.stringValue, @"pgkit_io_dst");
 		XCTAssertEqualObjects(controller.targetDescriptionField.stringValue, ([NSString stringWithFormat:@"pgkit_test@127.0.0.1:%@", port]));
-		XCTAssertEqualObjects(controller.passwordField.stringValue, @"");
-		XCTAssertEqualObjects(controller.passwordField.placeholderString, @"Saved in Keychain");
+		XCTAssertEqualObjects(controller.databasePopup.titleOfSelectedItem, @"pgkit_io_dst", @"the favorite's database");
+		XCTAssertEqualObjects(controller.selectedDatabase, @"pgkit_io_dst");
+		XCTAssertEqualObjects(controller.targetStatusField.stringValue, @"");
+		XCTAssertTrue(controller.retryButton.isHidden);
+		XCTAssertEqualObjects(controller.retryButton.title, @"Retry");
 		XCTAssertEqualObjects(controller.transferButton.title, @"Transfer");
 		XCTAssertTrue(controller.transferButton.isEnabled);
-		XCTAssertEqual(self.providedDatabases.count, 0u, @"nothing connects while the sheet is open");
-		XCTAssertEqual(self.targetRequests.count, 0u);
+		XCTAssertEqual(self.providedDatabases.count, 0u, @"the source isn't connected while the sheet is open");
+		XCTAssertEqualObjects(self.targetRequests, @[@"Test target|(none)|pgkit_io_dst|session"], @"only the session");
+		XCTAssertFalse([controller respondsToSelector:NSSelectorFromString(@"passwordField")], @"no Password field");
+		XCTAssertFalse([controller respondsToSelector:NSSelectorFromString(@"databaseField")], @"a menu, not a field");
 	}];
 }
 
@@ -359,45 +449,44 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 		[self click:controller.wholeDatabaseRadio];
 		XCTAssertTrue(controller.transferButton.isEnabled, @"the whole database needs no table checked");
 
-		[self type:@"" into:controller.databaseField];
-		XCTAssertFalse(controller.transferButton.isEnabled, @"no database name");
-		[self type:@"pgkit_io_dst" into:controller.databaseField];
-		XCTAssertTrue(controller.transferButton.isEnabled);
-
 		[controller cancel:nil];
 		XCTAssertTrue([self spinUntil:^BOOL{ return self.ended && [self window].attachedSheet == nil; } timeout:5]);
 
+		NSUInteger requests = self.targetRequests.count;
 		controller = [self openSheetWithFavorites:@[]];
 		XCTAssertFalse(controller.favoritePopup.isEnabled, @"no favorites");
+		XCTAssertFalse(controller.databasePopup.isEnabled);
 		XCTAssertFalse(controller.transferButton.isEnabled);
-		[self type:@"pgkit_io_dst" into:controller.databaseField];
-		XCTAssertFalse(controller.transferButton.isEnabled, @"still no favorite");
+		XCTAssertNil(controller.selectedDatabase);
 		[controller transfer:nil];
-		XCTAssertEqual(self.targetRequests.count, 0u);
+		XCTAssertEqual(self.targetRequests.count, requests, @"no favorite: nothing connects");
 		[controller cancel:nil];
 		XCTAssertTrue([self spinUntil:^BOOL{ return self.ended && [self window].attachedSheet == nil; } timeout:5]);
 	}];
 }
 
-- (void)testDatabaseFollowsFavoriteUntilEdited
+/// The target line and the menu follow the favorite (a session per favorite, the previous one closed).
+- (void)testDatabaseMenuFollowsFavorite
 {
 	[self onEachPort:^(NSNumber *port, PGPostgresConnection *target) {
 		SPPostgresFavorite *first = [self favoriteNamed:@"Test target" database:@"pgkit_io_dst"];
-		SPPostgresFavorite *second = [self favoriteNamed:@"Other target" database:@"other_db"];
+		SPPostgresFavorite *second = [self favoriteNamed:@"Other target" database:@"pgkit_io_src"];
 		second.user = @"someone";
 		SPPostgresTransferController *controller = [self openSheetWithFavorites:@[first, second]];
-		XCTAssertEqualObjects(controller.databaseField.stringValue, @"pgkit_io_dst");
+		XCTAssertEqualObjects(controller.selectedDatabase, @"pgkit_io_dst");
 
 		[self chooseFavorite:1 in:controller];
-		XCTAssertEqualObjects(controller.databaseField.stringValue, @"other_db");
 		XCTAssertEqualObjects(controller.targetDescriptionField.stringValue, ([NSString stringWithFormat:@"someone@127.0.0.1:%@", port]));
+		[self waitForSession:controller];
+		XCTAssertEqualObjects(controller.selectedDatabase, @"pgkit_io_src");
+		XCTAssertFalse(self.sessionConnections[0].isConnected, @"the first favorite's session is closed");
+		XCTAssertTrue(self.sessionConnections[1].isConnected);
+
 		[self chooseFavorite:0 in:controller];
-		XCTAssertEqualObjects(controller.databaseField.stringValue, @"pgkit_io_dst");
-
-		[self type:@"mine" into:controller.databaseField];
-		[self chooseFavorite:1 in:controller];
-		XCTAssertEqualObjects(controller.databaseField.stringValue, @"mine", @"edited: it stays");
-		XCTAssertEqualObjects(controller.targetDescriptionField.stringValue, ([NSString stringWithFormat:@"someone@127.0.0.1:%@", port]));
+		[self waitForSession:controller];
+		XCTAssertEqualObjects(controller.selectedDatabase, @"pgkit_io_dst");
+		XCTAssertFalse(self.sessionConnections[1].isConnected);
+		XCTAssertEqualObjects(self.targetRequests, (@[@"Test target|(none)|pgkit_io_dst|session", @"Other target|(none)|pgkit_io_src|session", @"Test target|(none)|pgkit_io_dst|session"]));
 	}];
 }
 
@@ -458,7 +547,7 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 		XCTAssertEqualObjects(askedDescription, description);
 		[self spinUntil:^BOOL{ return NO; } timeout:0.5];
 		XCTAssertEqual(self.providedDatabases.count, 0u, @"no source connection");
-		XCTAssertEqual(self.targetRequests.count, 0u, @"no target connection");
+		XCTAssertEqual(self.targetRequests.count, 1u, @"no target connection but the session");
 		XCTAssertNil(controller.progressSheet);
 		XCTAssertFalse(self.ended);
 		XCTAssertEqual([self window].attachedSheet, controller.sheet);
@@ -483,7 +572,7 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 		[controller.sheet endSheet:alertWindow returnCode:NSAlertSecondButtonReturn];
 		[self spinUntil:^BOOL{ return NO; } timeout:0.5];
 		XCTAssertEqual(self.providedDatabases.count, 0u);
-		XCTAssertEqual(self.targetRequests.count, 0u);
+		XCTAssertEqual(self.targetRequests.count, 1u, @"the session only");
 		XCTAssertFalse(self.ended);
 		XCTAssertEqual([self window].attachedSheet, controller.sheet);
 	}];
@@ -517,8 +606,8 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 		XCTAssertEqualObjects(self.alerts.firstObject.informativeText, controller.completionNote);
 
 		XCTAssertEqualObjects(self.providedDatabases, @[@"pgkit_io_src"]);
-		XCTAssertEqualObjects(self.targetRequests, @[@"Test target|(none)|pgkit_io_dst"]);
-		for (PGPostgresConnection *provided in self.providedConnections) XCTAssertFalse(provided.isConnected, @"the job's connections are closed");
+		XCTAssertEqualObjects(self.targetRequests, (@[@"Test target|(none)|pgkit_io_dst|session", @"Test target|(none)|pgkit_io_dst|token 1"]), @"through the session");
+		for (PGPostgresConnection *provided in self.providedConnections) XCTAssertFalse(provided.isConnected, @"the job's connections and the session are closed");
 		[self assertTemporaryDirectoryEmpty];
 
 		PGPostgresConnection *source = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_io_src"];
@@ -553,13 +642,12 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 		[controller.tablesList setChecked:YES item:@[@"Sales Data", @"Orders 2026"]];
 		[controller.tablesList setChecked:YES item:@[@"Sales Data", @"order_lines"]];
 		[self click:controller.overwriteModeRadio];
-		[self type:@"secret" into:controller.passwordField];
 		[self transferWith:controller];
 
 		XCTAssertNil(controller.lastErrorMessage);
 		XCTAssertTrue([controller.completionNote hasPrefix:@"Copied 2 tables to “pgkit_io_dst” on “Test target”.\n\nAlso created, as the tables need them: "], @"%@", controller.completionNote);
 		XCTAssertTrue([controller.completionNote containsString:@"type public.mood"], @"%@", controller.completionNote);
-		XCTAssertEqualObjects(self.targetRequests, @[@"Test target|secret|pgkit_io_dst"], @"the typed password");
+		XCTAssertEqualObjects(self.targetRequests, (@[@"Test target|(none)|pgkit_io_dst|session", @"Test target|(none)|pgkit_io_dst|token 1"]));
 		XCTAssertEqualObjects([self value:@"SELECT string_agg(note, ',') FROM public.marker" on:target], @"still here", @"left alone");
 		PGPostgresConnection *source = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_io_src"];
 		[self.openConnections addObject:source];
@@ -572,26 +660,49 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 	}];
 }
 
-/// The default target provider (no seam): a connector with the typed password (so the Keychain isn't read for a TCP
-/// favorite), its SSH prompts on the progress sheet.
-- (void)testDefaultTargetProviderConnectsOnProgressSheet
+/// The default targetConnect (no seam): the session is a connector with the Keychain's password (a stand-in here:
+/// SPKeychain's lookup is replaced, so the real Keychain is never read) on the Transfer sheet; the transfer's
+/// connection shares it (its password, no parent window, no second Keychain read).
+- (void)testDefaultTargetConnectUsesTheSession
 {
 	[self onEachPort:^(NSNumber *port, PGPostgresConnection *target) {
-		SPPostgresTransferController *controller = [self openSheet];
-		controller.targetProviderForFavorite = nil;
-		controller.emptyConfirmation = ^(NSString *database, NSString *targetDescription, void (^answer)(BOOL)) { answer(YES); };
-		[self type:@"pgkit" into:controller.passwordField];
-		[controller transfer:nil];
-		XCTAssertNotNil(controller.progressSheet);
-		SPPostgresConnector *connector = controller.pendingConnector;
-		XCTAssertNotNil(connector, @"the default target provider is connecting");
-		XCTAssertEqual(connector.parentWindow, (NSWindow *)controller.progressSheet.panel);
-		XCTAssertEqualObjects(connector.password, @"pgkit");
-		XCTAssertTrue([self spinUntil:^BOOL{ return self.ended && [self window].attachedSheet == nil; } timeout:120]);
-		XCTAssertNil(controller.lastErrorMessage);
-		XCTAssertNil(controller.pendingConnector);
-		XCTAssertTrue([controller.completionNote hasPrefix:@"Copied 5 tables"], @"%@", controller.completionNote);
-		XCTAssertEqualObjects(self.providedDatabases, @[@"pgkit_io_src"]);
+		Class keychainClass = NSClassFromString(@"SPKeychain");
+		XCTAssertNotNil(keychainClass);
+		Method lookup = class_getInstanceMethod(keychainClass, NSSelectorFromString(@"getPasswordForName:account:"));
+		__block NSUInteger lookups = 0;
+		IMP original = method_setImplementation(lookup, imp_implementationWithBlock(^NSString *(id me, NSString *name, NSString *account) {
+			lookups++;
+			return @"pgkit";
+		}));
+		@try {
+			SPPostgresTransferController *controller = [[SPPostgresTransferController alloc] initWithDocument:self.document];
+			self.controller = controller;
+			self.ended = NO;
+			[self configure:controller favorites:nil];
+			controller.targetConnect = nil;
+			controller.emptyConfirmation = ^(NSString *database, NSString *targetDescription, void (^answer)(BOOL)) { answer(YES); };
+			[controller beginSheet];
+			[self waitForSession:controller];
+			XCTAssertEqualObjects(controller.selectedDatabase, @"pgkit_io_dst", @"%@", controller.targetStatusField.stringValue);
+			XCTAssertEqual(lookups, 1u, @"the Keychain's password, read as the session connects");
+			XCTAssertTrue([[self menuTitles:controller] containsObject:@"pgkit_io_src"]);
+
+			[controller transfer:nil];
+			XCTAssertNotNil(controller.progressSheet);
+			SPPostgresConnector *connector = controller.pendingConnector;
+			XCTAssertNotNil(connector, @"the transfer's connection is connecting");
+			XCTAssertEqualObjects(connector.password, @"pgkit", @"the session's password");
+			XCTAssertNil(connector.parentWindow);
+			XCTAssertTrue([self spinUntil:^BOOL{ return self.ended && [self window].attachedSheet == nil; } timeout:120]);
+			XCTAssertNil(controller.lastErrorMessage);
+			XCTAssertNil(controller.pendingConnector);
+			XCTAssertTrue([controller.completionNote hasPrefix:@"Copied 5 tables"], @"%@", controller.completionNote);
+			XCTAssertEqualObjects(self.providedDatabases, @[@"pgkit_io_src"]);
+			XCTAssertEqual(lookups, 1u, @"no second Keychain read");
+		}
+		@finally {
+			method_setImplementation(lookup, original);
+		}
 	}];
 }
 
@@ -675,7 +786,7 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 			[controller transfer:nil];
 			BOOL progressBegan = controller.progressSheet != nil;
 			[controller cancel:nil];
-			if (!progressBegan) XCTAssertEqual(self.targetRequests.count, 0u, @"no provider asked");
+			if (!progressBegan) XCTAssertEqual(self.targetRequests.count, 1u, @"no transfer connection asked for");
 			self.controller = nil;
 		}
 		XCTAssertTrue([self spinUntil:^BOOL{ return self.ended && [self window].attachedSheet == nil; } timeout:30]);
@@ -713,6 +824,315 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 			self.controller = nil;
 		}
 		XCTAssertTrue([self spinUntil:^BOOL{ @autoreleasepool { return weakController == nil; } } timeout:5], @"no retain cycle through stored blocks");
+	}];
+}
+
+#pragma mark - The target database menu
+
+- (void)testMenuListsTargetDatabases
+{
+	[self onEachPort:^(NSNumber *port, PGPostgresConnection *target) {
+		SPPostgresTransferController *controller = [self openSheet];
+		NSArray *titles = [self menuTitles:controller];
+		XCTAssertTrue([titles containsObject:@"pgkit_io_src"], @"%@", titles);
+		XCTAssertTrue([titles containsObject:@"pgkit_io_dst"], @"%@", titles);
+		XCTAssertFalse([titles containsObject:@"template0"], @"%@", titles);
+		XCTAssertFalse([titles containsObject:@"template1"], @"%@", titles);
+		XCTAssertEqualObjects(titles.lastObject, @"New Database…");
+		XCTAssertEqualObjects(titles[titles.count - 2], @"-", @"a separator before New Database…");
+		NSArray *names = [titles subarrayWithRange:NSMakeRange(0, titles.count - 2)];
+		XCTAssertEqualObjects(names, [names sortedArrayUsingSelector:@selector(compare:)], @"by name");
+		XCTAssertEqualObjects(controller.databasePopup.titleOfSelectedItem, @"pgkit_io_dst");
+		XCTAssertEqualObjects(controller.selectedDatabase, @"pgkit_io_dst");
+		XCTAssertTrue(controller.transferButton.isEnabled);
+
+		// Another database chosen: it is the target
+		[self chooseDatabase:@"pgkit_io_src" in:controller];
+		XCTAssertEqualObjects(controller.selectedDatabase, @"pgkit_io_src");
+		XCTAssertTrue(controller.transferButton.isEnabled);
+	}];
+}
+
+- (void)testConnectingAndFailureStates
+{
+	[self onEachPort:^(NSNumber *port, PGPostgresConnection *target) {
+		self.heldConnects = [NSMutableArray array];
+		SPPostgresTransferController *controller = [self openSheet];
+		XCTAssertEqualObjects([self menuTitles:controller], @[@"Connecting…"]);
+		XCTAssertFalse(controller.databasePopup.itemArray.firstObject.isEnabled);
+		XCTAssertNil(controller.selectedDatabase);
+		XCTAssertFalse(controller.transferButton.isEnabled);
+		XCTAssertTrue(controller.retryButton.isHidden);
+		[controller transfer:nil];
+		XCTAssertNil(controller.progressSheet, @"nothing to transfer into yet");
+
+		// It fails: one retry on postgres, which fails too
+		self.failConnects = YES;
+		[self answerHeld:0];
+		XCTAssertEqualObjects(self.targetRequests, (@[@"Test target|(none)|pgkit_io_dst|session", @"Test target|(none)|postgres|session"]));
+		[self answerHeld:1];
+		XCTAssertEqualObjects([self menuTitles:controller], @[@"Not connected"]);
+		XCTAssertFalse(controller.databasePopup.itemArray.firstObject.isEnabled);
+		XCTAssertTrue([controller.targetStatusField.stringValue containsString:@"test: could not connect"], @"%@", controller.targetStatusField.stringValue);
+		XCTAssertFalse(controller.retryButton.isHidden);
+		XCTAssertFalse(controller.transferButton.isEnabled);
+		XCTAssertNil(controller.selectedDatabase);
+
+		// Retry connects again
+		self.failConnects = NO;
+		self.heldConnects = nil;
+		// (-performClick: may run the run loop, which would answer already)
+		XCTAssertTrue(controller.retryButton.isEnabled);
+		[NSApp sendAction:controller.retryButton.action to:controller.retryButton.target from:controller.retryButton];
+		XCTAssertEqualObjects([self menuTitles:controller], @[@"Connecting…"]);
+		XCTAssertTrue(controller.retryButton.isHidden);
+		[self waitForSession:controller];
+		XCTAssertEqualObjects(controller.selectedDatabase, @"pgkit_io_dst");
+		XCTAssertEqualObjects(controller.targetStatusField.stringValue, @"");
+		XCTAssertTrue(controller.transferButton.isEnabled);
+		XCTAssertEqual(self.targetRequests.count, 3u);
+	}];
+}
+
+/// Favorite A's connect answers after B was chosen: its connection is closed, the menu is B's.
+- (void)testSwitchingFavoriteIgnoresLateResult
+{
+	[self onEachPort:^(NSNumber *port, PGPostgresConnection *target) {
+		self.heldConnects = [NSMutableArray array];
+		SPPostgresFavorite *a = [self favoriteNamed:@"A" database:@"pgkit_io_dst"];
+		SPPostgresFavorite *b = [self favoriteNamed:@"B" database:@"pgkit_io_src"];
+		SPPostgresTransferController *controller = [self openSheetWithFavorites:@[a, b]];
+		[self chooseFavorite:1 in:controller];
+		XCTAssertEqualObjects([self menuTitles:controller], @[@"Connecting…"]);
+		XCTAssertEqualObjects(self.targetRequests, (@[@"A|(none)|pgkit_io_dst|session", @"B|(none)|pgkit_io_src|session"]));
+
+		[self answerHeld:1];
+		XCTAssertEqualObjects(controller.selectedDatabase, @"pgkit_io_src");
+		NSArray *titles = [self menuTitles:controller];
+		[self answerHeld:0];
+		XCTAssertEqual(self.sessionConnections.count, 2u);
+		PGPostgresConnection *late = self.sessionConnections[1];
+		XCTAssertFalse(late.isConnected, @"A's late connection is closed");
+		XCTAssertTrue(self.sessionConnections[0].isConnected, @"B's session stays");
+		XCTAssertEqualObjects([self menuTitles:controller], titles);
+		XCTAssertEqualObjects(controller.selectedDatabase, @"pgkit_io_src");
+		XCTAssertTrue(controller.transferButton.isEnabled);
+		XCTAssertEqual(self.targetRequests.count, 2u, @"no retry for the late one");
+	}];
+}
+
+/// A wrong (no) password, then the right one: one prompt; the transfer uses it through the session without asking.
+- (void)testPasswordPromptThenTransfer
+{
+	[self onEachPort:^(NSNumber *port, PGPostgresConnection *target) {
+		self.requiredPassword = @"pgkit";
+		__block NSUInteger prompts = 0;
+		__block SPPostgresFavorite *prompted = nil;
+		SPPostgresTransferController *controller = [[SPPostgresTransferController alloc] initWithDocument:self.document];
+		self.controller = controller;
+		self.ended = NO;
+		[self configure:controller favorites:nil];
+		controller.passwordPrompt = ^(SPPostgresFavorite *favorite, void (^answer)(NSString *)) {
+			prompts++;
+			prompted = favorite;
+			answer(@"pgkit");
+		};
+		controller.emptyConfirmation = ^(NSString *database, NSString *targetDescription, void (^answer)(BOOL)) { answer(YES); };
+		[controller beginSheet];
+		[self waitForSession:controller];
+		XCTAssertEqual(prompts, 1u);
+		XCTAssertEqualObjects(prompted.name, @"Test target");
+		XCTAssertEqualObjects(controller.selectedDatabase, @"pgkit_io_dst", @"%@", controller.targetStatusField.stringValue);
+		XCTAssertEqualObjects(self.targetRequests, (@[@"Test target|(none)|pgkit_io_dst|session", @"Test target|pgkit|pgkit_io_dst|session"]), @"no retry on postgres for a password");
+
+		[self transferWith:controller];
+		XCTAssertNil(controller.lastErrorMessage);
+		XCTAssertTrue([controller.completionNote hasPrefix:@"Copied 5 tables"], @"%@", controller.completionNote);
+		XCTAssertEqual(prompts, 1u, @"asked once");
+		XCTAssertEqualObjects(self.targetRequests.lastObject, ([NSString stringWithFormat:@"Test target|pgkit|pgkit_io_dst|%@", self.sessionTokens.lastObject]));
+		XCTAssertEqual(self.targetRequests.count, 3u);
+		XCTAssertFalse(self.sessionConnections.lastObject.isConnected, @"the session closes when the controller ends");
+		self.requiredPassword = nil;
+	}];
+}
+
+/// Cancel at the password prompt: not connected, Retry asks again.
+- (void)testPasswordPromptCancel
+{
+	[self onEachPort:^(NSNumber *port, PGPostgresConnection *target) {
+		self.requiredPassword = @"pgkit";
+		SPPostgresTransferController *controller = [[SPPostgresTransferController alloc] initWithDocument:self.document];
+		self.controller = controller;
+		self.ended = NO;
+		[self configure:controller favorites:nil];
+		__block NSString *reply = nil;
+		__block NSUInteger prompts = 0;
+		controller.passwordPrompt = ^(SPPostgresFavorite *favorite, void (^answer)(NSString *)) { prompts++; answer(reply); };
+		[controller beginSheet];
+		[self waitForSession:controller];
+		XCTAssertEqual(prompts, 1u);
+		XCTAssertEqualObjects([self menuTitles:controller], @[@"Not connected"]);
+		XCTAssertTrue([controller.targetStatusField.stringValue containsString:@"password authentication failed"], @"%@", controller.targetStatusField.stringValue);
+		XCTAssertFalse(controller.retryButton.isHidden);
+		reply = @"pgkit";
+		[self click:controller.retryButton];
+		[self waitForSession:controller];
+		XCTAssertEqual(prompts, 2u);
+		XCTAssertEqualObjects(controller.selectedDatabase, @"pgkit_io_dst");
+		self.requiredPassword = nil;
+
+		// The default prompt
+		NSAlert *alert = [controller passwordAlertForFavorite:[self favoriteNamed:@"Test target" database:@"pgkit_io_dst"]];
+		XCTAssertEqualObjects(alert.messageText, @"Password for pgkit_test on “Test target”");
+		XCTAssertTrue([alert.accessoryView isKindOfClass:[NSSecureTextField class]]);
+		XCTAssertEqualObjects(alert.buttons[0].title, @"Connect");
+		XCTAssertEqualObjects(alert.buttons[1].title, @"Cancel");
+	}];
+}
+
+#pragma mark - New Database…
+
+- (void)testNewDatabaseCreatesAndSelects
+{
+	[self onEachPort:^(NSNumber *port, PGPostgresConnection *target) {
+		SPPostgresTransferController *controller = [self openSheet];
+		__block NSUInteger prompts = 0;
+		controller.newDatabasePrompt = ^(SPPostgresFavorite *favorite, void (^answer)(NSString *)) {
+			prompts++;
+			XCTAssertEqualObjects(favorite.name, @"Test target");
+			answer(@"sp_t7_made");
+		};
+		controller.emptyConfirmation = ^(NSString *database, NSString *targetDescription, void (^answer)(BOOL)) {
+			XCTFail(@"a database created in this sheet isn't confirmed");
+			answer(NO);
+		};
+		[self chooseDatabase:@"New Database…" in:controller];
+		XCTAssertEqual(prompts, 1u);
+		XCTAssertEqualObjects(controller.selectedDatabase, @"sp_t7_made");
+		XCTAssertEqualObjects(controller.databasePopup.titleOfSelectedItem, @"sp_t7_made");
+		NSArray *titles = [self menuTitles:controller];
+		XCTAssertTrue([titles containsObject:@"sp_t7_made"], @"%@", titles);
+		XCTAssertEqualObjects(titles.lastObject, @"New Database…");
+		XCTAssertEqual(self.alerts.count, 0u);
+
+		[self transferWith:controller];
+		XCTAssertNil(controller.lastErrorMessage);
+		XCTAssertTrue([controller.completionNote containsString:@"Copied 5 tables to “sp_t7_made” on “Test target”."], @"%@", controller.completionNote);
+		PGPostgresConnection *made = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue database:@"sp_t7_made"];
+		[self.openConnections addObject:made];
+		PGPostgresConnection *source = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_io_src"];
+		[self.openConnections addObject:source];
+		NSDictionary *expected = [self rowsOf:source];
+		XCTAssertGreaterThan(expected.count, 3u);
+		XCTAssertEqualObjects([self rowsOf:made], expected, @"port %@", port);
+		[made disconnect];
+		[self assertTemporaryDirectoryEmpty];
+	}];
+}
+
+/// A name that exists: the server's error, the selection back, nothing created.
+- (void)testNewDatabaseExistingNameShowsError
+{
+	[self onEachPort:^(NSNumber *port, PGPostgresConnection *target) {
+		SPPostgresTransferController *controller = [self openSheet];
+		NSArray *before = [self menuTitles:controller];
+		controller.newDatabasePrompt = ^(SPPostgresFavorite *favorite, void (^answer)(NSString *)) { answer(@"pgkit_io_dst"); };
+		[self chooseDatabase:@"New Database…" in:controller];
+		XCTAssertEqual(self.alerts.count, 1u);
+		XCTAssertEqualObjects(self.alerts.firstObject.messageText, @"“pgkit_io_dst” couldn't be created on “Test target”");
+		XCTAssertTrue([self.alerts.firstObject.informativeText containsString:@"already exists"], @"%@", self.alerts.firstObject.informativeText);
+		XCTAssertEqualObjects(controller.databasePopup.titleOfSelectedItem, @"pgkit_io_dst");
+		XCTAssertEqualObjects(controller.selectedDatabase, @"pgkit_io_dst");
+		XCTAssertEqualObjects([self menuTitles:controller], before);
+		XCTAssertTrue(controller.transferButton.isEnabled);
+		// Still a database the sheet didn't create: Empty mode asks
+		__block NSUInteger asked = 0;
+		controller.emptyConfirmation = ^(NSString *database, NSString *targetDescription, void (^answer)(BOOL)) { asked++; answer(NO); };
+		[controller transfer:nil];
+		XCTAssertEqual(asked, 1u);
+	}];
+}
+
+- (void)testNewDatabaseCancelRestoresSelection
+{
+	[self onEachPort:^(NSNumber *port, PGPostgresConnection *target) {
+		SPPostgresTransferController *controller = [self openSheet];
+		NSArray *before = [self menuTitles:controller];
+		[self chooseDatabase:@"pgkit_io_src" in:controller];
+		controller.newDatabasePrompt = ^(SPPostgresFavorite *favorite, void (^answer)(NSString *)) { answer(nil); };
+		[self chooseDatabase:@"New Database…" in:controller];
+		XCTAssertEqualObjects(controller.databasePopup.titleOfSelectedItem, @"pgkit_io_src");
+		XCTAssertEqualObjects(controller.selectedDatabase, @"pgkit_io_src");
+		XCTAssertEqualObjects([self menuTitles:controller], before);
+		XCTAssertEqual(self.alerts.count, 0u);
+
+		// The default prompt: a sheet on the Transfer sheet; Cancel there restores the selection too
+		controller.newDatabasePrompt = nil;
+		[self chooseDatabase:@"New Database…" in:controller];
+		XCTAssertTrue([self spinUntil:^BOOL{ return controller.sheet.attachedSheet != nil; } timeout:5]);
+		[controller.sheet endSheet:controller.sheet.attachedSheet returnCode:NSAlertSecondButtonReturn];
+		[self spinUntil:^BOOL{ return controller.sheet.attachedSheet == nil; } timeout:5];
+		XCTAssertEqualObjects(controller.selectedDatabase, @"pgkit_io_src");
+		XCTAssertEqualObjects(controller.databasePopup.titleOfSelectedItem, @"pgkit_io_src");
+
+		// Its Create button: a name of 1 to 63 bytes in UTF-8, sent as typed
+		NSAlert *alert = [controller createDatabaseAlertForFavorite:[self favoriteNamed:@"Test target" database:@"pgkit_io_dst"]];
+		XCTAssertEqualObjects(alert.messageText, @"New database on “Test target”");
+		XCTAssertEqualObjects(alert.buttons[0].title, @"Create");
+		XCTAssertEqualObjects(alert.buttons[1].title, @"Cancel");
+		NSTextField *field = (NSTextField *)alert.accessoryView;
+		XCTAssertTrue([field isKindOfClass:[NSTextField class]]);
+		NSButton *create = alert.buttons[0];
+		XCTAssertFalse(create.isEnabled);
+		NSString *e = @"é";
+		NSDictionary<NSString *, NSNumber *> *cases = @{
+			@"": @NO, @"a": @YES, @" ": @YES,
+			[@"" stringByPaddingToLength:63 withString:@"x" startingAtIndex:0]: @YES,
+			[@"" stringByPaddingToLength:64 withString:@"x" startingAtIndex:0]: @NO,
+			[[@"" stringByPaddingToLength:31 withString:e startingAtIndex:0] stringByAppendingString:@"x"]: @YES,
+			[@"" stringByPaddingToLength:32 withString:e startingAtIndex:0]: @NO,
+		};
+		for (NSString *name in cases) {
+			field.stringValue = name;
+			XCTAssertEqual(create.isEnabled, cases[name].boolValue, @"“%@”", name);
+		}
+	}];
+}
+
+/// Closing the tab while the sheet's session is connected closes the session.
+- (void)testTeardownClosesSession
+{
+	[self onEachPort:^(NSNumber *port, PGPostgresConnection *target) {
+		// The document opens the sheet; the test's seams are set as it begins
+		Method begin = class_getInstanceMethod([SPPostgresTransferController class], @selector(beginSheet));
+		IMP original = method_getImplementation(begin);
+		__weak SPPostgresTransferControllerTests *weakSelf = self;
+		method_setImplementation(begin, imp_implementationWithBlock(^(SPPostgresTransferController *me) {
+			void (^documentDidEnd)(void) = me.didEnd;
+			[weakSelf configure:me favorites:nil];
+			me.didEnd = ^{ weakSelf.ended = YES; if (documentDidEnd) documentDidEnd(); };
+			((void (*)(id, SEL))original)(me, @selector(beginSheet));
+		}));
+		@try {
+			self.ended = NO;
+			[self.document showTransfer:nil];
+		}
+		@finally {
+			method_setImplementation(begin, original);
+		}
+		SPPostgresTransferController *controller = self.document.transferController;
+		XCTAssertNotNil(controller);
+		[self waitForSession:controller];
+		XCTAssertEqualObjects(controller.selectedDatabase, @"pgkit_io_dst");
+		PGPostgresConnection *session = self.sessionConnections.firstObject;
+		XCTAssertTrue(session.isConnected);
+		controller = nil;
+
+		NSTabView *tabView = [self.windowController valueForKey:@"tabView"];
+		[tabView removeTabViewItem:self.document.parentTabViewItem];
+		XCTAssertTrue([self spinUntil:^BOOL{ return self.ended; } timeout:5]);
+		XCTAssertFalse(session.isConnected, @"the session is closed");
+		XCTAssertNil(self.document.transferController);
 	}];
 }
 
