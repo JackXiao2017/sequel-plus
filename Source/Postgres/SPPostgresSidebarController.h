@@ -1,6 +1,7 @@
 #import <Cocoa/Cocoa.h>
 
 @class SPPostgresCatalog;
+@class SPPostgresTaskRunner;
 @class SPPostgresSidebarController;
 
 @protocol SPPostgresSidebarControllerDelegate <NSObject>
@@ -31,11 +32,19 @@
  * The left panel of a PostgreSQL tab: a schema picker on top, then an outline with the
  * TABLES, VIEWS and SEQUENCES of the selected schema and, last, the EXTENSIONS installed in the database.
  * Use on the main thread.
+ *
+ * Reloads run through taskRunner ("Reloading...", cancellable): with a background runner a reload method returns at
+ * once and the end state it documents holds once the reload's task has completed (the runner idle). The catalog queries
+ * run on the runner's thread, on a catalog of their own over the runner's connection; the lists, the pop-up and the
+ * selection change on the main thread, all at once, in the order the reloads were asked for. A cancelled reload
+ * changes nothing (the pop-up goes back to the shown schema) and reports no error. The completion variants are called
+ * once the reload has been applied (or has failed or been cancelled), never after -invalidate.
  */
 __attribute__((visibility("default")))
 @interface SPPostgresSidebarController : NSObject <NSOutlineViewDataSource, NSOutlineViewDelegate>
 
-/// Loads the schemas (selecting the catalog's default schema), the tables and views, and the extensions.
+/// Loads the schemas (selecting the catalog's default schema), the tables and views, and the extensions, on an inline
+/// runner over the catalog's connection (so they are loaded when this returns).
 - (instancetype)initWithCatalog:(SPPostgresCatalog *)catalog;
 
 /// Schema popup on top, outline below. Built once; sized by the caller (autoresizes).
@@ -45,6 +54,8 @@ __attribute__((visibility("default")))
 /// view or sequence; a selected extension (the database's, not the schema's) stays selected if it is still listed.
 /// If the tables or views can't be loaded, the schema, lists and selection stay as they were.
 - (void)reloadSchema:(NSString *)schema;
+/// -reloadSchema:, then completion (loaded: NO if a list failed or the reload was cancelled, the lists as they were).
+- (void)reloadSchema:(NSString *)schema completion:(void (^)(BOOL loaded))completion;
 
 /**
  * Shows the tables, views and sequences of `schema` (as -reloadSchema:) and selects its sequence `sequence`, the
@@ -52,11 +63,17 @@ __attribute__((visibility("default")))
  * selection on the way. A sequence that isn't listed leaves nothing selected.
  */
 - (void)reloadSchema:(NSString *)schema selectingSequence:(NSString *)sequence;
+/// The same, then completion (loaded: NO if a list failed or the reload was cancelled).
+- (void)reloadSchema:(NSString *)schema selectingSequence:(NSString *)sequence completion:(void (^)(BOOL loaded))completion;
 
 /// Switches to another catalog (another database): reloads schemas, extensions and the default schema, with nothing
 /// selected.
 /// A list that can't be loaded keeps what it showed.
 - (void)reloadWithCatalog:(SPPostgresCatalog *)catalog;
+/// The same, then completion (loaded: NO if a list failed or the reload was cancelled). The queries run on taskRunner's
+/// connection, which must be the catalog's (an owner that sets taskRunner sets one over the new connection first; the
+/// default inline runner follows the catalog by itself).
+- (void)reloadWithCatalog:(SPPostgresCatalog *)catalog completion:(void (^)(BOOL loaded))completion;
 
 /**
  * Reloads the schemas, the extensions and the shown schema's tables, views and sequences (after the Query view
@@ -64,6 +81,9 @@ __attribute__((visibility("default")))
  * The delegate hears of a selection change only if the selection ends up different.
  */
 - (void)reloadKeepingSelection;
+/// The same, then completion (loaded: NO if a list failed or the reload was cancelled). The selection kept is the one
+/// shown when the reload is applied.
+- (void)reloadKeepingSelection:(void (^)(BOOL loaded))completion;
 
 /// @[@"TABLES", @"VIEWS", @"SEQUENCES", @"EXTENSIONS"]: Extensions is always last.
 - (NSArray *)sectionTitles;
@@ -124,7 +144,12 @@ __attribute__((visibility("default")))
 
 @property (assign) id<SPPostgresSidebarControllerDelegate> delegate;
 
-/// Detaches the outline and popup from this controller (called by the window on close; also on dealloc).
+/// Runs the reloads (default: an inline runner on the catalog's connection, so a reload has been applied when its
+/// method returns). With a background runner (the tab's, from Stage 8 Task 7) a reload returns at once.
+@property (retain) SPPostgresTaskRunner *taskRunner;
+
+/// Detaches the outline and popup from this controller, and drops the reloads still to come (no completion is called
+/// after this). Called by the window on close; also on dealloc.
 - (void)invalidate;
 
 @end

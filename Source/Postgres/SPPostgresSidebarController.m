@@ -1,5 +1,6 @@
 #import "SPPostgresSidebarController.h"
 #import "SPPostgresCatalog.h"
+#import "SPPostgresTaskRunner.h"
 
 static NSString * const SPPostgresSidebarTables = @"TABLES";
 static NSString * const SPPostgresSidebarViews = @"VIEWS";
@@ -11,6 +12,67 @@ static NSString * const SPPostgresSidebarItemCell = @"SPPostgresSidebarItemCell"
 
 static const CGFloat SPPostgresSidebarSchemaBarHeight = 32;
 static const NSInteger SPPostgresSidebarDetailTag = 1;
+
+/// What a reload reads (on the runner's thread) before it is applied (on the main thread).
+typedef NS_ENUM(NSInteger, SPPostgresSidebarReloadKind) {
+	SPPostgresSidebarReloadCatalog,  // schemas, extensions, then the default schema's lists
+	SPPostgresSidebarReloadKeeping,  // schemas, extensions, then the shown schema's lists (else the default schema's)
+	SPPostgresSidebarReloadSchema    // one schema's lists
+};
+
+/**
+ * A reload's queries, on the runner's thread, on a catalog of its own over the runner's connection: nothing here is
+ * shared with the main thread (schema and knownSchemas are immutable copies). Keys: "schemas" and "extensions" (when
+ * asked for and read), "schema" (the schema whose lists were read; absent for none), "tables", "views" and "sequences"
+ * (when read), and "failures": each failed query's NSError (NSNull if it had none), in the order they ran.
+ */
+static NSDictionary *SPPostgresSidebarRead(PGPostgresConnection *connection, SPPostgresSidebarReloadKind kind, NSString *schema, NSArray *knownSchemas)
+{
+	SPPostgresCatalog *catalog = [[[SPPostgresCatalog alloc] initWithConnection:connection] autorelease];
+	NSMutableDictionary *read = [NSMutableDictionary dictionary];
+	NSMutableArray *failures = [NSMutableArray array];
+	NSError *error = nil;
+
+	if (kind != SPPostgresSidebarReloadSchema) {
+		NSArray *names = [catalog schemaNames:&error];
+		if (names) {
+			[read setObject:names forKey:@"schemas"];
+			// A catalog reload shows the default schema; a reload keeping the selection, the shown one if still there
+			if (kind == SPPostgresSidebarReloadCatalog || ![names containsObject:schema]) schema = [catalog defaultSchemaFromSchemas:names];
+		}
+		else {
+			[failures addObject:error ?: (id)[NSNull null]];
+			if (kind == SPPostgresSidebarReloadCatalog) schema = [catalog defaultSchemaFromSchemas:knownSchemas];
+		}
+
+		error = nil;
+		NSArray *installed = [catalog installedExtensions:&error];
+		if (installed) [read setObject:installed forKey:@"extensions"];
+		else [failures addObject:error ?: (id)[NSNull null]];
+	}
+
+	if (schema) {
+		[read setObject:schema forKey:@"schema"];
+
+		error = nil;
+		NSArray *tables = [catalog tableNamesInSchema:schema error:&error];
+		if (tables) [read setObject:tables forKey:@"tables"];
+		else [failures addObject:error ?: (id)[NSNull null]];
+
+		error = nil;
+		NSArray *views = [catalog viewNamesInSchema:schema error:&error];
+		if (views) [read setObject:views forKey:@"views"];
+		else [failures addObject:error ?: (id)[NSNull null]];
+
+		error = nil;
+		NSArray *sequences = [catalog sequenceNamesInSchema:schema error:&error];
+		if (sequences) [read setObject:sequences forKey:@"sequences"];
+		else [failures addObject:error ?: (id)[NSNull null]];
+	}
+
+	[read setObject:failures forKey:@"failures"];
+	return read;
+}
 
 typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	SPPostgresSidebarSection,
@@ -69,7 +131,11 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 - (void)_buildView;
 - (void)_reloadSchemaPopup;
-- (void)_reloadExtensions;
+- (void)_runReload:(SPPostgresSidebarReloadKind)kind schema:(NSString *)schema apply:(BOOL (^)(NSDictionary *read))apply completion:(void (^)(BOOL loaded))completion;
+- (void)_reloadSchema:(NSString *)schema selectingSequence:(NSString *)sequence holding:(BOOL)holding completion:(void (^)(BOOL loaded))completion;
+- (BOOL)_applySchemaRead:(NSDictionary *)read;
+- (void)_applyExtensionsRead:(NSDictionary *)read;
+- (void)_rememberFailuresOfRead:(NSDictionary *)read;
 - (void)_reloadOutline;
 - (void)_updateSelectionFromOutline;
 - (BOOL)_selectItemNamed:(NSString *)name inSection:(NSString *)sectionTitle;
@@ -99,6 +165,11 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 	BOOL reloading;
 
+	/// Set by -invalidate: reloads still to come are dropped
+	BOOL invalidated;
+	/// Whether taskRunner is the default inline runner (made here, following the catalog's connection)
+	BOOL ownsTaskRunner;
+
 	/// Nesting of reloads (a catalog reload contains a schema reload): failures are reported once, at the end
 	NSUInteger reloadDepth;
 	BOOL reloadFailed;
@@ -116,6 +187,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 @synthesize lastError;
 @synthesize delegate;
 @synthesize tableMenu;
+@synthesize taskRunner;
 
 - (instancetype)initWithCatalog:(SPPostgresCatalog *)theCatalog
 {
@@ -127,6 +199,9 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 		schemas = [@[] retain];
 
 		[self _buildView];
+
+		taskRunner = [[SPPostgresTaskRunner inlineRunnerWithConnection:[theCatalog connection]] retain];
+		ownsTaskRunner = YES;
 		[self reloadWithCatalog:theCatalog];
 	}
 	return self;
@@ -137,6 +212,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[self invalidate];
 
 	[catalog release];
+	[taskRunner release];
 	[schemas release];
 	[sections release];
 	[view release];
@@ -156,6 +232,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 - (void)invalidate
 {
+	invalidated = YES;
 	delegate = nil;
 	[outlineView setDelegate:nil];
 	[outlineView setDataSource:nil];
@@ -269,109 +346,211 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 #pragma mark - Loading
 
+- (void)setTaskRunner:(SPPostgresTaskRunner *)runner
+{
+	if (runner == taskRunner) return;
+	[taskRunner release];
+	taskRunner = [runner retain];
+	ownsTaskRunner = NO;
+}
+
+// Every reload follows the same steps. On the main thread: copies of what it starts from (the schema asked for or
+// shown, the schemas listed). On the runner's thread: SPPostgresSidebarRead, which touches nothing of this controller.
+// Back on the main thread: dropped after -invalidate; a cancelled one keeps everything (the pop-up back to the shown
+// schema) and reports nothing; else what it read is applied as the synchronous reload applied it (a failed list keeps
+// what it showed, the first error reported once), then the caller's completion. Reloads are applied in the order they
+// were asked for, each one in full: a later one doesn't make an earlier one's result stale, as each applies what it
+// read on top of the one before (as calling them one after the other did).
+
+- (void)_runReload:(SPPostgresSidebarReloadKind)kind schema:(NSString *)schema apply:(BOOL (^)(NSDictionary *read))apply completion:(void (^)(BOOL loaded))completion
+{
+	if (invalidated) return;
+
+	NSString *theSchema = [[schema copy] autorelease];
+	NSArray *knownSchemas = [[schemas copy] autorelease];
+
+	[taskRunner runTaskWithDescription:NSLocalizedString(@"Reloading...", @"Reloading table task string") cancelTitle:NSLocalizedString(@"Cancel", @"cancel button") work:^id(PGPostgresConnection *connection, NSError **error) {
+		return SPPostgresSidebarRead(connection, kind, theSchema, knownSchemas);
+	} completion:^(id result, NSError *error, BOOL cancelled) {
+		if (invalidated) return;
+
+		BOOL loaded = NO;
+		if (result) {
+			loaded = apply(result);
+		}
+		else if (cancelled) {
+			// Nothing changes: the pop-up (which may show the schema the user chose) goes back to the shown schema
+			[self _reloadSchemaPopup];
+		}
+		else {
+			// The work itself failed (it reports query failures in its result): as a failed reload
+			[self _beginReload];
+			[self _rememberError:error];
+			[self _reloadSchemaPopup];
+			[self _endReload];
+		}
+
+		if (completion) completion(loaded);
+	}];
+}
+
 - (void)reloadWithCatalog:(SPPostgresCatalog *)theCatalog
+{
+	[self reloadWithCatalog:theCatalog completion:nil];
+}
+
+- (void)reloadWithCatalog:(SPPostgresCatalog *)theCatalog completion:(void (^)(BOOL loaded))completion
 {
 	if (theCatalog != catalog) {
 		[catalog release];
 		catalog = [theCatalog retain];
 	}
-
-	[self _beginReload];
-
-	NSError *error = nil;
-	NSArray *names = [catalog schemaNames:&error];
-	if (names) {
-		[schemas release];
-		schemas = [names copy];
-	}
-	else {
-		// Keep the schemas that were listed
-		[self _rememberError:error];
+	// The default runner follows the catalog to its connection (another database's)
+	if (ownsTaskRunner && [taskRunner connection] != [catalog connection]) {
+		[taskRunner release];
+		taskRunner = [[SPPostgresTaskRunner inlineRunnerWithConnection:[catalog connection]] retain];
 	}
 
-	[self _reloadExtensions];
+	[self _runReload:SPPostgresSidebarReloadCatalog schema:nil apply:^BOOL(NSDictionary *read) {
+		[self _beginReload];
+		[self _rememberFailuresOfRead:read];
 
-	// Nor does a selected extension (another database's)
-	[selectedExtensionName release], selectedExtensionName = nil;
+		// Schemas that can't be listed keep the ones that were
+		NSArray *names = [read objectForKey:@"schemas"];
+		if (names) {
+			[schemas release];
+			schemas = [names copy];
+		}
 
-	// The default schema of this database (the previous database's schema doesn't carry over)
-	[self reloadSchema:[catalog defaultSchemaFromSchemas:schemas]];
+		[self _applyExtensionsRead:read];
 
-	[self _endReload];
+		// Nor does a selected extension (another database's)
+		[selectedExtensionName release], selectedExtensionName = nil;
+
+		// The default schema of this database (the previous database's schema doesn't carry over)
+		[self _applySchemaRead:read];
+
+		BOOL loaded = ![[read objectForKey:@"failures"] count];
+		[self _endReload];
+		return loaded;
+	} completion:completion];
 }
 
 - (void)reloadKeepingSelection
 {
-	NSString *previousSchema = [[selectedSchema copy] autorelease];
-	NSString *table = [[selectedTableName copy] autorelease];
-	NSString *sequence = [[selectedSequenceName copy] autorelease];
-	NSString *extension = [[selectedExtensionName copy] autorelease];
-	NSString *schema = previousSchema;
+	[self reloadKeepingSelection:nil];
+}
 
-	[self _beginReload];
+- (void)reloadKeepingSelection:(void (^)(BOOL loaded))completion
+{
+	// The schema shown now is read again (if it is still there); the selection kept is the one shown when applied
+	[self _runReload:SPPostgresSidebarReloadKeeping schema:selectedSchema apply:^BOOL(NSDictionary *read) {
+		NSString *previousSchema = [[selectedSchema copy] autorelease];
+		NSString *table = [[selectedTableName copy] autorelease];
+		NSString *sequence = [[selectedSequenceName copy] autorelease];
+		NSString *extension = [[selectedExtensionName copy] autorelease];
 
-	NSError *error = nil;
-	NSArray *names = [catalog schemaNames:&error];
-	if (names) {
-		[schemas release];
-		schemas = [names copy];
-		if (![names containsObject:schema]) schema = [catalog defaultSchemaFromSchemas:schemas];
-	}
-	else {
-		[self _rememberError:error];
-	}
+		[self _beginReload];
+		[self _rememberFailuresOfRead:read];
 
-	[self _reloadExtensions];
+		NSArray *names = [read objectForKey:@"schemas"];
+		if (names) {
+			[schemas release];
+			schemas = [names copy];
+		}
 
-	holdingSelectionChanges = YES;
-	[self reloadSchema:schema];
-	// The same schema (not the default one standing in for a schema that is gone): its table or sequence again
-	if (table && [previousSchema isEqualToString:selectedSchema]) [self selectTableNamed:table];
-	if (sequence && [previousSchema isEqualToString:selectedSchema]) [self selectSequenceNamed:sequence];
-	// An extension is the database's, whatever the schema
-	if (extension) [self selectExtensionNamed:extension];
-	holdingSelectionChanges = NO;
+		[self _applyExtensionsRead:read];
 
-	BOOL sameSchema = (previousSchema == selectedSchema) || [previousSchema isEqualToString:selectedSchema];
-	BOOL sameTable = (table == selectedTableName) || [table isEqualToString:selectedTableName];
-	BOOL sameSequence = (sequence == selectedSequenceName) || [sequence isEqualToString:selectedSequenceName];
-	BOOL sameExtension = (extension == selectedExtensionName) || [extension isEqualToString:selectedExtensionName];
-	if (!sameSchema || !sameTable || !sameSequence || !sameExtension) [delegate sidebarSelectionDidChange:self];
+		holdingSelectionChanges = YES;
+		[self _applySchemaRead:read];
+		// The same schema (not the default one standing in for a schema that is gone): its table or sequence again
+		if (table && [previousSchema isEqualToString:selectedSchema]) [self selectTableNamed:table];
+		if (sequence && [previousSchema isEqualToString:selectedSchema]) [self selectSequenceNamed:sequence];
+		// An extension is the database's, whatever the schema
+		if (extension) [self selectExtensionNamed:extension];
+		holdingSelectionChanges = NO;
 
-	[self _endReload];
+		BOOL sameSchema = (previousSchema == selectedSchema) || [previousSchema isEqualToString:selectedSchema];
+		BOOL sameTable = (table == selectedTableName) || [table isEqualToString:selectedTableName];
+		BOOL sameSequence = (sequence == selectedSequenceName) || [sequence isEqualToString:selectedSequenceName];
+		BOOL sameExtension = (extension == selectedExtensionName) || [extension isEqualToString:selectedExtensionName];
+		if (!sameSchema || !sameTable || !sameSequence || !sameExtension) [delegate sidebarSelectionDidChange:self];
+
+		BOOL loaded = ![[read objectForKey:@"failures"] count];
+		[self _endReload];
+		return loaded;
+	} completion:completion];
 }
 
 - (void)reloadSchema:(NSString *)schema
 {
-	[self _beginReload];
+	[self _reloadSchema:schema selectingSequence:nil holding:NO completion:nil];
+}
 
-	NSArray *tableNames = nil;
-	NSArray *viewNames = nil;
-	NSArray *sequenceNames = nil;
-	BOOL loaded = YES;
+- (void)reloadSchema:(NSString *)schema completion:(void (^)(BOOL loaded))completion
+{
+	[self _reloadSchema:schema selectingSequence:nil holding:NO completion:completion];
+}
 
-	if (schema) {
-		NSError *error = nil;
-		tableNames = [catalog tableNamesInSchema:schema error:&error];
-		if (!tableNames) {
-			[self _rememberError:error];
-			loaded = NO;
-		}
+- (void)reloadSchema:(NSString *)schema selectingSequence:(NSString *)sequence
+{
+	[self _reloadSchema:schema selectingSequence:sequence holding:YES completion:nil];
+}
 
-		error = nil;
-		viewNames = [catalog viewNamesInSchema:schema error:&error];
-		if (!viewNames) {
-			[self _rememberError:error];
-			loaded = NO;
-		}
+- (void)reloadSchema:(NSString *)schema selectingSequence:(NSString *)sequence completion:(void (^)(BOOL loaded))completion
+{
+	[self _reloadSchema:schema selectingSequence:sequence holding:YES completion:completion];
+}
 
-		error = nil;
-		sequenceNames = [catalog sequenceNamesInSchema:schema error:&error];
-		if (!sequenceNames) {
-			[self _rememberError:error];
-			loaded = NO;
-		}
-	}
+/**
+ * Shows schema's lists. holding: the delegate hears of one selection change at the end (none if the selection ends
+ * up the same), after `sequence` is selected; else of the reload's selection change, as -reloadSchema: does.
+ */
+- (void)_reloadSchema:(NSString *)schema selectingSequence:(NSString *)sequence holding:(BOOL)holding completion:(void (^)(BOOL loaded))completion
+{
+	NSString *theSequence = [[sequence copy] autorelease];
+
+	[self _runReload:SPPostgresSidebarReloadSchema schema:schema apply:^BOOL(NSDictionary *read) {
+		NSString *previousSchema = [[selectedSchema copy] autorelease];
+		NSString *previousTable = [[selectedTableName copy] autorelease];
+		NSString *previousSequence = [[selectedSequenceName copy] autorelease];
+		NSString *previousExtension = [[selectedExtensionName copy] autorelease];
+
+		BOOL wasHolding = holdingSelectionChanges;
+		if (holding) holdingSelectionChanges = YES;
+
+		[self _beginReload];
+		[self _rememberFailuresOfRead:read];
+		BOOL loaded = [self _applySchemaRead:read];
+		[self _endReload];
+
+		if (!holding) return loaded;
+
+		if (theSequence) [self selectSequenceNamed:theSequence];
+		holdingSelectionChanges = wasHolding;
+		if (wasHolding) return loaded;
+
+		BOOL sameSchema = (previousSchema == selectedSchema) || [previousSchema isEqualToString:selectedSchema];
+		BOOL sameTable = (previousTable == selectedTableName) || [previousTable isEqualToString:selectedTableName];
+		BOOL sameSequence = (previousSequence == selectedSequenceName) || [previousSequence isEqualToString:selectedSequenceName];
+		BOOL sameExtension = (previousExtension == selectedExtensionName) || [previousExtension isEqualToString:selectedExtensionName];
+		if (!sameSchema || !sameTable || !sameSequence || !sameExtension) [delegate sidebarSelectionDidChange:self];
+		return loaded;
+	} completion:completion];
+}
+
+/**
+ * Shows the schema a reload read (none: empty lists) and selects it in the pop-up, clearing the selection of a table,
+ * view or sequence (a selected extension stays if still listed). YES if its lists were read; else the schema, lists
+ * and selection stay as they were (the extensions shown afresh if the reload read them).
+ */
+- (BOOL)_applySchemaRead:(NSDictionary *)read
+{
+	NSString *schema = [read objectForKey:@"schema"];
+	NSArray *tableNames = [read objectForKey:@"tables"];
+	NSArray *viewNames = [read objectForKey:@"views"];
+	NSArray *sequenceNames = [read objectForKey:@"sequences"];
+	BOOL loaded = !schema || (tableNames && viewNames && sequenceNames);
 
 	if (loaded) {
 		if (selectedSchema != schema) {
@@ -415,7 +594,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	else {
 		// Keep the schema, lists and selection that were shown; the popup goes back to the shown schema
 		[self _reloadSchemaPopup];
-		// An enclosing catalog reload may have reloaded the extensions: show them, leaving the table selection
+		// A catalog reload may have reloaded the extensions: show them, leaving the table selection
 		[outlineView reloadItem:[self _sectionNamed:SPPostgresSidebarExtensions] reloadChildren:YES];
 		// Its rows are new: a selected extension still listed stays selected; one that is gone leaves nothing selected
 		if (selectedExtensionName && ![self selectExtensionNamed:selectedExtensionName]) {
@@ -424,44 +603,27 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 		}
 	}
 
-	[self _endReload];
+	return loaded;
 }
 
-- (void)reloadSchema:(NSString *)schema selectingSequence:(NSString *)sequence
+/// The installed extensions a reload read; if it couldn't, the ones that were listed stay.
+- (void)_applyExtensionsRead:(NSDictionary *)read
 {
-	NSString *previousSchema = [[selectedSchema copy] autorelease];
-	NSString *previousTable = [[selectedTableName copy] autorelease];
-	NSString *previousSequence = [[selectedSequenceName copy] autorelease];
-	NSString *previousExtension = [[selectedExtensionName copy] autorelease];
-
-	BOOL wasHolding = holdingSelectionChanges;
-	holdingSelectionChanges = YES;
-	[self reloadSchema:schema];
-	if (sequence) [self selectSequenceNamed:sequence];
-	holdingSelectionChanges = wasHolding;
-	if (wasHolding) return;
-
-	BOOL sameSchema = (previousSchema == selectedSchema) || [previousSchema isEqualToString:selectedSchema];
-	BOOL sameTable = (previousTable == selectedTableName) || [previousTable isEqualToString:selectedTableName];
-	BOOL sameSequence = (previousSequence == selectedSequenceName) || [previousSequence isEqualToString:selectedSequenceName];
-	BOOL sameExtension = (previousExtension == selectedExtensionName) || [previousExtension isEqualToString:selectedExtensionName];
-	if (!sameSchema || !sameTable || !sameSequence || !sameExtension) [delegate sidebarSelectionDidChange:self];
-}
-
-- (void)_reloadExtensions
-{
-	NSError *error = nil;
-	NSArray *installed = [catalog installedExtensions:&error];
-	if (!installed) {
-		// Keep the extensions that were listed
-		[self _rememberError:error];
-		return;
-	}
+	NSArray *installed = [read objectForKey:@"extensions"];
+	if (!installed) return;
 
 	SPPostgresSidebarItem *extensions = [self _sectionNamed:SPPostgresSidebarExtensions];
 	[[extensions children] removeAllObjects];
 	for (NSDictionary *extension in installed) {
 		[[extensions children] addObject:[SPPostgresSidebarItem itemWithTitle:[extension objectForKey:@"name"] detail:[extension objectForKey:@"version"] kind:SPPostgresSidebarExtension]];
+	}
+}
+
+/// A reload's failed queries, in the order they ran (the first one is reported).
+- (void)_rememberFailuresOfRead:(NSDictionary *)read
+{
+	for (id failure in [read objectForKey:@"failures"]) {
+		[self _rememberError:[failure isKindOfClass:[NSError class]] ? failure : nil];
 	}
 }
 

@@ -84,12 +84,17 @@ NSString * const SPPostgresPaneExtension = @"extension";
 - (void)_installExtensionController;
 - (void)_refreshExtensionIfStale;
 - (void)_extensionsDidChange;
+- (void)_extensionsDidChange:(void (^)(void))then;
 - (void)_dropExtension:(NSString *)name;
 - (void)_extensionInstalled:(NSString *)name;
 - (void)_installQueryController;
 - (void)_queryRunChangedSchema:(BOOL)schemaChanged data:(BOOL)dataChanged;
 - (void)_structureDidChange:(BOOL)columnsChanged;
 - (void)_reloadSidebarKeepingSelection;
+- (void)_reloadSidebarKeepingSelection:(void (^)(void))then;
+- (void (^)(BOOL))_quietSidebarCompletion:(void (^)(BOOL loaded))completion;
+- (void)_installSidebarRunner;
+- (void)_selectHistoryEntry:(NSDictionary *)entry;
 - (void)_reloadDeferredSidebar;
 - (void)_relationsDidChange;
 - (void)_tableInfoDidChange;
@@ -176,6 +181,9 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	BOOL pendingHistoryWentBack;
 	/// Showing a history entry: the changes it makes aren't recorded
 	BOOL restoringHistory;
+	/// Sidebar reloads asked for and not yet completed whose selection changes aren't places the user went to
+	/// (see -_quietSidebarCompletion:)
+	NSUInteger quietSidebarReloads;
 	/// Waiting for the user to confirm a database switch that rolls back their transaction
 	BOOL confirmingSwitch;
 	/// The Query view changed tables or schemas while the lists couldn't be reloaded (aborted transaction)
@@ -285,6 +293,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 		sidebar = [[SPPostgresSidebarController alloc] initWithCatalog:catalog];
 		[sidebar setDelegate:self];
 		if ([sidebar lastError]) [self _reportCatalogError:[sidebar lastError]];
+		[self _installSidebarRunner];
 
 		[self _buildContent];
 		[self _buildToolbar];
@@ -493,6 +502,30 @@ NSString * const SPPostgresPaneExtension = @"extension";
 {
 	if ([[splitView subviews] count] < 2) return nil;
 	return [[splitView subviews] lastObject];
+}
+
+/// The sidebar's runner for the current connection.
+- (void)_installSidebarRunner
+{
+	// The sidebar keeps an inline runner on the tab's connection for now (its reloads have been applied when the call
+	// returns): Task 7 switches every controller to the tab's background runner at once, after Query, the sidebar and
+	// the panes are converted (until then they use the connection on the main thread, so no load may run on the
+	// runner's thread). The chained calls below already wait for the reloads' completions.
+	[sidebar setTaskRunner:[SPPostgresTaskRunner inlineRunnerWithConnection:connection]];
+}
+
+/**
+ * Wraps a sidebar reload's completion: until it has run, the selection changes the reload makes are not places the
+ * user went to (History), as restoringHistory around a synchronous reload did. Call it when asking for the reload.
+ */
+- (void (^)(BOOL))_quietSidebarCompletion:(void (^)(BOOL loaded))completion
+{
+	quietSidebarReloads++;
+	void (^then)(BOOL) = [[completion copy] autorelease];
+	return [[^(BOOL loaded) {
+		quietSidebarReloads--;
+		if (then && !tornDown) then(loaded);
+	} copy] autorelease];
 }
 
 /**
@@ -980,12 +1013,13 @@ NSString * const SPPostgresPaneExtension = @"extension";
 		listsNeedReload = NO;
 		contentNeedsReset = YES; // its columns may have changed
 
-		// Not a place the user went to (history)
-		restoringHistory = YES;
-		[sidebar reloadKeepingSelection];
-		restoringHistory = NO;
-		[self _reloadDatabasePopup];
-		[self updateWindowTitle:self];
+		// Not a place the user went to (history); the rest once the lists are shown
+		[sidebar reloadKeepingSelection:[self _quietSidebarCompletion:^(BOOL loaded) {
+			[self _reloadDatabasePopup];
+			[self updateWindowTitle:self];
+			[self _refreshCurrentPaneIfStale];
+		}]];
+		return;
 	}
 
 	[self _refreshCurrentPaneIfStale];
@@ -1011,16 +1045,24 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// should-change callback, once the selection has changed (see deferringSidebarReloads).
 - (void)_reloadSidebarKeepingSelection
 {
+	[self _reloadSidebarKeepingSelection:nil];
+}
+
+/// The same, then `then` once the lists are shown (at once if the reload waits for a selection change, or if torn down).
+- (void)_reloadSidebarKeepingSelection:(void (^)(void))then
+{
 	if (tornDown) return;
 	if (deferringSidebarReloads) {
 		sidebarReloadDeferred = YES;
+		if (then) then();
 		return;
 	}
 
-	BOOL wasRestoring = restoringHistory;
-	restoringHistory = YES; // not a place the user went to
-	[sidebar reloadKeepingSelection];
-	restoringHistory = wasRestoring;
+	// Not a place the user went to
+	void (^after)(void) = [[then copy] autorelease];
+	[sidebar reloadKeepingSelection:[self _quietSidebarCompletion:^(BOOL loaded) {
+		if (after) after();
+	}]];
 }
 
 /// The sidebar reload that waited for the selection change (see deferringSidebarReloads): the item the user went
@@ -1599,9 +1641,14 @@ NSString * const SPPostgresPaneExtension = @"extension";
 - (void)sidebarSelectionDidChange:(SPPostgresSidebarController *)theSidebar
 {
 	if (tornDown) return;
+
+	// While a quiet reload (see -_quietSidebarCompletion:) is outstanding, its selection changes aren't recorded
+	BOOL wasRestoring = restoringHistory;
+	if (quietSidebarReloads) restoringHistory = YES;
 	[self _showSelectedTable];
 	[self updateWindowTitle:self];
 	[self _recordHistory];
+	restoringHistory = wasRestoring;
 
 	// The lists the edits saved on leaving changed, now that the selection the user chose is made
 	[self _reloadDeferredSidebar];
@@ -1732,9 +1779,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	// A column default may have named it (Structure), and the lists change
 	structureNeedsReset = YES;
 	if (![schema isEqualToString:[sidebar selectedSchema]]) return;
-	restoringHistory = YES;
-	[sidebar reloadKeepingSelection];
-	restoringHistory = NO;
+	[sidebar reloadKeepingSelection:[self _quietSidebarCompletion:nil]];
 }
 
 #pragma mark - Extensions
@@ -1763,8 +1808,10 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// and shown.
 - (void)_extensionInstalled:(NSString *)name
 {
-	[self _extensionsDidChange];
-	[sidebar selectExtensionNamed:name];
+	NSString *extension = [[name copy] autorelease];
+	[self _extensionsDidChange:^{
+		[sidebar selectExtensionNamed:extension];
+	}];
 }
 
 /// "Install Extension…" in the sidebar's menu.
@@ -1825,14 +1872,15 @@ NSString * const SPPostgresPaneExtension = @"extension";
 		return;
 	}
 
-	[self _extensionsDidChange];
-	if (!wasSelected) return;
+	[self _extensionsDidChange:^{
+		if (!wasSelected) return;
 
-	// Nothing is selected after the selected extension's drop (not a place the user went to)
-	BOOL wasRestoring = restoringHistory;
-	restoringHistory = YES;
-	[sidebar selectTableNamed:nil];
-	restoringHistory = wasRestoring;
+		// Nothing is selected after the selected extension's drop (not a place the user went to)
+		BOOL wasRestoring = restoringHistory;
+		restoringHistory = YES;
+		[sidebar selectTableNamed:nil];
+		restoringHistory = wasRestoring;
+	}];
 }
 
 /**
@@ -1840,6 +1888,12 @@ NSString * const SPPostgresPaneExtension = @"extension";
  * so the lists reload keeping the selection (if still listed), and the panes read afresh, as after Query-view DDL.
  */
 - (void)_extensionsDidChange
+{
+	[self _extensionsDidChange:nil];
+}
+
+/// The same, then `then` once the lists are shown and the shown pane refreshed (not if torn down).
+- (void)_extensionsDidChange:(void (^)(void))then
 {
 	if (tornDown) return;
 	contentNeedsReset = YES;
@@ -1850,8 +1904,11 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	sequenceNeedsReset = YES;
 	extensionNeedsReset = YES;
 
-	[self _reloadSidebarKeepingSelection];
-	[self _refreshCurrentPaneIfStale];
+	void (^after)(void) = [[then copy] autorelease];
+	[self _reloadSidebarKeepingSelection:^{
+		[self _refreshCurrentPaneIfStale];
+		if (after) after();
+	}];
 }
 
 - (void)extensionController:(SPPostgresExtensionController *)controller didChangeExtension:(NSString *)name
@@ -2048,24 +2105,31 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	NSDictionary *historyEntry = [[pendingHistoryEntry retain] autorelease];
 	[pendingHistoryEntry release];
 	pendingHistoryEntry = nil;
-	if (historyEntry) restoringHistory = YES;
 
-	[sidebar reloadWithCatalog:catalog];
-	[self _installQueryController];
-	[self _installStructureController];
-	[self _installRelationsController];
-	[self _installTriggersController];
-	[self _installInfoController];
-	[self _installSequenceController];
-	[self _installExtensionController];
-	[self _installContentController];
-	[self _reloadDatabasePopup];
+	// The panes on the new connection, and the history entry, once the new database's lists are shown
+	void (^listsShown)(BOOL) = ^(BOOL loaded) {
+		if (tornDown) return;
+		// A history move's panes aren't places the user went to either (its entry is recorded already)
+		BOOL wasRestoring = restoringHistory;
+		if (historyEntry) restoringHistory = YES;
+		[self _installQueryController];
+		[self _installStructureController];
+		[self _installRelationsController];
+		[self _installTriggersController];
+		[self _installInfoController];
+		[self _installSequenceController];
+		[self _installExtensionController];
+		[self _installContentController];
+		[self _reloadDatabasePopup];
 
-	if (historyEntry) [self _applyHistoryEntry:historyEntry];
-	restoringHistory = NO;
+		if (historyEntry) [self _applyHistoryEntry:historyEntry];
+		restoringHistory = wasRestoring;
 
-	[self updateWindowTitle:self];
-	[self _updateHistoryControl];
+		[self updateWindowTitle:self];
+		[self _updateHistoryControl];
+	};
+	[self _installSidebarRunner];
+	[sidebar reloadWithCatalog:catalog completion:historyEntry ? [self _quietSidebarCompletion:listsShown] : listsShown];
 
 	[oldConnector release];
 }
@@ -2145,10 +2209,25 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// Selects the entry's schema, table (none if it had none) and pane (an unknown one: Content), without recording that as a new entry.
 - (void)_applyHistoryEntry:(NSDictionary *)entry
 {
+	NSString *schema = [entry objectForKey:@"schema"];
+	if ([schema length] && ![schema isEqualToString:[sidebar selectedSchema]]) {
+		// The entry's schema first (its empty selection on the way not recorded), then its table and pane
+		NSDictionary *theEntry = [[entry copy] autorelease];
+		[sidebar reloadSchema:schema completion:[self _quietSidebarCompletion:^(BOOL loaded) {
+			[self _selectHistoryEntry:theEntry];
+		}]];
+		return;
+	}
+	[self _selectHistoryEntry:entry];
+}
+
+/// The entry's table (in the schema shown) and pane, without recording that as a new entry.
+- (void)_selectHistoryEntry:(NSDictionary *)entry
+{
+	BOOL wasRestoring = restoringHistory;
 	restoringHistory = YES;
 
 	NSString *schema = [entry objectForKey:@"schema"];
-	if ([schema length] && ![schema isEqualToString:[sidebar selectedSchema]]) [sidebar reloadSchema:schema];
 
 	// A table, view or sequence of the entry's schema only (a schema that can't be loaded any more leaves nothing
 	// selected); a Sequence pane entry is a sequence's
@@ -2163,7 +2242,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 	[self showPane:[entry objectForKey:@"pane"]];
 
-	restoringHistory = NO;
+	restoringHistory = wasRestoring;
 }
 
 /// A history move waiting for a database switch is given up: the history goes back to where it was.
@@ -2314,11 +2393,11 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	// The copy is in the schema the sidebar shows (the sheet was modal)
 	if (![schema isEqualToString:[sidebar selectedSchema]]) return;
 
-	// The reload's empty selection on the way is not a place the user went to (history)
-	restoringHistory = YES;
-	[sidebar reloadSchema:schema];
-	restoringHistory = NO;
-	[sidebar selectTableNamed:newName];
+	// The reload's empty selection on the way is not a place the user went to (history); the copy, selected once listed, is
+	NSString *copyName = [[newName copy] autorelease];
+	[sidebar reloadSchema:schema completion:[self _quietSidebarCompletion:^(BOOL loaded) {
+		[sidebar selectTableNamed:copyName];
+	}]];
 }
 
 #pragma mark - Rename Table
@@ -2447,16 +2526,12 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	NSString *reselect = [selected isEqualToString:table] ? newName : selected;
 	if (!reselect && selectedSequence) {
 		// Straight back to the sequence (no empty selection, so no other pane, on the way), not recorded
-		BOOL wasRestoring = restoringHistory;
-		restoringHistory = YES;
-		[sidebar reloadSchema:schema selectingSequence:selectedSequence];
-		restoringHistory = wasRestoring;
+		[sidebar reloadSchema:schema selectingSequence:selectedSequence completion:[self _quietSidebarCompletion:nil]];
 		return;
 	}
-	restoringHistory = YES;
-	[sidebar reloadSchema:schema];
-	restoringHistory = NO;
-	if (reselect) [sidebar selectTableNamed:reselect];
+	[sidebar reloadSchema:schema completion:[self _quietSidebarCompletion:^(BOOL loaded) {
+		if (reselect) [sidebar selectTableNamed:reselect];
+	}]];
 }
 
 #pragma mark - Split view
@@ -2920,9 +2995,12 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	listsNeedReload = YES;
 	if ([connection transactionStatus] != PGPostgresTransactionInError) {
 		listsNeedReload = NO;
-		[self _reloadSidebarKeepingSelection];
-		[self _reloadDatabasePopup];
-		[self updateWindowTitle:self];
+		[self _reloadSidebarKeepingSelection:^{
+			[self _reloadDatabasePopup];
+			[self updateWindowTitle:self];
+			[self _refreshCurrentPaneIfStale];
+		}];
+		return;
 	}
 	[self _refreshCurrentPaneIfStale];
 }
