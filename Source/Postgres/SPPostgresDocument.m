@@ -770,6 +770,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}
 
 	queryController = [[SPPostgresQueryController alloc] initWithConnection:connection];
+	// Query keeps its own inline runner on the tab's connection for now, as Content (see -_installContentController):
+	// Task 7 switches every controller to the tab's background runner at once
 	if ([text length]) [[queryController editor] setString:text];
 
 	// Unretained, as the Content controller's presenter: -invalidate (on replace or teardown) drops the block

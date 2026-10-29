@@ -9,10 +9,32 @@
 #import "../Source/Postgres/SPPostgresContentController.h"
 #import "../Source/Postgres/SPPostgresQueryController.h"
 #import "../Source/Postgres/SPPostgresConsoleLogger.h"
+#import "../Source/Postgres/SPPostgresTaskRunner.h"
 
 /// The controller's test seam: called before each statement runs.
 @interface SPPostgresQueryController (Testing)
 - (void)setStatementWillRunHook:(void (^)(NSString *statement))hook;
+@end
+
+/// Records every value a runner's currentDescription takes.
+@interface SPQueryTestDescriptionRecorder : NSObject
+@property (strong) NSMutableArray *values;
+@end
+
+@implementation SPQueryTestDescriptionRecorder
+
+- (instancetype)init
+{
+	if ((self = [super init])) _values = [NSMutableArray array];
+	return self;
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context
+{
+	id value = change[NSKeyValueChangeNewKey];
+	if ([value isKindOfClass:[NSString class]]) [self.values addObject:value];
+}
+
 @end
 
 static const NSUInteger SPQueryTestPort = 55418;
@@ -762,6 +784,169 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	XCTAssertFalse([[self.document.sidebar itemTitlesInSection:@"TABLES"] containsObject:@"in_aborted"]);
 	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"items");
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
+}
+
+#pragma mark - Running in the background
+
+/// The Query controller on a background runner of its own on the tab's connection. Each test waits for it to be idle
+/// before using the connection on the main thread; side SQL goes through self.other.
+- (SPPostgresTaskRunner *)useBackgroundRunner
+{
+	SPPostgresTaskRunner *runner = [[SPPostgresTaskRunner alloc] initWithConnection:self.document.connection];
+	self.query.taskRunner = runner;
+	[self addTeardownBlock:^{
+		[runner cancelAll];
+		[SPPostgresTestServers waitForRunner:runner timeout:10];
+		[runner invalidateWithCompletion:nil];
+	}];
+	return runner;
+}
+
+- (void)testRunAllInBackgroundShowsLastResult
+{
+	SPPostgresTaskRunner *runner = [self useBackgroundRunner];
+	SPPostgresConsoleLogger *logger = [SPPostgresConsoleLogger loggerForConnection:self.document.connection];
+
+	[self setSQL:@"SELECT 1; SELECT 2 AS b"];
+	[self.query runAllQueries:nil];
+	XCTAssertTrue(runner.isBusy, @"the run is on the runner's thread");
+	XCTAssertEqualObjects(runner.currentCancelTitle, @"Stop queries");
+	XCTAssertTrue(logger.loggingCustomQueries, @"the user's statements are logged as custom queries");
+
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+	XCTAssertEqualObjects([self columnTitles], @[@"b"]);
+	XCTAssertEqual([[self grid] numberOfRows], 1);
+	XCTAssertEqualObjects([self valueAtRow:0 column:@"b"], @"2");
+	XCTAssertEqualObjects(self.query.statusText, @"1 row");
+	XCTAssertFalse(logger.loggingCustomQueries, @"restored after the run");
+	XCTAssertEqual(self.alerts.count, 0u);
+
+	// The next run runs
+	[self setSQL:@"SELECT 3 AS c"];
+	[self.query runAllQueries:nil];
+	XCTAssertEqualObjects(runner.currentCancelTitle, @"Stop query");
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+	XCTAssertEqualObjects([self columnTitles], @[@"c"]);
+}
+
+- (void)testCancelLongStatementShowsQueryCancelled
+{
+	SPPostgresTaskRunner *runner = [self useBackgroundRunner];
+	SPPostgresConsoleLogger *logger = [SPPostgresConsoleLogger loggerForConnection:self.document.connection];
+
+	[self setSQL:@"SELECT 5 AS before; SELECT pg_sleep(30)"];
+	[self.query runAllQueries:nil];
+	[self spinUntil:^BOOL{ return NO; } timeout:0.3];
+	XCTAssertTrue(runner.isBusy);
+	[runner cancelAll];
+
+	NSDate *start = [NSDate date];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self.query.statusText isEqualToString:@"Query cancelled."]; } timeout:5], @"%@", self.query.statusText);
+	XCTAssertLessThan([[NSDate date] timeIntervalSinceDate:start], 5.0);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:5]);
+	XCTAssertEqualObjects(self.query.statusText, @"Query cancelled.");
+	XCTAssertEqual(self.alerts.count, 0u, @"a cancel shows no alert");
+	XCTAssertNil([self.controller window].attachedSheet);
+	XCTAssertFalse(logger.loggingCustomQueries, @"restored after a cancel");
+	XCTAssertEqualObjects([self columnTitles], @[@"before"], @"the last row set returned before the cancel");
+
+	// The connection is usable and the next run runs
+	[self setSQL:@"SELECT 6 AS after"];
+	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+	XCTAssertEqualObjects([self valueAtRow:0 column:@"after"], @"6");
+	XCTAssertEqualObjects(self.query.statusText, @"1 row");
+}
+
+- (void)testStatementsBeforeCancelStillReportChanges
+{
+	[self addTeardownBlock:^{
+		PGPostgresConnection *cleanup = [SPPostgresTestServers connectedConnectionOnPort:SPQueryTestPort];
+		[cleanup execute:@"DROP TABLE IF EXISTS sp_t8_x"];
+		[cleanup disconnect];
+	}];
+	SPPostgresTaskRunner *runner = [self useBackgroundRunner];
+	__block NSUInteger calls = 0;
+	__block BOOL schema = NO;
+	self.query.runDidChangeDatabase = ^(BOOL schemaChanged, BOOL dataChanged) {
+		calls++;
+		schema = schemaChanged;
+	};
+
+	[self setSQL:@"CREATE TABLE sp_t8_x(a int); SELECT pg_sleep(30)"];
+	[self.query runAllQueries:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [runner.currentDescription isEqualToString:@"Running query 2 of 2..."]; } timeout:10], @"%@", runner.currentDescription);
+	[self spinUntil:^BOOL{ return NO; } timeout:0.3];
+	[runner cancelAll];
+
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:5]);
+	XCTAssertEqualObjects(self.query.statusText, @"Query cancelled.");
+	XCTAssertEqual(calls, 1u, @"the CREATE before the cancel is reported");
+	XCTAssertTrue(schema);
+	XCTAssertEqual(self.alerts.count, 0u);
+	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM pg_tables WHERE tablename = 'sp_t8_x'"], @1);
+}
+
+- (void)testDescriptionCountsStatements
+{
+	SPPostgresTaskRunner *runner = [self useBackgroundRunner];
+	SPQueryTestDescriptionRecorder *recorder = [[SPQueryTestDescriptionRecorder alloc] init];
+	[runner addObserver:recorder forKeyPath:@"currentDescription" options:NSKeyValueObservingOptionNew context:NULL];
+
+	[self setSQL:@"SELECT 1; SELECT 2"];
+	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+
+	[self setSQL:@"SELECT 3"];
+	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+	[runner removeObserver:recorder forKeyPath:@"currentDescription"];
+
+	XCTAssertTrue([recorder.values containsObject:@"Running query 1 of 2..."], @"%@", recorder.values);
+	XCTAssertTrue([recorder.values containsObject:@"Running query 2 of 2..."], @"%@", recorder.values);
+	XCTAssertTrue([recorder.values containsObject:@"Running query..."], @"%@", recorder.values);
+	XCTAssertFalse([recorder.values containsObject:@"Running query 1 of 1..."], @"%@", recorder.values);
+}
+
+- (void)testRunRefusedWhileBusy
+{
+	SPPostgresTaskRunner *runner = [self useBackgroundRunner];
+	[runner runTaskWithDescription:@"busy" cancelTitle:nil work:^id(PGPostgresConnection *connection, NSError **error) {
+		return [connection execute:@"SELECT pg_sleep(1)"];
+	} completion:nil];
+	XCTAssertTrue(runner.isBusy);
+
+	[self setSQL:@"SELECT 2 AS b"];
+	[self.query runAllQueries:nil];
+	[self.query runCurrentQuery:nil];
+	XCTAssertEqualObjects(runner.currentDescription, @"busy", @"nothing else queued");
+
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+	[self spinUntil:^BOOL{ return NO; } timeout:0.2];
+	XCTAssertEqualObjects(self.query.statusText, @"", @"neither run happened");
+	XCTAssertEqual([[[self grid] tableColumns] count], 0u);
+}
+
+- (void)testExceptionInBackgroundRunRestoresState
+{
+	SPPostgresTaskRunner *runner = [self useBackgroundRunner];
+	SPPostgresConsoleLogger *logger = [SPPostgresConsoleLogger loggerForConnection:self.document.connection];
+	__block NSUInteger calls = 0;
+	[self.query setStatementWillRunHook:^(NSString *statement) {
+		XCTAssertFalse([NSThread isMainThread], @"the hook runs on the runner's thread");
+		if (++calls == 2) [NSException raise:NSInternalInconsistencyException format:@"forced"];
+	}];
+	[self setSQL:@"SELECT 1 AS one; SELECT 2 AS two"];
+	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+	XCTAssertFalse(logger.loggingCustomQueries);
+	XCTAssertEqualObjects(self.query.statusText, @"1 row");
+	XCTAssertEqualObjects([self columnTitles], @[@"one"]);
+
+	[self.query setStatementWillRunHook:nil];
+	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+	XCTAssertEqualObjects([self columnTitles], @[@"two"]);
 }
 
 @end
