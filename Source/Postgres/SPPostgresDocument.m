@@ -891,6 +891,16 @@ NSString * const SPPostgresPaneExtension = @"extension";
 }
 
 /**
+ * Whether a pane's toolbar item and View menu item can switch to it now: as -_canShowPane:, and not while the tab is
+ * processing (as MySQL's controls during a task): the pane's load would queue behind the running one, and a Stop
+ * would cancel both.
+ */
+- (BOOL)_canSwitchToPane:(NSString *)pane
+{
+	return !isProcessing && [self _canShowPane:pane];
+}
+
+/**
  * Ends an edit in progress in a pane's view (saving it), and saves a Structure draft column. NO if it couldn't
  * (e.g. the value or the column was refused): the tab should stay where it is.
  */
@@ -2313,7 +2323,10 @@ NSString * const SPPostgresPaneExtension = @"extension";
 		}];
 	}
 	else {
-		[self _applyHistoryEntry:entry];
+		[self _applyHistoryEntry:entry undoingMove:^{
+			if (back) [history goForward];
+			else [history goBack];
+		}];
 	}
 	[self _reloadDeferredSidebar];
 	[self _updateHistoryControl];
@@ -2322,11 +2335,27 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// Selects the entry's schema, table (none if it had none) and pane (an unknown one: Content), without recording that as a new entry.
 - (void)_applyHistoryEntry:(NSDictionary *)entry
 {
+	[self _applyHistoryEntry:entry undoingMove:nil];
+}
+
+/**
+ * The same; undoMove (may be nil) puts History back where it was when the entry's schema couldn't be shown (its
+ * reload cancelled or failed): the tab stays where it is, and the entry can be gone to again.
+ */
+- (void)_applyHistoryEntry:(NSDictionary *)entry undoingMove:(void (^)(void))undoMove
+{
 	NSString *schema = [entry objectForKey:@"schema"];
 	if ([schema length] && ![schema isEqualToString:[sidebar selectedSchema]]) {
 		// The entry's schema first (its empty selection on the way not recorded), then its table and pane
 		NSDictionary *theEntry = [[entry copy] autorelease];
+		NSString *theSchema = [[schema copy] autorelease];
+		void (^undo)(void) = [[undoMove copy] autorelease];
 		[sidebar reloadSchema:schema completion:[self _quietSidebarCompletion:^(BOOL loaded) {
+			if (!loaded && undo && ![theSchema isEqualToString:[sidebar selectedSchema]]) {
+				undo();
+				[self _updateHistoryControl];
+				return;
+			}
 			[self _selectHistoryEntry:theEntry];
 		}]];
 		return;
@@ -2706,11 +2735,12 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	if (tornDown) return NO;
 
 	// As the pane toolbar items
-	if (action == @selector(viewStructure:)) return [self _canShowPane:SPPostgresPaneStructure];
-	if (action == @selector(viewContent:)) return [self _canShowPane:SPPostgresPaneContent];
-	if (action == @selector(viewRelations:)) return [self _canShowPane:SPPostgresPaneRelations];
-	if (action == @selector(viewTriggers:)) return [self _canShowPane:SPPostgresPaneTriggers];
-	if (action == @selector(viewStatus:)) return [self _canShowPane:SPPostgresPaneInfo];
+	if (action == @selector(viewStructure:)) return [self _canSwitchToPane:SPPostgresPaneStructure];
+	if (action == @selector(viewContent:)) return [self _canSwitchToPane:SPPostgresPaneContent];
+	if (action == @selector(viewRelations:)) return [self _canSwitchToPane:SPPostgresPaneRelations];
+	if (action == @selector(viewTriggers:)) return [self _canSwitchToPane:SPPostgresPaneTriggers];
+	if (action == @selector(viewStatus:)) return [self _canSwitchToPane:SPPostgresPaneInfo];
+	if (action == @selector(viewQuery:)) return [self _canSwitchToPane:SPPostgresPaneQuery];
 
 	if (action == @selector(showUserManager:)) return [self _canShowUsers];
 	if (action == @selector(export:)) return [self _canRunSheetJob];
@@ -2863,17 +2893,21 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	if ([identifier isEqualToString:SPMainToolbarUserManager]) return [self _canShowUsers];
 	if ([identifier isEqualToString:SPMainToolbarTransfer]) return [self _canShowTransfer];
 
-	// The pane items: see -_canShowPane:
+	// The pane items: see -_canSwitchToPane:
 	NSString *pane = [self _paneForToolbarIdentifier:identifier];
-	if (pane) return [self _canShowPane:pane];
+	if (pane) return [self _canSwitchToPane:pane];
 
 	return !tornDown;
 }
 
-/// Shows a pane its item allows (see -_canShowPane:), and gives its main view the keyboard focus.
+/// Shows a pane its item allows (see -_canSwitchToPane:), and gives its main view the keyboard focus.
 - (void)_viewPane:(NSString *)pane
 {
 	if (![self _canShowPane:pane]) return;
+	if (isProcessing) {
+		NSBeep();
+		return;
+	}
 	[self showPane:pane];
 	if (![currentPane isEqualToString:pane]) return;
 

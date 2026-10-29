@@ -283,6 +283,13 @@ static void SPPostgresTaskRunnerSendCancel(PGPostgresCancelToken *token)
 	if (token) SPPostgresTaskRunnerSendCancel(token);
 }
 
+- (BOOL)isInvalidated
+{
+	@synchronized(self) {
+		return invalidated;
+	}
+}
+
 - (BOOL)isCancelled
 {
 	if (_inlineRunner) return NO;

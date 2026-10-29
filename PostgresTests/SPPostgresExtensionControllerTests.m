@@ -415,4 +415,28 @@
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 }
 
+/// A runner the tab dropped (a database switch invalidates it with its connection, before the new panes are
+/// installed): Update and Drop… are refused, as while busy.
+- (void)testChangesRefusedOnceRunnerInvalidated
+{
+	PGPostgresConnection *connection = [self connectOn:@55418];
+	[self install:@"hstore" version:@"1.4" on:connection];
+
+	SPPostgresExtensionController *pane = [self paneOn:connection];
+	SPPostgresTaskRunner *runner = [self backgroundRunnerOn:connection];
+	pane.taskRunner = runner;
+	[pane showExtension:@"hstore"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	XCTAssertTrue(pane.updateButton.isEnabled);
+
+	[runner invalidateWithCompletion:nil];
+	XCTAssertFalse(runner.isBusy);
+	[pane update:pane.updateButton];
+	[pane drop:pane.dropButton];
+	XCTAssertEqualObjects(self.changed, @[]);
+	XCTAssertEqualObjects(self.dropRequests, @[]);
+	XCTAssertEqualObjects([[connection execute:@"SELECT extversion::text FROM pg_extension WHERE extname = 'hstore'"] textValueAtRow:0 column:0], @"1.4");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+}
+
 @end
