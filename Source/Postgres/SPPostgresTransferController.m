@@ -63,6 +63,7 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 @end
 
 @interface SPPostgresTransferController ()
+- (void)_beginProgressTo:(SPPostgresFavorite *)favorite database:(NSString *)targetDatabase password:(NSString *)password mode:(SPPostgresTransferMode)mode tables:(NSArray *)tables;
 - (void)_updateControls;
 - (void)_finish;
 @end
@@ -93,6 +94,8 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 	SPPostgresConnector *pendingConnector;
 	NSString *lastErrorMessage;
 	NSString *completionNote;
+	/// Runs when the Transfer sheet has ended (it begins the progress sheet)
+	void (^afterSheetEnds)(void);
 	BOOL began;
 	BOOL finished;
 	BOOL running;
@@ -156,6 +159,7 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 	[transferButton release];
 	[cancelButton release];
 	[progressSheet release];
+	[afterSheetEnds release];
 	[job release];
 	[pendingConnector release];
 	[lastErrorMessage release];
@@ -437,7 +441,11 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 	[self _buildSheet];
 	NSError *tablesError = [self _loadContents];
 	[self _updateControls];
-	[window beginSheet:sheet completionHandler:nil];
+	[window beginSheet:sheet completionHandler:^(NSModalResponse response) {
+		void (^next)(void) = [afterSheetEnds autorelease];
+		afterSheetEnds = nil;
+		if (next) next();
+	}];
 
 	// The tables couldn't be read: say why, rather than show an empty list. On the sheet (no presenter set);
 	// otherwise as the document shows its alerts
@@ -592,8 +600,23 @@ static NSError *SPPostgresTransferCancelledError(void)
 	running = YES;
 	[self _setLastErrorMessage:nil];
 	[self _setCompletionNote:nil];
-	[self _endSheet];
 
+	// The progress sheet begins once the Transfer sheet has ended (AppKit queues a sheet begun while another is attached)
+	void (^next)(void) = ^{
+		[self _beginProgressTo:favorite database:targetDatabase password:password mode:mode tables:tables];
+	};
+	if ([sheet sheetParent]) {
+		[afterSheetEnds release];
+		afterSheetEnds = [next copy];
+		[self _endSheet];
+	} else {
+		[self _endSheet];
+		next();
+	}
+}
+
+- (void)_beginProgressTo:(SPPostgresFavorite *)favorite database:(NSString *)targetDatabase password:(NSString *)password mode:(SPPostgresTransferMode)mode tables:(NSArray *)tables
+{
 	NSString *title = [NSString stringWithFormat:NSLocalizedString(@"Transferring “%@” to “%@”…", @"Postgres transfer: progress title (source database, target database)"), database, targetDatabase];
 	[progressSheet release];
 	progressSheet = [[SPPostgresProgressSheet beginOnWindow:[document parentWindow] title:title] retain];

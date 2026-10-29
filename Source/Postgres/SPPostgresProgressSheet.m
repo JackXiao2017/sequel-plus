@@ -16,6 +16,8 @@ static const NSTimeInterval SPPostgresProgressSheetUpdateInterval = 0.1;
 	NSTextField *statusField;
 	NSProgressIndicator *progressIndicator;
 	NSButton *cancelButton;
+	/// The window the sheet was begun on (retained until -end)
+	NSWindow *parentWindow;
 
 	/// Guards everything below (touched from any thread)
 	NSLock *lock;
@@ -63,6 +65,7 @@ static const NSTimeInterval SPPostgresProgressSheetUpdateInterval = 0.1;
 	[statusField release];
 	[progressIndicator release];
 	[cancelButton release];
+	[parentWindow release];
 	[pendingStatus release];
 	[cancelHandler release];
 	[lock release];
@@ -119,6 +122,7 @@ static const NSTimeInterval SPPostgresProgressSheetUpdateInterval = 0.1;
 - (void)_attachToWindow:(NSWindow *)window
 {
 	if (!window) return;
+	parentWindow = [window retain];
 	[window beginSheet:panel completionHandler:nil];
 }
 
@@ -220,9 +224,11 @@ static const NSTimeInterval SPPostgresProgressSheetUpdateInterval = 0.1;
 	[cancelHandler release];
 	cancelHandler = nil;
 
-	NSWindow *parent = [panel sheetParent];
-	if (parent) [parent endSheet:panel];
+	// A sheet still queued behind another isn't attached yet: AppKit removes it from the queue too
+	if (parentWindow) [parentWindow endSheet:panel];
 	[panel orderOut:nil];
+	[parentWindow release];
+	parentWindow = nil;
 	[self autorelease]; // balances +beginOnWindow:title:
 }
 
