@@ -1,6 +1,7 @@
 #import "SPPostgresContentController.h"
 #import "SPPostgresTableData.h"
 #import "SPPostgresErrors.h"
+#import "SPPostgresTaskRunner.h"
 #import "SPTableView.h"
 #import "SPButtonBar.h"
 #import "SPConstants.h"
@@ -14,6 +15,30 @@ static const CGFloat SPPostgresContentButtonWidth = 32;
 static const CGFloat SPPostgresContentMinColumnWidth = 40;
 static const CGFloat SPPostgresContentMaxColumnWidth = 300;
 static const NSUInteger SPPostgresContentWidthSampleRows = 100;
+
+/// One page as a load fetched it (on the runner's thread), with the state it was asked for; applied on the main thread.
+@interface SPPostgresContentPage : NSObject
+@property (retain) SPPostgresFilter *filter;
+@property (copy) NSString *sortColumn;
+@property BOOL ascending;
+@property NSUInteger page;
+@property NSUInteger pageCount;
+@property NSInteger matchingRowCount;
+@property NSInteger tableRowCount;
+@property (retain) NSArray *rows;
+@end
+
+@implementation SPPostgresContentPage
+
+- (void)dealloc
+{
+	[_filter release];
+	[_sortColumn release];
+	[_rows release];
+	[super dealloc];
+}
+
+@end
 
 @interface SPPostgresContentController ()
 
@@ -32,6 +57,11 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	NSMutableArray *rows;           // NSArray of NSString / NSNull
 	BOOL editable;
 	BOOL loaded;                    // the current table's rows loaded at least once (the grid and counts are its own)
+	BOOL loadingTable;              // a table switch hasn't loaded its first rows yet ("Loading table data...")
+	BOOL needsShow;                 // a table switch was cancelled before its columns came: Refresh shows the table again
+	NSUInteger loadGeneration;      // taken by each load (and by -invalidate): only the latest one's completion is applied
+	BOOL endingEdit;                // inside -_endEditing (a commit then leaves the reload to its caller)
+	BOOL reloadOwed;                // a commit inside -_endEditing wants the rows reloaded
 
 	SPPostgresFilter *filter;       // nil: no filter
 	NSString *sortColumn;           // nil: primary-key order
@@ -69,6 +99,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 @synthesize pageCount;
 @synthesize alertPresenter;
 @synthesize confirmationPresenter;
+@synthesize taskRunner;
 
 #pragma mark - Setup
 
@@ -76,6 +107,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 {
 	if ((self = [super init])) {
 		connection = [theConnection retain];
+		taskRunner = [[SPPostgresTaskRunner inlineRunnerWithConnection:theConnection] retain];
 		rows = [[NSMutableArray alloc] init];
 		columns = [@[] retain];
 		currentPage = 1;
@@ -95,6 +127,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	[self invalidate];
 
 	[connection release];
+	[taskRunner release];
 	[tableData release];
 	[columns release];
 	[rows release];
@@ -127,6 +160,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 {
 	if (invalidated) return;
 	invalidated = YES;
+	loadGeneration++;
 
 	// An edit in progress must not call back into a controller that is going away
 	if ([tableView currentEditor]) [tableView abortEditing];
@@ -383,6 +417,12 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 
 #pragma mark - Loading
 
+// Every load follows the same steps. On the main thread: end the cell edit (so a commit is sent while the runner is
+// idle) and take a new load generation. On the runner's thread: the work uses only the data layer (tableData, made on
+// the main thread and used by the runner's thread only while its tasks run) and copies of the state asked for, never
+// this controller. Back on the main thread: the completion is dropped if the controller was invalidated or a newer
+// load was asked for; a cancelled load shows no alert and keeps what is shown; a failed one shows the error.
+
 - (void)showTable:(NSString *)theTable inSchema:(NSString *)theSchema
 {
 	if (invalidated) return;
@@ -407,96 +447,152 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	tableRowCount = 0;
 	editable = NO;
 	loaded = NO;
+	needsShow = NO;
+	loadingTable = NO;
+	NSUInteger generation = ++loadGeneration;
 
 	if ([theTable length] && [theSchema length]) {
 		tableData = [[SPPostgresTableData alloc] initWithConnection:connection schema:theSchema table:theTable];
-
-		NSError *error = nil;
-		NSArray *theColumns = [tableData columns:&error];
-		if (theColumns) {
-			[columns release];
-			columns = [theColumns copy];
-			editable = [tableData isEditable];
-		}
-		else {
-			[self _presentError:error title:[NSString stringWithFormat:NSLocalizedString(@"Could not load the columns of “%@”", @"Postgres content: columns failed"), theTable]];
-		}
+		loadingTable = YES;
 	}
 
-	[self _rebuildColumns];
-	[self _rebuildFilterBar];
-	[self setNoticeText:(tableData && !editable) ? ([tableData readOnlyReason] ?: @"") : @""];
-	[noticeField setStringValue:noticeText];
+	// The previous table's columns, rows and counts go at once
+	[self _showColumns];
+	[tableView reloadData];
+	[self _updateBottomBar];
+	if (!tableData) return;
 
-	// On failure (alert shown) the grid and bottom bar must not keep the previous table's rows and counts
-	if (![columns count] || ![self _loadWithFilter:nil sortColumn:nil ascending:YES page:1]) {
-		[tableView reloadData];
+	// First the columns (shown as soon as they come, so a cancel leaves them), then the first page
+	SPPostgresTableData *data = tableData;
+	NSString *description = [NSString stringWithFormat:NSLocalizedString(@"Loading %@...", @"Loading table task string"), theTable];
+	[taskRunner runTaskWithDescription:description cancelTitle:NSLocalizedString(@"Stop", @"stop button") work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		NSArray *theColumns = [data columns:error];
+		if (!theColumns) return nil;
+		BOOL isEditable = [data isEditable];
+		return @{@"columns" : theColumns, @"editable" : @(isEditable), @"readOnlyReason" : (isEditable ? nil : [data readOnlyReason]) ?: @""};
+	} completion:^(id result, NSError *error, BOOL cancelled) {
+		if (invalidated || generation != loadGeneration) return;
+
+		if (!result) {
+			loadingTable = NO;
+			if (cancelled) needsShow = YES;
+			else [self _presentError:error title:[NSString stringWithFormat:NSLocalizedString(@"Could not load the columns of “%@”", @"Postgres content: columns failed"), theTable]];
+			[self _updateBottomBar];
+			return;
+		}
+
+		[columns release];
+		columns = [[result objectForKey:@"columns"] copy];
+		editable = [[result objectForKey:@"editable"] boolValue];
+		[self setNoticeText:[result objectForKey:@"readOnlyReason"]];
+		[self _showColumns];
 		[self _updateBottomBar];
-		return;
-	}
-	[self _fitColumnWidths];
+		[self _loadWithFilter:nil sortColumn:nil ascending:YES page:1 description:description];
+	}];
 }
 
 - (void)reload
 {
-	if (invalidated || ![columns count]) return;
-	[self _loadWithFilter:filter sortColumn:sortColumn ascending:sortAscending page:currentPage];
+	if (invalidated) return;
+	if (needsShow) {
+		[self showTable:table inSchema:schema];
+		return;
+	}
+	if (![columns count]) return;
+	[self _loadWithFilter:filter sortColumn:sortColumn ascending:sortAscending page:currentPage
+			  description:NSLocalizedString(@"Reloading data...", @"Reloading data task description")];
+}
+
+/// The current columns in the grid, the filter bar and the notice.
+- (void)_showColumns
+{
+	[self _rebuildColumns];
+	[self _rebuildFilterBar];
+	if (!editable && [columns count]) [noticeField setStringValue:noticeText];
+	else {
+		[self setNoticeText:@""];
+		[noticeField setStringValue:@""];
+	}
 }
 
 /**
- * Loads a page with the given state; only on success does that state become the current one. On failure
- * the error is shown and the grid keeps its rows (and the previous filter, sort and page).
+ * Loads a page with the given state; only once it has loaded does that state become the current one. On failure
+ * the error is shown and the grid keeps its rows (and the previous filter, sort and page); cancelled, it keeps them
+ * without an alert.
  */
-- (BOOL)_loadWithFilter:(SPPostgresFilter *)theFilter sortColumn:(NSString *)theSortColumn ascending:(BOOL)ascending page:(NSUInteger)page
+- (void)_loadWithFilter:(SPPostgresFilter *)theFilter sortColumn:(NSString *)theSortColumn ascending:(BOOL)ascending page:(NSUInteger)page
+			description:(NSString *)description
 {
-	if (!tableData || ![columns count]) return NO;
+	if (!tableData || ![columns count]) return;
+	[self _endEditing];
+	NSUInteger generation = ++loadGeneration;
 
-	NSString *title = [NSString stringWithFormat:NSLocalizedString(@"Could not load the rows of “%@”", @"Postgres content: load failed"), table];
-	NSError *error = nil;
-
-	NSInteger matching = [tableData countRowsWithFilter:theFilter error:&error];
-	if (matching < 0) {
-		[self _presentError:error title:title];
-		return NO;
-	}
-
-	NSInteger total = matching;
-	if (theFilter) {
-		total = [tableData countRowsWithFilter:nil error:&error];
-		if (total < 0) {
-			[self _presentError:error title:title];
-			return NO;
-		}
-	}
-
+	// Everything the work needs, so it never reads this controller (the filter is never changed once made)
+	SPPostgresTableData *data = tableData;
+	NSString *theSort = [[theSortColumn copy] autorelease];
 	NSUInteger pageSize = [self _pageSize];
-	NSUInteger pages = 1;
-	if (pageSize && matching > 0) pages = ((NSUInteger)matching + pageSize - 1) / pageSize;
-	page = MAX(1u, MIN(page, pages));
+	NSString *title = [NSString stringWithFormat:NSLocalizedString(@"Could not load the rows of “%@”", @"Postgres content: load failed"), table];
 
-	NSArray *newRows = [tableData rowsWithFilter:theFilter sortColumn:theSortColumn ascending:ascending
-										  offset:(page - 1) * pageSize limit:pageSize error:&error];
-	if (!newRows) {
-		[self _presentError:error title:title];
-		return NO;
-	}
+	[taskRunner runTaskWithDescription:description cancelTitle:NSLocalizedString(@"Stop", @"stop button") work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		NSInteger matching = [data countRowsWithFilter:theFilter error:error];
+		if (matching < 0) return nil;
 
-	if (theFilter != filter) {
+		NSInteger total = matching;
+		if (theFilter) {
+			total = [data countRowsWithFilter:nil error:error];
+			if (total < 0) return nil;
+		}
+
+		NSUInteger pages = 1;
+		if (pageSize && matching > 0) pages = ((NSUInteger)matching + pageSize - 1) / pageSize;
+		NSUInteger shownPage = MAX(1u, MIN(page, pages));
+
+		NSArray *pageRows = [data rowsWithFilter:theFilter sortColumn:theSort ascending:ascending
+										  offset:(shownPage - 1) * pageSize limit:pageSize error:error];
+		if (!pageRows) return nil;
+
+		SPPostgresContentPage *result = [[[SPPostgresContentPage alloc] init] autorelease];
+		result.filter = theFilter;
+		result.sortColumn = theSort;
+		result.ascending = ascending;
+		result.page = shownPage;
+		result.pageCount = pages;
+		result.matchingRowCount = matching;
+		result.tableRowCount = total;
+		result.rows = pageRows;
+		return result;
+	} completion:^(id result, NSError *error, BOOL cancelled) {
+		if (invalidated || generation != loadGeneration) return;
+		BOOL firstRows = loadingTable;
+		loadingTable = NO;
+
+		if (result) [self _showPage:result];
+		else if (!cancelled) [self _presentError:error title:title];
+		[self _updateBottomBar];
+
+		if (result && firstRows) [self _fitColumnWidths];
+	}];
+}
+
+/// Makes a loaded page the current one.
+- (void)_showPage:(SPPostgresContentPage *)page
+{
+	if ([page filter] != filter) {
 		[filter release];
-		filter = [theFilter retain];
+		filter = [[page filter] retain];
 	}
-	if (theSortColumn != sortColumn) {
+	if ([page sortColumn] != sortColumn) {
 		[sortColumn release];
-		sortColumn = [theSortColumn copy];
+		sortColumn = [[page sortColumn] copy];
 	}
-	sortAscending = ascending;
-	currentPage = page;
-	pageCount = pages;
-	matchingRowCount = matching;
-	tableRowCount = total;
+	sortAscending = [page ascending];
+	currentPage = [page page];
+	pageCount = [page pageCount];
+	matchingRowCount = [page matchingRowCount];
+	tableRowCount = [page tableRowCount];
 	loaded = YES;
 
-	[rows setArray:newRows];
+	[rows setArray:[page rows]];
 
 	// Keep the selection where it still fits
 	NSIndexSet *selection = [[[tableView selectedRowIndexes] copy] autorelease];
@@ -508,8 +604,6 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	[tableView selectRowIndexes:kept byExtendingSelection:NO];
 
 	[self _updateSortIndicators];
-	[self _updateBottomBar];
-	return YES;
 }
 
 #pragma mark - Columns
@@ -626,7 +720,8 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 		newFilter = [SPPostgresFilter filterWithColumn:column comparison:comparison value:value];
 	}
 
-	[self _loadWithFilter:newFilter sortColumn:sortColumn ascending:sortAscending page:1];
+	[self _loadWithFilter:newFilter sortColumn:sortColumn ascending:sortAscending page:1
+			  description:NSLocalizedString(@"Filtering table...", @"Filtering table task description")];
 }
 
 #pragma mark - Bottom bar
@@ -638,7 +733,10 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	NSString *(^format)(NSInteger) = ^(NSInteger n) { return [formatter stringFromNumber:@(n)]; };
 
 	NSMutableString *text = [NSMutableString string];
-	if (tableData && [columns count] && loaded) {
+	if (loadingTable) {
+		[text appendString:NSLocalizedString(@"Loading table data...", @"Loading table data string")];
+	}
+	else if (tableData && [columns count] && loaded) {
 		NSUInteger pageSize = [self _pageSize];
 		NSInteger shown = (NSInteger)[rows count];
 		BOOL isLimited = pageSize && (NSUInteger)matchingRowCount > pageSize;
@@ -671,45 +769,67 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 
 	// Before the table's rows have loaded only Refresh (to retry) is available
 	BOOL hasTable = tableData && [columns count] && loaded;
-	[refreshButton setEnabled:tableData && [columns count]];
+	[refreshButton setEnabled:(tableData && [columns count]) || needsShow];
 	[addButton setEnabled:hasTable && editable];
 	[removeButton setEnabled:hasTable && editable && [tableView numberOfSelectedRows] > 0];
 	[previousPageButton setEnabled:hasTable && currentPage > 1];
 	[nextPageButton setEnabled:hasTable && currentPage < pageCount];
 }
 
-/// Commits a cell edit in progress (before an action that reloads the grid).
-- (void)_endEditing
+/**
+ * Commits a cell edit in progress, before an action that loads or writes (so the commit is sent while the runner is
+ * idle, never from the busy state's focus change). Returns YES when the commit wants the rows reloaded: the caller
+ * does it (a load does anyway).
+ */
+- (BOOL)_endEditing
 {
-	if (![tableView currentEditor]) return;
+	reloadOwed = NO;
+	if (![tableView currentEditor]) return NO;
+	endingEdit = YES;
 	if (![[tableView window] makeFirstResponder:tableView]) [tableView abortEditing];
+	endingEdit = NO;
+	return reloadOwed;
 }
 
 - (IBAction)refresh:(id)sender
 {
-	[self _endEditing];
 	[self reload];
 }
 
 - (IBAction)nextPage:(id)sender
 {
 	if (invalidated || currentPage >= pageCount) return;
-	[self _endEditing];
-	[self _loadWithFilter:filter sortColumn:sortColumn ascending:sortAscending page:currentPage + 1];
+	[self _loadPage:currentPage + 1];
 }
 
 - (IBAction)previousPage:(id)sender
 {
 	if (invalidated || currentPage <= 1) return;
-	[self _endEditing];
-	[self _loadWithFilter:filter sortColumn:sortColumn ascending:sortAscending page:currentPage - 1];
+	[self _loadPage:currentPage - 1];
+}
+
+- (void)_loadPage:(NSUInteger)page
+{
+	[self _loadWithFilter:filter sortColumn:sortColumn ascending:sortAscending page:page
+			  description:[NSString stringWithFormat:NSLocalizedString(@"Loading page %lu...", @"Loading table page task string"), (unsigned long)page]];
 }
 
 #pragma mark - Rows
 
+/// The short writes (add, delete, a cell edit) run on the main thread, so never while a load is using the connection.
+- (BOOL)_refuseWriteWhileBusy
+{
+	if (![taskRunner isBusy]) return NO;
+	NSBeep();
+	return YES;
+}
+
 - (IBAction)addRow:(id)sender
 {
 	if (invalidated || !tableData || !editable || !loaded) return;
+	if ([self _refuseWriteWhileBusy]) return;
+
+	// A cell being edited is saved first (shown as typed until the next load)
 	[self _endEditing];
 
 	// Every column gets its default (as MySQL's new row), then the user edits it in place
@@ -748,14 +868,18 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 - (IBAction)removeRows:(id)sender
 {
 	if (invalidated || !tableData || !editable || !loaded) return;
-	[self _endEditing];
+	if ([self _refuseWriteWhileBusy]) return;
+	BOOL editWantsReload = [self _endEditing];
 
 	NSIndexSet *selection = [tableView selectedRowIndexes];
 	NSMutableArray *selectedRows = [NSMutableArray array];
 	[selection enumerateIndexesUsingBlock:^(NSUInteger index, BOOL *stop) {
 		if (index < [rows count]) [selectedRows addObject:[rows objectAtIndex:index]];
 	}];
-	if (![selectedRows count]) return;
+	if (![selectedRows count]) {
+		if (editWantsReload) [self reload];
+		return;
+	}
 
 	// MySQL's confirmation (-[SPTableContent removeRow:])
 	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
@@ -778,6 +902,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	NSArray *toDelete = [selectedRows copy];
 	[self _confirm:alert completion:^(BOOL confirmed) {
 		if (confirmed && !invalidated) [self _deleteRows:toDelete];
+		else if (editWantsReload) [self reload];
 		[toDelete release];
 		[self release];
 	}];
@@ -785,6 +910,9 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 
 - (void)_deleteRows:(NSArray *)toDelete
 {
+	// A load may have started while the confirmation was up
+	if ([self _refuseWriteWhileBusy]) return;
+
 	NSError *error = nil;
 	if (![tableData deleteRows:toDelete error:&error]) {
 		[self _presentError:error title:NSLocalizedString(@"Could not delete the rows", @"Postgres content: delete failed")];
@@ -836,21 +964,46 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	// Unchanged: nothing to send
 	if ([newValue isEqual:oldValue]) return;
 
+	// An edit ending while a load runs (something outside this view started one, as edits end before every load
+	// here) is not sent: the grid goes on showing the row's loaded value
+	if ([self _refuseWriteWhileBusy]) return;
+
 	NSError *error = nil;
-	if (![tableData updateRow:originalRow column:[column name] value:newValue error:&error]) {
+	if ([tableData updateRow:originalRow column:[column name] value:newValue error:&error]) {
+		// Shown as sent until the reload brings Postgres's own format
+		NSMutableArray *changedRow = [[originalRow mutableCopy] autorelease];
+		[changedRow replaceObjectAtIndex:(NSUInteger)[[tableColumn identifier] integerValue] withObject:newValue];
+		[rows replaceObjectAtIndex:(NSUInteger)rowIndex withObject:changedRow];
+	}
+	else {
 		[self _presentError:error title:[NSString stringWithFormat:NSLocalizedString(@"Could not change “%@”", @"Postgres content: update failed"), [column name]]];
 	}
 
 	// Reload either way: after success Postgres's own format of the value (and of generated columns),
-	// after a failure the row's current values
-	[self reload];
+	// after a failure the row's current values. Committed by -_endEditing, its caller reloads. Committed by the
+	// grid's own editing ending (as Return or a click elsewhere), once that has finished: a load's start takes
+	// the keyboard focus, which must not end the same edit again. Unless another load has started by then.
+	if (endingEdit) {
+		reloadOwed = YES;
+	}
+	else if ([theTableView currentEditor] || [theTableView editedRow] >= 0) {
+		NSUInteger generation = loadGeneration;
+		[self retain];
+		dispatch_async(dispatch_get_main_queue(), ^{
+			if (generation == loadGeneration) [self reload];
+			[self release];
+		});
+	}
+	else {
+		[self reload];
+	}
 }
 
 #pragma mark - Table view delegate
 
 - (BOOL)tableView:(NSTableView *)theTableView shouldEditTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
 {
-	if (invalidated || !tableData || !editable || !loaded) return NO;
+	if (invalidated || !tableData || !editable || !loaded || [taskRunner isBusy]) return NO;
 	if (rowIndex < 0 || (NSUInteger)rowIndex >= [rows count]) return NO;
 
 	SPPostgresColumn *column = [self _columnForTableColumn:tableColumn];
@@ -880,7 +1033,8 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 
 	// From the first page (MySQL keeps the page; the first rows of the new order are what's wanted)
 	BOOL ascending = [name isEqualToString:sortColumn] ? !sortAscending : YES;
-	[self _loadWithFilter:filter sortColumn:name ascending:ascending page:1];
+	[self _loadWithFilter:filter sortColumn:name ascending:ascending page:1
+			  description:NSLocalizedString(@"Sorting table...", @"Sorting table task description")];
 }
 
 - (void)tableViewSelectionDidChange:(NSNotification *)notification

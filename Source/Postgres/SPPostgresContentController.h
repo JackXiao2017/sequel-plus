@@ -1,6 +1,7 @@
 #import <Cocoa/Cocoa.h>
 
 @class PGPostgresConnection;
+@class SPPostgresTaskRunner;
 
 /**
  * The Content view of a PostgreSQL tab, laid out as MySQL's Content tab: a filter bar on top (column,
@@ -14,6 +15,11 @@
  * on the server. Tables without a primary key, views and generated columns are never edited.
  *
  * A data-layer error is shown as an alert (see alertPresenter); the grid keeps the rows it showed.
+ *
+ * Loads run through taskRunner: with the tab's background runner a load method returns at once and the end state it
+ * documents holds once the runner is idle; a cancelled load shows no alert and keeps what was shown (a cancelled
+ * table switch shows the new table's columns, if they came, without rows; Refresh loads it). The short writes (a cell
+ * edit, add, delete) run on the main thread and are refused (NSBeep) while the runner is busy.
  */
 __attribute__((visibility("default")))
 @interface SPPostgresContentController : NSObject <NSTableViewDataSource, NSTableViewDelegate>
@@ -54,6 +60,10 @@ __attribute__((visibility("default")))
 @property (readonly, copy) NSString *countText;
 /// The bottom bar's notice: why the rows can't be edited, or @"".
 @property (readonly, copy) NSString *noticeText;
+
+/// Runs the loads (default: an inline runner on the connection, so a load has finished when its method returns).
+/// With a background runner (the tab's, from Stage 8 Task 7) a load returns at once and is applied when it completes.
+@property (retain) SPPostgresTaskRunner *taskRunner;
 
 /// Shows errors. nil (the default) shows them as sheets on the view's window. Replaceable (the tab routes them through its own).
 @property (copy) void (^alertPresenter)(NSAlert *alert);
