@@ -1,4 +1,5 @@
 #import <XCTest/XCTest.h>
+#import <objc/runtime.h>
 #import <PostgresKit/PostgresKit.h>
 #import "SPPostgresTestServers.h"
 #import "../Source/SPWindowController.h"
@@ -13,6 +14,7 @@
 #import "../Source/Postgres/SPPostgresCheckList.h"
 #import "../Source/Postgres/SPPostgresProgressSheet.h"
 #import "../Source/Postgres/SPPostgresErrors.h"
+#import "../Source/Postgres/SPPostgresFavoritesStore.h"
 
 static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifier";
 
@@ -388,7 +390,7 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 {
 	[self onEachPort:^(NSNumber *port, PGPostgresConnection *target) {
 		SPPostgresTransferController *controller = [self openSheet];
-		NSString *description = [NSString stringWithFormat:@"pgkit_test@127.0.0.1:%@", port];
+		NSString *description = [NSString stringWithFormat:@"“Test target” (pgkit_test@127.0.0.1:%@)", port];
 		NSAlert *alert = [controller emptyConfirmationAlertForDatabase:@"pgkit_io_dst" targetDescription:description];
 		XCTAssertEqualObjects(alert.messageText, @"Empty “pgkit_io_dst” and transfer into it?");
 		XCTAssertEqualObjects(alert.informativeText, ([NSString stringWithFormat:@"Everything in database “pgkit_io_dst” on %@ will be deleted: all schemas (including public), tables, views, functions, types and extensions. Other databases on that server aren't touched.\n\nType the database's name to confirm.", description]));
@@ -694,6 +696,27 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 		[self.document.exportController cancel:nil];
 		XCTAssertTrue([self spinUntil:^BOOL{ return self.document.exportController == nil && [self window].attachedSheet == nil; } timeout:5]);
 		XCTAssertTrue([self.document validateToolbarItem:item]);
+		XCTAssertFalse(item.isBordered, @"as MySQL's");
+
+		// Clicking it opens the Transfer sheet (the favorites come from a test-owned store, never the real one)
+		NSString *storeDirectory = [self.directory stringByAppendingPathComponent:@"store"];
+		[[NSFileManager defaultManager] createDirectoryAtPath:storeDirectory withIntermediateDirectories:YES attributes:nil error:NULL];
+		SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initWithFileURL:[NSURL fileURLWithPath:[storeDirectory stringByAppendingPathComponent:@"PostgresFavorites.plist"]]];
+		Method shared = class_getClassMethod([SPPostgresFavoritesStore class], @selector(sharedStore));
+		IMP original = method_setImplementation(shared, imp_implementationWithBlock(^id(id me) { return store; }));
+		@try {
+			XCTAssertTrue([NSApp sendAction:inToolbar.action to:inToolbar.target from:inToolbar]);
+			SPPostgresTransferController *opened = self.document.transferController;
+			XCTAssertNotNil(opened);
+			XCTAssertEqual([self window].attachedSheet, opened.sheet);
+			XCTAssertEqualObjects(opened.favorites, @[]);
+			XCTAssertFalse([self.document validateToolbarItem:item], @"not while Transfer is up");
+			[opened cancel:nil];
+			XCTAssertTrue([self spinUntil:^BOOL{ return self.document.transferController == nil && [self window].attachedSheet == nil; } timeout:5]);
+		}
+		@finally {
+			method_setImplementation(shared, original);
+		}
 	}];
 
 	// MySQL's Transfer item stays a never-enabled SPDisabledToolbarItem
