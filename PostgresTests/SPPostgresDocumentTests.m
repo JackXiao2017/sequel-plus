@@ -14,6 +14,7 @@
 #import "../Source/Postgres/SPPostgresExtensionController.h"
 #import "../Source/Postgres/SPPostgresInstallExtensionSheet.h"
 #import "../Source/Postgres/SPPostgresTaskRunner.h"
+#import "../Source/Postgres/SPPostgresCatalog.h"
 
 static const NSUInteger SPPostgresDocumentTestPort = 55418;
 
@@ -1770,6 +1771,100 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	XCTAssertFalse([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"child"]);
 	XCTAssertEqualObjects(self.document.contentController.table, @"child renamed");
 	XCTAssertEqualObjects(self.document.history.currentEntry[@"table"], @"child renamed");
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+}
+
+/// The sidebar on a background runner of its own over a connection to pgkit_nopublic (the database switched to); the
+/// runner is idle before anything else uses that connection, and is let go of (and the connection closed) at the end.
+- (SPPostgresTaskRunner *)switchRunnerFor:(SPPostgresSidebarController *)sidebar connection:(PGPostgresConnection *)other
+{
+	SPPostgresTaskRunner *runner = [[SPPostgresTaskRunner alloc] initWithConnection:other];
+	SPPostgresTaskRunner *previous = sidebar.taskRunner;
+	sidebar.taskRunner = runner;
+	[self addTeardownBlock:^{
+		sidebar.taskRunner = previous;
+		[runner invalidateWithCompletion:^{
+			[other disconnect];
+		}];
+	}];
+	return runner;
+}
+
+/// A database switch's reload has no Cancel button, and when it fails the previous database's lists don't stay.
+- (void)testNewCatalogReloadFailureKeepsNoPreviousLists
+{
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	XCTAssertTrue([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"customers"]);
+
+	// The new database's connection, gone before its lists are read
+	PGPostgresConnection *other = [SPPostgresTestServers connectedConnectionOnPort:SPPostgresDocumentTestPort database:@"pgkit_nopublic"];
+	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPPostgresDocumentTestPort];
+	NSString *terminate = [NSString stringWithFormat:@"SELECT pg_terminate_backend(%lu)", (unsigned long)[other serverProcessId]];
+	XCTAssertNotNil([admin execute:terminate]);
+	[admin disconnect];
+	SPPostgresTaskRunner *runner = [self switchRunnerFor:sidebar connection:other];
+
+	__block NSUInteger calls = 0;
+	__block BOOL loadedSeen = YES;
+	[sidebar reloadWithNewCatalog:[[SPPostgresCatalog alloc] initWithConnection:other] completion:^(BOOL loaded) {
+		calls++;
+		loadedSeen = loaded;
+	}];
+	XCTAssertTrue(runner.isBusy);
+	XCTAssertEqualObjects(runner.currentDescription, @"Reloading...");
+	XCTAssertNil(runner.currentCancelTitle, @"a database switch's reload isn't cancellable");
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+
+	XCTAssertEqual(calls, 1u);
+	XCTAssertFalse(loadedSeen);
+	XCTAssertNotNil(sidebar.lastError);
+	XCTAssertGreaterThanOrEqual(alerts.count, 1u, @"the failure is reported as for any reload");
+	XCTAssertNil(sidebar.selectedSchema);
+	XCTAssertNil(sidebar.selectedTableName);
+	for (NSString *section in @[@"TABLES", @"VIEWS", @"SEQUENCES", @"EXTENSIONS"]) {
+		XCTAssertEqualObjects([sidebar itemTitlesInSection:section], (@[]), @"%@: none of pgkit_test's", section);
+	}
+	XCTAssertEqual([self schemaPopupOf:sidebar].numberOfItems, 0);
+}
+
+/// Cancelled all the same (cancelAll cancels everything queued): the previous database's lists go, with no alert.
+- (void)testNewCatalogReloadCancelledKeepsNoPreviousLists
+{
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	XCTAssertTrue([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"customers"]);
+
+	PGPostgresConnection *other = [SPPostgresTestServers connectedConnectionOnPort:SPPostgresDocumentTestPort database:@"pgkit_nopublic"];
+	SPPostgresTaskRunner *runner = [self switchRunnerFor:sidebar connection:other];
+	[runner runTaskWithDescription:@"Loading..." cancelTitle:@"Cancel" work:^id(PGPostgresConnection *connection, NSError **error) {
+		return [connection execute:@"SELECT pg_sleep(1)"];
+	} completion:nil];
+
+	__block NSUInteger calls = 0;
+	__block BOOL loadedSeen = YES;
+	[sidebar reloadWithNewCatalog:[[SPPostgresCatalog alloc] initWithConnection:other] completion:^(BOOL loaded) {
+		calls++;
+		loadedSeen = loaded;
+	}];
+	[runner cancelAll];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+
+	XCTAssertEqual(calls, 1u);
+	XCTAssertFalse(loadedSeen);
+	XCTAssertNil(sidebar.selectedSchema);
+	for (NSString *section in @[@"TABLES", @"VIEWS", @"SEQUENCES", @"EXTENSIONS"]) {
+		XCTAssertEqualObjects([sidebar itemTitlesInSection:section], (@[]), @"%@: none of pgkit_test's", section);
+	}
+	XCTAssertEqual([self schemaPopupOf:sidebar].numberOfItems, 0);
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+
+	// The same reload, not cancelled: pgkit_nopublic's lists
+	[sidebar reloadWithNewCatalog:[[SPPostgresCatalog alloc] initWithConnection:other] completion:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+	XCTAssertEqualObjects(sidebar.selectedSchema, @"app");
+	XCTAssertTrue([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"items"]);
+	XCTAssertFalse([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"customers"]);
 	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
 }
 

@@ -131,7 +131,8 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 - (void)_buildView;
 - (void)_reloadSchemaPopup;
-- (void)_runReload:(SPPostgresSidebarReloadKind)kind schema:(NSString *)schema apply:(BOOL (^)(NSDictionary *read))apply completion:(void (^)(BOOL loaded))completion;
+- (void)_runReload:(SPPostgresSidebarReloadKind)kind schema:(NSString *)schema cancelTitle:(NSString *)cancelTitle apply:(BOOL (^)(NSDictionary *read))apply completion:(void (^)(BOOL loaded))completion;
+- (void)_reloadWithCatalog:(SPPostgresCatalog *)theCatalog emptyingFailedLists:(BOOL)emptying completion:(void (^)(BOOL loaded))completion;
 - (void)_reloadSchema:(NSString *)schema selectingSequence:(NSString *)sequence holding:(BOOL)holding completion:(void (^)(BOOL loaded))completion;
 - (BOOL)_applySchemaRead:(NSDictionary *)read;
 - (void)_applyExtensionsRead:(NSDictionary *)read;
@@ -362,14 +363,24 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 // were asked for, each one in full: a later one doesn't make an earlier one's result stale, as each applies what it
 // read on top of the one before (as calling them one after the other did).
 
-- (void)_runReload:(SPPostgresSidebarReloadKind)kind schema:(NSString *)schema apply:(BOOL (^)(NSDictionary *read))apply completion:(void (^)(BOOL loaded))completion
+/// cancelTitle nil: the reload has no Cancel button (cancelAll still cancels it); a cancel changes nothing.
+- (void)_runReload:(SPPostgresSidebarReloadKind)kind schema:(NSString *)schema cancelTitle:(NSString *)cancelTitle apply:(BOOL (^)(NSDictionary *read))apply completion:(void (^)(BOOL loaded))completion
+{
+	[self _runReload:kind schema:schema knownSchemas:schemas cancelTitle:cancelTitle apply:apply cancelApply:nil completion:completion];
+}
+
+/**
+ * The reload task. knownSchemas: the schemas a catalog reload falls back on for its default schema when they can't be
+ * listed. cancelApply (nil: nothing changes) is applied instead of `apply` when the reload is cancelled.
+ */
+- (void)_runReload:(SPPostgresSidebarReloadKind)kind schema:(NSString *)schema knownSchemas:(NSArray *)known cancelTitle:(NSString *)cancelTitle apply:(BOOL (^)(NSDictionary *read))apply cancelApply:(void (^)(void))cancelApply completion:(void (^)(BOOL loaded))completion
 {
 	if (invalidated) return;
 
 	NSString *theSchema = [[schema copy] autorelease];
-	NSArray *knownSchemas = [[schemas copy] autorelease];
+	NSArray *knownSchemas = [[known copy] autorelease];
 
-	[taskRunner runTaskWithDescription:NSLocalizedString(@"Reloading...", @"Reloading table task string") cancelTitle:NSLocalizedString(@"Cancel", @"cancel button") work:^id(PGPostgresConnection *connection, NSError **error) {
+	[taskRunner runTaskWithDescription:NSLocalizedString(@"Reloading...", @"Reloading table task string") cancelTitle:cancelTitle work:^id(PGPostgresConnection *connection, NSError **error) {
 		return SPPostgresSidebarRead(connection, kind, theSchema, knownSchemas);
 	} completion:^(id result, NSError *error, BOOL cancelled) {
 		if (invalidated) return;
@@ -377,6 +388,9 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 		BOOL loaded = NO;
 		if (result) {
 			loaded = apply(result);
+		}
+		else if (cancelled && cancelApply) {
+			cancelApply();
 		}
 		else if (cancelled) {
 			// Nothing changes: the pop-up (which may show the schema the user chose) goes back to the shown schema
@@ -401,6 +415,18 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 - (void)reloadWithCatalog:(SPPostgresCatalog *)theCatalog completion:(void (^)(BOOL loaded))completion
 {
+	[self _reloadWithCatalog:theCatalog emptyingFailedLists:NO completion:completion];
+}
+
+- (void)reloadWithNewCatalog:(SPPostgresCatalog *)theCatalog completion:(void (^)(BOOL loaded))completion
+{
+	[self _reloadWithCatalog:theCatalog emptyingFailedLists:YES completion:completion];
+}
+
+/// emptying: another database's lists (-reloadWithNewCatalog:completion:): not cancellable, and none of the lists shown
+/// before is kept (a list that fails, or a cancel, leaves it empty).
+- (void)_reloadWithCatalog:(SPPostgresCatalog *)theCatalog emptyingFailedLists:(BOOL)emptying completion:(void (^)(BOOL loaded))completion
+{
 	if (theCatalog != catalog) {
 		[catalog release];
 		catalog = [theCatalog retain];
@@ -411,29 +437,42 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 		taskRunner = [[SPPostgresTaskRunner inlineRunnerWithConnection:[catalog connection]] retain];
 	}
 
-	[self _runReload:SPPostgresSidebarReloadCatalog schema:nil apply:^BOOL(NSDictionary *read) {
+	BOOL (^apply)(NSDictionary *) = ^BOOL(NSDictionary *read) {
 		[self _beginReload];
 		[self _rememberFailuresOfRead:read];
 
-		// Schemas that can't be listed keep the ones that were
+		// Schemas that can't be listed keep the ones that were (none for another database)
 		NSArray *names = [read objectForKey:@"schemas"];
-		if (names) {
+		if (names || emptying) {
 			[schemas release];
-			schemas = [names copy];
+			schemas = [(names ?: @[]) copy];
 		}
 
+		// Extensions that can't be listed keep the ones that were (none for another database)
+		if (emptying && ![read objectForKey:@"extensions"]) {
+			[self _applyExtensionsRead:@{@"extensions" : @[]}];
+		}
 		[self _applyExtensionsRead:read];
 
 		// Nor does a selected extension (another database's)
 		[selectedExtensionName release], selectedExtensionName = nil;
 
-		// The default schema of this database (the previous database's schema doesn't carry over)
-		[self _applySchemaRead:read];
+		// The default schema of this database (the previous database's schema doesn't carry over); for another
+		// database, lists that can't be read are shown empty, with no schema
+		BOOL listsRead = [read objectForKey:@"schema"] && [read objectForKey:@"tables"] && [read objectForKey:@"views"] && [read objectForKey:@"sequences"];
+		[self _applySchemaRead:(emptying && !listsRead) ? @{} : read];
 
 		BOOL loaded = ![[read objectForKey:@"failures"] count];
 		[self _endReload];
 		return loaded;
-	} completion:completion];
+	};
+
+	// Another database: its default schema is never one of the previous database's schemas
+	[self _runReload:SPPostgresSidebarReloadCatalog schema:nil knownSchemas:(emptying ? @[] : schemas)
+		 cancelTitle:(emptying ? nil : NSLocalizedString(@"Cancel", @"cancel button")) apply:apply cancelApply:(emptying ? ^{
+		// Cancelled with everything queued: the previous database's lists go all the same (nothing reported)
+		apply(@{@"failures" : @[]});
+	} : nil) completion:completion];
 }
 
 - (void)reloadKeepingSelection
@@ -444,7 +483,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 - (void)reloadKeepingSelection:(void (^)(BOOL loaded))completion
 {
 	// The schema shown now is read again (if it is still there); the selection kept is the one shown when applied
-	[self _runReload:SPPostgresSidebarReloadKeeping schema:selectedSchema apply:^BOOL(NSDictionary *read) {
+	[self _runReload:SPPostgresSidebarReloadKeeping schema:selectedSchema cancelTitle:NSLocalizedString(@"Cancel", @"cancel button") apply:^BOOL(NSDictionary *read) {
 		NSString *previousSchema = [[selectedSchema copy] autorelease];
 		NSString *table = [[selectedTableName copy] autorelease];
 		NSString *sequence = [[selectedSequenceName copy] autorelease];
@@ -510,7 +549,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 {
 	NSString *theSequence = [[sequence copy] autorelease];
 
-	[self _runReload:SPPostgresSidebarReloadSchema schema:schema apply:^BOOL(NSDictionary *read) {
+	[self _runReload:SPPostgresSidebarReloadSchema schema:schema cancelTitle:NSLocalizedString(@"Cancel", @"cancel button") apply:^BOOL(NSDictionary *read) {
 		NSString *previousSchema = [[selectedSchema copy] autorelease];
 		NSString *previousTable = [[selectedTableName copy] autorelease];
 		NSString *previousSequence = [[selectedSequenceName copy] autorelease];

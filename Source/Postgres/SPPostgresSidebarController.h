@@ -76,6 +76,14 @@ __attribute__((visibility("default")))
 - (void)reloadWithCatalog:(SPPostgresCatalog *)catalog completion:(void (^)(BOOL loaded))completion;
 
 /**
+ * Another database's catalog (a database switch), as -reloadWithCatalog:completion: but with no Cancel button (no cancel
+ * title), and keeping none of the lists shown before: a list that can't be loaded (or every list, if the reload is
+ * cancelled all the same) is shown empty, a schema list that fails leaving no schema selected. Failures are reported to
+ * the delegate as for any reload (a cancel isn't).
+ */
+- (void)reloadWithNewCatalog:(SPPostgresCatalog *)catalog completion:(void (^)(BOOL loaded))completion;
+
+/**
  * Reloads the schemas, the extensions and the shown schema's tables, views and sequences (after the Query view
  * changed them), keeping the selected table, sequence or extension if it is still listed. A schema that is gone gives way to the default one.
  * The delegate hears of a selection change only if the selection ends up different.
@@ -146,7 +154,7 @@ __attribute__((visibility("default")))
 
 /// Runs the reloads (default: an inline runner on the catalog's connection, so a reload has been applied when its
 /// method returns). With a background runner (the tab's, from Stage 8 Task 7) a reload returns at once.
-@property (retain) SPPostgresTaskRunner *taskRunner;
+@property (nonatomic, retain) SPPostgresTaskRunner *taskRunner;
 
 /// Detaches the outline and popup from this controller, and drops the reloads still to come (no completion is called
 /// after this). Called by the window on close; also on dealloc.

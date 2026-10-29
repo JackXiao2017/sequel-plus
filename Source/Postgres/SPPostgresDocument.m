@@ -2122,14 +2122,16 @@ NSString * const SPPostgresPaneExtension = @"extension";
 		[self _installContentController];
 		[self _reloadDatabasePopup];
 
-		if (historyEntry) [self _applyHistoryEntry:historyEntry];
+		// Not against lists that couldn't be read (the sidebar shows them empty; the failure is reported already)
+		if (historyEntry && loaded) [self _applyHistoryEntry:historyEntry];
 		restoringHistory = wasRestoring;
 
 		[self updateWindowTitle:self];
 		[self _updateHistoryControl];
 	};
 	[self _installSidebarRunner];
-	[sidebar reloadWithCatalog:catalog completion:historyEntry ? [self _quietSidebarCompletion:listsShown] : listsShown];
+	// Not cancellable (database switches keep their Stage 2 flow), and none of the previous database's lists stays
+	[sidebar reloadWithNewCatalog:catalog completion:historyEntry ? [self _quietSidebarCompletion:listsShown] : listsShown];
 
 	[oldConnector release];
 }
