@@ -319,18 +319,19 @@ static NSData *SPImageData(NSImage *image)
 		NSToolbarItem *mine = [mysql toolbar:[mysql valueForKey:@"mainToolbar"] itemForItemIdentifier:identifier willBeInsertedIntoToolbar:NO];
 		NSToolbarItem *theirs = [[postgres toolbar].delegate toolbar:[postgres toolbar] itemForItemIdentifier:identifier willBeInsertedIntoToolbar:NO];
 		XCTAssertEqualObjects([theirs label], [mine label], @"%@", identifier);
-		XCTAssertEqualObjects([theirs paletteLabel], [mine paletteLabel], @"%@", identifier);
 		XCTAssertEqualObjects(SPImageData([theirs image]), SPImageData([mine image]), @"%@", identifier);
+		XCTAssertEqualObjects([theirs paletteLabel], [mine paletteLabel], @"%@", identifier);
+		XCTAssertEqual([theirs isBordered], [mine isBordered], @"%@", identifier);
 		if ([identifier isEqualToString:SPParityTransfer]) {
-			// Transfer works on Postgres tabs only: there a plain item with an action (bordered, as Users), on MySQL tabs
-			// an SPDisabledToolbarItem without one
+			// Transfer works on Postgres tabs only: there a plain item with an action, on MySQL tabs an always-disabled
+			// SPDisabledToolbarItem without one; they look the same
 			XCTAssertEqualObjects([theirs class], [NSToolbarItem class]);
+			XCTAssertEqualObjects([mine class], [SPDisabledToolbarItem class]);
 			XCTAssertTrue([theirs action] != NULL);
-			XCTAssertTrue([theirs isBordered]);
+			XCTAssertTrue([mine action] == NULL);
 		}
 		else {
 			XCTAssertEqualObjects([theirs class], [mine class], @"%@", identifier);
-			XCTAssertEqual([theirs isBordered], [mine isBordered], @"%@", identifier);
 			XCTAssertEqual([theirs action] == NULL, [mine action] == NULL, @"%@: both have an action, or neither", identifier);
 		}
 
@@ -364,7 +365,9 @@ static NSData *SPImageData(NSImage *image)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 		for (NSToolbarItem *item in [[window toolbar] items]) {
-			[layout addObject:[NSString stringWithFormat:@"%@ %@ %@ %@ %@", [item itemIdentifier], [item class], NSStringFromSize([item minSize]), NSStringFromSize([item maxSize]), [item view] ? NSStringFromRect([[item view] convertRect:[[item view] bounds] toView:nil]) : @""]];
+			// Transfer's class differs (enabled on Postgres tabs only); everything else about it must match
+			NSString *className = [[item itemIdentifier] isEqualToString:SPParityTransfer] ? @"(Transfer)" : NSStringFromClass([item class]);
+			[layout addObject:[NSString stringWithFormat:@"%@ %@ %@ %@ %@", [item itemIdentifier], className, NSStringFromSize([item minSize]), NSStringFromSize([item maxSize]), [item view] ? NSStringFromRect([[item view] convertRect:[[item view] bounds] toView:nil]) : @""]];
 		}
 #pragma clang diagnostic pop
 		[layouts addObject:layout];
@@ -373,11 +376,7 @@ static NSData *SPImageData(NSImage *image)
 
 	// Element by element (a failing array comparison is very slow to describe)
 	XCTAssertEqual([layouts[1] count], [layouts[0] count]);
-	for (NSUInteger i = 0; i < [layouts[0] count]; i++) {
-		// Transfer is enabled (bordered, as Users) on Postgres tabs only: see -testInstalledItemsMatchInKind
-		if ([layouts[0][i] hasPrefix:[SPParityTransfer stringByAppendingString:@" "]]) continue;
-		XCTAssertEqualObjects(layouts[1][i], layouts[0][i]);
-	}
+	for (NSUInteger i = 0; i < [layouts[0] count]; i++) XCTAssertEqualObjects(layouts[1][i], layouts[0][i]);
 	XCTAssertEqualObjects(frames[1], frames[0], @"the window and its content keep their place");
 }
 
@@ -519,7 +518,8 @@ static NSData *SPImageData(NSImage *image)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 		for (NSToolbarItem *item in [[[self.controller window] toolbar] items]) {
-			kind[[item itemIdentifier]] = [NSString stringWithFormat:@"%@ bordered=%d template=%d min=%@ max=%@ view=%@", [item class], [item isBordered], [[item image] isTemplate], NSStringFromSize([item minSize]), NSStringFromSize([item maxSize]), [[item view] class]];
+			NSString *className = [[item itemIdentifier] isEqualToString:SPParityTransfer] ? @"(Transfer)" : NSStringFromClass([item class]);
+			kind[[item itemIdentifier]] = [NSString stringWithFormat:@"%@ bordered=%d template=%d min=%@ max=%@ view=%@", className, [item isBordered], [[item image] isTemplate], NSStringFromSize([item minSize]), NSStringFromSize([item maxSize]), [[item view] class]];
 		}
 #pragma clang diagnostic pop
 		[kinds addObject:kind];
@@ -527,14 +527,6 @@ static NSData *SPImageData(NSImage *image)
 	XCTAssertEqualObjects([NSSet setWithArray:[kinds[1] allKeys]], [NSSet setWithArray:[kinds[0] allKeys]]);
 	for (NSString *identifier in kinds[0]) {
 		if ([identifier isEqualToString:SPParityDatabase]) continue; // its width follows the left pane (see -testLeftPaneWidthIsShared)
-		if ([identifier isEqualToString:SPParityTransfer]) {
-			// Enabled on Postgres tabs only: there it is an image item like Users (a plain item, bordered, the same size;
-			// its symbol image is a template, Users' isn't); on MySQL tabs an always-disabled SPDisabledToolbarItem
-			NSString *likeUsers = [kinds[1][SPParityUsers] stringByReplacingOccurrencesOfString:@" template=0 " withString:@" template=1 "];
-			XCTAssertEqualObjects(kinds[1][identifier], likeUsers);
-			XCTAssertTrue([kinds[0][identifier] hasPrefix:@"SPDisabledToolbarItem "], @"%@", kinds[0][identifier]);
-			continue;
-		}
 		XCTAssertEqualObjects(kinds[1][identifier], kinds[0][identifier], @"%@", identifier);
 	}
 }

@@ -2475,12 +2475,21 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 - (NSToolbarItem *)toolbar:(NSToolbar *)theToolbar itemForItemIdentifier:(NSString *)identifier willBeInsertedIntoToolbar:(BOOL)flag
 {
-	// Transfer works on Postgres tabs: a plain item (MySQL's is an always-disabled SPDisabledToolbarItem), with the
-	// same label and image
+	// Transfer works on Postgres tabs: a plain item (MySQL's is an always-disabled SPDisabledToolbarItem) that looks
+	// exactly like MySQL's (label, image, no bezel, size), so switching tabs moves nothing. AppKit would border an
+	// image item with an action, making it wider
 	if ([identifier isEqualToString:SPMainToolbarTransfer]) {
 		NSToolbarItem *transfer = [[[NSToolbarItem alloc] initWithItemIdentifier:identifier] autorelease];
 		SPConfigureTransferToolbarItem(transfer);
 		[transfer setImage:SPCompactToolbarImage([transfer image])];
+		[transfer setBordered:NO];
+		// An item with an action gets a larger frame than MySQL's actionless one even without a bezel (32 instead of
+		// 28 points): give it MySQL's (SPToolbarParityTests compare the installed sizes)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+		[transfer setMinSize:NSMakeSize(28, 28)];
+		[transfer setMaxSize:NSMakeSize(28, 28)];
+#pragma clang diagnostic pop
 		[transfer setTarget:self];
 		[transfer setAction:@selector(showTransfer:)];
 		return transfer;

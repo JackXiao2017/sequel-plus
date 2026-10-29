@@ -522,7 +522,8 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 		else [self _updateControls];
 	} copy] autorelease];
 
-	NSString *description = [[self class] targetDescriptionForFavorite:favorite];
+	// Names the favorite and where it points: “<favorite>” (user@host:port…)
+	NSString *description = [NSString stringWithFormat:NSLocalizedString(@"“%@” (%@)", @"Postgres transfer: empty confirmation's target (favorite name, target line)"), [favorite name] ?: @"", [[self class] targetDescriptionForFavorite:favorite]];
 	if (emptyConfirmation) {
 		emptyConfirmation(targetDatabase, description, answer);
 		return;
