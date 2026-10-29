@@ -2,6 +2,7 @@
 #import "SPPostgresStatementSplitter.h"
 #import "SPPostgresConsoleLogger.h"
 #import "SPPostgresTableData.h"
+#import "SPPostgresTaskRunner.h"
 #import "SPTableView.h"
 #import "SPButtonBar.h"
 #import "SPConstants.h"
@@ -55,6 +56,50 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 @end
 
+#pragma mark - Run
+
+/**
+ * What one run produced. The work fills it in on the runner's thread, statement by statement; the completion reads
+ * it on the main thread once the work has returned (also after a cancel, so what ran before it is still shown).
+ */
+@interface SPPostgresQueryRun : NSObject
+/// The last row set returned (nil: none).
+@property (retain) PGPostgresResult *rowsResult;
+/// The status line for the last statement run (@"" before the first).
+@property (copy) NSString *status;
+@property (assign) BOOL schemaChanged;
+@property (assign) BOOL dataChanged;
+/// The run stopped because the runner was cancelled.
+@property (assign) BOOL cancelled;
+/// Raised during the run (e.g. by the test hook); the run stopped there.
+@property (retain) NSException *exception;
+@end
+
+@implementation SPPostgresQueryRun
+
+@synthesize rowsResult;
+@synthesize status;
+@synthesize schemaChanged;
+@synthesize dataChanged;
+@synthesize cancelled;
+@synthesize exception;
+
+- (instancetype)init
+{
+	if ((self = [super init])) status = [@"" copy];
+	return self;
+}
+
+- (void)dealloc
+{
+	[rowsResult release];
+	[status release];
+	[exception release];
+	[super dealloc];
+}
+
+@end
+
 #pragma mark - Controller
 
 @interface SPPostgresQueryController ()
@@ -79,10 +124,14 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	NSButton *runCurrentButton;
 	NSTextField *statusField;
 
-	BOOL running;
+	BOOL running;                   // YES from a run's enqueue until its completion
 	BOOL invalidated;
 
-	/// Test seam: called before each statement runs (see the tests' SPPostgresQueryController (Testing))
+	/// The connection's logger while a run logs the user's statements as custom queries (nil: none), and what to restore
+	SPPostgresConsoleLogger *runLogger;
+	BOOL runLoggerWasLoggingCustomQueries;
+
+	/// Test seam: called on the runner's thread before each statement runs (see the tests' SPPostgresQueryController (Testing))
 	void (^statementWillRunHook)(NSString *statement);
 }
 
@@ -90,6 +139,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 @synthesize resultsView;
 @synthesize statusText;
 @synthesize runDidChangeDatabase;
+@synthesize taskRunner;
 
 #pragma mark - Setup
 
@@ -97,6 +147,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 {
 	if ((self = [super init])) {
 		connection = [theConnection retain];
+		taskRunner = [[SPPostgresTaskRunner inlineRunnerWithConnection:theConnection] retain];
 		statusText = [@"" copy];
 		[self _buildView];
 	}
@@ -109,6 +160,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[self invalidate];
 
 	[connection release];
+	[taskRunner release];
 	[result release];
 	[statusText release];
 
@@ -138,6 +190,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	// Tooltip owners aren't retained
 	[runAllButton removeAllToolTips];
 	[runCurrentButton removeAllToolTips];
+
+	// A run's completion may never come (the tab's runner is invalidated when the tab closes)
+	[self _restoreRunLogging];
 
 	// The block may capture the tab
 	[runDidChangeDatabase release];
@@ -413,17 +468,34 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 #pragma mark - Running
 
+/// The user's run keys and buttons do nothing while the runner is busy (one query at a time on the connection).
+- (BOOL)_refuseRunWhileBusy
+{
+	if (!running && ![taskRunner isBusy]) return NO;
+	NSBeep();
+	return YES;
+}
+
+/// Ends the editor's input in progress (an input method's marked text) before its text is read for a run.
+- (void)_endEditing
+{
+	if ([editor hasMarkedText]) [editor unmarkText];
+	[editor breakUndoCoalescing];
+}
+
 - (IBAction)runAllQueries:(id)sender
 {
-	if (invalidated) return;
-	[self _runStatements:[SPPostgresStatementSplitter statementsInSQL:[editor string]]];
+	if (invalidated || [self _refuseRunWhileBusy]) return;
+	[self _endEditing];
+	[self _runStatements:[SPPostgresStatementSplitter statementsInSQL:[[[editor string] copy] autorelease]]];
 }
 
 - (IBAction)runCurrentQuery:(id)sender
 {
-	if (invalidated) return;
+	if (invalidated || [self _refuseRunWhileBusy]) return;
+	[self _endEditing];
 
-	NSString *text = [editor string];
+	NSString *text = [[[editor string] copy] autorelease];
 	NSRange selection = [editor selectedRange];
 	NSArray *statements = nil;
 
@@ -444,7 +516,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 }
 
 /// "1 row" / "N rows", or with " affected".
-- (NSString *)_rowCountText:(unsigned long long)count affected:(BOOL)affected
++ (NSString *)_rowCountText:(unsigned long long)count affected:(BOOL)affected
 {
 	if (affected) {
 		if (count == 1) return NSLocalizedString(@"1 row affected", @"Postgres query: one row affected");
@@ -456,9 +528,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 /**
  * The status line text for a failed statement: the server's message, then its DETAIL and HINT lines (as psql).
- * Notes an aborted transaction after the message.
+ * Notes an aborted transaction after the message. Called on the thread that ran the statement on connection.
  */
-- (NSString *)_errorTextForStatement:(NSUInteger)number error:(PGPostgresError *)error fallback:(NSString *)fallback
++ (NSString *)_errorTextForStatement:(NSUInteger)number error:(PGPostgresError *)error fallback:(NSString *)fallback connection:(PGPostgresConnection *)connection
 {
 	NSCharacterSet *whitespace = [NSCharacterSet whitespaceAndNewlineCharacterSet];
 	NSString *message = [[error errorPrimaryMessage] stringByTrimmingCharactersInSet:whitespace];
@@ -478,37 +550,31 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 }
 
 /**
- * Runs the statements in order. The grid shows the last row set; the first error stops the run. The status
- * line describes the last statement run, and says which statement the grid's rows come from when it isn't
- * that one.
+ * The work of a run, on the runner's thread: runs the statements in order on connection, filling in run as it goes.
+ * The first error stops the run, as does a cancel (between statements, or interrupting one). Uses only its
+ * arguments (a class method: never the controller's views or state).
  */
-- (void)_runStatements:(NSArray *)statements
++ (void)_runStatements:(NSArray *)statements onConnection:(PGPostgresConnection *)connection runner:(SPPostgresTaskRunner *)runner
+				logger:(SPPostgresConsoleLogger *)logger hook:(void (^)(NSString *statement))hook into:(SPPostgresQueryRun *)run
 {
-	if (invalidated || running || ![statements count]) return;
-
-	// Hold on: an action may arrive from a view whose tab closes while the run's alerts or callbacks spin
-	[[self retain] autorelease];
-
-	SPPostgresConsoleLogger *logger = [SPPostgresConsoleLogger loggerForConnection:connection];
-	BOOL wasLoggingCustomQueries = [logger loggingCustomQueries];
-
-	NSString *status = @"";
+	NSUInteger total = [statements count];
 	NSUInteger number = 0;
-	BOOL schemaChanged = NO, dataChanged = NO;
-	NSUInteger shownStatement = 0; // the statement whose rows the grid shows (0: none)
+	NSUInteger shownStatement = 0; // the statement whose rows the grid will show (0: none)
 
-	running = YES;
-	[logger setLoggingCustomQueries:YES];
-
-	// Whatever happens (an exception from AppKit or a hook), the next run must be possible and the
-	// interface's own queries logged as such again
+	// An exception (from the hook, or a lost connection's) stops the run like an error: what ran is still shown
 	@try {
-		[self _showResult:nil];
-
 		for (NSString *statement in statements) {
+			if ([runner isCancelled]) {
+				[run setCancelled:YES];
+				break;
+			}
 			number++;
 
-			if (statementWillRunHook) statementWillRunHook(statement);
+			if (total > 1) {
+				[runner updateDescription:[NSString stringWithFormat:NSLocalizedString(@"Running query %ld of %lu...", @"Running multiple queries string"), (long)number, (unsigned long)total]];
+			}
+
+			if (hook) hook(statement);
 
 			// A new error object is made for each failed query: compare with the previous one to know if this
 			// statement left one (a lost connection may leave none)
@@ -525,6 +591,12 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 			}
 
 			if (!statementResult) {
+				// Interrupted by a cancel: not an error to report
+				if ([runner isCancelled]) {
+					[run setCancelled:YES];
+					break;
+				}
+
 				PGPostgresError *error = [connection lastError];
 				if (error == previousError) error = nil;
 
@@ -532,16 +604,18 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 				if (![fallback length] && ![connection isConnected]) fallback = NSLocalizedString(@"The connection to the PostgreSQL server was lost.", @"Postgres query: connection lost");
 				if (![fallback length]) fallback = [connection libpqErrorMessage];
 
-				status = [self _errorTextForStatement:number error:error fallback:fallback];
+				NSString *status = [self _errorTextForStatement:number error:error fallback:fallback connection:connection];
+				[run setStatus:status];
 				[logger logError:status];
 				break;
 			}
 
-			if (!schemaChanged) schemaChanged = [[self class] statementMayChangeSchema:statement];
-			if (!dataChanged) dataChanged = [[self class] statementMayChangeData:statement];
+			if (![run schemaChanged]) [run setSchemaChanged:[self statementMayChangeSchema:statement]];
+			if (![run dataChanged]) [run setDataChanged:[self statementMayChangeData:statement]];
 
+			NSString *status;
 			if ([statementResult returnsRows]) {
-				[self _showResult:statementResult];
+				[run setRowsResult:statementResult];
 				shownStatement = number;
 				status = [self _rowCountText:[statementResult numberOfRows] affected:NO];
 			}
@@ -556,19 +630,82 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 			if (shownStatement && shownStatement != number) {
 				status = [status stringByAppendingFormat:NSLocalizedString(@" – results shown from statement %lu", @"Postgres query: rows are from an earlier statement (number)"), (unsigned long)shownStatement];
 			}
+			[run setStatus:status];
 		}
 	}
-	@finally {
-		[logger setLoggingCustomQueries:wasLoggingCustomQueries];
+	@catch (NSException *exception) {
+		[run setException:exception];
+	}
+}
+
+/// Gives the interface's own queries back their logging, once per run (from the completion, or -invalidate if it never comes).
+- (void)_restoreRunLogging
+{
+	if (!runLogger) return;
+	[runLogger setLoggingCustomQueries:runLoggerWasLoggingCustomQueries];
+	[runLogger release];
+	runLogger = nil;
+}
+
+/**
+ * Runs the statements in order through the task runner. The grid shows the last row set; the first error stops
+ * the run. The status line describes the last statement run, and says which statement the grid's rows come from
+ * when it isn't that one. Cancelled, the grid shows the last row set returned before the cancel and the status line
+ * says "Query cancelled."; what ran before the cancel is still reported through runDidChangeDatabase.
+ */
+- (void)_runStatements:(NSArray *)statements
+{
+	if (invalidated || running || [taskRunner isBusy] || ![statements count]) return;
+
+	// Hold on: an action may arrive from a view whose tab closes while the run's alerts or callbacks spin (the
+	// inline runner calls the completion before the blocks are copied)
+	[[self retain] autorelease];
+
+	SPPostgresTaskRunner *runner = taskRunner;
+	SPPostgresConsoleLogger *logger = [SPPostgresConsoleLogger loggerForConnection:[runner connection]];
+
+	running = YES;
+	[self _restoreRunLogging];
+	runLogger = [logger retain];
+	runLoggerWasLoggingCustomQueries = [logger loggingCustomQueries];
+	[logger setLoggingCustomQueries:YES];
+
+	// Everything the work needs, so it never reads this controller
+	NSArray *theStatements = [[statements copy] autorelease];
+	void (^hook)(NSString *) = [[statementWillRunHook copy] autorelease];
+	SPPostgresQueryRun *run = [[[SPPostgresQueryRun alloc] init] autorelease];
+	NSUInteger total = [theStatements count];
+
+	NSString *description = (total > 1)
+		? [NSString stringWithFormat:NSLocalizedString(@"Running query %ld of %lu...", @"Running multiple queries string"), 1L, (unsigned long)total]
+		: NSLocalizedString(@"Running query...", @"Running single query string");
+	NSString *cancelTitle = (total > 1) ? NSLocalizedString(@"Stop queries", @"Stop queries string") : NSLocalizedString(@"Stop query", @"Stop query string");
+
+	[runner runTaskWithDescription:description cancelTitle:cancelTitle work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		[SPPostgresQueryController _runStatements:theStatements onConnection:theConnection runner:runner logger:logger hook:hook into:run];
+		return run;
+	} completion:^(id result, NSError *error, BOOL cancelled) {
+		// Whatever happens, the interface's own queries are logged as such again and the next run is possible
+		[self _restoreRunLogging];
 		running = NO;
 
+		// Raised on the runner's thread: the inline runner's caller rethrows it below; otherwise it is reported here
+		if ([run exception] && ![runner isInline]) [NSApp reportException:[run exception]];
+
+		if (invalidated) return;
+
+		NSString *status = (cancelled || [run cancelled]) ? NSLocalizedString(@"Query cancelled.", @"Query cancelled error") : ([run status] ?: @"");
+		[self _showResult:[run rowsResult]];
 		[self setStatusText:status];
 		[statusField setStringValue:status];
 		[statusField setToolTip:status];
-	}
 
-	// As MySQL's Query tab: the tab reloads what the run may have changed
-	if ((schemaChanged || dataChanged) && !invalidated && runDidChangeDatabase) runDidChangeDatabase(schemaChanged, dataChanged);
+		// As MySQL's Query tab: the tab reloads what the run may have changed (also what ran before a cancel)
+		if (([run schemaChanged] || [run dataChanged]) && runDidChangeDatabase) runDidChangeDatabase([run schemaChanged], [run dataChanged]);
+	}];
+
+	// As before the runner: an exception raised during an inline run reaches the action's caller, once the state is restored
+	if ([runner isInline] && [run exception]) @throw [run exception];
 }
 
 #pragma mark - Results
