@@ -17,7 +17,7 @@
  *   user@<socket directory> or user@host:port via SSH sshUser@sshHost. Choosing a favorite (and opening the sheet)
  *   opens a session to it (the favorite's database, or postgres; one retry on postgres) with the Keychain password,
  *   asking for one (never saved) when the server wants it. Database: a menu of the session's databases, then
- *   "New Database…" (CREATE DATABASE on the session). "Connecting…" / "Not connected" (the error and Retry under it).
+ *   "New Database…" (CREATE DATABASE on the session); the favorite's database is selected when listed, else none. "Connecting…" / "Not connected" (the error and Retry under it).
  * - Mode: "Empty the target database first" (default; confirmed first by typing the database's name, except for a
  *   database created in this sheet) or "Overwrite tables that already exist on the target".
  *
@@ -69,7 +69,7 @@ __attribute__((visibility("default")))
 - (NSAlert *)passwordAlertForFavorite:(SPPostgresFavorite *)favorite;
 
 /// The New Database… prompt: "New database on “<favorite>”", an NSTextField accessory, Create (enabled while the name
-/// is non-empty and at most 63 bytes in UTF-8) and Cancel.
+/// is non-empty, at most 63 bytes in UTF-8, and has no leading or trailing whitespace) and Cancel.
 - (NSAlert *)createDatabaseAlertForFavorite:(SPPostgresFavorite *)favorite;
 
 /// Asks to confirm Empty mode; answer must be called once (later calls are ignored). nil (the default): the alert of
@@ -99,7 +99,8 @@ __attribute__((visibility("default")))
 @property (readonly) NSTextField *targetStatusField;
 /// Shown while not connected
 @property (readonly) NSButton *retryButton;
-/// The database chosen in the menu; nil while none (connecting, not connected, nothing listed)
+/// The database chosen in the menu; nil while none (connecting, not connected, or the favorite's database isn't listed:
+/// nothing is chosen for the user)
 @property (readonly, copy) NSString *selectedDatabase;
 @property (readonly) NSButton *emptyModeRadio;
 @property (readonly) NSButton *overwriteModeRadio;

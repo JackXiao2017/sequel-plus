@@ -47,6 +47,57 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 @property BOOL ended;
 @end
 
+/// Stands in for SPSSHTunnel as the owner of its SSHQuestionDialog nib (its real password and host-key sheets, buttons
+/// and actions), without starting a tunnel: records how each sheet was answered and ends it as the tunnel does.
+@interface SPTestTunnelSheetOwner : NSObject
+@property (strong) IBOutlet NSWindow *sshQuestionDialog;
+@property (strong) IBOutlet NSTextField *sshQuestionText;
+@property (strong) IBOutlet NSButton *sshPasswordKeychainCheckbox;
+@property (strong) IBOutlet NSWindow *sshPasswordDialog;
+@property (strong) IBOutlet NSTextField *sshPasswordText;
+@property (strong) IBOutlet NSSecureTextField *sshPasswordField;
+@property (strong) NSArray *topLevelObjects;
+/// "password yes/no", "question yes/no" per answer
+@property (strong) NSMutableArray<NSString *> *answers;
+@end
+
+@implementation SPTestTunnelSheetOwner
+
+- (instancetype)init
+{
+	if ((self = [super init])) {
+		_answers = [NSMutableArray array];
+		NSArray *objects = nil;
+		if (![[NSBundle mainBundle] loadNibNamed:@"SSHQuestionDialog" owner:self topLevelObjects:&objects]) return nil;
+		_topLevelObjects = objects;
+	}
+	return self;
+}
+
+- (void)_answer:(NSString *)kind sender:(id)sender dialog:(NSWindow *)dialog
+{
+	[self.answers addObject:[NSString stringWithFormat:@"%@ %@", kind, [sender tag] == 1 ? @"yes" : @"no"]];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+	[NSApp endSheet:dialog];
+#pragma clang diagnostic pop
+	[dialog orderOut:nil];
+}
+
+- (IBAction)closeSSHQuestionSheet:(id)sender { [self _answer:@"question" sender:sender dialog:self.sshQuestionDialog]; }
+- (IBAction)closeSSHPasswordSheet:(id)sender { [self _answer:@"password" sender:sender dialog:self.sshPasswordDialog]; }
+
+/// Shows a dialog on window as SPSSHTunnel does.
+- (void)show:(NSWindow *)dialog on:(NSWindow *)window
+{
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+	[NSApp beginSheet:dialog modalForWindow:window modalDelegate:nil didEndSelector:NULL contextInfo:NULL];
+#pragma clang diagnostic pop
+}
+
+@end
+
 @implementation SPPostgresTransferControllerTests
 
 - (void)setUp
@@ -894,6 +945,64 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 	}];
 }
 
+/// The favorite's database isn't listed (it has none, or it is gone and the session fell back to postgres): nothing is
+/// chosen for the user, Transfer stays disabled (in either mode) until a database is picked.
+- (void)testUnlistedFavoriteDatabaseSelectsNothing
+{
+	[self onEachPort:^(NSNumber *port, PGPostgresConnection *target) {
+		SPPostgresTransferController *controller = [[SPPostgresTransferController alloc] initWithDocument:self.document];
+		self.controller = controller;
+		self.ended = NO;
+		SPPostgresFavorite *none = [self favoriteNamed:@"No database" database:@""];
+		SPPostgresFavorite *gone = [self favoriteNamed:@"Gone" database:@"sp_t7_gone"];
+		[self configure:controller favorites:@[none, gone]];
+		// The tests never touch postgres: the session's fallback lands on pgkit_io_dst instead (it only lists names)
+		void (^connect)(SPPostgresFavorite *, NSString *, NSString *, id, void (^)(PGPostgresConnection *, id, NSError *)) = controller.targetConnect;
+		// and sp_t7_gone fails as a missing database does
+		NSMutableArray *requests = self.targetRequests;
+		controller.targetConnect = ^(SPPostgresFavorite *favorite, NSString *database, NSString *password, id sessionToken, void (^completion)(PGPostgresConnection *, id, NSError *)) {
+			if ([database isEqualToString:@"sp_t7_gone"]) {
+				[requests addObject:[NSString stringWithFormat:@"%@|(none)|%@|session", favorite.name, database]];
+				dispatch_async(dispatch_get_main_queue(), ^{
+					completion(nil, nil, SPPostgresMakeError(SPPostgresErrorConnectionFailed, @"database \"sp_t7_gone\" does not exist", nil));
+				});
+				return;
+			}
+			connect(favorite, [database isEqualToString:@"postgres"] ? @"pgkit_io_dst" : database, password, sessionToken, completion);
+		};
+		[controller beginSheet];
+		[self waitForSession:controller];
+		XCTAssertEqualObjects(self.targetRequests, (@[@"No database|(none)|pgkit_io_dst|session"]), @"postgres, as pgkit_io_dst");
+
+		for (NSUInteger index = 0; index < 2; index++) {
+			if (index == 1) {
+				// sp_t7_gone doesn't exist: one retry on postgres
+				[self chooseFavorite:1 in:controller];
+				[self waitForSession:controller];
+				XCTAssertEqualObjects([self.targetRequests subarrayWithRange:NSMakeRange(1, self.targetRequests.count - 1)], (@[@"Gone|(none)|sp_t7_gone|session", @"Gone|(none)|pgkit_io_dst|session"]));
+			}
+			NSArray *titles = [self menuTitles:controller];
+			XCTAssertTrue([titles containsObject:@"pgkit_io_dst"], @"%@", titles);
+			XCTAssertEqualObjects(titles.lastObject, @"New Database…");
+			XCTAssertNil(controller.selectedDatabase, @"no database chosen for the user");
+			XCTAssertEqual(controller.databasePopup.indexOfSelectedItem, -1, @"no item selected");
+			XCTAssertFalse(controller.transferButton.isEnabled);
+			[NSApp sendAction:controller.overwriteModeRadio.action to:controller.overwriteModeRadio.target from:controller.overwriteModeRadio];
+			XCTAssertFalse(controller.transferButton.isEnabled, @"Overwrite mode too");
+			NSUInteger requests = self.targetRequests.count;
+			[controller transfer:nil];
+			XCTAssertNil(controller.progressSheet, @"nothing to transfer into");
+			XCTAssertEqual(self.targetRequests.count, requests);
+			[NSApp sendAction:controller.emptyModeRadio.action to:controller.emptyModeRadio.target from:controller.emptyModeRadio];
+
+			// Picked: it is the target
+			[self chooseDatabase:@"pgkit_io_dst" in:controller];
+			XCTAssertEqualObjects(controller.selectedDatabase, @"pgkit_io_dst");
+			XCTAssertTrue(controller.transferButton.isEnabled);
+		}
+	}];
+}
+
 /// Favorite A's connect answers after B was chosen: its connection is closed, the menu is B's.
 - (void)testSwitchingFavoriteIgnoresLateResult
 {
@@ -1086,7 +1195,9 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 		XCTAssertFalse(create.isEnabled);
 		NSString *e = @"é";
 		NSDictionary<NSString *, NSNumber *> *cases = @{
-			@"": @NO, @"a": @YES, @" ": @YES,
+			@"": @NO, @"a": @YES, @"a b": @YES,
+			// Whitespace around the name (or only whitespace): never trimmed silently, so not accepted
+			@" ": @NO, @"\t": @NO, @" a": @NO, @"a ": @NO, @"a\n": @NO, @"\u00A0a": @NO,
 			[@"" stringByPaddingToLength:63 withString:@"x" startingAtIndex:0]: @YES,
 			[@"" stringByPaddingToLength:64 withString:@"x" startingAtIndex:0]: @NO,
 			[[@"" stringByPaddingToLength:31 withString:e startingAtIndex:0] stringByAppendingString:@"x"]: @YES,
@@ -1133,6 +1244,32 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 		XCTAssertTrue([self spinUntil:^BOOL{ return self.ended; } timeout:5]);
 		XCTAssertFalse(session.isConnected, @"the session is closed");
 		XCTAssertNil(self.document.transferController);
+	}];
+}
+
+/// Cancel (e.g. the tab closing) while the session's SSH password or host-key sheet is up on the Transfer sheet: the
+/// sheet is answered as Cancel/No through its own action (the tunnel's worker waits for that answer), and every sheet
+/// ends.
+- (void)testCancelAnswersTheTunnelsSheet
+{
+	[self onEachPort:^(NSNumber *port, PGPostgresConnection *target) {
+		for (NSString *kind in @[@"password", @"question"]) {
+			self.heldConnects = [NSMutableArray array]; // still connecting, as while the tunnel asks
+			SPPostgresTransferController *controller = [self openSheet];
+			SPTestTunnelSheetOwner *tunnel = [[SPTestTunnelSheetOwner alloc] init];
+			XCTAssertNotNil(tunnel);
+			NSWindow *dialog = [kind isEqualToString:@"password"] ? tunnel.sshPasswordDialog : tunnel.sshQuestionDialog;
+			XCTAssertNotNil(dialog);
+			[tunnel show:dialog on:controller.sheet];
+			XCTAssertTrue([self spinUntil:^BOOL{ return controller.sheet.attachedSheet == dialog; } timeout:5]);
+
+			[controller cancel:nil];
+			XCTAssertEqualObjects(tunnel.answers, (@[[kind stringByAppendingString:@" no"]]), @"answered once, as Cancel/No");
+			XCTAssertTrue([self spinUntil:^BOOL{ return self.ended && controller.sheet.attachedSheet == nil && [self window].attachedSheet == nil; } timeout:5]);
+			XCTAssertFalse(dialog.isVisible);
+			self.controller = nil;
+			self.heldConnects = nil;
+		}
 	}];
 }
 

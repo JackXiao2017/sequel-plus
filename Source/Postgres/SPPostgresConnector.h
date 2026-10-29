@@ -43,6 +43,10 @@ __attribute__((visibility("default")))
  * the attempt is pending, the attempt is torn down and the completion is still called (once, on the
  * main thread, from a later run loop turn) with SPPostgresErrorCancelled. If -disconnect or -cancel
  * was called before this method, the completion is called with SPPostgresErrorCancelled.
+ *
+ * SPPostgresErrorPasswordRequired: the server asked for a password and none was given (detected in any server
+ * language), or the one sent was rejected (detected only from the server's English "password authentication failed"
+ * message; in another lc_messages language a wrong password is SPPostgresErrorConnectionFailed).
  */
 - (void)connectWithCompletion:(void (^)(PGPostgresConnection *connection, NSError *error))completion;
 
