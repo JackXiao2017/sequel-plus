@@ -1,5 +1,6 @@
 #import "SPPostgresTestServers.h"
 #import <XCTest/XCTest.h>
+#import <Cocoa/Cocoa.h>
 #import <PostgresKit/PostgresKit.h>
 #import "../Source/Postgres/SPPostgresTaskRunner.h"
 
@@ -365,6 +366,27 @@ static NSString * const SPUserSchemas = @"nspname NOT LIKE 'pg\\_%' AND nspname 
 		[[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
 	}
 	return !runner.isBusy;
+}
+
++ (void)queueSleep:(NSTimeInterval)seconds onRunner:(SPPostgresTaskRunner *)runner
+{
+	NSString *sql = [NSString stringWithFormat:@"SELECT pg_sleep(%g)", seconds];
+	[runner runTaskWithDescription:@"Sleeping..." cancelTitle:@"Cancel" work:^id(PGPostgresConnection *connection, NSError **error) {
+		return [connection execute:sql];
+	} completion:nil];
+}
+
++ (NSArray<NSArray *> *)rowsOfTableView:(NSTableView *)tableView
+{
+	NSMutableArray *rows = [NSMutableArray array];
+	for (NSInteger row = 0; row < [tableView numberOfRows]; row++) {
+		NSMutableArray *values = [NSMutableArray array];
+		for (NSTableColumn *column in [tableView tableColumns]) {
+			[values addObject:[[tableView dataSource] tableView:tableView objectValueForTableColumn:column row:row] ?: [NSNull null]];
+		}
+		[rows addObject:values];
+	}
+	return rows;
 }
 
 @end

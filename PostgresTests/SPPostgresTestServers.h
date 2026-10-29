@@ -2,6 +2,7 @@
 
 @class PGPostgresConnection;
 @class SPPostgresTaskRunner;
+@class NSTableView;
 @protocol PGPostgresConnectionDelegate;
 
 /// Helpers for the Docker test servers started by Scripts/pg-test-servers.sh
@@ -69,5 +70,11 @@
 /// Spins the main run loop until runner is no longer busy (its last queued completion has returned). YES if it went
 /// idle within timeout seconds.
 + (BOOL)waitForRunner:(SPPostgresTaskRunner *)runner timeout:(NSTimeInterval)timeout;
+
+/// Queues `SELECT pg_sleep(seconds)` on runner ("Sleeping...", cancellable), ahead of whatever is asked next.
++ (void)queueSleep:(NSTimeInterval)seconds onRunner:(SPPostgresTaskRunner *)runner;
+
+/// Every cell of tableView as its data source gives it, row by row (NSNull for nil).
++ (NSArray<NSArray *> *)rowsOfTableView:(NSTableView *)tableView;
 
 @end

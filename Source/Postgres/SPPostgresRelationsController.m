@@ -1,7 +1,7 @@
 #import "SPPostgresRelationsController.h"
 #import "SPPostgresTableStructure.h"
 #import "SPPostgresConstraintSheet.h"
-#import "SPPostgresTaskRunner.h"
+#import "SPPostgresPaneLoader.h"
 #import "SPTableView.h"
 #import "SPButtonBar.h"
 #import "SPConstants.h"
@@ -26,10 +26,7 @@ static const CGFloat SPPostgresRelationsButtonWidth = 32;
 	NSArray *foreignKeys;   // SPPostgresConstraint (FOREIGN KEY)
 	BOOL loaded;
 
-	SPPostgresTaskRunner *taskRunner;
-	NSUInteger loadGeneration; // taken by each load (and by -invalidate): only the latest one's completion is applied
-	BOOL switchPending;        // -showTable:inSchema: asked for a table not loaded yet (a cancel leaves the view stale)
-	BOOL stale;
+	SPPostgresPaneLoader *loader; // the runner, the load generation, staleness, and refusing changes while busy
 
 	NSView *view;
 	NSView *section;        // the grid and its bar (hidden under an empty state)
@@ -54,8 +51,6 @@ static const CGFloat SPPostgresRelationsButtonWidth = 32;
 @synthesize confirmationPresenter;
 @synthesize constraintSheetPresenter;
 @synthesize relationsDidChange;
-@synthesize taskRunner;
-@synthesize stale;
 
 #pragma mark - Setup
 
@@ -63,7 +58,7 @@ static const CGFloat SPPostgresRelationsButtonWidth = 32;
 {
 	if ((self = [super init])) {
 		connection = [theConnection retain];
-		taskRunner = [[SPPostgresTaskRunner inlineRunnerWithConnection:theConnection] retain];
+		loader = [[SPPostgresPaneLoader alloc] initWithConnection:theConnection];
 		columnNames = [@[] retain];
 		foreignKeys = [@[] retain];
 		noticeText = [@"" copy];
@@ -79,7 +74,7 @@ static const CGFloat SPPostgresRelationsButtonWidth = 32;
 	[self invalidate];
 
 	[connection release];
-	[taskRunner release];
+	[loader release];
 	[structure release];
 	[columnNames release];
 	[foreignKeys release];
@@ -105,7 +100,7 @@ static const CGFloat SPPostgresRelationsButtonWidth = 32;
 {
 	if (invalidated) return;
 	invalidated = YES;
-	loadGeneration++;
+	[loader invalidate];
 
 	[relationsView setDataSource:nil];
 	[relationsView setDelegate:nil];
@@ -321,11 +316,24 @@ static NSDictionary *SPPostgresRelationsRead(SPPostgresTableStructure *structure
 	return @{@"columns" : theColumns, @"constraints" : theConstraints};
 }
 
-// A load (a switch, -reload, Refresh) takes a new load generation; on the runner's thread the work uses only the
-// structure object (made on the main thread, where nothing uses it while the runner is busy: + and − are refused then).
-// Back on the main thread the completion is dropped if the controller was invalidated or a newer load was asked for; a
-// cancelled load shows no alert (a cancelled switch leaves the view stale); a failed one shows the error. A change
-// reads the keys again at once, on the main thread, as part of the change (-_load).
+// A load (a switch, -reload, Refresh) goes through the pane loader (SPPostgresPaneLoader); on the runner's thread the
+// work uses only the structure object (made on the main thread, where nothing uses it while the runner is busy: + and
+// − are refused then). A change reads the keys again at once, on the main thread, as part of the change (-_load).
+
+- (SPPostgresTaskRunner *)taskRunner
+{
+	return [loader taskRunner];
+}
+
+- (void)setTaskRunner:(SPPostgresTaskRunner *)runner
+{
+	[loader setTaskRunner:runner];
+}
+
+- (BOOL)isStale
+{
+	return [loader isStale];
+}
 
 - (void)showTable:(NSString *)theTable inSchema:(NSString *)theSchema
 {
@@ -341,15 +349,14 @@ static NSDictionary *SPPostgresRelationsRead(SPPostgresTableStructure *structure
 	[relationsView deselectAll:nil];
 
 	// The previous table's keys go at once
-	[self _showRelations:nil error:nil];
-	switchPending = (structure != nil);
-	[self _loadInBackground];
+	[self _clearRelations];
+	[self _loadSwitching:YES];
 }
 
 - (void)reload
 {
 	if (invalidated) return;
-	[self _loadInBackground];
+	[self _loadSwitching:NO];
 }
 
 - (IBAction)refresh:(id)sender
@@ -358,27 +365,17 @@ static NSDictionary *SPPostgresRelationsRead(SPPostgresTableStructure *structure
 }
 
 /// Reads the keys through the runner and shows them (see -_showRelations:error:).
-- (void)_loadInBackground
+- (void)_loadSwitching:(BOOL)switching
 {
-	NSUInteger generation = ++loadGeneration;
-	stale = NO;
 	if (!structure) {
-		switchPending = NO;
-		[self _showRelations:nil error:nil];
+		[loader loadNothing];
+		[self _clearRelations];
 		return;
 	}
-
 	SPPostgresTableStructure *target = structure;
-	[taskRunner runTaskWithDescription:NSLocalizedString(@"Reloading...", @"Reloading table task string") cancelTitle:NSLocalizedString(@"Cancel", @"cancel button") work:^id(PGPostgresConnection *theConnection, NSError **error) {
+	[loader loadSwitching:switching work:^id(PGPostgresConnection *theConnection, NSError **error) {
 		return SPPostgresRelationsRead(target, error);
-	} completion:^(id result, NSError *error, BOOL cancelled) {
-		if (invalidated || generation != loadGeneration) return;
-		if (cancelled) {
-			if (switchPending) stale = YES;
-			[self _updateButtons];
-			return;
-		}
-		switchPending = NO;
+	} apply:^(id result, NSError *error) {
 		[self _showRelations:result error:error];
 	}];
 }
@@ -386,19 +383,29 @@ static NSDictionary *SPPostgresRelationsRead(SPPostgresTableStructure *structure
 /// Reads the keys on the main thread and shows them: part of a change, which runs only while the runner is idle.
 - (void)_load
 {
+	if (!structure) {
+		[self _clearRelations];
+		return;
+	}
 	NSError *error = nil;
-	NSDictionary *result = structure ? SPPostgresRelationsRead(structure, &error) : nil;
+	NSDictionary *result = SPPostgresRelationsRead(structure, &error);
 	[self _showRelations:result error:error];
 }
 
-/// Shows what was read (SPPostgresRelationsRead). nil with an error: the grid empties and the error is shown; nil
-/// without one empties the grid.
+/// An empty grid, no notice (no table, or before a switch's table has loaded).
+- (void)_clearRelations
+{
+	[self _showRelations:@{} error:nil];
+}
+
+/// Shows what was read (SPPostgresRelationsRead; an empty dictionary: nothing). nil means it couldn't be read: the
+/// grid empties and the error is shown.
 - (void)_showRelations:(NSDictionary *)result error:(NSError *)error
 {
 	NSArray *newColumns = [result objectForKey:@"columns"];
 	NSArray *constraints = [result objectForKey:@"constraints"];
-	BOOL failed = structure && !result && error;
-	loaded = (result != nil);
+	BOOL failed = (result == nil);
+	loaded = (constraints != nil);
 
 	// The selection is kept by constraint name, not row: a key added or dropped elsewhere shifts the rows
 	NSInteger selectedRow = [relationsView selectedRow];
@@ -418,7 +425,7 @@ static NSDictionary *SPPostgresRelationsRead(SPPostgresTableStructure *structure
 		NSString *detail = [[[[error localizedDescription] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] componentsSeparatedByString:@"\n"] firstObject];
 		notice = [NSString stringWithFormat:NSLocalizedString(@"Could not load the relations: %@", @"Postgres relations: load failed notice"), [detail length] ? detail : NSLocalizedString(@"An unknown error occurred.", @"Postgres structure: unknown error")];
 	}
-	else if (structure && loaded) {
+	else if (loaded) {
 		notice = [NSString stringWithFormat:NSLocalizedString(@"Relations for table: %@", @"Relations tab subtitle showing table name"), table];
 	}
 	[self setNoticeText:notice];
@@ -444,13 +451,10 @@ static NSDictionary *SPPostgresRelationsRead(SPPostgresTableStructure *structure
 }
 
 /// A change succeeded: the grid shows the server's keys, and the tab hears of it.
-/// + and − run on the main thread, so never while a load is using the connection: refused (NSBeep) while the runner
-/// is busy.
+/// + and − run on the main thread, so never while a load is using the connection (see SPPostgresPaneLoader).
 - (BOOL)_refuseChangeWhileBusy
 {
-	if (![taskRunner isBusy]) return NO;
-	NSBeep();
-	return YES;
+	return [loader refuseChangeWhileBusy];
 }
 
 - (void)_didChange

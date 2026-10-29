@@ -880,32 +880,6 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	return structure;
 }
 
-- (void)waitFor:(SPPostgresTaskRunner *)runner
-{
-	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
-}
-
-/// Queues a one-second statement on runner, ahead of whatever is asked next.
-- (void)queueSleepOn:(SPPostgresTaskRunner *)runner
-{
-	[runner runTaskWithDescription:@"Sleeping..." cancelTitle:@"Cancel" work:^id(PGPostgresConnection *connection, NSError **error) {
-		return [connection execute:@"SELECT pg_sleep(1)"];
-	} completion:nil];
-	XCTAssertTrue(runner.isBusy);
-}
-
-/// Every cell of grid, row by row.
-- (NSArray *)rowsOf:(NSTableView *)grid
-{
-	NSMutableArray *rows = [NSMutableArray array];
-	for (NSInteger row = 0; row < [grid numberOfRows]; row++) {
-		NSMutableArray *values = [NSMutableArray array];
-		for (NSTableColumn *column in [grid tableColumns]) [values addObject:[[grid dataSource] tableView:grid objectValueForTableColumn:column row:row] ?: [NSNull null]];
-		[rows addObject:values];
-	}
-	return rows;
-}
-
 - (void)testShowTableLoadsInBackground
 {
 	SPPostgresStructureController *structure = [self structureOnTabRunner];
@@ -913,7 +887,7 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	XCTAssertTrue(structure.taskRunner.isBusy, @"showTable: returns while the structure loads");
 	XCTAssertEqualObjects(structure.taskRunner.currentDescription, @"Reloading...");
 	XCTAssertEqualObjects(structure.taskRunner.currentCancelTitle, @"Cancel");
-	[self waitFor:structure.taskRunner];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:structure.taskRunner timeout:30]);
 
 	// What the inline (synchronous) path shows for the same table
 	SPPostgresStructureController *reference = [[SPPostgresStructureController alloc] initWithConnection:self.other];
@@ -922,9 +896,9 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	XCTAssertFalse(reference.taskRunner.isBusy);
 
 	XCTAssertEqual([structure.columnsView numberOfRows], 8);
-	XCTAssertEqualObjects([self rowsOf:structure.columnsView], [self rowsOf:reference.columnsView]);
-	XCTAssertEqualObjects([self rowsOf:structure.indexesView], [self rowsOf:reference.indexesView]);
-	XCTAssertEqualObjects([self rowsOf:structure.constraintsView], [self rowsOf:reference.constraintsView]);
+	XCTAssertEqualObjects([SPPostgresTestServers rowsOfTableView:structure.columnsView], [SPPostgresTestServers rowsOfTableView:reference.columnsView]);
+	XCTAssertEqualObjects([SPPostgresTestServers rowsOfTableView:structure.indexesView], [SPPostgresTestServers rowsOfTableView:reference.indexesView]);
+	XCTAssertEqualObjects([SPPostgresTestServers rowsOfTableView:structure.constraintsView], [SPPostgresTestServers rowsOfTableView:reference.constraintsView]);
 	XCTAssertTrue([structure.indexesView numberOfRows] > 0);
 	XCTAssertEqual(structure.editable, reference.editable);
 	XCTAssertTrue(structure.editable);
@@ -941,14 +915,15 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	SPPostgresStructureController *structure = [self structureOnTabRunner];
 	SPPostgresTaskRunner *runner = structure.taskRunner;
 	[structure showTable:@"child" inSchema:@"structure_test"];
-	[self waitFor:runner];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
 	XCTAssertEqual([structure.columnsView numberOfRows], 2);
 
-	[self queueSleepOn:runner];
+	[SPPostgresTestServers queueSleep:1 onRunner:runner];
+	XCTAssertTrue(runner.isBusy);
 	[structure showTable:@"t" inSchema:@"structure_test"];
 	XCTAssertTrue(runner.isBusy);
 	[runner cancelAll];
-	[self waitFor:runner];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
 
 	XCTAssertEqualObjects(structure.table, @"t");
 	XCTAssertEqual([structure.columnsView numberOfRows], 0);
@@ -961,7 +936,7 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	XCTAssertFalse([[structure valueForKey:@"addColumnButton"] isEnabled]);
 
 	[structure refresh:nil];
-	[self waitFor:runner];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
 	XCTAssertEqual([structure.columnsView numberOfRows], 8);
 	XCTAssertFalse(structure.stale);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
@@ -973,20 +948,57 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	SPPostgresStructureController *structure = [self structureOnTabRunner];
 	SPPostgresTaskRunner *runner = structure.taskRunner;
 	[structure showTable:@"t" inSchema:@"structure_test"];
-	[self waitFor:runner];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
 	NSInteger row = [self rowNamed:@"code" in:structure.columnsView];
 
-	[self queueSleepOn:runner];
+	[SPPostgresTestServers queueSleep:1 onRunner:runner];
+	XCTAssertTrue(runner.isBusy);
 	XCTAssertFalse([self canEdit:structure.columnsView row:row column:@"comment"], @"no edit starts while busy");
 	[self setValue:@"while busy" in:structure.columnsView row:row column:@"comment"];
 	[structure addColumn:nil];
 	XCTAssertFalse(structure.hasDraftColumn);
 	XCTAssertTrue(runner.isBusy);
-	[self waitFor:runner];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
 
 	XCTAssertEqualObjects([self serverValue:@"SELECT col_description('structure_test.t'::regclass, 2)"], @"the code");
 	XCTAssertEqualObjects([self valueIn:structure.columnsView row:row column:@"comment"], @"the code");
 	XCTAssertTrue([self canEdit:structure.columnsView row:row column:@"comment"], @"editable again once idle");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+}
+
+/// A cell being edited while a load runs doesn't end: its text stays and nothing is committed (Refresh, -reload and
+/// -commitPendingEdits refuse); once idle it commits. (A background runner on the tab's connection that the tab's
+/// task display doesn't watch: the display ends any edit when the tab's own runner turns busy, see Stage 8 Task 2.)
+- (void)testCellEditKeptWhileBusy
+{
+	[self showStructureOf:@"t"];
+	SPPostgresStructureController *structure = self.structure;
+	SPPostgresTaskRunner *runner = [[SPPostgresTaskRunner alloc] initWithConnection:[structure valueForKey:@"connection"]];
+	structure.taskRunner = runner;
+	[self addTeardownBlock:^{
+		[runner invalidateWithCompletion:nil];
+	}];
+	NSTableView *columns = structure.columnsView;
+	NSInteger row = [self rowNamed:@"code" in:columns];
+	XCTAssertTrue([[columns window] makeFirstResponder:columns]);
+	[columns editColumn:[columns columnWithIdentifier:@"comment"] row:row withEvent:nil select:YES];
+	XCTAssertNotNil([columns currentEditor]);
+	[[columns currentEditor] setString:@"typed while busy"];
+
+	[SPPostgresTestServers queueSleep:1 onRunner:runner];
+	XCTAssertTrue(runner.isBusy);
+	XCTAssertFalse([structure commitPendingEdits], @"the commit is refused while busy");
+	[structure refresh:nil];
+	[structure reload];
+	XCTAssertNotNil([columns currentEditor], @"the edit goes on");
+	XCTAssertEqualObjects([[columns currentEditor] string], @"typed while busy");
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	XCTAssertEqualObjects([self serverValue:@"SELECT col_description('structure_test.t'::regclass, 2)"], @"the code");
+
+	// Once idle it commits
+	XCTAssertTrue([structure commitPendingEdits]);
+	XCTAssertNil([columns currentEditor]);
+	XCTAssertEqualObjects([self serverValue:@"SELECT col_description('structure_test.t'::regclass, 2)"], @"typed while busy");
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 }
 

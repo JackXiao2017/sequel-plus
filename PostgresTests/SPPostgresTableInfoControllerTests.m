@@ -469,11 +469,6 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	return info;
 }
 
-- (void)waitFor:(SPPostgresTaskRunner *)runner
-{
-	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
-}
-
 - (NSArray *)shownValuesOf:(SPPostgresTableInfoController *)info
 {
 	return @[[info.typeField stringValue], [info.ownerField stringValue], [info.rowsField stringValue], [info.tableSizeField stringValue],
@@ -488,7 +483,7 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	XCTAssertTrue(info.taskRunner.isBusy, @"showTable: returns while the information loads");
 	XCTAssertEqualObjects(info.taskRunner.currentDescription, @"Reloading...");
 	XCTAssertEqualObjects(info.taskRunner.currentCancelTitle, @"Cancel");
-	[self waitFor:info.taskRunner];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:info.taskRunner timeout:30]);
 
 	SPPostgresTableInfoController *reference = [[SPPostgresTableInfoController alloc] initWithConnection:self.other];
 	XCTAssertTrue(reference.taskRunner.isInline);
@@ -509,16 +504,14 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	SPPostgresTableInfoController *info = [self infoOnTabRunner];
 	SPPostgresTaskRunner *runner = info.taskRunner;
 	[info showTable:@"t" inSchema:@"structure_test"];
-	[self waitFor:runner];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
 	XCTAssertEqualObjects([info.typeField stringValue], @"table");
 
-	[runner runTaskWithDescription:@"Sleeping..." cancelTitle:@"Cancel" work:^id(PGPostgresConnection *connection, NSError **error) {
-		return [connection execute:@"SELECT pg_sleep(1)"];
-	} completion:nil];
+	[SPPostgresTestServers queueSleep:1 onRunner:runner];
 	[info showTable:@"child" inSchema:@"structure_test"];
 	XCTAssertTrue(runner.isBusy);
 	[runner cancelAll];
-	[self waitFor:runner];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
 
 	XCTAssertEqualObjects(info.table, @"child");
 	XCTAssertEqualObjects([self shownValuesOf:info], (@[@"", @"", @"", @"", @"", @"", @"", @"", @"", @NO]));
@@ -526,7 +519,7 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	XCTAssertTrue(info.stale, @"the next show (or a reload) loads it");
 
 	[info reload];
-	[self waitFor:runner];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
 	XCTAssertEqualObjects([info.typeField stringValue], @"table");
 	XCTAssertTrue([[info.createSyntaxView string] containsString:@"child"], @"%@", [info.createSyntaxView string]);
 	XCTAssertFalse(info.stale);
@@ -542,12 +535,10 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	[self typeComment:@"while busy"];
 	XCTAssertTrue(info.hasPendingComment);
 
-	[runner runTaskWithDescription:@"Sleeping..." cancelTitle:@"Cancel" work:^id(PGPostgresConnection *connection, NSError **error) {
-		return [connection execute:@"SELECT pg_sleep(1)"];
-	} completion:nil];
+	[SPPostgresTestServers queueSleep:1 onRunner:runner];
 	XCTAssertFalse([info commitPendingEdits]);
 	XCTAssertTrue(info.hasPendingComment);
-	[self waitFor:runner];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
 
 	XCTAssertEqualObjects([self serverValue:@"SELECT obj_description('structure_test.t'::regclass, 'pg_class')"], @"the t table");
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
