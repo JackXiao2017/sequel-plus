@@ -12,6 +12,7 @@
 #import "SPPostgresUsersController.h"
 #import "SPPostgresExportController.h"
 #import "SPPostgresImportController.h"
+#import "SPPostgresTransferController.h"
 #import "SPPostgresBackgroundJob.h"
 #import "SPPostgresSequences.h"
 #import "SPPostgresTableStructure.h"
@@ -224,6 +225,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	SPPostgresUsersController *usersController;
 	SPPostgresExportController *exportController;
 	SPPostgresImportController *importController;
+	SPPostgresTransferController *transferController;
 
 	BOOL tornDown;
 }
@@ -247,6 +249,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 @synthesize usersController;
 @synthesize exportController;
 @synthesize importController;
+@synthesize transferController;
 @synthesize currentDatabase;
 @synthesize isProcessing;
 @synthesize parentWindowController;
@@ -333,6 +336,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[usersController release];
 	[exportController release];
 	[importController release];
+	[transferController release];
 
 	[super dealloc];
 }
@@ -1450,6 +1454,9 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	// The Import panel or sheets end; an import running is cancelled (rolled back)
 	[importController cancel];
 
+	// The Transfer sheet ends; a transfer running is cancelled (the target's transaction rolls back)
+	[transferController cancel:nil];
+
 	// A Duplicate Table sheet still up (its completion sees tornDown)
 	if (duplicateSheet) [[duplicateSheet sheetParent] endSheet:duplicateSheet returnCode:NSModalResponseCancel];
 
@@ -2424,6 +2431,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	if (action == @selector(showUserManager:)) return [self _canShowUsers];
 	if (action == @selector(export:)) return [self _canRunSheetJob];
 	if (action == @selector(import:)) return [self _canRunSheetJob];
+	if (action == @selector(showTransfer:)) return [self _canRunSheetJob];
 
 	// View > Back/Forward In History (tags 0 and 1), as MySQL's
 	if (action == @selector(backForwardInHistory:)) {
@@ -2462,18 +2470,29 @@ NSString * const SPPostgresPaneExtension = @"extension";
 {
 	return @[SPMainToolbarDatabaseSelection, SPMainToolbarHistoryNavigation, SPMainToolbarShowConsole, SPMainToolbarTableStructure,
 			 SPMainToolbarTableContent, SPMainToolbarTableRelations, SPMainToolbarTableTriggers, SPMainToolbarTableInfo, SPMainToolbarCustomQuery,
-			 SPMainToolbarUserManager];
+			 SPMainToolbarUserManager, SPMainToolbarTransfer];
 }
 
 - (NSToolbarItem *)toolbar:(NSToolbar *)theToolbar itemForItemIdentifier:(NSString *)identifier willBeInsertedIntoToolbar:(BOOL)flag
 {
+	// Transfer works on Postgres tabs: a plain item (MySQL's is an always-disabled SPDisabledToolbarItem), with the
+	// same label and image
+	if ([identifier isEqualToString:SPMainToolbarTransfer]) {
+		NSToolbarItem *transfer = [[[NSToolbarItem alloc] initWithItemIdentifier:identifier] autorelease];
+		SPConfigureTransferToolbarItem(transfer);
+		[transfer setImage:SPCompactToolbarImage([transfer image])];
+		[transfer setTarget:self];
+		[transfer setAction:@selector(showTransfer:)];
+		return transfer;
+	}
+
 	// The items MySQL tabs show (SPMainToolbar.m): same images, labels, sizes and item kinds
 	NSToolbarItem *item = SPCreateMainToolbarItem(identifier);
 	if (!item) return nil;
 
 	// The items of features Postgres tabs don't have yet keep an action (as MySQL's do, which is what
-	// sizes them), validated off; Transfer has none, as on MySQL tabs
-	SEL action = [identifier isEqualToString:SPMainToolbarTransfer] ? NULL : @selector(unavailableInThisVersion:);
+	// sizes them), validated off
+	SEL action = @selector(unavailableInThisVersion:);
 
 	if ([identifier isEqualToString:SPMainToolbarDatabaseSelection]) {
 		[item setView:databasePopup];
@@ -2549,6 +2568,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}
 
 	if ([identifier isEqualToString:SPMainToolbarUserManager]) return [self _canShowUsers];
+	if ([identifier isEqualToString:SPMainToolbarTransfer]) return [self _canRunSheetJob];
 
 	// The pane items: see -_canShowPane:
 	NSString *pane = [self _paneForToolbarIdentifier:identifier];
@@ -2620,11 +2640,11 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	return [self _canRunSheetJob];
 }
 
-/// The sheet of a job (Users, Export, Import) can open: connected, not processing (a database switch), no sheet
+/// The sheet of a job (Users, Export, Import, Transfer) can open: connected, not processing (a database switch), no sheet
 /// attached, and no other job's sheet pending.
 - (BOOL)_canRunSheetJob
 {
-	return !tornDown && !isProcessing && !confirmingSwitch && !usersController && !exportController && !importController && [connection isConnected] && parentWindow && ![parentWindow attachedSheet];
+	return !tornDown && !isProcessing && !confirmingSwitch && !usersController && !exportController && !importController && !transferController && [connection isConnected] && parentWindow && ![parentWindow attachedSheet];
 }
 
 /**
@@ -2736,6 +2756,23 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[controller setDidEnd:^{
 		if (exportController == controller) {
 			exportController = nil;
+			[controller autorelease];
+		}
+	}];
+	[controller beginSheet];
+}
+
+#pragma mark - Transfer
+
+- (IBAction)showTransfer:(id)sender
+{
+	if (![self _canRunSheetJob] || ![currentDatabase length]) return;
+
+	SPPostgresTransferController *controller = [[SPPostgresTransferController alloc] initWithDocument:self];
+	transferController = controller; // released when it ends
+	[controller setDidEnd:^{
+		if (transferController == controller) {
+			transferController = nil;
 			[controller autorelease];
 		}
 	}];

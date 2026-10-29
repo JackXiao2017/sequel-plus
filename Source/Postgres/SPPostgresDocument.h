@@ -18,6 +18,7 @@
 @class SPWindowController;
 @class SPPostgresExportController;
 @class SPPostgresImportController;
+@class SPPostgresTransferController;
 
 /**
  * Hands out a connection of its own to database: calls completion exactly once, on the main thread (synchronously or
@@ -167,6 +168,15 @@ __attribute__((visibility("default")))
 
 /// The Import controller while its panel or sheets are shown or its import runs, else nil.
 @property (readonly) SPPostgresImportController *importController;
+
+/**
+ * The Transfer toolbar item: the Transfer sheet (SPPostgresTransferController), copying this database (or some of its
+ * tables) into a database of any Postgres favorite. Enabled while connected, not processing and no sheet is attached.
+ */
+- (IBAction)showTransfer:(id)sender;
+
+/// The Transfer sheet's controller while it is shown or its transfer runs, else nil.
+@property (readonly) SPPostgresTransferController *transferController;
 
 /**
  * An import changed the database (called by SPPostgresImportController after a successful or partly successful

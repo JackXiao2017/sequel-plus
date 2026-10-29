@@ -44,6 +44,8 @@ static NSString *SPTransferJSON(NSArray *array)
 @synthesize dependenciesCreated;
 @synthesize foreignTablesSkipped;
 @synthesize skippedSettings;
+@synthesize readingTableIndex;
+@synthesize readingTableCount;
 
 - (instancetype)initWithSource:(PGPostgresConnection *)theSource target:(PGPostgresConnection *)theTarget
 {
@@ -333,6 +335,8 @@ static void SPTransferRollBack(PGPostgresConnection *connection)
 - (BOOL)run:(NSError **)error
 {
 	tablesCopied = 0;
+	readingTableIndex = 0;
+	readingTableCount = 0;
 	[replacedObjects release];
 	replacedObjects = nil;
 	[dependenciesCreated release];
@@ -453,6 +457,8 @@ static void SPTransferRollBack(PGPostgresConnection *connection)
 	__block NSUInteger tableCount = 0;
 	[writer setProgress:^BOOL(NSUInteger tableIndex, NSUInteger count, NSString *table) {
 		tableCount = count;
+		readingTableIndex = tableIndex;
+		readingTableCount = count;
 		return [self _report:SPPostgresTransferReading fraction:count ? (double)(tableIndex - 1) / (double)count : 0 detail:table];
 	}];
 	NSError *writeError = nil;
