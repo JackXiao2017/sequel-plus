@@ -942,4 +942,96 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	XCTAssertEqual(self.alerts.count, 0u);
 }
 
+#pragma mark - Committing a cell
+
+/// Starts editing row's cell in the grid with text typed in (not yet committed).
+- (void)typeInCellAtRow:(NSInteger)row column:(NSString *)name text:(NSString *)text
+{
+	NSTableView *grid = [self grid];
+	[[grid window] makeFirstResponder:grid];
+	[grid editColumn:[[grid tableColumns] indexOfObject:[self columnNamed:name]] row:row withEvent:nil select:YES];
+	XCTAssertNotNil([grid currentEditor], @"the cell is being edited");
+	[[grid currentEditor] setString:text];
+}
+
+/// What Tab does in the grid (AppKit's own Tab handling needs a key window, which tests don't have): the edit ending
+/// commits the cell (the data source is told while the editor is still up), then the next cell's edit starts.
+- (void)tabFromCellAtRow:(NSInteger)row column:(NSString *)name to:(NSString *)nextName
+{
+	NSTableView *grid = [self grid];
+	XCTAssertNotNil([grid currentEditor]);
+	id value = [[[grid currentEditor] string] copy];
+	[(id<NSTableViewDataSource>)[grid dataSource] tableView:grid setObjectValue:value forTableColumn:[self columnNamed:name] row:row];
+	[grid editColumn:[[grid tableColumns] indexOfObject:[self columnNamed:nextName]] row:row withEvent:nil select:YES];
+}
+
+/// Tab commits the cell and goes on editing the next one: the reload (inline, inside the commit) doesn't end it.
+- (void)testTabToNextCellKeepsEditingAfterReload
+{
+	[self selectTable:@"items"];
+	NSTableView *grid = [self grid];
+	[self typeInCellAtRow:4 column:@"price" text:@"2.50"];
+
+	[self tabFromCellAtRow:4 column:@"price" to:@"flags"];
+	[self spinFor:0.3];
+
+	XCTAssertEqualObjects([self serverValue:@"SELECT price::text FROM content_test.items WHERE id = 5"], @"2.500000");
+	XCTAssertNotNil([grid currentEditor], @"the next cell is still being edited");
+	XCTAssertEqual([grid editedRow], 4);
+	XCTAssertEqual([grid editedColumn], (NSInteger)[[grid tableColumns] indexOfObject:[self columnNamed:@"flags"]]);
+	XCTAssertEqualObjects([self valueAtRow:4 column:@"price"], @"2.500000", @"reloaded: Postgres's own format");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
+}
+
+/// The same with the tab's background runner: the reload waits until the next cell's edit has ended.
+- (void)testTabToNextCellKeepsEditingWithBackgroundRunner
+{
+	[self useTabRunner];
+	[self selectTable:@"items"];
+	NSTableView *grid = [self grid];
+	[self typeInCellAtRow:4 column:@"price" text:@"2.50"];
+
+	[self tabFromCellAtRow:4 column:@"price" to:@"flags"];
+	[self spinFor:0.3];
+
+	XCTAssertEqualObjects([self serverValue:@"SELECT price::text FROM content_test.items WHERE id = 5"], @"2.500000");
+	XCTAssertNotNil([grid currentEditor], @"the next cell is still being edited");
+	XCTAssertEqual([grid editedColumn], (NSInteger)[[grid tableColumns] indexOfObject:[self columnNamed:@"flags"]]);
+	XCTAssertFalse(self.content.taskRunner.isBusy, @"no load while the next cell is edited");
+	XCTAssertEqualObjects([self valueAtRow:4 column:@"price"], @"2.50", @"shown as sent until the reload");
+
+	// Ending that edit runs the pending reload
+	XCTAssertTrue([[grid window] makeFirstResponder:nil]);
+	XCTAssertNil([grid currentEditor]);
+	[self spinFor:0.1];
+	[self waitForContent];
+	XCTAssertEqualObjects([self valueAtRow:4 column:@"price"], @"2.500000");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
+}
+
+/// Add commits the cell being edited and reloads before adding: the cell shows Postgres's format, and after a
+/// row-changed error the rows are reloaded as the alert says.
+- (void)testAddRowReloadsCommittedCellFirst
+{
+	[self selectTable:@"items"];
+	SPPostgresContentController *content = self.content;
+	[self typeInCellAtRow:4 column:@"price" text:@"3.5"];
+	[content addRow:nil];
+
+	XCTAssertEqualObjects([self serverValue:@"SELECT price::text FROM content_test.items WHERE id = 5"], @"3.500000");
+	XCTAssertEqualObjects([self valueAtRow:4 column:@"price"], @"3.500000");
+	XCTAssertEqual([[self grid] numberOfRows], 31);
+	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.items"], @31);
+
+	// The row was deleted meanwhile: the alert says the rows were reloaded, and they were
+	[[[self grid] window] makeFirstResponder:nil];
+	XCTAssertNotNil([self.other execute:@"DELETE FROM content_test.items WHERE id = 6"]);
+	[self typeInCellAtRow:5 column:@"name" text:@"too late"];
+	[content addRow:nil];
+	XCTAssertEqual(self.alerts.count, 1u);
+	XCTAssertEqualObjects([self.alerts[0] messageText], @"This row was changed or deleted by someone else.");
+	XCTAssertFalse([[self idsInGrid] containsObject:@"6"]);
+	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.items"], @31);
+}
+
 @end

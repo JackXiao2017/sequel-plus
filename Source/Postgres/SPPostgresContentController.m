@@ -62,6 +62,8 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	NSUInteger loadGeneration;      // taken by each load (and by -invalidate): only the latest one's completion is applied
 	BOOL endingEdit;                // inside -_endEditing (a commit then leaves the reload to its caller)
 	BOOL reloadOwed;                // a commit inside -_endEditing wants the rows reloaded
+	BOOL committingInGrid;          // reloading from inside the grid's own commit (which must not be ended again)
+	BOOL reloadPending;             // a grid commit's reload waits for the grid's editing to end (background runner)
 
 	SPPostgresFilter *filter;       // nil: no filter
 	NSString *sortColumn;           // nil: primary-key order
@@ -524,7 +526,8 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 			description:(NSString *)description
 {
 	if (!tableData || ![columns count]) return;
-	[self _endEditing];
+	if (!committingInGrid) [self _endEditing];
+	reloadPending = NO; // this load shows the rows as they are now
 	NSUInteger generation = ++loadGeneration;
 
 	// Everything the work needs, so it never reads this controller (the filter is never changed once made)
@@ -829,8 +832,11 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	if (invalidated || !tableData || !editable || !loaded) return;
 	if ([self _refuseWriteWhileBusy]) return;
 
-	// A cell being edited is saved first (shown as typed until the next load)
-	[self _endEditing];
+	// A cell being edited is saved first, and the rows reloaded (as Postgres has them, also after a failed save)
+	if ([self _endEditing]) {
+		[self reload];
+		if ([self _refuseWriteWhileBusy]) return; // a background reload: add once it is done
+	}
 
 	// Every column gets its default (as MySQL's new row), then the user edits it in place
 	NSError *error = nil;
@@ -980,23 +986,45 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	}
 
 	// Reload either way: after success Postgres's own format of the value (and of generated columns),
-	// after a failure the row's current values. Committed by -_endEditing, its caller reloads. Committed by the
-	// grid's own editing ending (as Return or a click elsewhere), once that has finished: a load's start takes
-	// the keyboard focus, which must not end the same edit again. Unless another load has started by then.
+	// after a failure the row's current values. Committed by -_endEditing: its caller reloads.
 	if (endingEdit) {
 		reloadOwed = YES;
+		return;
 	}
-	else if ([theTableView currentEditor] || [theTableView editedRow] >= 0) {
-		NSUInteger generation = loadGeneration;
-		[self retain];
-		dispatch_async(dispatch_get_main_queue(), ^{
-			if (generation == loadGeneration) [self reload];
-			[self release];
-		});
-	}
-	else {
+
+	// Committed by the grid's own editing ending (Return, Tab, a click elsewhere) or called directly. Inline: now,
+	// inside the commit, as before (the grid's next edit, after Tab, starts once this returns).
+	BOOL gridEditing = [theTableView currentEditor] || [theTableView editedRow] >= 0;
+	if (!gridEditing || [taskRunner isInline]) {
+		committingInGrid = gridEditing;
 		[self reload];
+		committingInGrid = NO;
+		return;
 	}
+
+	// Background: a load queued inside the commit would make the busy state take the focus and end this same edit
+	// again, so the reload waits for the commit to finish, and for any edit started meanwhile (Tab) to end
+	reloadPending = YES;
+	dispatch_async(dispatch_get_main_queue(), ^{
+		[self _reloadIfPending];
+	});
+}
+
+/// The pending reload of a grid commit, unless a cell is being edited (it then runs when that edit ends).
+- (void)_reloadIfPending
+{
+	if (invalidated || !reloadPending || [tableView currentEditor]) return;
+	reloadPending = NO;
+	[self reload];
+}
+
+/// The grid's editing ended (NSTableView, as an NSControl, tells its delegate).
+- (void)controlTextDidEndEditing:(NSNotification *)notification
+{
+	if (!reloadPending || [notification object] != tableView) return;
+	dispatch_async(dispatch_get_main_queue(), ^{
+		[self _reloadIfPending];
+	});
 }
 
 #pragma mark - Table view delegate
