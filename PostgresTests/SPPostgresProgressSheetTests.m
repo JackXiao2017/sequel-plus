@@ -29,6 +29,8 @@
 	return window;
 }
 
+/// Pins the behaviour, but passes on the old code too on this macOS (sheetParent is set while the sheet is queued),
+/// so it isn't a RED proof.
 - (void)testEndWhileQueuedLeavesNoSheet
 {
 	NSWindow *window = [self makeWindow];
@@ -47,6 +49,8 @@
 	[window close];
 }
 
+/// Pins the behaviour, but passes on the old code too on this macOS (sheetParent is set while the sheet is queued),
+/// so it isn't a RED proof.
 - (void)testEndWhileQueuedAfterSpinLeavesNoSheet
 {
 	NSWindow *window = [self makeWindow];

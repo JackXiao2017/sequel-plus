@@ -96,6 +96,8 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 	NSString *completionNote;
 	/// Runs when the Transfer sheet has ended (it begins the progress sheet)
 	void (^afterSheetEnds)(void);
+	/// Cancel came after Transfer was clicked but before the progress sheet began
+	BOOL cancelRequested;
 	BOOL began;
 	BOOL finished;
 	BOOL running;
@@ -471,7 +473,16 @@ static const NSUInteger SPPostgresTransferDefaultPort = 5432;
 	if (finished) return;
 	if (running) {
 		// The job sees it and stops (the target's transaction rolls back), then the controller ends
-		[progressSheet cancel:nil];
+		if (progressSheet) {
+			[progressSheet cancel:nil];
+			return;
+		}
+		// The Transfer sheet is still ending: the progress sheet and the job never begin
+		cancelRequested = YES;
+		running = NO;
+		[afterSheetEnds release];
+		afterSheetEnds = nil;
+		[self _finish];
 		return;
 	}
 	// The confirmation sheet, if up, ends as Cancel (its answer is ignored once finished)
@@ -617,6 +628,7 @@ static NSError *SPPostgresTransferCancelledError(void)
 
 - (void)_beginProgressTo:(SPPostgresFavorite *)favorite database:(NSString *)targetDatabase password:(NSString *)password mode:(SPPostgresTransferMode)mode tables:(NSArray *)tables
 {
+	if (finished || cancelRequested) return;
 	NSString *title = [NSString stringWithFormat:NSLocalizedString(@"Transferring “%@” to “%@”…", @"Postgres transfer: progress title (source database, target database)"), database, targetDatabase];
 	[progressSheet release];
 	progressSheet = [[SPPostgresProgressSheet beginOnWindow:[document parentWindow] title:title] retain];
