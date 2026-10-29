@@ -388,8 +388,9 @@ static SPPostgresInstallExtensionSheet *SPPostgresCurrentInstallExtensionSheet =
 - (void)_updateAlsoInstalls
 {
 	SPPostgresAvailableExtension *extension = [self _selectedExtension];
-	if ([taskRunner isBusy]) return; // never on the main thread while a load uses the connection
-	NSArray *missing = extension ? [extensions missingRequirementsForExtension:[extension name] version:[versionPopup titleOfSelectedItem] error:NULL] : nil;
+	// Never read on the main thread while a load uses the connection: nothing is shown (not another extension's list)
+	NSArray *missing = nil;
+	if (extension && ![taskRunner isBusy]) missing = [extensions missingRequirementsForExtension:[extension name] version:[versionPopup titleOfSelectedItem] error:NULL];
 	if ([missing count]) {
 		[alsoInstallsLabel setStringValue:[NSString stringWithFormat:NSLocalizedString(@"Also installs: %@", @"Postgres install extension sheet: missing requirements"), [missing componentsJoinedByString:@", "]]];
 		[alsoInstallsLabel setHidden:NO];

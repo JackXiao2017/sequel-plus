@@ -1666,8 +1666,7 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 
 #pragma mark - Table list in the background
 
-/// The sidebar's runner and the tab's are idle (the sidebar keeps an inline runner until Stage 8 Task 7 hands it the
-/// tab's, so both are waited for).
+/// The sidebar's runner and the tab's (the same one) are idle.
 - (void)waitForLists
 {
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.sidebar.taskRunner timeout:30]);
@@ -1753,7 +1752,7 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 {
 	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
 	SPPostgresSidebarController *sidebar = self.document.sidebar;
-	// The tab's background runner (as from Task 7); nothing else uses the connection until it is idle
+	// The tab's background runner; nothing else uses the connection until it is idle
 	SPPostgresTaskRunner *runner = self.document.taskRunner;
 	XCTAssertFalse(runner.isInline);
 	SPPostgresTaskRunner *previous = sidebar.taskRunner;
@@ -1973,8 +1972,7 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 
 #pragma mark - Panes in the background
 
-/// The table panes on the tab's background runner (the tab keeps them on inline runners until Stage 8 Task 7), put
-/// back on their own when the test ends. The test waits for the runner before anything else uses the connection.
+/// The table panes on the tab's background runner (as the tab does), put back on their own when the test ends. The test waits for the runner before anything else uses the connection.
 - (void)putPanesOnTabRunner
 {
 	SPPostgresTaskRunner *runner = self.document.taskRunner;

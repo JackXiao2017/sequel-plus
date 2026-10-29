@@ -1,4 +1,5 @@
 #import <Cocoa/Cocoa.h>
+#import <PostgresKit/PostgresKit.h>
 
 @class PGPostgresConnection;
 @class SPPostgresTaskRunner;
@@ -65,6 +66,10 @@ __attribute__((visibility("default")))
  * to reload its lists and the Content view. Not called after -invalidate.
  */
 @property (copy) void (^runDidChangeDatabase)(BOOL schemaChanged, BOOL dataChanged);
+/// The session's transaction status at the end of the last run, read on the runner's thread (valid from the run's
+/// completion, e.g. inside runDidChangeDatabase; libpq's status read on the main thread meanwhile could be another
+/// task's).
+@property (readonly) PGPostgresTransactionStatus lastRunTransactionStatus;
 
 /// Detaches the grid, editor and buttons from this controller (called by the tab when it closes or replaces it; also on dealloc).
 - (void)invalidate;

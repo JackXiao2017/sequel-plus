@@ -177,6 +177,10 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 	/// -reloadKeepingSelection tells the delegate once, at the end
 	BOOL holdingSelectionChanges;
+
+	/// The schema the latest schema reload asked for, until it completes (nil: none queued); see -pendingSchema
+	NSString *pendingSchema;
+	NSUInteger pendingSchemaToken;
 }
 
 @synthesize selectedSchema;
@@ -223,6 +227,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[sequenceMenu release];
 	[extensionMenu release];
 	[selectedSchema release];
+	[pendingSchema release];
 	[selectedTableName release];
 	[selectedSequenceName release];
 	[selectedExtensionName release];
@@ -353,6 +358,10 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[taskRunner release];
 	taskRunner = [runner retain];
 	ownsTaskRunner = NO;
+	// A schema reload queued on the previous runner never completes now
+	pendingSchemaToken++;
+	[pendingSchema release];
+	pendingSchema = nil;
 }
 
 // Every reload follows the same steps. On the main thread: copies of what it starts from (the schema asked for or
@@ -482,8 +491,11 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 - (void)reloadKeepingSelection:(void (^)(BOOL loaded))completion
 {
-	// The schema shown now is read again (if it is still there); the selection kept is the one shown when applied
+	// The schema shown now is read again (if it is still there); the selection kept is the one shown when applied. Another
+	// schema shown by then (a schema reload applied in between): this result is dropped, the lists shown are fresh.
+	NSString *queuedSchema = [[selectedSchema copy] autorelease];
 	[self _runReload:SPPostgresSidebarReloadKeeping schema:selectedSchema cancelTitle:NSLocalizedString(@"Cancel", @"cancel button") apply:^BOOL(NSDictionary *read) {
+		if (queuedSchema != selectedSchema && ![queuedSchema isEqualToString:selectedSchema]) return YES;
 		NSString *previousSchema = [[selectedSchema copy] autorelease];
 		NSString *table = [[selectedTableName copy] autorelease];
 		NSString *sequence = [[selectedSequenceName copy] autorelease];
@@ -548,8 +560,18 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 - (void)_reloadSchema:(NSString *)schema selectingSequence:(NSString *)sequence holding:(BOOL)holding completion:(void (^)(BOOL loaded))completion
 {
 	NSString *theSequence = [[sequence copy] autorelease];
+	// A reload of the schema shown, to select a sequence in it (a rename, an add): dropped if another schema is shown
+	// by the time it applies (that schema's lists are fresh, and the sequence isn't in it)
+	NSString *queuedSchema = [[selectedSchema copy] autorelease];
+	BOOL reloadingShownSchema = holding && ((queuedSchema == schema) || [queuedSchema isEqualToString:schema]);
+
+	NSUInteger token = ++pendingSchemaToken;
+	[pendingSchema release];
+	pendingSchema = [schema copy];
+	void (^theCompletion)(BOOL) = [[completion copy] autorelease];
 
 	[self _runReload:SPPostgresSidebarReloadSchema schema:schema cancelTitle:NSLocalizedString(@"Cancel", @"cancel button") apply:^BOOL(NSDictionary *read) {
+		if (reloadingShownSchema && queuedSchema != selectedSchema && ![queuedSchema isEqualToString:selectedSchema]) return YES;
 		NSString *previousSchema = [[selectedSchema copy] autorelease];
 		NSString *previousTable = [[selectedTableName copy] autorelease];
 		NSString *previousSequence = [[selectedSequenceName copy] autorelease];
@@ -575,7 +597,18 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 		BOOL sameExtension = (previousExtension == selectedExtensionName) || [previousExtension isEqualToString:selectedExtensionName];
 		if (!sameSchema || !sameTable || !sameSequence || !sameExtension) [delegate sidebarSelectionDidChange:self];
 		return loaded;
-	} completion:completion];
+	} completion:^(BOOL loaded) {
+		if (token == pendingSchemaToken) {
+			[pendingSchema release];
+			pendingSchema = nil;
+		}
+		if (theCompletion) theCompletion(loaded);
+	}];
+}
+
+- (NSString *)pendingSchema
+{
+	return [[pendingSchema retain] autorelease];
 }
 
 /**
