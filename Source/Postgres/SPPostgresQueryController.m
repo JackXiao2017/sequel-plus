@@ -5,6 +5,7 @@
 #import "SPPostgresTaskRunner.h"
 #import "SPPostgresTextView.h"
 #import "SPPostgresSQLTokenizer.h"
+#import "SPPostgresQueryStore.h"
 #import "SPTextViewAdditions.h"
 #import "SPTableView.h"
 #import "SPButtonBar.h"
@@ -43,6 +44,16 @@ static const NSInteger SPPostgresGearCommentQueryTag = 12;
 static const NSInteger SPPostgresGearAllDatabasesTag = 8000;
 static const NSInteger SPPostgresGearAllTablesTag = 8001;
 static const NSInteger SPPostgresGearAllFieldsTag = 8002;
+
+// The Query History pop-up's items (DBView.xib, SPCustomQuery.h): their tags, and the first entry's index (after the
+// hidden title, Copy, Save, Clear, a separator, the filter and a separator)
+static const NSInteger SPPostgresHistoryCopyTag = 300000;
+static const NSInteger SPPostgresHistorySaveTag = 300001;
+static const NSInteger SPPostgresHistoryClearTag = 300002;
+static const NSInteger SPPostgresHistoryFirstEntryIndex = 7;
+// The entries' titles and tooltips are cut to these lengths (SPQueryController's -historyMenuItemsForFileURL:)
+static const NSUInteger SPPostgresHistoryTitleLength = 64;
+static const NSUInteger SPPostgresHistoryToolTipLength = 256;
 // The words after the caret's that the help looks at ("create text search configuration")
 static const NSUInteger SPPostgresHelpFollowingWords = 3;
 
@@ -199,7 +210,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 #pragma mark - Controller
 
-@interface SPPostgresQueryController () <NSSplitViewDelegate, NSWindowDelegate>
+@interface SPPostgresQueryController () <NSSplitViewDelegate, NSWindowDelegate, NSMenuDelegate>
 
 @property (readwrite, copy) NSString *statusText;
 @property (readwrite, copy) NSString *lastRunQueryText;
@@ -256,6 +267,23 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	NSMutableDictionary<NSString *, NSMenuItem *> *toggleMenuItems;
 	void (^helpHandler)(NSString *searchString, BOOL autoHelp);
 
+	// Query History
+	SPPostgresQueryStore *historyStore;
+	NSPasteboard *pasteboard;
+	NSString * (^savePathProvider)(NSString *suggestedName);
+	void (^alertPresenter)(NSAlert *alert);
+	void (^confirmationPresenter)(NSAlert *alert, void (^completion)(BOOL confirmed));
+	NSArray<NSString *> *historyEntries;    // the entries the menu shows, most recent first
+	NSSearchField *historySearchField;
+	NSMenuItem *copyHistoryMenuItem;
+	NSMenuItem *saveHistoryMenuItem;
+	NSMenuItem *clearHistoryMenuItem;
+	NSInteger currentHistoryOffsetIndex;    // Previous / Next's entry (-1: none yet), as MySQL's
+	BOOL historyItemWasJustInserted;        // Previous / Next is inserting (the selection change keeps the offset)
+	BOOL historySaveErrorReported;          // a run's failed history save is reported once
+	/// Test seam: called instead of NSBeep() by Previous / Next (see the tests' SPPostgresQueryController (HistoryTesting))
+	void (^beepHook)(void);
+
 	BOOL running;                   // YES from a run's enqueue until its completion
 	BOOL observingRunner;           // observing taskRunner's busy (the run controls are disabled while it is)
 	BOOL invalidated;
@@ -285,6 +313,11 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 @synthesize lastRunQueryText;
 @synthesize infoPaneSplitView;
 @synthesize helpHandler;
+@synthesize historyStore;
+@synthesize pasteboard;
+@synthesize savePathProvider;
+@synthesize alertPresenter;
+@synthesize confirmationPresenter;
 
 #pragma mark - Setup
 
@@ -295,7 +328,11 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 		defaults = [[NSUserDefaults standardUserDefaults] retain];
 		statusText = [@"" copy];
 		infoPaneAnimates = YES;
+		pasteboard = [[NSPasteboard generalPasteboard] retain];
+		currentHistoryOffsetIndex = -1;
+		historyEntries = [@[] retain];
 		[self _buildView];
+		[self setHistoryStore:[SPPostgresQueryStore sharedHistoryStore]];
 		[self _bindEditModeButton];
 		[self _updateToggles];
 		[self _updateGearItems];
@@ -350,6 +387,17 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[completionListMenuItem release];
 	[editorFontMenuItem release];
 	[toggleMenuItems release];
+	[historyStore release];
+	[pasteboard release];
+	[savePathProvider release];
+	[alertPresenter release];
+	[confirmationPresenter release];
+	[historyEntries release];
+	[historySearchField release];
+	[copyHistoryMenuItem release];
+	[saveHistoryMenuItem release];
+	[clearHistoryMenuItem release];
+	[beepHook release];
 
 	[super dealloc];
 }
@@ -376,6 +424,18 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 		for (NSMenuItem *subitem in [[item submenu] itemArray]) [subitem setTarget:nil];
 	}
 	[infoPaneSplitView setDelegate:nil];
+	// The history's menu, filter and store
+	[[NSNotificationCenter defaultCenter] removeObserver:self name:SPPostgresQueryStoreDidChangeNotification object:nil];
+	[historyButton setTarget:nil];
+	[[historyButton menu] setDelegate:nil];
+	for (NSMenuItem *item in [[historyButton menu] itemArray]) [item setTarget:nil];
+	[historySearchField setTarget:nil];
+	[savePathProvider release];
+	savePathProvider = nil;
+	[alertPresenter release];
+	alertPresenter = nil;
+	[confirmationPresenter release];
+	confirmationPresenter = nil;
 	// Editor Font… made this the font panel's delegate
 	if ([NSFontPanel sharedFontPanelExists] && [[NSFontPanel sharedFontPanel] delegate] == (id)self) [[NSFontPanel sharedFontPanel] setDelegate:nil];
 	// A pending auto-help (SPTextView's -autoHelp delay)
@@ -472,6 +532,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	defaultsController = [[NSUserDefaultsController alloc] initWithDefaults:defaults initialValues:nil];
 	[defaultsController setAppliesImmediately:YES];
 	[editModeButton bind:NSValueBinding toObject:defaultsController withKeyPath:[@"values." stringByAppendingString:SPEditInSheetEnabled] options:nil];
+	// As DBView.xib's: the Query History pop-up is hidden while MySQL's history size is 0
+	[historyButton bind:NSHiddenBinding toObject:defaultsController withKeyPath:[@"values." stringByAppendingString:SPCustomQueryMaxHistoryItems]
+				options:@{NSValueTransformerNameBindingOption: NSNegateBooleanTransformerName}];
 	// The gear's toggles follow defaults (see -_updateToggles)
 	for (NSString *key in SPPostgresGearToggleKeys()) {
 		[defaultsController addObserver:self forKeyPath:[@"values." stringByAppendingString:key] options:0 context:SPPostgresQueryToggleContext];
@@ -482,6 +545,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 {
 	if (!defaultsController) return;
 	[editModeButton unbind:NSValueBinding];
+	[historyButton unbind:NSHiddenBinding];
 	for (NSString *key in SPPostgresGearToggleKeys()) {
 		[defaultsController removeObserver:self forKeyPath:[@"values." stringByAppendingString:key] context:SPPostgresQueryToggleContext];
 	}
@@ -709,6 +773,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 												 key:@"y"
 											 toolTip:NSLocalizedString(@"Choose a query from your recent queries (⌥⌘Y)", @"query history popup button tooltip")];
 	[historyButton setAutoresizingMask:NSViewMaxXMargin | NSViewMinYMargin];
+	[self _buildHistoryMenu];
 	[topBar addSubview:historyButton];
 
 	// MySQL's run pop-up button: a click runs the primary action, the menu has both and Switch Default. The items show
@@ -1083,8 +1148,374 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 - (void)textViewDidChangeSelection:(NSNotification *)notification
 {
 	if ([notification object] != editor) return;
+	// As MySQL's: moving the caret starts Previous / Next again from the newest entry
+	if (!historyItemWasJustInserted) currentHistoryOffsetIndex = -1;
 	[self _updateContextualRunInterface];
 	[self _updateGearItems];
+}
+
+#pragma mark - Query History
+
+/// MySQL's Query History menu (DBView.xib), after its hidden title item: Copy History, Save History… (its alternate),
+/// Clear History (titled for an untitled document, as every Postgres tab is), a separator, the filter, a separator.
+/// The entries follow (see -_reloadHistoryMenu).
+- (void)_buildHistoryMenu
+{
+	NSMenu *menu = [historyButton menu];
+	[menu setAutoenablesItems:NO];
+	[menu setDelegate:self];
+
+	copyHistoryMenuItem = [[menu addItemWithTitle:NSLocalizedString(@"Copy History", @"Postgres query history: copy history menu item") action:@selector(copyQueryHistory:) keyEquivalent:@""] retain];
+	[copyHistoryMenuItem setTag:SPPostgresHistoryCopyTag];
+	[copyHistoryMenuItem setKeyEquivalentModifierMask:NSEventModifierFlagOption];
+	[copyHistoryMenuItem setToolTip:NSLocalizedString(@"Copy all history items onto the clipboard.", @"Postgres query history: copy history tooltip")];
+	[copyHistoryMenuItem setTarget:self];
+
+	saveHistoryMenuItem = [[menu addItemWithTitle:NSLocalizedString(@"Save History…", @"Postgres query history: save history menu item") action:@selector(saveQueryHistory:) keyEquivalent:@""] retain];
+	[saveHistoryMenuItem setTag:SPPostgresHistorySaveTag];
+	[saveHistoryMenuItem setKeyEquivalentModifierMask:0];
+	[saveHistoryMenuItem setAlternate:YES];
+	[saveHistoryMenuItem setToolTip:NSLocalizedString(@"Save all history items to file. Press ⌥ to copy all history items onto the clipboard.", @"Postgres query history: save history tooltip")];
+	[saveHistoryMenuItem setTarget:self];
+
+	// As MySQL's -validateMenuItem: for an untitled document
+	clearHistoryMenuItem = [[menu addItemWithTitle:NSLocalizedString(@"Clear Global History", @"clear global history menu item title") action:@selector(clearQueryHistory:) keyEquivalent:@""] retain];
+	[clearHistoryMenuItem setTag:SPPostgresHistoryClearTag];
+	[clearHistoryMenuItem setToolTip:NSLocalizedString(@"Clear the global history list", @"clear the global history list tooltip message")];
+	[clearHistoryMenuItem setTarget:self];
+
+	[menu addItem:[NSMenuItem separatorItem]];
+
+	// The filter (DBView.xib's "Query History Search" view), as the item's view. No recents autosave name: that would
+	// write the standard preferences
+	NSView *searchView = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, 217, 20)] autorelease];
+	historySearchField = [[NSSearchField alloc] initWithFrame:NSMakeRect(20, 1, 176, 19)];
+	[[historySearchField cell] setControlSize:NSControlSizeSmall];
+	[historySearchField setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+	[[historySearchField cell] setPlaceholderString:NSLocalizedString(@"Filter", @"filter label")];
+	[[historySearchField cell] setScrollable:YES];
+	[[historySearchField cell] setUsesSingleLineMode:YES];
+	[[historySearchField cell] setSendsSearchStringImmediately:YES];
+	[historySearchField setFocusRingType:NSFocusRingTypeNone];
+	[historySearchField setTarget:self];
+	[historySearchField setAction:@selector(filterQueryHistory:)];
+	[searchView addSubview:historySearchField];
+	NSMenuItem *searchItem = [menu addItemWithTitle:@"" action:NULL keyEquivalent:@""];
+	[searchItem setView:searchView];
+
+	[menu addItem:[NSMenuItem separatorItem]];
+
+	[historyButton setTarget:self];
+	[historyButton setAction:@selector(chooseQueryHistory:)];
+	[self _updateHistoryItems];
+}
+
+- (void)setHistoryStore:(SPPostgresQueryStore *)store
+{
+	if (store == historyStore) return;
+	NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+	if (historyStore) [center removeObserver:self name:SPPostgresQueryStoreDidChangeNotification object:historyStore];
+	[historyStore release];
+	historyStore = [store retain];
+	if (invalidated) return;
+	if (historyStore) [center addObserver:self selector:@selector(_historyStoreDidChange:) name:SPPostgresQueryStoreDidChangeNotification object:historyStore];
+	currentHistoryOffsetIndex = -1;
+	historySaveErrorReported = NO;
+	[self _reloadHistoryMenu];
+}
+
+/// The store's entries (its strings), most recent first.
+- (NSArray<NSString *> *)_storedHistory
+{
+	NSMutableArray *entries = [NSMutableArray array];
+	for (id item in [historyStore items] ?: @[]) {
+		if ([item isKindOfClass:[NSString class]]) [entries addObject:item];
+	}
+	return entries;
+}
+
+- (void)_historyStoreDidChange:(NSNotification *)notification
+{
+	if (invalidated) return;
+	[self _reloadHistoryMenu];
+}
+
+/// The menu's entries, from the store when it changed (another tab, or another copy of the app, may have written it).
+- (void)_reloadHistoryMenuIfChanged
+{
+	if (![[self _storedHistory] isEqualToArray:historyEntries]) [self _reloadHistoryMenu];
+}
+
+/// As MySQL's -historyItemsHaveBeenUpdated:: the entries after the filter, then the filter is applied again.
+- (void)_reloadHistoryMenu
+{
+	if (invalidated) return;
+	NSArray *entries = [self _storedHistory];
+	[historyEntries release];
+	historyEntries = [entries copy];
+
+	NSMenu *menu = [historyButton menu];
+	while ([menu numberOfItems] > SPPostgresHistoryFirstEntryIndex) [menu removeItemAtIndex:[menu numberOfItems] - 1];
+	for (NSString *entry in historyEntries) {
+		NSString *title = ([entry length] > SPPostgresHistoryTitleLength) ? [NSString stringWithFormat:@"%@…", [entry substringToIndex:SPPostgresHistoryTitleLength - 1]] : entry;
+		NSString *toolTip = ([entry length] > SPPostgresHistoryToolTipLength) ? [NSString stringWithFormat:@"%@…", [entry substringToIndex:SPPostgresHistoryToolTipLength - 1]] : entry;
+		NSMenuItem *item = [[[NSMenuItem alloc] initWithTitle:title action:@selector(chooseQueryHistory:) keyEquivalent:@""] autorelease];
+		[item setTarget:self];
+		[item setToolTip:toolTip];
+		[item setRepresentedObject:entry];
+		[menu addItem:item];
+	}
+	[self _updateHistoryItems];
+	[self filterQueryHistory:nil];
+}
+
+/// As MySQL's -validateMenuItem:: Copy, Save and Clear while there is history.
+- (void)_updateHistoryItems
+{
+	BOOL hasHistory = [historyEntries count] > 0;
+	[copyHistoryMenuItem setEnabled:hasHistory];
+	[saveHistoryMenuItem setEnabled:hasHistory];
+	[clearHistoryMenuItem setEnabled:hasHistory];
+}
+
+- (void)menuNeedsUpdate:(NSMenu *)menu
+{
+	if (invalidated || menu != [historyButton menu]) return;
+	[self _reloadHistoryMenuIfChanged];
+}
+
+/// As MySQL's -addHistory:forFileURL: (SPQueryController): first, without duplicates, capped at the history size.
+- (void)_addHistoryEntry:(NSString *)entry
+{
+	if (invalidated || !historyStore || ![entry length]) return;
+	NSInteger maxItems = [defaults integerForKey:SPCustomQueryMaxHistoryItems];
+	// A history size of 0 records nothing (and keeps what is stored)
+	if (maxItems <= 0) return;
+
+	NSMutableArray *entries = [NSMutableArray arrayWithArray:[self _storedHistory]];
+	[entries removeObject:entry];
+	[entries insertObject:entry atIndex:0];
+	if ([entries count] > (NSUInteger)maxItems) [entries removeObjectsInRange:NSMakeRange(maxItems, [entries count] - maxItems)];
+
+	NSError *error = nil;
+	if (![historyStore setItems:entries error:&error]) {
+		// Reported once (not after every run); the file is left as it is
+		if (!historySaveErrorReported) {
+			historySaveErrorReported = YES;
+			[self _presentHistoryError:error title:NSLocalizedString(@"The query could not be added to the history.", @"Postgres query history: add failed")];
+		}
+	}
+}
+
+/// The entries joined with ";\n", as MySQL's -buildHistoryString.
+- (NSString *)_historyString
+{
+	[self _reloadHistoryMenuIfChanged];
+	return [historyEntries componentsJoinedByString:@";\n"];
+}
+
+/// Inserts text in range of the editor, undoably (as typing it would), then updates the run button's title.
+- (void)_insertEditorText:(NSString *)text inRange:(NSRange)range
+{
+	[editor breakUndoCoalescing];
+	[editor insertText:text replacementRange:range];
+	[editor breakUndoCoalescing];
+}
+
+- (IBAction)chooseQueryHistory:(id)sender
+{
+	if (invalidated) return;
+
+	NSString *entry = nil;
+	if ([sender isKindOfClass:[NSMenuItem class]]) {
+		entry = [(NSMenuItem *)sender representedObject];
+	}
+	else {
+		NSInteger index = [historyButton indexOfSelectedItem] - SPPostgresHistoryFirstEntryIndex;
+		if (index >= 0 && index < (NSInteger)[historyEntries count]) entry = [historyEntries objectAtIndex:index];
+	}
+	if (![entry isKindOfClass:[NSString class]]) return;
+
+	// As MySQL's: History Replaces Editor Content, inverted while a modifier key is held
+	BOOL replaceContent = [defaults boolForKey:SPQueryHistoryReplacesContent];
+	if ([[NSApp currentEvent] modifierFlags] & (NSEventModifierFlagShift | NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand)) {
+		replaceContent = !replaceContent;
+	}
+	NSRange range = replaceContent ? NSMakeRange(0, [[editor string] length]) : [editor selectedRange];
+	[self _insertEditorText:entry inRange:range];
+	[self _editorChangedByGear];
+}
+
+/// Previous (step 1) / Next (step -1) Query from History, as MySQL's -gearMenuItemSelected:: the entry is inserted at
+/// the caret (over the selection, so over the entry inserted before) and selected; past either end: a beep.
+- (void)_insertHistoryEntryAtOffsetStep:(NSInteger)step
+{
+	[self _reloadHistoryMenuIfChanged];
+	NSInteger count = (NSInteger)[historyEntries count];
+	currentHistoryOffsetIndex += step;
+	if (count > 0 && currentHistoryOffsetIndex >= 0 && currentHistoryOffsetIndex < count) {
+		historyItemWasJustInserted = YES;
+		NSString *entry = [historyEntries objectAtIndex:currentHistoryOffsetIndex];
+		NSRange selection = [editor selectedRange];
+		[self _insertEditorText:entry inRange:selection];
+		[editor setSelectedRange:NSMakeRange(selection.location, [entry length])];
+		[self _editorChangedByGear];
+	}
+	else {
+		currentHistoryOffsetIndex -= step;
+		[self _beep];
+	}
+	historyItemWasJustInserted = NO;
+}
+
+- (void)_beep
+{
+	if (beepHook) beepHook();
+	else NSBeep();
+}
+
+/// Test seam (see the tests' SPPostgresQueryController (HistoryTesting)).
+- (void)setBeepHook:(void (^)(void))hook
+{
+	if (hook == beepHook) return;
+	[beepHook release];
+	beepHook = [hook copy];
+}
+
+- (IBAction)copyQueryHistory:(id)sender
+{
+	if (invalidated) return;
+	NSPasteboard *pb = pasteboard ?: [NSPasteboard generalPasteboard];
+	[pb declareTypes:@[NSPasteboardTypeString] owner:nil];
+	[pb setString:[self _historyString] forType:NSPasteboardTypeString];
+}
+
+- (IBAction)saveQueryHistory:(id)sender
+{
+	if (invalidated) return;
+	NSString *history = [self _historyString];
+
+	if (savePathProvider) {
+		NSString *path = savePathProvider(@"history.sql");
+		if (path) [self _writeHistory:history toURL:[NSURL fileURLWithPath:path]];
+		return;
+	}
+
+	NSSavePanel *panel = [NSSavePanel savePanel];
+	[panel setAllowedFileTypes:@[SPFileExtensionSQL]];
+	[panel setExtensionHidden:NO];
+	[panel setAllowsOtherFileTypes:YES];
+	[panel setCanSelectHiddenExtension:YES];
+	[panel setCanCreateDirectories:YES];
+	[panel setNameFieldStringValue:@"history"];
+
+	void (^completion)(NSModalResponse) = ^(NSModalResponse response) {
+		if (response == NSModalResponseOK && !invalidated) [self _writeHistory:history toURL:[panel URL]];
+	};
+	NSWindow *window = [view window];
+	if (window && ![window attachedSheet]) [panel beginSheetModalForWindow:window completionHandler:completion];
+	else completion([panel runModal]);
+}
+
+/// Writes history (UTF-8); a failure is shown.
+- (void)_writeHistory:(NSString *)history toURL:(NSURL *)url
+{
+	NSError *error = nil;
+	if (![history writeToURL:url atomically:YES encoding:NSUTF8StringEncoding error:&error]) {
+		[self _presentHistoryError:error title:NSLocalizedString(@"The history could not be saved.", @"Postgres query history: save failed")];
+	}
+}
+
+- (IBAction)clearQueryHistory:(id)sender
+{
+	if (invalidated) return;
+
+	// As MySQL's, for an untitled document (every Postgres tab: its history is global)
+	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+	[alert setMessageText:NSLocalizedString(@"Clear History?", @"clear history message")];
+	[alert setInformativeText:NSLocalizedString(@"Are you sure you want to clear the global history list? This action cannot be undone.", @"clear global history list informative message")];
+	[alert setAlertStyle:NSAlertStyleCritical];
+	NSButton *clearButton = [alert addButtonWithTitle:NSLocalizedString(@"Clear", @"clear button")];
+	NSButton *cancelButton = [alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"cancel button")];
+	// As MySQL's: Cancel has the return key, Clear ⌘R
+	[clearButton setKeyEquivalent:@"r"];
+	[clearButton setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+	[cancelButton setKeyEquivalent:@"\r"];
+
+	[self _confirm:alert completion:^(BOOL confirmed) {
+		if (!confirmed || invalidated) return;
+		NSError *error = nil;
+		if (![historyStore setItems:@[] error:&error]) {
+			[self _presentHistoryError:error title:NSLocalizedString(@"The history could not be cleared.", @"Postgres query history: clear failed")];
+		}
+	}];
+}
+
+/// As MySQL's -filterQueryHistory:: the entries that don't contain the filter's text (case-insensitive, as text, not
+/// a pattern) are hidden, and stay in the menu.
+- (IBAction)filterQueryHistory:(id)sender
+{
+	if (invalidated) return;
+	NSString *filter = [historySearchField stringValue] ?: @"";
+	NSMenu *menu = [historyButton menu];
+	for (NSInteger i = SPPostgresHistoryFirstEntryIndex; i < [menu numberOfItems]; i++) {
+		NSUInteger entryIndex = i - SPPostgresHistoryFirstEntryIndex;
+		NSString *entry = (entryIndex < [historyEntries count]) ? [historyEntries objectAtIndex:entryIndex] : @"";
+		BOOL matches = ![filter length] || [entry rangeOfString:filter options:NSCaseInsensitiveSearch].location != NSNotFound;
+		[[menu itemAtIndex:i] setHidden:!matches];
+	}
+}
+
+/// Shows an alert (alertPresenter, else a sheet on the view's window, else the log).
+- (void)_presentAlert:(NSAlert *)alert
+{
+	if (invalidated) return;
+	if (alertPresenter) {
+		alertPresenter(alert);
+		return;
+	}
+	NSWindow *window = [view window];
+	if (window && ![window attachedSheet]) [alert beginSheetModalForWindow:window completionHandler:nil];
+	else NSLog(@"%@: %@", [alert messageText], [alert informativeText]);
+}
+
+- (void)_presentHistoryError:(NSError *)error title:(NSString *)title
+{
+	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+	[alert setAlertStyle:NSAlertStyleWarning];
+	[alert setMessageText:title];
+	NSString *detail = [error localizedDescription];
+	[alert setInformativeText:[detail length] ? detail : NSLocalizedString(@"An unknown error occurred.", @"Postgres content: unknown error")];
+	[self _presentAlert:alert];
+}
+
+/// Asks to confirm (confirmationPresenter, else a sheet on the view's window); completion runs once.
+- (void)_confirm:(NSAlert *)alert completion:(void (^)(BOOL confirmed))completion
+{
+	// A heap copy, so a presenter may keep it (even without copying it) until the answer comes. It runs once and
+	// then balances its own Block_copy (deferred to the autorelease pool, as it is still running).
+	void (^original)(BOOL) = completion;
+	__block BOOL done = NO;
+	__block void (^once)(BOOL) = nil;
+	once = Block_copy(^(BOOL confirmed) {
+		if (done) return;
+		done = YES;
+		original(confirmed);
+		[(id)once autorelease];
+	});
+
+	if (confirmationPresenter) {
+		confirmationPresenter(alert, once);
+		return;
+	}
+	NSWindow *window = [view window];
+	if (!window || [window attachedSheet]) {
+		once([alert runModal] == NSAlertFirstButtonReturn);
+		return;
+	}
+	[alert beginSheetModalForWindow:window completionHandler:^(NSModalResponse response) {
+		once(response == NSAlertFirstButtonReturn);
+	}];
 }
 
 #pragma mark - The gear menu
@@ -1202,9 +1633,13 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 {
 	if (invalidated) return;
 
-	if (sender == previousHistoryMenuItem || sender == nextHistoryMenuItem) {
-		// The Postgres query history comes later (Stage 11 Task 7)
-		NSBeep();
+	// "Previous / Next Query from History" (as MySQL's: ⌃↑ the next older entry, ⌃↓ the next newer one)
+	if (sender == previousHistoryMenuItem) {
+		[self _insertHistoryEntryAtOffsetStep:1];
+		return;
+	}
+	if (sender == nextHistoryMenuItem) {
+		[self _insertHistoryEntryAtOffsetStep:-1];
 		return;
 	}
 
@@ -1816,8 +2251,12 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 		}
 		[self _showResult:[run rowsResult]];
 		lastRunTransactionStatus = [run transactionStatus];
-		// As MySQL's usedQuery, recorded only when a statement was sent
-		if ([[run ranStatements] count]) [self setLastRunQueryText:[[run ranStatements] componentsJoinedByString:@";\n"]];
+		// As MySQL's usedQuery, recorded (and added to the history) only when a statement was sent
+		if ([[run ranStatements] count]) {
+			NSString *usedQuery = [[run ranStatements] componentsJoinedByString:@";\n"];
+			[self setLastRunQueryText:usedQuery];
+			[self _addHistoryEntry:usedQuery];
+		}
 		NSString *status = [SPPostgresQueryController _statusTextForRun:run];
 		[self setStatusText:status];
 		[statusField setStringValue:status];

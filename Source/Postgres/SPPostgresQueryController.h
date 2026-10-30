@@ -5,6 +5,7 @@
 @class SPPostgresTaskRunner;
 @class SPComboPopupButton;
 @class SPSplitView;
+@class SPPostgresQueryStore;
 
 /**
  * The Query view of a PostgreSQL tab, laid out as MySQL's Query tab (DBView.xib): an outer SPSplitView holding
@@ -96,18 +97,61 @@ __attribute__((visibility("default")))
 
 #pragma mark - MySQL's bars (DBView.xib)
 
-/// The top bar: the gear (see -gearMenuItemSelected:), Query Favorites and Query History (their hidden title item only,
-/// for now) and the run button.
+/// The top bar: the gear (see -gearMenuItemSelected:), Query Favorites (its hidden title item only, for now), Query
+/// History (see below) and the run button.
 @property (readonly) NSPopUpButton *gearButton;
 @property (readonly) NSPopUpButton *favoritesButton;
 @property (readonly) NSPopUpButton *historyButton;
 @property (readonly) SPComboPopupButton *runButton;
 
+#pragma mark - Query History (DBView.xib)
+
+/**
+ * The query history, stored apart from MySQL's (never its queryHistory preference): one entry per run that sent at
+ * least one statement, the statements sent joined with ";\n" (lastRunQueryText, MySQL's usedQuery), most recent
+ * first, without duplicates (an entry run again moves to the front), capped at MySQL's shared
+ * "CustomQueryMaxHistoryItems" (read from defaults; 0 records nothing). Postgres tabs have no documents, so the history
+ * is global. Default: +[SPPostgresQueryStore sharedHistoryStore]. The menu follows the store (a change made by another
+ * tab too).
+ *
+ * The Query History pop-up's menu, as MySQL's: its hidden title, Copy History, Save History… (an alternate), Clear
+ * Global History, a separator, the filter (an NSSearchField), a separator, then the entries (titles cut to 64
+ * characters, tooltips to 256). It is hidden while "CustomQueryMaxHistoryItems" is 0 (following defaults).
+ */
+@property (nonatomic, retain) SPPostgresQueryStore *historyStore;
+
+/// Where Copy History puts the history. Default: the general pasteboard.
+@property (nonatomic, retain) NSPasteboard *pasteboard;
+
+/// Save History…'s destination: called with the suggested file name ("history.sql"), returns the path to write or nil
+/// to cancel. nil (the default) shows an NSSavePanel (a sheet on the view's window). Tests return a temporary path.
+@property (copy) NSString * (^savePathProvider)(NSString *suggestedName);
+
+/// Shows the history's alerts (a failed save or clear). nil (the default): a sheet on the view's window.
+@property (copy) void (^alertPresenter)(NSAlert *alert);
+
+/// Asks to confirm Clear History; call completion exactly once (later calls are ignored). nil (the default): a sheet
+/// on the view's window.
+@property (copy) void (^confirmationPresenter)(NSAlert *alert, void (^completion)(BOOL confirmed));
+
+/// An entry chosen in the pop-up: inserted at the caret (undoably), or replacing the editor's text when
+/// "QueryHistoryReplacesContent" is set (a modifier key held inverts it), as MySQL's.
+- (IBAction)chooseQueryHistory:(id)sender;
+/// The entries joined with ";\n", on pasteboard.
+- (IBAction)copyQueryHistory:(id)sender;
+/// The entries joined with ";\n", written (UTF-8) to the file savePathProvider (or the save panel) gives.
+- (IBAction)saveQueryHistory:(id)sender;
+/// Asks (confirmationPresenter), then empties the history store.
+- (IBAction)clearQueryHistory:(id)sender;
+/// Hides the entries that don't contain the filter's text (case-insensitive); they stay in the menu, as MySQL's.
+- (IBAction)filterQueryHistory:(id)sender;
+
 #pragma mark - The gear menu (DBView.xib)
 
 /**
- * The gear's items, as MySQL's -[SPCustomQuery gearMenuItemSelected:]: Previous / Next Query from History (⌃↑ / ⌃↓;
- * NSBeep for now), Shift Right / Left (⌘] / ⌘[, SPTextView's), Comment Line / Comment Selection (⌘/: "-- " on the
+ * The gear's items, as MySQL's -[SPCustomQuery gearMenuItemSelected:]: Previous / Next Query from History (⌃↑ / ⌃↓:
+ * the next older / newer entry, inserted at the caret and selected, so a second ⌃↑ replaces it; past either end, or
+ * with no history, NSBeep; moving the caret starts again from the newest), Shift Right / Left (⌘] / ⌘[, SPTextView's), Comment Line / Comment Selection (⌘/: "-- " on the
  * caret's line, or the selection wrapped in / * * /) and Comment Current Query (⌥⌘/, the current statement wrapped, or
  * unwrapped when it is already), Completion List (Esc; ⌃ fuzzy), Editor Font… (the font panel, as MySQL's) and the
  * toggles: History / Favorite Replaces Editor Content, Indent New Lines, Auto-pair Characters, Auto-uppercase

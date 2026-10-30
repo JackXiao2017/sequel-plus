@@ -12,6 +12,7 @@
 #import "../Source/Postgres/SPPostgresSQLTokenizer.h"
 #import "../Source/Postgres/SPPostgresStatementSplitter.h"
 #import "../Source/Postgres/SPPostgresHelpDataSource.h"
+#import "../Source/Postgres/SPPostgresQueryStore.h"
 
 // MySQL's preference keys (Source/SPConstants.m; the header is not ARC-clean)
 static NSString * const SPGearTestAutoIndentKey = @"CustomQueryAutoIndent";
@@ -235,7 +236,10 @@ static const NSUInteger SPGearTestPort = 55418;
 		XCTAssertEqual([listItems[i] target], self.query);
 	}
 
-	// Previous / Next Query from History: only a beep for now (Task 7); the editor is untouched
+	// Previous / Next Query from History with no history (SPPostgresQueryHistoryTests has the rest): the editor is
+	// untouched (a beep)
+	NSString *storePath = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.plist", [[NSUUID UUID] UUIDString]]];
+	self.query.historyStore = [[SPPostgresQueryStore alloc] initWithFileURL:[NSURL fileURLWithPath:storePath]];
 	[[self editor] setString:@"SELECT 1"];
 	[self choose:[self gearItem:@"Previous Query from History"]];
 	[self choose:[self gearItem:@"Next Query from History"]];

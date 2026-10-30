@@ -1,4 +1,5 @@
 #import "SPTestPrefsGuard.h"
+#import "../Source/Postgres/SPPostgresQueryStore.h"
 #import <objc/runtime.h>
 
 NSString * const SPTestTransferAddedKey = @"SPToolbarTransferItemAdded";
@@ -31,6 +32,11 @@ static const void *SPRequestedAutosaveNameKey = &SPRequestedAutosaveNameKey;
  *   selects the owner's favorite and reads its password from the login keychain
  *   (-[SPConnectionController updateFavoriteSelection:]), which can block the run on a keychain
  *   access prompt (e.g. after a rebuild changes the app's signature).
+ *
+ * - The Postgres Query tab's shared history and favorites stores (+[SPPostgresQueryStore sharedHistoryStore] /
+ *   +sharedFavoritesStore) are stores on a temporary directory of this run, never the real files under Application
+ *   Support: every query a test runs through a Query view is recorded in the shared history unless the test injects
+ *   its own store.
  *
  * - Sparkle's automatic update checks are off (SUEnableAutomaticChecks reads NO from the volatile argument
  *   domain, and a check already scheduled is dropped), so no check runs in the middle of a test.
@@ -85,6 +91,16 @@ static const void *SPRequestedAutosaveNameKey = &SPRequestedAutosaveNameKey;
 	Method originalSplit = class_getInstanceMethod([NSSplitView class], @selector(setAutosaveName:));
 	Method replacementSplit = class_getInstanceMethod([NSSplitView class], @selector(sp_test_setAutosaveName:));
 	method_exchangeImplementations(originalSplit, replacementSplit);
+
+	// The Postgres Query tab's shared stores: on a temporary directory of this run
+	NSString *storeDirectory = [NSTemporaryDirectory() stringByAppendingPathComponent:
+		[NSString stringWithFormat:@"SPPostgresTestQueryStores-%d-%@", [[NSProcessInfo processInfo] processIdentifier], [[NSUUID UUID] UUIDString]]];
+	SPPostgresQueryStore *historyStore = [[SPPostgresQueryStore alloc] initWithFileURL:[NSURL fileURLWithPath:[storeDirectory stringByAppendingPathComponent:@"PostgresQueryHistory.plist"]]];
+	SPPostgresQueryStore *favoritesStore = [[SPPostgresQueryStore alloc] initWithFileURL:[NSURL fileURLWithPath:[storeDirectory stringByAppendingPathComponent:@"PostgresQueryFavorites.plist"]]];
+	method_setImplementation(class_getClassMethod([SPPostgresQueryStore class], @selector(sharedHistoryStore)),
+							 imp_implementationWithBlock(^id(id me) { return historyStore; }));
+	method_setImplementation(class_getClassMethod([SPPostgresQueryStore class], @selector(sharedFavoritesStore)),
+							 imp_implementationWithBlock(^id(id me) { return favoritesStore; }));
 
 	NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
 	NSMutableDictionary *domain = [([prefs volatileDomainForName:NSArgumentDomain] ?: @{}) mutableCopy];
