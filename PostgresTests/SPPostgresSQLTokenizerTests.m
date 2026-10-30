@@ -1,16 +1,6 @@
 #import <XCTest/XCTest.h>
 #import "../Source/Postgres/SPPostgresSQLTokenizer.h"
 
-// Looked up by name: until the app itself uses the tokenizer, the app binary doesn't export its class
-// symbol to the test bundle's linker (the class is still registered at runtime).
-#define SPTokenizer ((Class<SPTokenizerAPI>)NSClassFromString(@"SPPostgresSQLTokenizer"))
-
-@protocol SPTokenizerAPI
-+ (NSArray<SPPostgresSQLToken *> *)tokensInString:(NSString *)string range:(NSRange)range;
-+ (NSSet<NSString *> *)keywords;
-+ (NSArray<NSString *> *)functionNames;
-@end
-
 @interface SPPostgresSQLTokenizerTests : XCTestCase
 @end
 
@@ -18,7 +8,7 @@
 
 - (NSArray *)tokens:(NSString *)sql
 {
-	return [SPTokenizer tokensInString:sql range:NSMakeRange(0, sql.length)];
+	return [SPPostgresSQLTokenizer tokensInString:sql range:NSMakeRange(0, sql.length)];
 }
 
 /// Kinds of the tokens that aren't whitespace.
@@ -105,7 +95,7 @@
 - (void)testSubrangeTokenizing
 {
 	NSString *sql = @"SELECT a FROM b";
-	NSArray *tokens = [SPTokenizer tokensInString:sql range:NSMakeRange(7, 8)];
+	NSArray *tokens = [SPPostgresSQLTokenizer tokensInString:sql range:NSMakeRange(7, 8)];
 	XCTAssertEqual(((SPPostgresSQLToken *)tokens.firstObject).range.location, 7u);
 	XCTAssertEqual(NSMaxRange(((SPPostgresSQLToken *)tokens.lastObject).range), 15u);
 	NSUInteger total = 0;
@@ -117,9 +107,9 @@
 
 - (void)testWordLists
 {
-	XCTAssertTrue([[SPTokenizer keywords] containsObject:@"select"]);
-	XCTAssertTrue([[SPTokenizer keywords] containsObject:@"bigint"]);
-	NSArray *names = [SPTokenizer functionNames];
+	XCTAssertTrue([[SPPostgresSQLTokenizer keywords] containsObject:@"select"]);
+	XCTAssertTrue([[SPPostgresSQLTokenizer keywords] containsObject:@"bigint"]);
+	NSArray *names = [SPPostgresSQLTokenizer functionNames];
 	XCTAssertTrue([names containsObject:@"count"]);
 	XCTAssertTrue([names containsObject:@"pg_sleep"]);
 	XCTAssertFalse([names containsObject:@"pg_stat_get_activity"]);

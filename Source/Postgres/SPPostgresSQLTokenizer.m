@@ -571,9 +571,7 @@ static BOOL SPIsDigit(unichar c)
 
 		SPPostgresSQLToken *token = [[SPPostgresSQLToken alloc] initWithKind:kind range:NSMakeRange(range.location + i, j - i)];
 		[tokens addObject:token];
-#if !__has_feature(objc_arc)
 		[token release];
-#endif
 		i = j;
 	}
 

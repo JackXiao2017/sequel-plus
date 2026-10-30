@@ -46,7 +46,9 @@
  * the runner's thread. The tests' statement hook (-setStatementWillRunHook:, a test seam) is called on that thread,
  * before each statement.
  *
- * The editor uses MySQL's query editor font preference, without smart quotes or dashes, with undo.
+ * The editor is an SPPostgresTextView (MySQL's SPTextView with Postgres colouring): MySQL's query editor font and
+ * colour preferences, line numbers, auto-pair, auto-indent and auto-uppercase, without smart quotes or dashes, with undo.
+ * Its auto-indent, auto-pair, auto-uppercase and auto-help toggles are set from defaults when the view is built.
  */
 __attribute__((visibility("default")))
 @interface SPPostgresQueryController : NSObject <NSTableViewDataSource, NSTableViewDelegate, NSTextViewDelegate>
@@ -152,6 +154,7 @@ __attribute__((visibility("default")))
 /// Detaches the grid, editor, bars and bindings from this controller (called by the tab when it closes or replaces it; also on dealloc).
 - (void)invalidate;
 
+/// An SPPostgresTextView.
 @property (readonly) NSTextView *editor;
 @property (readonly) NSTableView *resultsView;
 /// The column names of the row set the grid shows, or nil when it shows none.

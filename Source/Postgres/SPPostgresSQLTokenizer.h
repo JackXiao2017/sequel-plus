@@ -13,6 +13,7 @@ typedef NS_ENUM(NSUInteger, SPPostgresTokenKind) {
 };
 
 /// One token: its kind and its range in the tokenized string.
+__attribute__((visibility("default")))
 @interface SPPostgresSQLToken : NSObject
 
 @property (readonly) SPPostgresTokenKind kind;
@@ -26,6 +27,7 @@ typedef NS_ENUM(NSUInteger, SPPostgresTokenKind) {
  * (tags must match), nested block comments. An unterminated string, quoted identifier, dollar body or
  * comment runs to the end of the range. Single pass over UTF-16 code units; safe on any thread.
  */
+__attribute__((visibility("default")))
 @interface SPPostgresSQLTokenizer : NSObject
 
 /// The tokens of the given range of string, in order, covering the range exactly without gaps.
