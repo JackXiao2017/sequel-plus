@@ -278,8 +278,6 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	XCTAssertTrue([[box window] makeFirstResponder:nil]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT obj_description('structure_test.t'::regclass, 'pg_class')"], @"second", @"trimmed, as MySQL's");
 	XCTAssertTrue([[info.createSyntaxView string] containsString:@"COMMENT ON TABLE \"structure_test\".\"t\" IS 'second';"], @"%@", [info.createSyntaxView string]);
-	// The save refreshes the table list's information pane (a read on the tab's runner): the next change waits for it
-	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	// A failure (a lock held elsewhere): the alert, the text stays and the tab stays
 	info.lockTimeout = 0.5;

@@ -2965,8 +2965,8 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	XCTAssertNil([self window].attachedSheet);
 }
 
-/// A comment saved in Table Info shows in the information pane under the table list.
-- (void)testInfoPaneFollowsCommentSave
+/// A comment saved in Table Info is patched into the information pane under the table list: nothing is read.
+- (void)testCommentSaveUpdatesInfoPaneWithoutRead
 {
 	[self sp9AdminRunning:@[@"CREATE TABLE public.sp9_a (id integer)"]];
 	// Expanded whatever the real preferences hold (a scratch suite, only read)
@@ -2981,21 +2981,97 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 
 	XCTAssertTrue([sidebar selectTableNamed:@"sp9_a"]);
 	[self waitForTab];
-	XCTAssertEqualObjects(sidebar.infoPane.lines[0], @"TABLE INFORMATION");
-	XCTAssertFalse([[sidebar.infoPane.lines lastObject] hasPrefix:@"comment: "]);
-
 	[self.document viewStatus:nil];
 	[self waitForTab];
+	NSArray *facts = sidebar.infoPane.lines;
+	XCTAssertEqualObjects(facts[0], @"TABLE INFORMATION");
+	XCTAssertFalse([[facts lastObject] hasPrefix:@"comment: "]);
+
+	// From here the pane's reads would show on a runner of its own
+	SPPostgresTaskRunner *probe = [[SPPostgresTaskRunner alloc] initWithConnection:[SPPostgresTestServers connectedConnectionOnPort:SPPostgresDocumentTestPort]];
+	sidebar.infoPane.taskRunner = probe;
+	[self addTeardownBlock:^{
+		[probe invalidateWithCompletion:nil];
+	}];
+
 	SPPostgresTableInfoController *info = self.document.infoController;
 	NSTextView *box = info.commentView;
-	XCTAssertTrue([[box window] makeFirstResponder:box]);
-	NSRange all = NSMakeRange(0, box.string.length);
-	[box setSelectedRange:all];
-	[box insertText:@"pane note" replacementRange:all];
-	XCTAssertTrue([info commitPendingEdits]);
-	[self waitForTab];
+	void (^save)(NSString *) = ^(NSString *text) {
+		XCTAssertTrue([[box window] makeFirstResponder:box]);
+		NSRange all = NSMakeRange(0, box.string.length);
+		[box setSelectedRange:all];
+		[box insertText:text replacementRange:all];
+		XCTAssertTrue([info commitPendingEdits]);
+	};
+
+	// Added: the line appears, and neither runner is busy (no input blocker, the next change isn't refused)
+	save(@"pane note");
+	XCTAssertFalse(probe.isBusy);
+	XCTAssertFalse(self.document.taskRunner.isBusy);
+	XCTAssertFalse(self.document.isProcessing);
 	XCTAssertEqualObjects([sidebar.infoPane.lines lastObject], @"comment: pane note");
+	XCTAssertEqual(sidebar.infoPane.lines.count, facts.count + 1);
+
+	// Changed, then removed
+	save(@"other note");
+	XCTAssertEqualObjects([sidebar.infoPane.lines lastObject], @"comment: other note");
+	XCTAssertEqual(sidebar.infoPane.lines.count, facts.count + 1);
+	save(@"");
+	XCTAssertEqualObjects(sidebar.infoPane.lines, facts);
+	XCTAssertFalse(probe.isBusy);
+	XCTAssertFalse(self.document.isProcessing);
 	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+
+	// Another relation shown in the pane: left as it is
+	[sidebar.infoPane setComment:@"stray" forRelation:@"customers" inSchema:@"public"];
+	XCTAssertEqualObjects(sidebar.infoPane.lines, facts);
+}
+
+/// The read completed while another sheet was attached: the Create Syntax sheet comes up once that sheet ends.
+- (void)testCreateSyntaxSheetWaitsForAttachedSheet
+{
+	[self privateCreateSyntaxPasteboard];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self.controller showWindow:nil];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
+	[self waitForTab];
+
+	[[self sidebarDelegate] sidebar:sidebar showCreateSyntaxForRelations:@[@"customers"] copy:NO];
+	NSPanel *other = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 200, 100) styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:YES];
+	other.releasedWhenClosed = NO;
+	[[self window] beginSheet:other completionHandler:nil];
+	[self waitForTab];
+	[self spinUntil:^BOOL{ return NO; } timeout:0.2];
+	XCTAssertEqual([self window].attachedSheet, other, @"not shown over the other sheet");
+
+	[[self window] endSheet:other];
+	[other orderOut:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [[self window].attachedSheet.title isEqualToString:@"Create syntax for TABLE 'customers'"]; } timeout:5]);
+	NSWindow *sheet = [self window].attachedSheet;
+	NSTextView *text = [self viewWithIdentifier:@"createSyntaxText" in:sheet.contentView];
+	XCTAssertTrue([text.string hasPrefix:@"CREATE TABLE \"public\".\"customers\""], @"%@", text.string);
+	[(NSButton *)[self viewWithIdentifier:@"createSyntaxCloseButton" in:sheet.contentView] performClick:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+}
+
+/// Escape closes the Create Syntax sheet, as MySQL's hidden "Close via ESC" button does.
+- (void)testEscapeClosesCreateSyntaxSheet
+{
+	[self privateCreateSyntaxPasteboard];
+	[self.controller showWindow:nil];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
+	[self waitForTab];
+
+	[[self sidebarDelegate] sidebar:sidebar showCreateSyntaxForRelations:@[@"customers"] copy:NO];
+	[self waitForTab];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet != nil; } timeout:5]);
+	NSWindow *sheet = [self window].attachedSheet;
+	NSEvent *escape = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:sheet.windowNumber context:nil characters:@"\e" charactersIgnoringModifiers:@"\e" isARepeat:NO keyCode:53];
+	XCTAssertTrue([sheet performKeyEquivalent:escape]);
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
 }
 
 @end

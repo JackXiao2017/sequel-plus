@@ -153,7 +153,7 @@ __attribute__((visibility("default")))
  * after its image item, has the same items. Each validation titles them for the targets (actionTargetRelationNames
  * here, selectedRelationNames in the gear) as MySQL's -setSelectionState: does, hiding Truncate unless every target is
  * a table, and Rename, Duplicate and the Open items unless there is exactly one. Rename and Duplicate are enabled on
- * one table, Open on one table or view, the others on at least one; every item needs the delegate's method and
+ * one table, Open on one table or view, Export on targets with at least one table (an export takes tables only), the others on at least one; every item needs the delegate's method and
  * actionsEnabled. They call the delegate.
  */
 @property (readonly) NSMenu *tableMenu;

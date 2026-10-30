@@ -16,6 +16,9 @@ static NSString * const SPPostgresSidebarInfoColumn = @"info";
 	BOOL ownsTaskRunner;
 	BOOL invalidated;
 	NSArray *lines;
+	/// The relation shown (or being read), nil for none
+	NSString *shownName;
+	NSString *shownSchema;
 }
 
 @synthesize tableView;
@@ -73,6 +76,8 @@ static NSString * const SPPostgresSidebarInfoColumn = @"info";
 	[tableView release];
 	[scrollView release];
 	[lines release];
+	[shownName release];
+	[shownSchema release];
 	[super dealloc];
 }
 
@@ -116,14 +121,28 @@ static NSString * const SPPostgresSidebarInfoColumn = @"info";
 	[tableView reloadData];
 }
 
+- (void)_setShownName:(NSString *)name schema:(NSString *)schema
+{
+	if (name != shownName) {
+		[shownName release];
+		shownName = [name copy];
+	}
+	if (schema != shownSchema) {
+		[shownSchema release];
+		shownSchema = [schema copy];
+	}
+}
+
 - (void)showNothing
 {
+	[self _setShownName:nil schema:nil];
 	[loader loadNothing];
 	[self _showLines:@[NSLocalizedString(@"INFORMATION", @"header for blank info pane")]];
 }
 
 - (void)showMultipleSelection
 {
+	[self _setShownName:nil schema:nil];
 	[loader loadNothing];
 	[self _showLines:@[NSLocalizedString(@"INFORMATION", @"header for blank info pane"), NSLocalizedString(@"multiple selection", @"multiple selection")]];
 }
@@ -151,9 +170,10 @@ static NSString *SPPostgresInfoHeader(BOOL isView)
 		[loader setTaskRunner:[SPPostgresTaskRunner inlineRunnerWithConnection:connection]];
 	}
 
-	// The header alone while the facts are read
+	// "INFORMATION" while the facts are read (and if the read is cancelled, as when Stop cancels the tab's loads)
 	NSString *header = SPPostgresInfoHeader(isView);
-	[self _showLines:@[header]];
+	[self _setShownName:name schema:schema];
+	[self _showLines:@[NSLocalizedString(@"INFORMATION", @"header for blank info pane")]];
 
 	// On the runner's thread: a structure object of its own over the runner's connection, and copies of the names
 	NSString *theName = [[name copy] autorelease];
@@ -164,6 +184,19 @@ static NSString *SPPostgresInfoHeader(BOOL isView)
 	} apply:^(id result, NSError *error) {
 		[self _showLines:result ? [self _linesForInfo:result] : @[header, NSLocalizedString(@"error occurred", @"error occurred")]];
 	}];
+}
+
+- (void)setComment:(NSString *)comment forRelation:(NSString *)name inSchema:(NSString *)schema
+{
+	if (invalidated || ![name isEqualToString:shownName] || ![schema isEqualToString:shownSchema]) return;
+	// Only over facts read (not while they are read, nor after a failed read)
+	if ([lines count] < 2 || [[lines objectAtIndex:1] isEqualToString:NSLocalizedString(@"error occurred", @"error occurred")]) return;
+
+	NSString *prefix = [NSString stringWithFormat:NSLocalizedString(@"comment: %@", @"Postgres table info pane: comment"), @""];
+	NSMutableArray *updated = [[lines mutableCopy] autorelease];
+	if ([[updated lastObject] hasPrefix:prefix]) [updated removeLastObject];
+	if ([comment length]) [updated addObject:[NSString stringWithFormat:NSLocalizedString(@"comment: %@", @"Postgres table info pane: comment"), comment]];
+	[self _showLines:updated];
 }
 
 /// The rows for -[SPPostgresTableStructure tableInfo:]'s result.
