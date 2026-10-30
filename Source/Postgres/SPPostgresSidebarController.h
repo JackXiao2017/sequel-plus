@@ -178,6 +178,8 @@ __attribute__((visibility("default")))
 - (NSMenu *)menuForRow:(NSInteger)row;
 
 @property (readonly) NSString *selectedSchema;
+/// The schemas the schema pop-up lists (as last loaded), in its order; empty before the first load.
+@property (readonly) NSArray<NSString *> *schemaNames;
 /// The schema a schema reload (-reloadSchema:…) has been asked for and not yet completed, nil when none is queued: the
 /// schema about to be shown.
 @property (readonly, copy) NSString *pendingSchema;

@@ -1,5 +1,7 @@
 #import "SPPostgresTextView.h"
 #import "SPPostgresSQLTokenizer.h"
+#import "SPNarrowDownCompletion.h"
+#import "SPConstants.h"
 
 // The attributes SPTextView's own -doSyntaxHighlighting sets, which its auto-pair (-keyDown:) and auto-help read.
 // They are private #defines in Source/SPTextView.m (kLEXToken/kLEXTokenValue, kQuote/kQuoteValue, kSQLkeyword/kValue);
@@ -16,7 +18,169 @@ static NSString * const SPPostgresSQLKeywordValue = @"x";        // kValue
 static const NSUInteger SPPostgresSyntaxHiliteBias = 2000;
 static const NSUInteger SPPostgresMaxTextSizeForSyntaxHighlighting = 20000000;
 
+// SPTextView's private pop-up placement (Source/SPTextView.m), used as SPTextView's own completion uses it
+@interface SPTextView (SPPostgresCompletionPlacement)
+- (void)_positionCompletionPopup:(SPNarrowDownCompletion *)aPopup relativeToTextAtLocation:(NSUInteger)aLocation;
+@end
+
+// SPNarrowDownCompletion's private methods (Source/SPNarrowDownCompletion.m): the filtering of the items, and the event
+// loop -orderFront: starts after a delay
+@interface SPNarrowDownCompletion (SPPostgresCompletionPrivate)
+- (void)filter;
+- (void)watchUserEvents;
+@end
+
+/**
+ * MySQL's completion pop-up for the Postgres editor's items, whose "match" may be a double-quoted name:
+ * - a filter typed without a leading " (Ord) finds a quoted name by the name itself (Order Items), as one typed after a
+ *   " finds it by its quoted form (SPNarrowDownCompletion only compares "match" when an item has one);
+ * - the autocompletion placeholder is shown only when what is inserted starts with what was typed, and the replaced
+ *   range ends at the caret;
+ * - a function gets "()" (CustomQueryFunctionCompletionInsertsArguments), not MySQL's argument snippet for a MySQL
+ *   function of that name;
+ * - -close also drops the event loop -orderFront: scheduled, so a pop-up closed before it starts never runs it.
+ * No item is a reference ("isRef"), so nothing here is backtick-quoted and backtickMode stays 0.
+ */
+@interface SPPostgresNarrowDownCompletion : SPNarrowDownCompletion
+
+/// The replaced range goes past the caret (a closing " or the rest of the word): SPNarrowDownCompletion's placeholder
+/// assumes it ends there, so none is shown.
+@property (assign) BOOL rangeExtendsPastCaret;
+
+@end
+
+@implementation SPPostgresNarrowDownCompletion
+
+@synthesize rangeExtendsPastCaret;
+
+- (void)filter
+{
+	NSString *typed = staticPrefix ? [staticPrefix stringByAppendingString:mutablePrefix] : [NSString stringWithString:mutablePrefix];
+	if (dictMode || [typed hasPrefix:@"\""]) {
+		[super filter];
+		return;
+	}
+
+	// The quoted items, filtered on their name: copies without "match", mapped back to the items once filtered
+	NSArray *items = suggestions;
+	NSMutableArray *byName = [NSMutableArray arrayWithCapacity:[items count]];
+	NSMapTable *originals = [[NSMapTable alloc] initWithKeyOptions:(NSPointerFunctionsStrongMemory | NSPointerFunctionsObjectPointerPersonality)
+													  valueOptions:NSPointerFunctionsStrongMemory capacity:0];
+	for (NSDictionary *item in items) {
+		if (![[item objectForKey:@"match"] hasPrefix:@"\""]) {
+			[byName addObject:item];
+			continue;
+		}
+		NSMutableDictionary *copy = [[item mutableCopy] autorelease];
+		[copy removeObjectForKey:@"match"];
+		[byName addObject:copy];
+		[originals setObject:item forKey:copy];
+	}
+
+	suggestions = byName;
+	@try {
+		[super filter];
+	}
+	@finally {
+		suggestions = items;
+	}
+
+	if ([originals count] && filtered) {
+		NSMutableArray *mapped = [NSMutableArray arrayWithCapacity:[filtered count]];
+		for (id item in filtered) [mapped addObject:([originals objectForKey:item] ?: item)];
+		[filtered release];
+		filtered = [mapped retain];
+	}
+	[originals release];
+}
+
+- (void)insertAutocompletePlaceholder
+{
+	if (rangeExtendsPastCaret) return;
+
+	NSInteger row = [theTableView selectedRow];
+	if (row >= 0 && (NSUInteger)row < [filtered count]) {
+		NSDictionary *item = [filtered objectAtIndex:(NSUInteger)row];
+		NSString *match = [item objectForKey:@"match"] ?: [item objectForKey:@"display"];
+		if (match && ![[match lowercaseString] hasPrefix:[originalFilterString lowercaseString]]) {
+			// "Order Items" for Ord: no placeholder (the rest of the text wouldn't be what is inserted)
+			[self removeAutocompletionPlaceholderUsingFastMethod:YES];
+			return;
+		}
+	}
+	[super insertAutocompletePlaceholder];
+}
+
+- (void)insert_text:(NSString *)aString
+{
+	NSInteger row = [theTableView selectedRow];
+	NSDictionary *item = (row >= 0 && (NSUInteger)row < [filtered count]) ? [filtered objectAtIndex:(NSUInteger)row] : nil;
+	if (dictMode || ![[item objectForKey:@"image"] hasPrefix:@"func"]) {
+		[super insert_text:aString];
+		return;
+	}
+
+	// SPNarrowDownCompletion's insertion (backtickMode is 0: no item is a reference), then "()" for the arguments
+	NSUInteger length = [[theView string] length];
+	if (NSMaxRange(theCharRange) > length) theCharRange = NSIntersectionRange(NSMakeRange(0, length), theCharRange);
+	[theView breakUndoCoalescing];
+	if (![theView selectedRange].length) [theView setSelectedRange:theCharRange];
+	[theView breakUndoCoalescing];
+	[theView insertText:aString];
+	if ([prefs boolForKey:SPCustomQueryFunctionCompletionInsertsArguments] && ![aString hasSuffix:@")"]) {
+		[theView insertText:@"()"];
+		[theView moveLeft:nil];
+	}
+}
+
+- (void)close
+{
+	[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(watchUserEvents) object:nil];
+	[super close];
+}
+
+@end
+
+#pragma mark -
+
+/// The name as completion inserts it: double-quoted ("" for ") unless it is an all-lowercase identifier and no keyword.
+static NSString *SPPostgresCompletionInsertedName(NSString *name)
+{
+	static NSCharacterSet *notIdentifier = nil;
+	static NSCharacterSet *notFirst = nil;
+	static dispatch_once_t once;
+	dispatch_once(&once, ^{
+		NSMutableCharacterSet *identifier = [NSMutableCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyz_0123456789$"];
+		notIdentifier = [[identifier invertedSet] retain];
+		notFirst = [[NSCharacterSet characterSetWithCharactersInString:@"0123456789$"] retain];
+	});
+
+	BOOL plain = [name length]
+		&& [name rangeOfCharacterFromSet:notIdentifier].location == NSNotFound
+		&& ![notFirst characterIsMember:[name characterAtIndex:0]]
+		&& ![[SPPostgresSQLTokenizer keywords] containsObject:name];
+	if (plain) return name;
+
+	return [NSString stringWithFormat:@"\"%@\"", [name stringByReplacingOccurrencesOfString:@"\"" withString:@"\"\""]];
+}
+
+/// A completion item for a name (SPNarrowDownCompletion's keys; "match" only when the inserted text differs).
+static NSDictionary *SPPostgresCompletionNameItem(NSString *name, NSString *image)
+{
+	NSString *inserted = SPPostgresCompletionInsertedName(name);
+	if ([inserted isEqualToString:name]) return @{@"display": name, @"image": image};
+	return @{@"display": name, @"match": inserted, @"image": image};
+}
+
+/// Whether c is part of an unquoted identifier (letters, digits, _ and $).
+static BOOL SPPostgresIsIdentifierCharacter(unichar c)
+{
+	return c == '_' || c == '$' || [[NSCharacterSet alphanumericCharacterSet] characterIsMember:c];
+}
+
 @implementation SPPostgresTextView
+
+@synthesize completionNamesProvider;
 
 - (instancetype)initWithFrame:(NSRect)frame scrollView:(NSScrollView *)theScrollView
 {
@@ -179,6 +343,262 @@ static const NSUInteger SPPostgresMaxTextSizeForSyntaxHighlighting = 20000000;
 	}
 
 	[self setNeedsDisplayInRect:[self bounds]];
+}
+
+#pragma mark - Completion
+
+/// The provider's names for key, nil-safe.
+- (NSArray<NSString *> *)_completionNames:(NSDictionary *)names forKey:(NSString *)key
+{
+	id list = [names objectForKey:key];
+	return [list isKindOfClass:[NSArray class]] ? list : @[];
+}
+
+- (NSArray *)suggestionsForSQLCompletionWith:(NSString *)currentWord dictMode:(BOOL)isDictMode browseMode:(BOOL)dbBrowseMode withTableName:(NSString *)aTableName withDbName:(NSString *)aDbName
+{
+	NSMutableArray *items = [NSMutableArray array];
+	if (!currentWord) currentWord = @"";
+
+	if (!dbBrowseMode) {
+		// As SPTextView: the buffer's words starting with the current word (below 1 MB), without it, sorted. A word is
+		// an identifier or keyword token (so widget_count is one word, and nothing inside strings or comments)
+		NSString *text = [self string];
+		if ([text length] && [text length] < 1000000) {
+			NSMutableSet *words = [NSMutableSet set];
+			for (SPPostgresSQLToken *token in [SPPostgresSQLTokenizer tokensInString:text range:NSMakeRange(0, [text length])]) {
+				if ([token kind] != SPPostgresTokenIdentifier && [token kind] != SPPostgresTokenKeyword) continue;
+				NSString *string = [text substringWithRange:[token range]];
+				if ([string hasPrefix:currentWord]) [words addObject:string];
+			}
+			[words removeObject:currentWord];
+			for (NSString *word in [[words allObjects] sortedArrayUsingSelector:@selector(localizedCompare:)]) {
+				[items addObject:@{@"display": word, @"image": @"dummy-small"}];
+			}
+		}
+
+		if (!isDictMode) {
+			for (NSString *keyword in [[[SPPostgresSQLTokenizer keywords] allObjects] sortedArrayUsingSelector:@selector(compare:)]) {
+				[items addObject:@{@"display": [keyword uppercaseString], @"image": @"dummy-small"}];
+			}
+			for (NSString *function in [SPPostgresSQLTokenizer functionNames]) {
+				[items addObject:@{@"display": function, @"image": @"func-small"}];
+			}
+		}
+	}
+
+	if (isDictMode) return items;
+
+	NSDictionary *names = completionNamesProvider ? completionNamesProvider() : nil;
+	if (!dbBrowseMode) {
+		for (NSString *name in [self _completionNames:names forKey:@"databases"]) [items addObject:SPPostgresCompletionNameItem(name, @"database-small")];
+		for (NSString *name in [self _completionNames:names forKey:@"schemas"]) [items addObject:SPPostgresCompletionNameItem(name, @"database-small")];
+	}
+	for (NSString *name in [self _completionNames:names forKey:@"tables"]) [items addObject:SPPostgresCompletionNameItem(name, @"table-small-square")];
+	for (NSString *name in [self _completionNames:names forKey:@"views"]) [items addObject:SPPostgresCompletionNameItem(name, @"table-view-small-square")];
+	for (NSString *name in [self _completionNames:names forKey:@"columns"]) [items addObject:SPPostgresCompletionNameItem(name, @"field-small-square")];
+
+	return items;
+}
+
+/**
+ * SPTextView's auto-completion timer action without its SPCustomQuery gate: when CustomQueryAutoComplete is on, the
+ * editor is the key window's first responder, nothing is selected and the character before the caret is a word's,
+ * completion opens in auto-complete mode (the spelling dictionary inside a string or comment, as SPTextView's).
+ * SPTextView schedules it after CustomQueryAutoCompleteDelay when a character is typed.
+ */
+- (void)doAutoCompletion
+{
+	if (completionIsOpen || ![self delegate]) return;
+
+	[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(doAutoCompletion) object:nil];
+	if (![prefs boolForKey:SPCustomQueryAutoComplete]) return;
+
+	NSRange r = [self selectedRange];
+	if (r.length || snippetControlCounter > -1 || !r.location) return;
+
+	NSCharacterSet *ignoreCharacterSet = [NSCharacterSet characterSetWithCharactersInString:@"\"'`;,()[]{}=+/<> \t\n\r"];
+	if ([ignoreCharacterSet characterIsMember:[[self string] characterAtIndex:r.location - 1]]) return;
+	if ([[NSApp keyWindow] firstResponder] != self) return;
+
+	BOOL useSpellChecker = ([[self textStorage] attribute:SPPostgresQuote atIndex:r.location - 1 effectiveRange:NULL] != nil);
+	[self doCompletionByUsingSpellChecker:useSpellChecker fuzzyMode:NO autoCompleteMode:YES];
+}
+
+/**
+ * SPTextView's completion (Esc, ⌃Esc, auto-completion) for PostgreSQL identifiers, in SPPostgresNarrowDownCompletion:
+ * the word is the identifier at the caret, or a "quoted identifier opened before the caret on its line (its closing "
+ * replaced too); after "name." only the tables, views and columns are offered. The spelling dictionary mode (F5, or
+ * auto-completion in a string) is SPTextView's.
+ */
+- (void)doCompletionByUsingSpellChecker:(BOOL)isDictMode fuzzyMode:(BOOL)fuzzySearch autoCompleteMode:(BOOL)autoCompleteMode
+{
+	if (isDictMode) {
+		[super doCompletionByUsingSpellChecker:isDictMode fuzzyMode:fuzzySearch autoCompleteMode:autoCompleteMode];
+		return;
+	}
+
+	if ([prefs boolForKey:SPCustomQueryAutoComplete]) {
+		[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(doAutoCompletion) object:nil];
+	}
+
+	if (![self isEditable] || (completionIsOpen && !completionWasReinvokedAutomatically)) return;
+
+	[self breakUndoCoalescing];
+	completionFuzzyMode = fuzzySearch;
+
+	NSString *text = [self string];
+	NSUInteger length = [text length];
+	NSUInteger caretPos = NSMaxRange([self selectedRange]);
+	[self setSelectedRange:NSMakeRange(caretPos, 0)];
+
+	// A "quoted identifier opened before the caret on this line (the tokenizer runs it to the caret when unclosed)
+	NSRange lineRange = [text lineRangeForRange:NSMakeRange(caretPos, 0)];
+	NSUInteger start = caretPos;
+	NSUInteger end = caretPos;
+	BOOL quoted = NO;
+	if (caretPos > lineRange.location) {
+		NSRange headRange = NSMakeRange(lineRange.location, caretPos - lineRange.location);
+		SPPostgresSQLToken *last = [[SPPostgresSQLTokenizer tokensInString:text range:headRange] lastObject];
+		if ([last kind] == SPPostgresTokenQuotedIdentifier && NSMaxRange([last range]) == caretPos) {
+			NSString *token = [text substringWithRange:[last range]];
+			NSUInteger quotes = [[token componentsSeparatedByString:@"\""] count] - 1;
+			if (quotes % 2) {
+				quoted = YES;
+				start = [last range].location;
+				// Up to and with the closing " on this line (an auto-paired one, or the rest of a name being edited)
+				NSUInteger lineEnd = NSMaxRange(lineRange);
+				NSRange closing = [text rangeOfString:@"\"" options:0 range:NSMakeRange(caretPos, lineEnd - caretPos)];
+				if (closing.location != NSNotFound) end = NSMaxRange(closing);
+			}
+		}
+	}
+	if (!quoted) {
+		while (start > lineRange.location && SPPostgresIsIdentifierCharacter([text characterAtIndex:start - 1])) start--;
+		while (end < length && SPPostgresIsIdentifierCharacter([text characterAtIndex:end])) end++;
+	}
+
+	NSRange completionRange = NSMakeRange(start, end - start);
+	if (completionRange.length > 100000) return;
+
+	// What is typed (to the caret for a quoted name: its closing " is not typed)
+	NSString *filter = quoted ? [text substringWithRange:NSMakeRange(start, caretPos - start)] : [text substringWithRange:completionRange];
+
+	// After "qualifier.": browse mode (the qualifier, unquoted)
+	NSString *qualifier = nil;
+	if (start > 0 && [text characterAtIndex:start - 1] == '.') {
+		NSUInteger qualifierEnd = start - 1;
+		NSUInteger qualifierStart = qualifierEnd;
+		if (qualifierEnd > lineRange.location && [text characterAtIndex:qualifierEnd - 1] == '"') {
+			NSRange opening = [text rangeOfString:@"\"" options:NSBackwardsSearch range:NSMakeRange(lineRange.location, qualifierEnd - 1 - lineRange.location)];
+			if (opening.location != NSNotFound) {
+				qualifierStart = opening.location;
+				NSString *inner = [text substringWithRange:NSMakeRange(qualifierStart + 1, qualifierEnd - qualifierStart - 2)];
+				qualifier = [inner stringByReplacingOccurrencesOfString:@"\"\"" withString:@"\""];
+			}
+		}
+		else {
+			while (qualifierStart > lineRange.location && SPPostgresIsIdentifierCharacter([text characterAtIndex:qualifierStart - 1])) qualifierStart--;
+			if (qualifierStart < qualifierEnd) qualifier = [text substringWithRange:NSMakeRange(qualifierStart, qualifierEnd - qualifierStart)];
+		}
+	}
+	BOOL browseMode = (qualifier != nil);
+
+	// As SPTextView: no auto-uppercasing of the word being completed
+	if (completionRange.length && caretPos) [[self textStorage] removeAttribute:SPPostgresSQLKeyword range:completionRange];
+
+	NSArray *items = [self suggestionsForSQLCompletionWith:filter dictMode:NO browseMode:browseMode withTableName:qualifier withDbName:nil];
+
+	if (completionIsOpen) [completionPopup close], completionPopup = nil;
+	completionIsOpen = YES;
+	// Owned as SPTextView owns its pop-ups: the window releases itself when closed
+	completionPopup = [[SPPostgresNarrowDownCompletion alloc] initWithItems:items
+	                                                           alreadyTyped:filter
+	                                                           staticPrefix:@""
+	                                               additionalWordCharacters:@"_.$"
+	                                                          caseSensitive:NO
+	                                                              charRange:completionRange
+	                                                             parseRange:completionRange
+	                                                                 inView:self
+	                                                               dictMode:NO
+	                                                         tabTriggerMode:[self isSnippetMode]
+	                                                            fuzzySearch:fuzzySearch
+	                                                           backtickMode:0
+	                                                             selectedDb:@""
+	                                                         caretMovedLeft:NO
+	                                                           autoComplete:autoCompleteMode
+	                                                              oneColumn:NO
+	                                                                  alias:nil
+	                                               withDBStructureRetriever:nil];
+
+	[(SPPostgresNarrowDownCompletion *)completionPopup setRangeExtendsPastCaret:(end > caretPos)];
+	completionParseRangeLocation = completionRange.location;
+
+	[self _positionCompletionPopup:completionPopup relativeToTextAtLocation:completionRange.location];
+
+	[completionPopup orderFront:self];
+	[completionPopup insertAutocompletePlaceholder];
+}
+
+/**
+ * SPTextView's predefined lists from the provider (never the delegate's MySQL tablesListInstance or document):
+ * $SP_ASLIST_ALL_DATABASES the databases, $SP_ASLIST_ALL_TABLES the tables and views, $SP_ASLIST_ALL_FIELDS the
+ * current table's columns. Any other kind is logged and beeps, as SPTextView's.
+ */
+- (void)showCompletionListFor:(NSString *)kind atRange:(NSRange)aRange fuzzySearch:(BOOL)fuzzySearchMode
+{
+	if ([prefs boolForKey:SPCustomQueryAutoComplete]) {
+		[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(doAutoCompletion) object:nil];
+	}
+
+	NSDictionary *names = completionNamesProvider ? completionNamesProvider() : nil;
+	NSMutableArray *items = [NSMutableArray array];
+
+	if ([kind isEqualToString:@"$SP_ASLIST_ALL_TABLES"]) {
+		for (NSString *name in [self _completionNames:names forKey:@"tables"]) [items addObject:SPPostgresCompletionNameItem(name, @"table-small-square")];
+		for (NSString *name in [self _completionNames:names forKey:@"views"]) [items addObject:SPPostgresCompletionNameItem(name, @"table-view-small-square")];
+	}
+	else if ([kind isEqualToString:@"$SP_ASLIST_ALL_DATABASES"]) {
+		for (NSString *name in [self _completionNames:names forKey:@"databases"]) [items addObject:SPPostgresCompletionNameItem(name, @"database-small")];
+	}
+	else if ([kind isEqualToString:@"$SP_ASLIST_ALL_FIELDS"]) {
+		for (NSString *name in [self _completionNames:names forKey:@"columns"]) [items addObject:SPPostgresCompletionNameItem(name, @"field-small-square")];
+	}
+	else {
+		NSLog(@"“%@” is not a valid completion list", kind);
+		NSBeep();
+		return;
+	}
+
+	if (completionIsOpen) [completionPopup close], completionPopup = nil;
+	completionIsOpen = YES;
+	completionPopup = [[SPPostgresNarrowDownCompletion alloc] initWithItems:items
+	                                                           alreadyTyped:@""
+	                                                           staticPrefix:@""
+	                                               additionalWordCharacters:@"_."
+	                                                          caseSensitive:NO
+	                                                              charRange:aRange
+	                                                             parseRange:aRange
+	                                                                 inView:self
+	                                                               dictMode:NO
+	                                                         tabTriggerMode:[self isSnippetMode]
+	                                                            fuzzySearch:fuzzySearchMode
+	                                                           backtickMode:0
+	                                                             selectedDb:@""
+	                                                         caretMovedLeft:NO
+	                                                           autoComplete:NO
+	                                                              oneColumn:NO
+	                                                                  alias:nil
+	                                               withDBStructureRetriever:nil];
+
+	[self _positionCompletionPopup:completionPopup relativeToTextAtLocation:aRange.location];
+
+	[completionPopup orderFront:self];
+}
+
+- (void)dealloc
+{
+	[completionNamesProvider release];
+	[super dealloc];
 }
 
 @end

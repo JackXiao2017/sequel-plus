@@ -90,6 +90,8 @@ __attribute__((visibility("default")))
 @property (nonatomic, retain) NSUserDefaults *defaults;
 @property (readonly, copy) NSString *schema;
 @property (readonly, copy) NSString *table;
+/// The names of the shown table's columns, in grid order, as loaded (empty before they come, or with no table).
+@property (readonly) NSArray<NSString *> *columnNames;
 
 /// 1-based.
 @property (readonly) NSUInteger currentPage;

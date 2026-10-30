@@ -19,6 +19,7 @@
 #import "SPPostgresSequences.h"
 #import "SPPostgresTableStructure.h"
 #import "SPPostgresQueryController.h"
+#import "SPPostgresTextView.h"
 #import "SPPostgresHistory.h"
 #import "SPPostgresTableDuplicator.h"
 #import "SPPostgresTableActions.h"
@@ -91,6 +92,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 - (void)_dropExtension:(NSString *)name;
 - (void)_extensionInstalled:(NSString *)name;
 - (void)_installQueryController;
+- (NSDictionary *)_completionNames;
 - (void)_queryRunChangedSchema:(BOOL)schemaChanged data:(BOOL)dataChanged;
 - (void)_structureDidChange:(BOOL)columnsChanged;
 - (void)_reloadSidebarKeepingSelection;
@@ -882,11 +884,43 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[queryController setExportResultHandler:^{
 		[document exportQueryResult:nil];
 	}];
+	// Completion's names, from what the tab lists (never a query: the runner may be using the connection)
+	[(SPPostgresTextView *)[queryController editor] setCompletionNamesProvider:^NSDictionary *{
+		return [document _completionNames];
+	}];
 
 	NSView *queryView = [queryController view];
 	[queryView setFrame:[pane bounds]];
 	[queryView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 	if ([currentPane isEqualToString:SPPostgresPaneQuery]) [pane addSubview:queryView];
+}
+
+/**
+ * The Query editor's completion names, from the lists the tab holds (read on the main thread, at once): the databases
+ * of the database pop-up, the schemas of the sidebar's schema pop-up, the shown schema's tables and views, and the
+ * columns the Content view loaded for the selected table (none while it shows another table or has not loaded them).
+ */
+- (NSDictionary *)_completionNames
+{
+	if (tornDown) return @{};
+
+	NSMutableArray *databases = [NSMutableArray array];
+	for (NSMenuItem *item in [databasePopup itemArray]) {
+		if ([item isSeparatorItem]) break; // then "Refresh Databases"
+		[databases addObject:[item title]];
+	}
+
+	NSArray *columns = @[];
+	NSString *table = [sidebar selectedTableName];
+	if (table && [[contentController table] isEqualToString:table] && [[contentController schema] isEqualToString:[sidebar selectedSchema]]) {
+		columns = [contentController columnNames];
+	}
+
+	return @{@"databases": databases,
+			 @"schemas": [sidebar schemaNames] ?: @[],
+			 @"tables": [sidebar itemTitlesInSection:@"TABLES"] ?: @[],
+			 @"views": [sidebar itemTitlesInSection:@"VIEWS"] ?: @[],
+			 @"columns": columns ?: @[]};
 }
 
 /// The known pane names, in toolbar order.

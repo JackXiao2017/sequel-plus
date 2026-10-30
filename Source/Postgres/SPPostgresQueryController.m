@@ -298,7 +298,8 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[exportCSVMenuItem setTarget:nil];
 	[infoPaneSplitView setDelegate:nil];
 
-	// The blocks may capture the tab
+	// The blocks may capture the tab (the editor's completion names too)
+	[(SPPostgresTextView *)editor setCompletionNamesProvider:nil];
 	[runDidChangeDatabase release];
 	runDidChangeDatabase = nil;
 	[exportResultHandler release];

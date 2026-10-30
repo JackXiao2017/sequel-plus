@@ -462,7 +462,7 @@ static BOOL SPIsDigit(unichar c)
 	dispatch_once(&once, ^{
 		NSMutableSet *set = [NSMutableSet set];
 		for (size_t i = 0; i < sizeof(SPPostgresFunctionNameWords) / sizeof(*SPPostgresFunctionNameWords); i++) [set addObject:@(SPPostgresFunctionNameWords[i]).lowercaseString];
-		names = [[set allObjects] sortedArrayUsingSelector:@selector(compare:)];
+		names = [[[set allObjects] sortedArrayUsingSelector:@selector(compare:)] retain]; // kept for the process (MRC)
 	});
 	return names;
 }

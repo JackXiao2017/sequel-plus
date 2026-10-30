@@ -1072,6 +1072,11 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 
 #pragma mark - Queries
 
+- (NSArray<NSString *> *)schemaNames
+{
+	return [[schemas retain] autorelease] ?: @[];
+}
+
 - (NSArray *)sectionTitles
 {
 	return [sections valueForKey:@"title"];
