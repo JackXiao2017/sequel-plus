@@ -927,7 +927,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	if (!helpViewerController) {
 		helpDataSource = [[SPPostgresHelpDataSource alloc] initWithServerMajorVersion:major];
 		helpViewerController = [[SPPostgresHelpViewerController alloc] init];
-		[helpViewerController setDataSource:helpDataSource];
+		[helpViewerController setDataSource:(id<SPHelpViewerDataSource>)helpDataSource]; // conforms (SPPostgresHelp.m)
 		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_helpViewerClosedByUser:) name:SPUserClosedHelpViewerNotification object:helpViewerController];
 	}
 	[helpDataSource setServerMajorVersion:major];

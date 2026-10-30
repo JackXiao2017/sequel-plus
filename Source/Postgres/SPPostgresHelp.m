@@ -24,6 +24,9 @@ static NSString *SPPostgresHelpEscapedHTML(NSString *string)
 	return escaped;
 }
 
+@interface SPPostgresHelpDataSource () <SPHelpViewerDataSource>
+@end
+
 @implementation SPPostgresHelpDataSource
 {
 	NSString *serverMajorVersion;
@@ -397,7 +400,8 @@ static NSString *SPPostgresHelpEscapedHTML(NSString *string)
 
 @implementation SPPostgresHelpViewerController
 
-/// As SPHelpViewerController's, titled for PostgreSQL.
+/// As SPHelpViewerController's, titled for PostgreSQL. Overrides a private SPHelpViewerController method;
+/// testAutoHelpShowsWordAtCaret (SPPostgresQueryGearTests) guards the title.
 - (void)updateWindowTitle
 {
 	NSString *title = NSLocalizedString(@"PostgreSQL Help", @"Postgres help viewer: window title");

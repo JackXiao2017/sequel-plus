@@ -486,23 +486,24 @@ static const NSUInteger SPTextViewTestPort = 55418;
 	[self closePopup:popup];
 }
 
-/// Only a name that isn't a plain lowercase identifier, or is a RESERVED keyword, is quoted (Ruling 6): name and type
+/// Only a name that isn't a plain lowercase identifier, or is a reserved or type_func_name keyword, is quoted (Rulings 6, 6b): name and type
 /// are (unreserved) keywords, used as plain column names.
 - (void)testCompletionQuotesOnlyReservedKeywords
 {
 	[self editor].completionNamesProvider = ^NSDictionary *{
-		return @{@"tables": @[@"select", @"order", @"name", @"type"], @"columns": @[@"name", @"date"]};
+		return @{@"tables": @[@"select", @"order", @"join", @"name", @"type"], @"columns": @[@"name", @"date"]};
 	};
 
 	XCTAssertTrue([[SPPostgresSQLTokenizer reservedKeywords] containsObject:@"select"]);
 	XCTAssertFalse([[SPPostgresSQLTokenizer reservedKeywords] containsObject:@"name"]);
-	XCTAssertEqual([[SPPostgresSQLTokenizer reservedKeywords] count], 78u);
+	XCTAssertEqual([[SPPostgresSQLTokenizer reservedKeywords] count], 101u, @"catcode R and T");
 
 	NSArray *suggestions = [self suggestionsFor:@""];
 	for (NSDictionary *item in suggestions) {
 		if ([item[@"image"] isEqualToString:@"table-small-square"] || [item[@"image"] isEqualToString:@"field-small-square"]) {
 			if ([item[@"display"] isEqualToString:@"select"]) XCTAssertEqualObjects(item[@"match"], @"\"select\"");
 			else if ([item[@"display"] isEqualToString:@"order"]) XCTAssertEqualObjects(item[@"match"], @"\"order\"");
+			else if ([item[@"display"] isEqualToString:@"join"]) XCTAssertEqualObjects(item[@"match"], @"\"join\"", @"a type_func_name keyword");
 			else XCTAssertNil(item[@"match"], @"%@ completes unquoted", item[@"display"]);
 		}
 	}

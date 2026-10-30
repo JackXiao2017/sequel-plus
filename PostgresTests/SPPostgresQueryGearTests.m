@@ -9,14 +9,9 @@
 #import "../Source/Postgres/SPPostgresFavorite.h"
 #import "../Source/Postgres/SPPostgresTaskRunner.h"
 #import "../Source/SPComboPopupButton.h"
-
-// The help classes (Source/Postgres/SPPostgresHelp.h, which imports SPHelpViewerController.h; not imported here)
-@interface SPPostgresHelpDataSource : NSObject
-- (instancetype)initWithServerMajorVersion:(NSString *)major;
-+ (NSString *)documentationPathForKeyword:(NSString *)keyword;
-+ (NSString *)majorVersionFromServerVersion:(NSString *)serverVersion;
-- (NSString *)HTMLHelpContentsForSearchString:(NSString *)searchString autoHelp:(BOOL)autoHelp;
-@end
+#import "../Source/Postgres/SPPostgresSQLTokenizer.h"
+#import "../Source/Postgres/SPPostgresStatementSplitter.h"
+#import "../Source/Postgres/SPPostgresHelpDataSource.h"
 
 // MySQL's preference keys (Source/SPConstants.m; the header is not ARC-clean)
 static NSString * const SPGearTestAutoIndentKey = @"CustomQueryAutoIndent";
@@ -361,13 +356,30 @@ static const NSUInteger SPGearTestPort = 55418;
 	[self choose:commentQuery];
 	XCTAssertEqualObjects([editor string], @"SELECT 1;\nSELECT 2");
 
-	// A "*/" inside is escaped, and restored when unwrapped
-	[editor setString:@"SELECT 1 /* x */ + 2"];
-	[editor setSelectedRange:NSMakeRange(3, 0)];
-	[self choose:commentQuery];
-	XCTAssertEqualObjects([editor string], @"/* SELECT 1 /* x *\\/ + 2 */");
-	[self choose:commentQuery];
-	XCTAssertEqualObjects([editor string], @"SELECT 1 /* x */ + 2");
+	// A block comment or a "/*" in a string inside: both delimiters are escaped (PostgreSQL's comments nest), so the
+	// wrapped statement is one comment and the next statement stays one; unwrapping restores the text exactly
+	NSArray *wrapped = @[
+		@[@"SELECT 1 /* x */ + 2;\nSELECT 2", @"/* SELECT 1 /\\* x *\\/ + 2 */;\nSELECT 2"],
+		@[@"SELECT '/*';\nSELECT 2", @"/* SELECT '/\\*' */;\nSELECT 2"],
+		@[@"SELECT '*/', '/\\', 3 */ 1;\nSELECT 2", @"/* SELECT '*\\/', '/\\\\', 3 *\\/ 1 */;\nSELECT 2"],
+	];
+	for (NSArray *pair in wrapped) {
+		NSString *original = pair[0];
+		[editor setString:original];
+		[editor setSelectedRange:NSMakeRange(3, 0)];
+		[self choose:commentQuery];
+		NSString *text = [editor string];
+		XCTAssertEqualObjects(text, pair[1]);
+
+		NSUInteger semicolon = [text rangeOfString:@";\nSELECT 2"].location;
+		NSArray<SPPostgresSQLToken *> *tokens = [SPPostgresSQLTokenizer tokensInString:text range:NSMakeRange(0, [text length])];
+		XCTAssertEqual([tokens[0] kind], SPPostgresTokenComment, @"%@", text);
+		XCTAssertEqual(NSMaxRange([tokens[0] range]), semicolon, @"the wrapped statement is one comment: %@", text);
+		XCTAssertEqualObjects([SPPostgresStatementSplitter statementsInSQL:text], @[@"SELECT 2"], @"%@", text);
+
+		[self choose:commentQuery];
+		XCTAssertEqualObjects([editor string], original, @"unwrapped exactly");
+	}
 
 	// The run button follows the changed text (a programmatic change)
 	[editor setString:@"SELECT 1;\nSELECT 2"];

@@ -36,8 +36,9 @@ __attribute__((visibility("default")))
 /// Lowercase keywords and built-in type names (frozen from PostgreSQL 18).
 + (NSSet<NSString *> *)keywords;
 
-/// Lowercase RESERVED keywords (frozen from PostgreSQL 18, pg_get_keywords() catcode 'R'): a name that is one of them
-/// must be double-quoted to be used as an identifier.
+/// Lowercase keywords that can't be used as a column name unquoted (frozen from PostgreSQL 18, pg_get_keywords()
+/// catcode 'R', reserved, and 'T', type_func_name, e.g. join, left, is): a name that is one of them must be double-quoted
+/// to be used as an identifier.
 + (NSSet<NSString *> *)reservedKeywords;
 
 /// Lowercase, sorted names of built-in functions (frozen from PostgreSQL 18).
