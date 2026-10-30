@@ -53,6 +53,7 @@ __attribute__((visibility("default")))
 	NSInteger _primaryKeyPosition;
 	BOOL _nullable;
 	BOOL _isGenerated;
+	BOOL _isAutoNumbered;
 }
 
 @property (readonly, copy) NSString *name;
@@ -71,6 +72,9 @@ __attribute__((visibility("default")))
 @property (readonly) NSInteger primaryKeyPosition;
 /// YES for identity ALWAYS columns and generated columns.
 @property (readonly) BOOL isGenerated;
+/// YES for identity columns (ALWAYS or BY DEFAULT) and serial ones (whose default starts with "nextval("): the columns a
+/// copied row takes a new value for (as MySQL's auto_increment).
+@property (readonly) BOOL isAutoNumbered;
 
 @end
 
@@ -154,6 +158,11 @@ __attribute__((visibility("default")))
 /// Inserts a row; columns missing from valuesByColumn (name -> NSString/NSNull) get their defaults.
 /// Returns the inserted row (via RETURNING) in the same format as -rowsWithFilter:…, or nil on failure.
 - (NSArray *)insertRowWithValues:(NSDictionary *)valuesByColumn error:(NSError **)error;
+
+/// Inserts a copy of row (as returned by -rowsWithFilter:…): its values for every column, except generated and
+/// auto-numbered ones (see SPPostgresColumn), which get their defaults. Returns the inserted row, as
+/// -insertRowWithValues:error:, or nil on failure (a plain primary key the copy repeats fails with the server's error).
+- (NSArray *)insertCopyOfRow:(NSArray *)row error:(NSError **)error;
 
 /// Deletes the rows (as returned by -rowsWithFilter:…) by primary key, all or nothing; rows repeating a key are
 /// deleted once. If any row is already gone, nothing is deleted and the error is SPPostgresErrorRowChanged.

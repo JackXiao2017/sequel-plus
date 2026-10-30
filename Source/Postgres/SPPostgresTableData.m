@@ -129,7 +129,7 @@ BOOL SPPostgresRunGuardedRead(PGPostgresConnection *connection, NSString *savepo
 @interface SPPostgresColumn ()
 - (instancetype)initWithName:(NSString *)name typeName:(NSString *)typeName castTypeName:(NSString *)castTypeName
 					nullable:(BOOL)nullable defaultExpression:(NSString *)defaultExpression
-		  primaryKeyPosition:(NSInteger)primaryKeyPosition isGenerated:(BOOL)isGenerated;
+		  primaryKeyPosition:(NSInteger)primaryKeyPosition isGenerated:(BOOL)isGenerated isAutoNumbered:(BOOL)isAutoNumbered;
 @end
 
 @implementation SPPostgresColumn
@@ -141,10 +141,11 @@ BOOL SPPostgresRunGuardedRead(PGPostgresConnection *connection, NSString *savepo
 @synthesize defaultExpression = _defaultExpression;
 @synthesize primaryKeyPosition = _primaryKeyPosition;
 @synthesize isGenerated = _isGenerated;
+@synthesize isAutoNumbered = _isAutoNumbered;
 
 - (instancetype)initWithName:(NSString *)name typeName:(NSString *)typeName castTypeName:(NSString *)castTypeName
 					nullable:(BOOL)nullable defaultExpression:(NSString *)defaultExpression
-		  primaryKeyPosition:(NSInteger)primaryKeyPosition isGenerated:(BOOL)isGenerated
+		  primaryKeyPosition:(NSInteger)primaryKeyPosition isGenerated:(BOOL)isGenerated isAutoNumbered:(BOOL)isAutoNumbered
 {
 	if ((self = [super init])) {
 		_name = [name copy];
@@ -154,6 +155,7 @@ BOOL SPPostgresRunGuardedRead(PGPostgresConnection *connection, NSString *savepo
 		_defaultExpression = [defaultExpression copy];
 		_primaryKeyPosition = primaryKeyPosition;
 		_isGenerated = isGenerated;
+		_isAutoNumbered = isAutoNumbered;
 	}
 	return self;
 }
@@ -277,7 +279,8 @@ BOOL SPPostgresRunGuardedRead(PGPostgresConnection *connection, NSString *savepo
 		 "CASE WHEN a.attgenerated = '' THEN pg_get_expr(d.adbin, d.adrelid) END AS def, "
 		 // indkey is an int2vector, whose subscripts start at 0, so the 1-based position comes from WITH ORDINALITY.
 		 "COALESCE((SELECT k.ord FROM unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) WHERE k.attnum = a.attnum), 0)::text AS pkpos, "
-		 "(a.attidentity = 'a' OR a.attgenerated <> '')::text AS generated "
+		 "(a.attidentity = 'a' OR a.attgenerated <> '')::text AS generated, "
+		 "(a.attidentity <> '' OR COALESCE(pg_get_expr(d.adbin, d.adrelid) LIKE 'nextval(%', false))::text AS autonumbered "
 		 "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
 		 "LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped "
 		 "LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum "
@@ -311,7 +314,8 @@ BOOL SPPostgresRunGuardedRead(PGPostgresConnection *connection, NSString *savepo
 																 nullable:[[row objectForKey:@"nullable"] isEqual:@"true"]
 														defaultExpression:[def isKindOfClass:[NSString class]] ? def : nil
 													   primaryKeyPosition:[[row objectForKey:@"pkpos"] integerValue]
-															  isGenerated:[[row objectForKey:@"generated"] isEqual:@"true"]];
+															  isGenerated:[[row objectForKey:@"generated"] isEqual:@"true"]
+														   isAutoNumbered:[[row objectForKey:@"autonumbered"] isEqual:@"true"]];
 		[columns addObject:column];
 		[column release];
 	}
@@ -608,6 +612,25 @@ BOOL SPPostgresRunGuardedRead(PGPostgresConnection *connection, NSString *savepo
 		return result != nil;
 	} error:error];
 	return ok ? row : nil;
+}
+
+- (NSArray *)insertCopyOfRow:(NSArray *)row error:(NSError **)error
+{
+	if (![self checkEditable:error]) return nil;
+	if ([row count] != [_columns count]) {
+		if (error) {
+			*error = SPPostgresMakeError(SPPostgresErrorQueryFailed,
+				NSLocalizedString(@"The row doesn't match the table's columns, so it can't be copied.", @"Postgres content: copied row shape mismatch"), nil);
+		}
+		return nil;
+	}
+
+	// Generated and auto-numbered columns are left out, so they get their defaults (a new serial or identity value)
+	NSMutableDictionary *valuesByColumn = [NSMutableDictionary dictionary];
+	[_columns enumerateObjectsUsingBlock:^(SPPostgresColumn *column, NSUInteger index, BOOL *stop) {
+		if (![column isGenerated] && ![column isAutoNumbered]) [valuesByColumn setObject:[row objectAtIndex:index] forKey:[column name]];
+	}];
+	return [self insertRowWithValues:valuesByColumn error:error];
 }
 
 - (BOOL)deleteRows:(NSArray *)rows error:(NSError **)error

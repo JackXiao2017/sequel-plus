@@ -327,6 +327,41 @@
 	}
 }
 
+- (void)testIsAutoNumbered
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		NSError *error = nil;
+		NSArray *columns = [[self dataOnPort:port table:@"copy_source"] columns:&error];
+		XCTAssertNotNil(columns, @"%@", error);
+		XCTAssertEqualObjects([columns valueForKey:@"name"], (@[@"id", @"ident", @"label", @"maybe", @"twice"]));
+		XCTAssertTrue([columns[0] isAutoNumbered], @"serial");
+		XCTAssertTrue([columns[1] isAutoNumbered], @"identity BY DEFAULT");
+		XCTAssertFalse([columns[2] isAutoNumbered], @"text");
+		XCTAssertFalse([columns[3] isAutoNumbered], @"int");
+		XCTAssertFalse([columns[4] isAutoNumbered], @"generated");
+
+		NSArray *generated = [[self dataOnPort:port table:@"generated_cols"] columns:&error];
+		XCTAssertTrue([generated[0] isAutoNumbered], @"identity ALWAYS");
+		XCTAssertFalse([generated[2] isAutoNumbered], @"a plain default");
+	}
+}
+
+- (void)testInsertCopyOfRowTakesNewKeyAndSameValues
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresTableData *data = [self dataOnPort:port table:@"copy_source"];
+		NSError *error = nil;
+		NSArray *original = [self rowWithId:@"1" in:data];
+		XCTAssertEqualObjects(original, (@[@"1", @"1", @"first", [NSNull null], @"2"]));
+
+		NSArray *copy = [data insertCopyOfRow:original error:&error];
+		XCTAssertNotNil(copy, @"%@", error);
+		XCTAssertEqualObjects(copy, (@[@"3", @"3", @"first", [NSNull null], @"6"]), @"new serial and identity values, the generated value recomputed");
+		XCTAssertEqual([data countRowsWithFilter:nil error:&error], 3);
+		XCTAssertEqualObjects([self rowWithId:@"3" in:data], copy);
+	}
+}
+
 - (void)testDeleteRowsByKey
 {
 	for (NSNumber *port in [SPPostgresTestServers ports]) {

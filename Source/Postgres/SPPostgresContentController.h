@@ -19,7 +19,7 @@
  * Loads run through taskRunner: with the tab's background runner a load method returns at once and the end state it
  * documents holds once the runner is idle; a cancelled load shows no alert and keeps what was shown (a cancelled
  * table switch shows the new table's columns, if they came, without rows; Refresh loads it). The short writes (a cell
- * edit, add, delete) run on the main thread and are refused (NSBeep) while the runner is busy.
+ * edit, add, duplicate, delete) run on the main thread and are refused (NSBeep) while the runner is busy.
  */
 __attribute__((visibility("default")))
 @interface SPPostgresContentController : NSObject <NSTableViewDataSource, NSTableViewDelegate>
@@ -42,6 +42,9 @@ __attribute__((visibility("default")))
 - (IBAction)addRow:(id)sender;
 /// Asks for confirmation (see confirmationPresenter), then deletes the selected rows.
 - (IBAction)removeRows:(id)sender;
+/// Inserts a copy of the selected row (one only: with several, MySQL's "You can only copy single rows." error), with
+/// new serial and identity values, at the end of this page, and selects it.
+- (IBAction)duplicateRow:(id)sender;
 - (IBAction)refresh:(id)sender;
 - (IBAction)nextPage:(id)sender;
 - (IBAction)previousPage:(id)sender;
