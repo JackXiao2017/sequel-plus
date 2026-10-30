@@ -14,6 +14,10 @@
  * never queries the connection and never inserts a backtick. A word typed after an opening " (or a name typed without
  * one) completes to the quoted name; a function gets "()" when CustomQueryFunctionCompletionInsertsArguments is on.
  * F5 (the spelling dictionary) is SPTextView's.
+ *
+ * Help: SPTextView's auto-help (CustomQueryUpdateAutoHelp) and its context menu item ("PostgreSQL Help for Word" /
+ * "… for Selection", ⌃H) call the delegate's -showAutoHelpForCurrentWord: / -showHelpForCurrentWord: (the Query
+ * controller's) with the editor. As SPTextView, auto-help skips a word inside a string or comment.
  */
 __attribute__((visibility("default")))
 @interface SPPostgresTextView : SPTextView
@@ -34,7 +38,7 @@ __attribute__((visibility("default")))
  * differs; never "isRef", which SPNarrowDownCompletion would backtick-quote): the buffer's words (its identifier and
  * keyword tokens) starting with currentWord (as SPTextView, not in browse mode), SPPostgresSQLTokenizer's keywords (uppercased) and
  * function names, then the provider's databases, schemas, tables, views and columns. A name that is not an all-lowercase
- * identifier, or is a keyword, is inserted double-quoted ("match": "Order Items" → "\"Order Items\""). In browse mode
+ * identifier, or is a RESERVED keyword (+[SPPostgresSQLTokenizer reservedKeywords]), is inserted double-quoted ("match": "Order Items" → "\"Order Items\""). In browse mode
  * (after "name.") only the tables, views and columns.
  */
 - (NSArray *)suggestionsForSQLCompletionWith:(NSString *)currentWord dictMode:(BOOL)isDictMode browseMode:(BOOL)dbBrowseMode withTableName:(NSString *)aTableName withDbName:(NSString *)aDbName;

@@ -262,6 +262,9 @@ __attribute__((visibility("default")))
 @property (readonly) SPPostgresContentController *contentController;
 /// The right pane: the Query view. Its editor's text is kept for the tab's session (also across database switches).
 @property (readonly) SPPostgresQueryController *queryController;
+/// The Query editor's help window (an SPPostgresHelpViewerController, MySQL's help window titled "PostgreSQL Help"):
+/// nil until the help is first shown (Update Help while typing, or the editor's context menu); closed with the tab.
+@property (readonly) NSWindowController *helpViewerController;
 /// The tab's Table History (the toolbar's History control, View > Back/Forward In History).
 @property (readonly) SPPostgresHistory *history;
 @property (readonly) PGPostgresConnection *connection;

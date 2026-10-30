@@ -202,9 +202,9 @@ static NSString * const SPQueryBarScratchSuite = @"SPPostgresStage11Tests";
 	XCTAssertTrue([query.runButton pullsDown]);
 	XCTAssertEqual([query.runButton lineOffset], 15u, @"SPComboPopupButton's small-control offset");
 
-	// The menus: the hidden first item only (later tasks fill them)
+	// The menus: the hidden first item (the gear's items: SPPostgresQueryGearTests; later tasks fill the others)
 	NSMenuItem *gearItem = [[query.gearButton menu] itemAtIndex:0];
-	XCTAssertEqual([[query.gearButton menu] numberOfItems], 1);
+	XCTAssertGreaterThan([[query.gearButton menu] numberOfItems], 1);
 	XCTAssertTrue([gearItem isHidden]);
 	XCTAssertEqualObjects([[gearItem image] name], @"button_action");
 	XCTAssertTrue([query.gearButton pullsDown]);

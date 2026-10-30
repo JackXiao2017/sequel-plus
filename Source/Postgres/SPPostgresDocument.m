@@ -20,6 +20,7 @@
 #import "SPPostgresTableStructure.h"
 #import "SPPostgresQueryController.h"
 #import "SPPostgresTextView.h"
+#import "SPPostgresHelp.h"
 #import "SPPostgresHistory.h"
 #import "SPPostgresTableDuplicator.h"
 #import "SPPostgresTableActions.h"
@@ -93,6 +94,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 - (void)_extensionInstalled:(NSString *)name;
 - (void)_installQueryController;
 - (NSDictionary *)_completionNames;
+- (void)_showHelpFor:(NSString *)searchString autoHelp:(BOOL)autoHelp;
+- (void)_closeHelpViewer;
 - (void)_queryRunChangedSchema:(BOOL)schemaChanged data:(BOOL)dataChanged;
 - (void)_structureDidChange:(BOOL)columnsChanged;
 - (void)_reloadSidebarKeepingSelection;
@@ -179,6 +182,10 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 	NSString *serverVersion;
 	NSString *currentDatabase;
+
+	/// The Query editor's help (MySQL's help window), made when it is first shown; closed on teardown
+	SPPostgresHelpViewerController *helpViewerController;
+	SPPostgresHelpDataSource *helpDataSource;
 
 	/// A database switch in progress (see -switchToDatabase:)
 	SPPostgresConnector *pendingConnector;
@@ -393,6 +400,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[addTableSchema release];
 	[serverVersion release];
 	[currentDatabase release];
+	[helpViewerController release];
+	[helpDataSource release];
 	[splitView release];
 	[toolbar release];
 	[databasePopup release];
@@ -884,6 +893,10 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[queryController setExportResultHandler:^{
 		[document exportQueryResult:nil];
 	}];
+	// The editor's help, in the tab's PostgreSQL help window
+	[queryController setHelpHandler:^(NSString *searchString, BOOL autoHelp) {
+		[document _showHelpFor:searchString autoHelp:autoHelp];
+	}];
 	// Completion's names, from what the tab lists (never a query: the runner may be using the connection)
 	[(SPPostgresTextView *)[queryController editor] setCompletionNamesProvider:^NSDictionary *{
 		return [document _completionNames];
@@ -893,6 +906,52 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[queryView setFrame:[pane bounds]];
 	[queryView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 	if ([currentPane isEqualToString:SPPostgresPaneQuery]) [pane addSubview:queryView];
+}
+
+#pragma mark - Help
+
+- (NSWindowController *)helpViewerController
+{
+	return helpViewerController;
+}
+
+/**
+ * Shows the help for searchString in the tab's help window (MySQL's, see SPPostgresHelp), made the first time, for
+ * the server's major version (read from the version the tab read when it connected: no query).
+ */
+- (void)_showHelpFor:(NSString *)searchString autoHelp:(BOOL)autoHelp
+{
+	if (tornDown) return;
+
+	NSString *major = [SPPostgresHelpDataSource majorVersionFromServerVersion:serverVersion];
+	if (!helpViewerController) {
+		helpDataSource = [[SPPostgresHelpDataSource alloc] initWithServerMajorVersion:major];
+		helpViewerController = [[SPPostgresHelpViewerController alloc] init];
+		[helpViewerController setDataSource:helpDataSource];
+		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_helpViewerClosedByUser:) name:SPUserClosedHelpViewerNotification object:helpViewerController];
+	}
+	[helpDataSource setServerMajorVersion:major];
+	[helpViewerController showHelpFor:searchString addToHistory:YES calledByAutoHelp:autoHelp];
+}
+
+/// As MySQL's -helpWindowClosedByUser:: the Query view turns Update Help while typing off.
+- (void)_helpViewerClosedByUser:(NSNotification *)notification
+{
+	if (tornDown || [notification object] != helpViewerController) return;
+	[queryController helpWindowClosedByUser:notification];
+}
+
+/// The help window closes (no notification: that is the user's close only) and is let go of.
+- (void)_closeHelpViewer
+{
+	if (!helpViewerController) return;
+	[[NSNotificationCenter defaultCenter] removeObserver:self name:SPUserClosedHelpViewerNotification object:helpViewerController];
+	[helpViewerController setDataSource:nil];
+	[helpViewerController close];
+	[helpViewerController release];
+	helpViewerController = nil;
+	[helpDataSource release];
+	helpDataSource = nil;
 }
 
 /**
@@ -1795,6 +1854,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[sequenceController invalidate]; // ends a Set Value sheet still up
 	[extensionController invalidate];
 	[queryController invalidate];
+	[self _closeHelpViewer];
 	[splitView setDelegate:nil];
 	[databasePopup setTarget:nil];
 	[historyControl setTarget:nil];

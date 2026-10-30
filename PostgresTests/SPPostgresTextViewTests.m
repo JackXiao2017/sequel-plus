@@ -2,6 +2,7 @@
 #import <PostgresKit/PostgresKit.h>
 #import "../Source/Postgres/SPPostgresQueryController.h"
 #import "../Source/Postgres/SPPostgresTextView.h"
+#import "../Source/Postgres/SPPostgresSQLTokenizer.h"
 #import "SPPostgresTestServers.h"
 #import "../Source/SPWindowController.h"
 #import "../Source/Postgres/SPPostgresDocument.h"
@@ -310,6 +311,9 @@ static const NSUInteger SPTextViewTestPort = 55418;
 	XCTAssertNil([storage attribute:@"Quoted" atIndex:items effectiveRange:NULL]);
 	XCTAssertEqualObjects([storage attribute:@"Quote" atIndex:quote effectiveRange:NULL], @"isQuoted");
 	XCTAssertNil([storage attribute:@"Quote" atIndex:identifier effectiveRange:NULL]);
+	// As MySQL's (token < 4): a comment is marked as quoted, so auto-help skips its words
+	XCTAssertEqualObjects([storage attribute:@"Quote" atIndex:comment + 3 effectiveRange:NULL], @"isQuoted");
+	XCTAssertNil([storage attribute:@"Quote" atIndex:items effectiveRange:NULL]);
 	XCTAssertNotNil([storage attribute:@"s" atIndex:0 effectiveRange:NULL]);
 	XCTAssertNil([storage attribute:@"s" atIndex:items effectiveRange:NULL]);
 }
@@ -480,6 +484,29 @@ static const NSUInteger SPTextViewTestPort = 55418;
 	XCTAssertEqualObjects([[self editor] string], @"SELECT pg_sleep()");
 	XCTAssertEqual([[self editor] selectedRange].location, 16u);
 	[self closePopup:popup];
+}
+
+/// Only a name that isn't a plain lowercase identifier, or is a RESERVED keyword, is quoted (Ruling 6): name and type
+/// are (unreserved) keywords, used as plain column names.
+- (void)testCompletionQuotesOnlyReservedKeywords
+{
+	[self editor].completionNamesProvider = ^NSDictionary *{
+		return @{@"tables": @[@"select", @"order", @"name", @"type"], @"columns": @[@"name", @"date"]};
+	};
+
+	XCTAssertTrue([[SPPostgresSQLTokenizer reservedKeywords] containsObject:@"select"]);
+	XCTAssertFalse([[SPPostgresSQLTokenizer reservedKeywords] containsObject:@"name"]);
+	XCTAssertEqual([[SPPostgresSQLTokenizer reservedKeywords] count], 78u);
+
+	NSArray *suggestions = [self suggestionsFor:@""];
+	for (NSDictionary *item in suggestions) {
+		if ([item[@"image"] isEqualToString:@"table-small-square"] || [item[@"image"] isEqualToString:@"field-small-square"]) {
+			if ([item[@"display"] isEqualToString:@"select"]) XCTAssertEqualObjects(item[@"match"], @"\"select\"");
+			else if ([item[@"display"] isEqualToString:@"order"]) XCTAssertEqualObjects(item[@"match"], @"\"order\"");
+			else XCTAssertNil(item[@"match"], @"%@ completes unquoted", item[@"display"]);
+		}
+	}
+	XCTAssertNotNil([self item:@"name" inSuggestions:suggestions]);
 }
 
 - (void)testCompletionListKinds

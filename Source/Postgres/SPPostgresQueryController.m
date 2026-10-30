@@ -4,6 +4,8 @@
 #import "SPPostgresTableData.h"
 #import "SPPostgresTaskRunner.h"
 #import "SPPostgresTextView.h"
+#import "SPPostgresSQLTokenizer.h"
+#import "SPTextViewAdditions.h"
 #import "SPTableView.h"
 #import "SPButtonBar.h"
 #import "SPSplitView.h"
@@ -26,6 +28,53 @@ static const NSInteger SPPostgresQuerySecondaryRunTag = 1;
 static const NSUInteger SPPostgresQueryRunButtonSmallLineOffset = 15;
 
 static void *SPPostgresQueryRunnerContext = &SPPostgresQueryRunnerContext;
+static void *SPPostgresQueryToggleContext = &SPPostgresQueryToggleContext;
+
+// The gear's items (DBView.xib): their tags
+static const NSInteger SPPostgresGearPreviousHistoryTag = 3;
+static const NSInteger SPPostgresGearNextHistoryTag = 4;
+static const NSInteger SPPostgresGearShiftRightTag = 6;
+static const NSInteger SPPostgresGearShiftLeftTag = 7;
+static const NSInteger SPPostgresGearCompletionListTag = 8;
+static const NSInteger SPPostgresGearAutoindentTag = 9;
+static const NSInteger SPPostgresGearAutopairTag = 10;
+static const NSInteger SPPostgresGearCommentLineTag = 11;
+static const NSInteger SPPostgresGearCommentQueryTag = 12;
+static const NSInteger SPPostgresGearAllDatabasesTag = 8000;
+static const NSInteger SPPostgresGearAllTablesTag = 8001;
+static const NSInteger SPPostgresGearAllFieldsTag = 8002;
+// The words after the caret's that the help looks at ("create text search configuration")
+static const NSUInteger SPPostgresHelpFollowingWords = 3;
+
+/// The gear's toggles' preferences (MySQL's shared keys), in the menu's order.
+static NSArray<NSString *> *SPPostgresGearToggleKeys(void)
+{
+	return @[SPQueryHistoryReplacesContent, SPQueryFavoriteReplacesContent, SPCustomQueryAutoIndent, SPCustomQueryAutoPairCharacters,
+			 SPCustomQueryAutoUppercaseKeywords, SPCustomQueryAutoComplete, SPCustomQueryUpdateAutoHelp];
+}
+
+/// Whether the regular expression pattern matches string (as RegexKitLite's -isMatchedByRegex:, which MySQL uses).
+static BOOL SPPostgresMatches(NSString *string, NSString *pattern)
+{
+	NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:NULL];
+	return [regex firstMatchInString:string options:0 range:NSMakeRange(0, [string length])] != nil;
+}
+
+/// Replaces every match of pattern in string with template (as RegexKitLite's -replaceOccurrencesOfRegex:withString:).
+static void SPPostgresReplace(NSMutableString *string, NSString *pattern, NSString *template)
+{
+	NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:NULL];
+	[regex replaceMatchesInString:string options:0 range:NSMakeRange(0, [string length]) withTemplate:template];
+}
+
+/// The capture group of pattern's first match in string, or @"" (as RegexKitLite's -rangeOfRegex:…capture:).
+static NSString *SPPostgresCapture(NSString *string, NSString *pattern, NSUInteger group)
+{
+	NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:NULL];
+	NSTextCheckingResult *match = [regex firstMatchInString:string options:0 range:NSMakeRange(0, [string length])];
+	if (!match || [match rangeAtIndex:group].location == NSNotFound) return @"";
+	return [string substringWithRange:[match rangeAtIndex:group]];
+}
 
 // Column widths fitted to the header and the first rows, as the Content view's
 static const CGFloat SPPostgresQueryMinColumnWidth = 40;
@@ -150,7 +199,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 #pragma mark - Controller
 
-@interface SPPostgresQueryController () <NSSplitViewDelegate>
+@interface SPPostgresQueryController () <NSSplitViewDelegate, NSWindowDelegate>
 
 @property (readwrite, copy) NSString *statusText;
 @property (readwrite, copy) NSString *lastRunQueryText;
@@ -192,7 +241,20 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	NSTextField *statusField;
 
 	NSUserDefaults *defaults;
-	NSUserDefaultsController *defaultsController; // the edit mode toggle's binding, on defaults
+	NSUserDefaultsController *defaultsController; // the edit mode toggle's binding and the gear's toggles, on defaults
+
+	// The gear's items (MySQL's outlets)
+	NSMenuItem *previousHistoryMenuItem;
+	NSMenuItem *nextHistoryMenuItem;
+	NSMenuItem *shiftRightMenuItem;
+	NSMenuItem *shiftLeftMenuItem;
+	NSMenuItem *commentLineOrSelectionMenuItem;
+	NSMenuItem *commentCurrentQueryMenuItem;
+	NSMenuItem *completionListMenuItem;
+	NSMenuItem *editorFontMenuItem;
+	/// The toggles, by their preference key
+	NSMutableDictionary<NSString *, NSMenuItem *> *toggleMenuItems;
+	void (^helpHandler)(NSString *searchString, BOOL autoHelp);
 
 	BOOL running;                   // YES from a run's enqueue until its completion
 	BOOL observingRunner;           // observing taskRunner's busy (the run controls are disabled while it is)
@@ -222,6 +284,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 @synthesize infoPaneAnimates;
 @synthesize lastRunQueryText;
 @synthesize infoPaneSplitView;
+@synthesize helpHandler;
 
 #pragma mark - Setup
 
@@ -234,6 +297,8 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 		infoPaneAnimates = YES;
 		[self _buildView];
 		[self _bindEditModeButton];
+		[self _updateToggles];
+		[self _updateGearItems];
 		[self setTaskRunner:[SPPostgresTaskRunner inlineRunnerWithConnection:theConnection]]; // updates the run controls
 		[self _updateQueryInteractionInterface];
 		[self _updateExportItem];
@@ -275,6 +340,16 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[statementWillRunHook release];
 	[runDidChangeDatabase release];
 	[exportResultHandler release];
+	[helpHandler release];
+	[previousHistoryMenuItem release];
+	[nextHistoryMenuItem release];
+	[shiftRightMenuItem release];
+	[shiftLeftMenuItem release];
+	[commentLineOrSelectionMenuItem release];
+	[commentCurrentQueryMenuItem release];
+	[completionListMenuItem release];
+	[editorFontMenuItem release];
+	[toggleMenuItems release];
 
 	[super dealloc];
 }
@@ -296,7 +371,15 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[runSecondaryActionMenuItem setTarget:nil];
 	[switchDefaultMenuItem setTarget:nil];
 	[exportCSVMenuItem setTarget:nil];
+	for (NSMenuItem *item in [[gearButton menu] itemArray]) {
+		[item setTarget:nil];
+		for (NSMenuItem *subitem in [[item submenu] itemArray]) [subitem setTarget:nil];
+	}
 	[infoPaneSplitView setDelegate:nil];
+	// Editor Font… made this the font panel's delegate
+	if ([NSFontPanel sharedFontPanelExists] && [[NSFontPanel sharedFontPanel] delegate] == (id)self) [[NSFontPanel sharedFontPanel] setDelegate:nil];
+	// A pending auto-help (SPTextView's -autoHelp delay)
+	[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(showAutoHelpForCurrentWord:) object:editor];
 
 	// The blocks may capture the tab (the editor's completion names too)
 	[(SPPostgresTextView *)editor setCompletionNamesProvider:nil];
@@ -304,6 +387,8 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	runDidChangeDatabase = nil;
 	[exportResultHandler release];
 	exportResultHandler = nil;
+	[helpHandler release];
+	helpHandler = nil;
 }
 
 #pragma mark - The runner
@@ -335,6 +420,10 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context
 {
+	if (context == SPPostgresQueryToggleContext) {
+		if (!invalidated) [self _updateToggles];
+		return;
+	}
 	if (context != SPPostgresQueryRunnerContext) {
 		[super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
 		return;
@@ -372,6 +461,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[defaults release];
 	defaults = [newDefaults retain];
 	[self _bindEditModeButton];
+	[self _updateToggles];
 	[self _updateQueryInteractionInterface];
 }
 
@@ -382,12 +472,19 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	defaultsController = [[NSUserDefaultsController alloc] initWithDefaults:defaults initialValues:nil];
 	[defaultsController setAppliesImmediately:YES];
 	[editModeButton bind:NSValueBinding toObject:defaultsController withKeyPath:[@"values." stringByAppendingString:SPEditInSheetEnabled] options:nil];
+	// The gear's toggles follow defaults (see -_updateToggles)
+	for (NSString *key in SPPostgresGearToggleKeys()) {
+		[defaultsController addObserver:self forKeyPath:[@"values." stringByAppendingString:key] options:0 context:SPPostgresQueryToggleContext];
+	}
 }
 
 - (void)_unbindEditModeButton
 {
 	if (!defaultsController) return;
 	[editModeButton unbind:NSValueBinding];
+	for (NSString *key in SPPostgresGearToggleKeys()) {
+		[defaultsController removeObserver:self forKeyPath:[@"values." stringByAppendingString:key] context:SPPostgresQueryToggleContext];
+	}
 	[defaultsController release];
 	defaultsController = nil;
 }
@@ -597,6 +694,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 	gearButton = [self _newGearButtonWithFrame:NSMakeRect(0, 0, 35, 23)];
 	[gearButton setAutoresizingMask:NSViewMaxXMargin | NSViewMinYMargin];
+	[self _buildGearMenu:[gearButton menu]];
 	[topBar addSubview:gearButton];
 
 	favoritesButton = [self _newRecessedPopUpWithFrame:NSMakeRect(38, 0, 129, 22)
@@ -986,6 +1084,384 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 {
 	if ([notification object] != editor) return;
 	[self _updateContextualRunInterface];
+	[self _updateGearItems];
+}
+
+#pragma mark - The gear menu
+
+/// A gear item (DBView.xib), sent to gearMenuItemSelected: unless action is given.
+- (NSMenuItem *)_addGearItemTo:(NSMenu *)menu title:(NSString *)title tag:(NSInteger)tag key:(NSString *)key modifiers:(NSEventModifierFlags)modifiers action:(SEL)action
+{
+	NSMenuItem *item = [menu addItemWithTitle:title action:(action ?: @selector(gearMenuItemSelected:)) keyEquivalent:key];
+	[item setKeyEquivalentModifierMask:modifiers];
+	[item setTag:tag];
+	[item setTarget:self];
+	return item;
+}
+
+/// MySQL's gear menu (DBView.xib), after its hidden image item: titles, tags, keys and tooltips as there.
+- (void)_buildGearMenu:(NSMenu *)menu
+{
+	[menu setAutoenablesItems:NO];
+	NSEventModifierFlags command = NSEventModifierFlagCommand;
+	NSString *up = [NSString stringWithFormat:@"%C", (unichar)NSUpArrowFunctionKey];
+	NSString *down = [NSString stringWithFormat:@"%C", (unichar)NSDownArrowFunctionKey];
+	toggleMenuItems = [[NSMutableDictionary alloc] init];
+
+	previousHistoryMenuItem = [[self _addGearItemTo:menu title:NSLocalizedString(@"Previous Query from History", @"Postgres query gear: previous history item")
+												tag:SPPostgresGearPreviousHistoryTag key:up modifiers:NSEventModifierFlagControl action:NULL] retain];
+	[previousHistoryMenuItem setToolTip:NSLocalizedString(@"Replaces the current query by the previous one coming from the history.", @"Postgres query gear: previous history item tooltip")];
+	nextHistoryMenuItem = [[self _addGearItemTo:menu title:NSLocalizedString(@"Next Query from History", @"Postgres query gear: next history item")
+											tag:SPPostgresGearNextHistoryTag key:down modifiers:NSEventModifierFlagControl action:NULL] retain];
+	[nextHistoryMenuItem setToolTip:NSLocalizedString(@"Replaces the current query by the next one coming from the history.", @"Postgres query gear: next history item tooltip")];
+	[toggleMenuItems setObject:[self _addGearItemTo:menu title:NSLocalizedString(@"History Replaces Editor Content", @"Postgres query gear: history replaces content toggle")
+												tag:0 key:@"" modifiers:0 action:NULL] forKey:SPQueryHistoryReplacesContent];
+	[menu addItem:[NSMenuItem separatorItem]];
+	[toggleMenuItems setObject:[self _addGearItemTo:menu title:NSLocalizedString(@"Favorite Replaces Editor Content", @"Postgres query gear: favorite replaces content toggle")
+												tag:0 key:@"" modifiers:0 action:NULL] forKey:SPQueryFavoriteReplacesContent];
+	[menu addItem:[NSMenuItem separatorItem]];
+
+	shiftRightMenuItem = [[self _addGearItemTo:menu title:NSLocalizedString(@"Shift Right", @"Postgres query gear: shift right")
+										   tag:SPPostgresGearShiftRightTag key:@"]" modifiers:command action:NULL] retain];
+	shiftLeftMenuItem = [[self _addGearItemTo:menu title:NSLocalizedString(@"Shift Left", @"Postgres query gear: shift left")
+										  tag:SPPostgresGearShiftLeftTag key:@"[" modifiers:command action:NULL] retain];
+	commentLineOrSelectionMenuItem = [[self _addGearItemTo:menu title:NSLocalizedString(@"Comment Line", @"Title of action menu item to comment line")
+													   tag:SPPostgresGearCommentLineTag key:@"/" modifiers:command action:NULL] retain];
+	commentCurrentQueryMenuItem = [[self _addGearItemTo:menu title:NSLocalizedString(@"Comment Current Query", @"Postgres query gear: comment current query")
+													tag:SPPostgresGearCommentQueryTag key:@"/" modifiers:command | NSEventModifierFlagOption action:NULL] retain];
+	[commentCurrentQueryMenuItem setAlternate:YES];
+	[commentCurrentQueryMenuItem setEnabled:NO];
+	completionListMenuItem = [[self _addGearItemTo:menu title:NSLocalizedString(@"Completion List", @"Postgres query gear: completion list")
+											   tag:SPPostgresGearCompletionListTag key:@"\x1b" modifiers:0 action:NULL] retain];
+
+	NSString *showListTitle = NSLocalizedString(@"Show Completion List", @"Postgres query gear: show completion list submenu");
+	NSMenu *listMenu = [[[NSMenu alloc] initWithTitle:showListTitle] autorelease];
+	NSEventModifierFlags optionCommand = command | NSEventModifierFlagOption;
+	[self _addGearItemTo:listMenu title:NSLocalizedString(@"All Databases Names", @"Postgres query gear: all database names")
+					 tag:SPPostgresGearAllDatabasesTag key:@"1" modifiers:optionCommand action:@selector(showCompletionList:)];
+	[self _addGearItemTo:listMenu title:NSLocalizedString(@"All Table and View Names", @"Postgres query gear: all table and view names")
+					 tag:SPPostgresGearAllTablesTag key:@"2" modifiers:optionCommand action:@selector(showCompletionList:)];
+	[self _addGearItemTo:listMenu title:NSLocalizedString(@"All Field Names From Current Table", @"Postgres query gear: all field names")
+					 tag:SPPostgresGearAllFieldsTag key:@"3" modifiers:optionCommand action:@selector(showCompletionList:)];
+	NSMenuItem *listItem = [menu addItemWithTitle:showListTitle action:NULL keyEquivalent:@""];
+	[listItem setSubmenu:listMenu];
+	[menu addItem:[NSMenuItem separatorItem]];
+
+	editorFontMenuItem = [[self _addGearItemTo:menu title:NSLocalizedString(@"Editor Font...", @"Postgres query gear: editor font")
+										   tag:0 key:@"" modifiers:0 action:NULL] retain];
+	[toggleMenuItems setObject:[self _addGearItemTo:menu title:NSLocalizedString(@"Indent New Lines", @"Postgres query gear: indent new lines toggle")
+												tag:SPPostgresGearAutoindentTag key:@"" modifiers:0 action:NULL] forKey:SPCustomQueryAutoIndent];
+	[toggleMenuItems setObject:[self _addGearItemTo:menu title:NSLocalizedString(@"Auto-pair Characters", @"Postgres query gear: auto-pair toggle")
+												tag:SPPostgresGearAutopairTag key:@"" modifiers:0 action:NULL] forKey:SPCustomQueryAutoPairCharacters];
+	[toggleMenuItems setObject:[self _addGearItemTo:menu title:NSLocalizedString(@"Auto-uppercase Keywords", @"Postgres query gear: auto-uppercase toggle")
+												tag:0 key:@"" modifiers:0 action:NULL] forKey:SPCustomQueryAutoUppercaseKeywords];
+	[toggleMenuItems setObject:[self _addGearItemTo:menu title:NSLocalizedString(@"Auto-completion", @"Postgres query gear: auto-completion toggle")
+												tag:0 key:@"" modifiers:0 action:NULL] forKey:SPCustomQueryAutoComplete];
+	[toggleMenuItems setObject:[self _addGearItemTo:menu title:NSLocalizedString(@"Update Help while typing", @"Postgres query gear: auto-help toggle")
+												tag:0 key:@"" modifiers:0 action:NULL] forKey:SPCustomQueryUpdateAutoHelp];
+}
+
+/// The toggles' states, and the editor's SPTextView toggles, from defaults.
+- (void)_updateToggles
+{
+	if (invalidated) return;
+	for (NSString *key in toggleMenuItems) {
+		[[toggleMenuItems objectForKey:key] setState:[defaults boolForKey:key] ? NSControlStateValueOn : NSControlStateValueOff];
+	}
+	SPPostgresTextView *textView = (SPPostgresTextView *)editor;
+	[textView setAutoindent:[defaults boolForKey:SPCustomQueryAutoIndent]];
+	[textView setAutopair:[defaults boolForKey:SPCustomQueryAutoPairCharacters]];
+	[textView setAutouppercaseKeywords:[defaults boolForKey:SPCustomQueryAutoUppercaseKeywords]];
+	[textView setAutohelp:[defaults boolForKey:SPCustomQueryUpdateAutoHelp]];
+}
+
+/// As MySQL's -textViewDidChangeSelection:: "Comment Line" or "Comment Selection", and Comment Current Query enabled
+/// while the editor holds text.
+- (void)_updateGearItems
+{
+	if (invalidated) return;
+	NSString *text = [editor string];
+	BOOL hasText = [text rangeOfCharacterFromSet:[[NSCharacterSet whitespaceAndNewlineCharacterSet] invertedSet]].location != NSNotFound;
+	[commentCurrentQueryMenuItem setEnabled:hasText];
+	if ([editor selectedRange].length) {
+		[commentLineOrSelectionMenuItem setTitle:NSLocalizedString(@"Comment Selection", @"Title of action menu item to comment selection")];
+	}
+	else {
+		[commentLineOrSelectionMenuItem setTitle:NSLocalizedString(@"Comment Line", @"Title of action menu item to comment line")];
+	}
+}
+
+/// After the gear changed the editor's text or selection.
+- (void)_editorChangedByGear
+{
+	[self _updateContextualRunInterface];
+	[self _updateGearItems];
+}
+
+- (IBAction)gearMenuItemSelected:(id)sender
+{
+	if (invalidated) return;
+
+	if (sender == previousHistoryMenuItem || sender == nextHistoryMenuItem) {
+		// The Postgres query history comes later (Stage 11 Task 7)
+		NSBeep();
+		return;
+	}
+
+	SPPostgresTextView *textView = (SPPostgresTextView *)editor;
+
+	// "Shift Right" / "Shift Left" (SPTextView's)
+	if (sender == shiftRightMenuItem) {
+		[textView shiftSelectionRight];
+		[self _editorChangedByGear];
+	}
+	if (sender == shiftLeftMenuItem) {
+		[textView shiftSelectionLeft];
+		[self _editorChangedByGear];
+	}
+
+	// "Comment Line/Selection" and "Comment Current Query"
+	if (sender == commentLineOrSelectionMenuItem) {
+		[self _commentOut];
+		[self _editorChangedByGear];
+	}
+	if (sender == commentCurrentQueryMenuItem) {
+		[self _commentOutCurrentQueryTakingSelection:NO];
+		[self _editorChangedByGear];
+	}
+
+	// "Completion List" (⌃: fuzzy)
+	if (sender == completionListMenuItem) {
+		BOOL fuzzy = ([[NSApp currentEvent] modifierFlags] & NSEventModifierFlagControl) != 0;
+		[textView doCompletionByUsingSpellChecker:NO fuzzyMode:fuzzy autoCompleteMode:NO];
+	}
+
+	// "Editor Font..." brings up the font panel (SPTextView's -changeFont: saves the font)
+	if (sender == editorFontMenuItem) {
+		NSFontPanel *panel = [NSFontPanel sharedFontPanel];
+		[panel setPanelFont:[editor font] isMultiple:NO];
+		[panel setDelegate:self];
+		[panel makeKeyAndOrderFront:self];
+	}
+
+	// The toggles: the preference flips in defaults, and the editor's toggle follows
+	for (NSString *key in toggleMenuItems) {
+		NSMenuItem *item = [toggleMenuItems objectForKey:key];
+		if (sender != item) continue;
+		BOOL enable = ![defaults boolForKey:key];
+		[defaults setBool:enable forKey:key];
+		[item setState:enable ? NSControlStateValueOn : NSControlStateValueOff];
+		if ([key isEqualToString:SPCustomQueryAutoIndent]) [textView setAutoindent:enable];
+		else if ([key isEqualToString:SPCustomQueryAutoPairCharacters]) [textView setAutopair:enable];
+		else if ([key isEqualToString:SPCustomQueryAutoUppercaseKeywords]) [textView setAutouppercaseKeywords:enable];
+		else if ([key isEqualToString:SPCustomQueryUpdateAutoHelp]) [textView setAutohelp:enable];
+	}
+}
+
+/// As MySQL's font panel modes (SPCustomQuery).
+- (NSFontPanelModeMask)validModesForFontPanel:(NSFontPanel *)fontPanel
+{
+	return NSFontPanelSizeModeMask | NSFontPanelCollectionModeMask;
+}
+
+- (IBAction)showCompletionList:(id)sender
+{
+	if (invalidated) return;
+	SPPostgresTextView *textView = (SPPostgresTextView *)editor;
+	NSRange insertRange = NSMakeRange([editor selectedRange].location, 0);
+	switch ([sender tag]) {
+		case SPPostgresGearAllDatabasesTag:
+			[textView showCompletionListFor:@"$SP_ASLIST_ALL_DATABASES" atRange:insertRange fuzzySearch:NO];
+			break;
+		case SPPostgresGearAllTablesTag:
+			[textView showCompletionListFor:@"$SP_ASLIST_ALL_TABLES" atRange:insertRange fuzzySearch:NO];
+			break;
+		case SPPostgresGearAllFieldsTag:
+			[textView showCompletionListFor:@"$SP_ASLIST_ALL_FIELDS" atRange:insertRange fuzzySearch:NO];
+			break;
+	}
+}
+
+#pragma mark - Comments
+
+/**
+ * The statement Comment Current Query (un)comments: the text between the semicolons around the caret (a comment-only
+ * one too, so a commented-out statement is found again), trimmed of whitespace; with the caret after a semicolon in
+ * whitespace only, the one before it (as MySQL's). {NSNotFound, 0} when there is none.
+ */
+- (NSRange)_commentQueryRange
+{
+	NSString *text = [editor string] ?: @"";
+	NSUInteger length = [text length];
+	NSUInteger caret = MIN([editor selectedRange].location, length);
+
+	// The semicolons outside strings, quoted identifiers and comments
+	NSMutableArray *semicolons = [NSMutableArray array];
+	for (SPPostgresSQLToken *token in [SPPostgresSQLTokenizer tokensInString:text range:NSMakeRange(0, length)]) {
+		if ([token kind] == SPPostgresTokenOther && [token range].length == 1 && [text characterAtIndex:[token range].location] == ';') {
+			[semicolons addObject:@([token range].location)];
+		}
+	}
+
+	NSCharacterSet *whitespace = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+	NSRange (^trimmed)(NSUInteger, NSUInteger) = ^NSRange(NSUInteger start, NSUInteger end) {
+		while (start < end && [whitespace characterIsMember:[text characterAtIndex:start]]) start++;
+		while (end > start && [whitespace characterIsMember:[text characterAtIndex:end - 1]]) end--;
+		return (start < end) ? NSMakeRange(start, end - start) : NSMakeRange(NSNotFound, 0);
+	};
+
+	NSUInteger start = 0, end = length, previousStart = 0;
+	BOOL afterSemicolon = NO;
+	for (NSNumber *semicolon in semicolons) {
+		NSUInteger location = [semicolon unsignedIntegerValue];
+		if (location < caret) {
+			previousStart = start;
+			start = location + 1;
+			afterSemicolon = YES;
+		}
+		else {
+			end = location;
+			break;
+		}
+	}
+
+	NSRange range = trimmed(start, end);
+	if (range.location == NSNotFound && afterSemicolon) range = trimmed(previousStart, start - 1);
+	return range;
+}
+
+/**
+ * As MySQL's -commentOutCurrentQueryTakingSelection: (SPCustomQuery.m): wraps the current statement (or the selection)
+ * in / * * / (a "* /" inside is escaped as "*\/"), or unwraps it when it is wrapped already; the caret then goes after
+ * the opening / *.
+ */
+- (void)_commentOutCurrentQueryTakingSelection:(BOOL)takeSelection
+{
+	BOOL isUncomment = NO;
+
+	NSRange workingRange = takeSelection ? [editor selectedRange] : [self _commentQueryRange];
+	if (workingRange.location == NSNotFound || !workingRange.length) {
+		NSBeep();
+		return;
+	}
+
+	NSMutableString *n = [NSMutableString stringWithString:[[editor string] substringWithRange:workingRange]];
+
+	if ([n hasSuffix:@"\n"]) {
+		workingRange.length--;
+		[n deleteCharactersInRange:NSMakeRange([n length] - 1, 1)];
+	}
+
+	// Escape given */ by *\/
+	SPPostgresReplace(n, @"\\*/(?=.)", @"*\\\\/");
+	SPPostgresReplace(n, @"\\*/(?=\\n)", @"*\\\\/");
+
+	// Wrap current query into /* */
+	[n insertString:@"/* " atIndex:0];
+	[n appendString:@" */"];
+
+	// Check if current query/selection is already commented out, if so uncomment it
+	if (SPPostgresMatches(n, @"^/\\* \\s*/\\*\\s*(.|\\n)*?\\s*\\*/ \\*/\\s*$")) {
+		SPPostgresReplace(n, @"^/\\* \\s*/\\*\\s*", @"");
+		SPPostgresReplace(n, @"\\s*\\*/ \\*/\\s*\\Z", @"");
+		// unescape *\/
+		SPPostgresReplace(n, @"\\*\\\\/", @"*/");
+		isUncomment = YES;
+	}
+
+	// Replace current query/selection by (un)commented string
+	[editor setSelectedRange:workingRange];
+	[editor insertText:n replacementRange:workingRange];
+
+	// If commenting out locate the caret just after the first /*
+	if (!isUncomment) [editor setSelectedRange:NSMakeRange(workingRange.location + 2, 0)];
+}
+
+/**
+ * As MySQL's -commentOut (SPCustomQuery.m), without MySQL's # comments: with a selection, -_commentOutCurrentQuery…;
+ * otherwise "-- " is added at the start of the caret's line, or removed (keeping the indentation) when the line is a
+ * "-- " comment or a single / * * / one. The caret goes to the next line.
+ */
+- (void)_commentOut
+{
+	NSRange oldRange = [editor selectedRange];
+
+	if (oldRange.length) {
+		[self _commentOutCurrentQueryTakingSelection:YES];
+		return;
+	}
+
+	NSString *text = [editor string];
+	NSRange lineRange = [text lineRangeForRange:oldRange];
+	NSMutableString *n = [NSMutableString stringWithFormat:@"-- %@", [text substringWithRange:lineRange]];
+
+	// Already commented out: uncomment it, keeping the original indentation
+	if (SPPostgresMatches(n, @"^-- \\s*--\\s")) {
+		NSString *indentation = SPPostgresCapture(n, @"^-- (\\s*)", 1);
+		SPPostgresReplace(n, @"^-- \\s*--\\s", [NSRegularExpression escapedTemplateForString:indentation]);
+	}
+	else if (SPPostgresMatches(n, @"^-- \\s*/\\*.*? ?\\*/\\s*$")) {
+		NSString *indentation = SPPostgresCapture(n, @"^-- (\\s*)", 1);
+		SPPostgresReplace(n, @"^-- \\s*/\\* ?", [NSRegularExpression escapedTemplateForString:indentation]);
+		NSString *trailing = SPPostgresCapture(n, @" ?\\*/(\\s*)$", 1);
+		SPPostgresReplace(n, @" ?\\*/\\s*$", [NSRegularExpression escapedTemplateForString:trailing]);
+	}
+
+	// Replace the line; the caret goes to the start of the next line, to (un)comment lines one after another
+	[editor setSelectedRange:lineRange];
+	[editor insertText:n replacementRange:lineRange];
+}
+
+#pragma mark - Help
+
+/**
+ * What the help is shown for: the selection, or the word at the caret (SPTextView's -getRangeForCurrentWord) and the
+ * words after it ("create table", tried before "create"); nil when there is none.
+ */
+- (NSString *)_helpSearchString
+{
+	NSString *text = [editor string];
+	NSRange wordRange = [editor getRangeForCurrentWord];
+	if (wordRange.location == NSNotFound || !wordRange.length || NSMaxRange(wordRange) > [text length]) return nil;
+	NSString *word = [text substringWithRange:wordRange];
+	if ([editor selectedRange].length) return word;
+
+	NSMutableArray *words = [NSMutableArray arrayWithObject:word];
+	NSUInteger restLength = MIN((NSUInteger)200, [text length] - NSMaxRange(wordRange));
+	for (SPPostgresSQLToken *token in [SPPostgresSQLTokenizer tokensInString:text range:NSMakeRange(NSMaxRange(wordRange), restLength)]) {
+		if ([token kind] == SPPostgresTokenWhitespace) continue;
+		if ([token kind] != SPPostgresTokenKeyword && [token kind] != SPPostgresTokenIdentifier) break;
+		[words addObject:[text substringWithRange:[token range]]];
+		if ([words count] > SPPostgresHelpFollowingWords) break;
+	}
+	return [words componentsJoinedByString:@" "];
+}
+
+- (void)showAutoHelpForCurrentWord:(id)sender
+{
+	if (invalidated || !helpHandler) return;
+	NSString *searchString = [self _helpSearchString];
+	if ([searchString length]) helpHandler(searchString, YES);
+}
+
+- (void)showHelpForCurrentWord:(id)sender
+{
+	if (invalidated || !helpHandler) {
+		NSBeep();
+		return;
+	}
+	NSString *searchString = [self _helpSearchString];
+	if ([searchString length]) helpHandler(searchString, NO);
+	else NSBeep();
+}
+
+- (void)helpWindowClosedByUser:(NSNotification *)notification
+{
+	if (invalidated) return;
+	// As MySQL's: Update Help while typing is turned off, so the window isn't reopened on key presses
+	[defaults setBool:NO forKey:SPCustomQueryUpdateAutoHelp];
+	[[toggleMenuItems objectForKey:SPCustomQueryUpdateAutoHelp] setState:NSControlStateValueOff];
+	[(SPPostgresTextView *)editor setAutohelp:NO];
 }
 
 #pragma mark - Export

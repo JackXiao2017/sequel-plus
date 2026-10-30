@@ -48,7 +48,7 @@
  *
  * The editor is an SPPostgresTextView (MySQL's SPTextView with Postgres colouring): MySQL's query editor font and
  * colour preferences, line numbers, auto-pair, auto-indent and auto-uppercase, without smart quotes or dashes, with undo.
- * Its auto-indent, auto-pair, auto-uppercase and auto-help toggles are set from defaults when the view is built.
+ * Its auto-indent, auto-pair, auto-uppercase and auto-help toggles follow defaults (and the gear's toggles).
  */
 __attribute__((visibility("default")))
 @interface SPPostgresQueryController : NSObject <NSTableViewDataSource, NSTableViewDelegate, NSTextViewDelegate>
@@ -86,8 +86,8 @@ __attribute__((visibility("default")))
  */
 - (NSRange)currentQueryRange;
 
-/// Where MySQL's shared preferences are read and written (QueryPrimaryControlRunsAll, EditInSheetEnabled, through an
-/// NSUserDefaultsController for the bindings). Default: standardUserDefaults.
+/// Where MySQL's shared preferences are read and written (QueryPrimaryControlRunsAll, EditInSheetEnabled, the gear's
+/// toggles, through an NSUserDefaultsController for the bindings and the toggles' states). Default: standardUserDefaults.
 @property (nonatomic, retain) NSUserDefaults *defaults;
 
 /// Called by the results gear's Export Result ▸ As CSV file… (set by the tab to its -exportQueryResult:). The item is
@@ -96,12 +96,46 @@ __attribute__((visibility("default")))
 
 #pragma mark - MySQL's bars (DBView.xib)
 
-/// The top bar: the gear (its hidden image item only, for now), Query Favorites and Query History (their hidden title
-/// item only, for now) and the run button.
+/// The top bar: the gear (see -gearMenuItemSelected:), Query Favorites and Query History (their hidden title item only,
+/// for now) and the run button.
 @property (readonly) NSPopUpButton *gearButton;
 @property (readonly) NSPopUpButton *favoritesButton;
 @property (readonly) NSPopUpButton *historyButton;
 @property (readonly) SPComboPopupButton *runButton;
+
+#pragma mark - The gear menu (DBView.xib)
+
+/**
+ * The gear's items, as MySQL's -[SPCustomQuery gearMenuItemSelected:]: Previous / Next Query from History (⌃↑ / ⌃↓;
+ * NSBeep for now), Shift Right / Left (⌘] / ⌘[, SPTextView's), Comment Line / Comment Selection (⌘/: "-- " on the
+ * caret's line, or the selection wrapped in / * * /) and Comment Current Query (⌥⌘/, the current statement wrapped, or
+ * unwrapped when it is already), Completion List (Esc; ⌃ fuzzy), Editor Font… (the font panel, as MySQL's) and the
+ * toggles: History / Favorite Replaces Editor Content, Indent New Lines, Auto-pair Characters, Auto-uppercase
+ * Keywords, Auto-completion and Update Help while typing. A toggle flips its MySQL preference in defaults and sets the
+ * editor's SPTextView toggle where there is one; the toggles follow defaults (a change made elsewhere too).
+ */
+- (IBAction)gearMenuItemSelected:(id)sender;
+
+/// Show Completion List ▸ (tags 8000, 8001, 8002): the editor's databases, tables and views, or current table's columns.
+- (IBAction)showCompletionList:(id)sender;
+
+#pragma mark - Help
+
+/**
+ * Shows the help for a search string (the tab's PostgreSQL help window), autoHelp YES when it is Update Help while
+ * typing's. Set by the tab; dropped by -invalidate.
+ */
+@property (copy) void (^helpHandler)(NSString *searchString, BOOL autoHelp);
+
+/// The editor's auto-help (SPTextView's -autoHelp, as MySQL's): the help for the selection, or for the word at the caret
+/// and the next word ("create table"), through helpHandler.
+- (void)showAutoHelpForCurrentWord:(id)sender;
+
+/// The same, for the editor's context menu item (⌃H).
+- (void)showHelpForCurrentWord:(id)sender;
+
+/// As MySQL's: the help window was closed by the user, so Update Help while typing is turned off (in defaults).
+- (void)helpWindowClosedByUser:(NSNotification *)notification;
 
 /// The results bar.
 @property (readonly) NSButton *infoPaneButton;
@@ -152,6 +186,7 @@ __attribute__((visibility("default")))
 @property (readonly) PGPostgresTransactionStatus lastRunTransactionStatus;
 
 /// Detaches the grid, editor, bars and bindings from this controller, and drops the editor's completionNamesProvider
+/// and the helpHandler
 /// (called by the tab when it closes or replaces it; also on dealloc).
 - (void)invalidate;
 
