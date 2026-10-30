@@ -169,6 +169,18 @@ then
 	set_spotlight_comment
 fi
 
+# Trimming removed files the frameworks' signatures seal, so a 'Release' build re-signs them to run locally
+# (Xcode then signs the app over them; 'Distribution' signs everything with the Developer ID below)
+if [ "$CONFIGURATION" == 'Release' ]
+then
+	log 'Re-signing trimmed frameworks to run locally...'
+
+	for FRAMEWORK in "$FRAMEWORKS_PATH"/*.framework
+	do
+		codesign --force --deep --sign - "$FRAMEWORK" 2>&1
+	done
+fi
+
 ls -d -1 "$FRAMEWORKS_PATH"/** > "$FRAMEWORKS_LIST"
 
 echo "${BUILD_PRODUCT}/Contents/Library/QuickLook/Sequel Pro.qlgenerator" >> "$FILES_TO_SIGN_LIST"
