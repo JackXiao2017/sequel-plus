@@ -352,7 +352,8 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 	XCTAssertTrue([self item:@"Delete Sequence…" in:onHeader].hidden);
 	XCTAssertEqual([sidebar menuForRow:-1], sidebar.extensionMenu);
 	XCTAssertEqual([sidebar menuForRow:tableRow], sidebar.tableMenu);
-	XCTAssertEqualObjects([sidebar.tableMenu.itemArray valueForKey:@"title"], (@[@"Duplicate Table…", @"Rename Table…"]));
+	XCTAssertEqual([sidebar.tableMenu indexOfItemWithTarget:sidebar andAction:NSSelectorFromString(@"renameTable:")], 0);
+	XCTAssertEqual([sidebar.tableMenu indexOfItemWithTarget:sidebar andAction:NSSelectorFromString(@"duplicateTable:")], 1);
 
 	// Delete validates on a selected sequence only
 	NSMenuItem *delete = [self item:@"Delete Sequence…" in:sidebar.sequenceMenu];

@@ -585,8 +585,8 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 
 	SPPostgresSidebarController *sidebar = self.document.sidebar;
 	NSMenu *menu = sidebar.tableMenu;
-	XCTAssertEqualObjects([menu.itemArray valueForKey:@"title"], (@[@"Duplicate Table…", @"Rename Table…"]));
-	NSMenuItem *duplicate = menu.itemArray.firstObject;
+	NSMenuItem *duplicate = [menu itemAtIndex:[menu indexOfItemWithTarget:sidebar andAction:NSSelectorFromString(@"duplicateTable:")]];
+	XCTAssertEqualObjects(duplicate.title, @"Duplicate Table…");
 
 	// Only for a table: not a view, not without a selection
 	XCTAssertFalse([(id<NSMenuItemValidation>)duplicate.target validateMenuItem:duplicate]);
@@ -598,7 +598,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	XCTAssertTrue([(id<NSMenuItemValidation>)duplicate.target validateMenuItem:duplicate]);
 
 	// The sheet: <table>_copy, the content checkbox, Duplicate/Cancel
-	[menu performActionForItemAtIndex:0];
+	[menu performActionForItemAtIndex:[menu indexOfItem:duplicate]];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	NSWindow *sheet = [self window].attachedSheet;
 	XCTAssertNotNil(sheet);
@@ -617,7 +617,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	XCTAssertFalse([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"customers_copy"]);
 
 	// Duplicate, with an odd name and the content
-	[menu performActionForItemAtIndex:0];
+	[menu performActionForItemAtIndex:[menu indexOfItem:duplicate]];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	sheet = [self window].attachedSheet;
 	name = [self viewWithIdentifier:@"duplicateTableName" in:sheet.contentView];
@@ -635,7 +635,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	XCTAssertEqual(alerts.count, 0u);
 
 	// A name that is taken: the server's message, as MySQL's "Couldn't duplicate" alert
-	[menu performActionForItemAtIndex:0];
+	[menu performActionForItemAtIndex:[menu indexOfItem:duplicate]];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	sheet = [self window].attachedSheet;
 	name = [self viewWithIdentifier:@"duplicateTableName" in:sheet.contentView];
@@ -690,7 +690,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 
 	SPPostgresSidebarController *sidebar = self.document.sidebar;
 	NSMenu *menu = sidebar.tableMenu;
-	NSMenuItem *rename = menu.itemArray.lastObject;
+	NSMenuItem *rename = [menu itemAtIndex:[menu indexOfItemWithTarget:sidebar andAction:NSSelectorFromString(@"renameTable:")]];
 	XCTAssertEqualObjects(rename.title, @"Rename Table…");
 
 	// Only for a table
@@ -785,7 +785,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	// Rename Table… t to t2
 	SPPostgresSidebarController *sidebar = self.document.sidebar;
 	NSMenu *menu = sidebar.tableMenu;
-	NSMenuItem *rename = menu.itemArray.lastObject;
+	NSMenuItem *rename = [menu itemAtIndex:[menu indexOfItemWithTarget:sidebar andAction:NSSelectorFromString(@"renameTable:")]];
 	XCTAssertEqualObjects(rename.title, @"Rename Table…");
 	[menu performActionForItemAtIndex:[menu indexOfItem:rename]];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
@@ -837,7 +837,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 
 	// Rename Table… from the sidebar, inside that transaction
 	NSMenu *menu = sidebar.tableMenu;
-	[menu performActionForItemAtIndex:[menu indexOfItem:menu.itemArray.lastObject]];
+	[menu performActionForItemAtIndex:[menu indexOfItemWithTarget:sidebar andAction:NSSelectorFromString(@"renameTable:")]];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	NSWindow *sheet = [self window].attachedSheet;
 	XCTAssertNotNil(sheet);
@@ -1545,7 +1545,8 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 
 		// On a table: the table menu, unchanged
 		XCTAssertEqual([sidebar menuForRow:[self rowTitled:@"sp_t5_items" group:NO in:sidebar]], sidebar.tableMenu);
-		XCTAssertEqualObjects([sidebar.tableMenu.itemArray valueForKey:@"title"], (@[@"Duplicate Table…", @"Rename Table…"]));
+		XCTAssertEqual([sidebar.tableMenu indexOfItemWithTarget:sidebar andAction:NSSelectorFromString(@"renameTable:")], 0);
+		XCTAssertEqual([sidebar.tableMenu indexOfItemWithTarget:sidebar andAction:NSSelectorFromString(@"duplicateTable:")], 1);
 
 		// Drop validates on an extension only
 		NSMenuItem *drop = [menu itemWithTitle:@"Drop Extension…"];
@@ -1854,7 +1855,7 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	SPPostgresSidebarController *sidebar = self.document.sidebar;
 
 	NSMenu *menu = sidebar.tableMenu;
-	NSMenuItem *rename = menu.itemArray.lastObject;
+	NSMenuItem *rename = [menu itemAtIndex:[menu indexOfItemWithTarget:sidebar andAction:NSSelectorFromString(@"renameTable:")]];
 	XCTAssertEqualObjects(rename.title, @"Rename Table…");
 	[menu performActionForItemAtIndex:[menu indexOfItem:rename]];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
