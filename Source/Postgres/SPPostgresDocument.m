@@ -21,6 +21,7 @@
 #import "SPPostgresQueryController.h"
 #import "SPPostgresHistory.h"
 #import "SPPostgresTableDuplicator.h"
+#import "SPPostgresTableActions.h"
 #import "SPPostgresConsoleLogger.h"
 #import "SPPostgresCatalog.h"
 #import "SPPostgresConnector.h"
@@ -1858,6 +1859,161 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	structureNeedsReset = YES;
 	if (![schema isEqualToString:[sidebar selectedSchema]]) return;
 	[sidebar reloadKeepingSelection:[self _quietSidebarCompletion:nil]];
+}
+
+#pragma mark - Truncate and Remove
+
+/// A Truncate or Remove confirmation as MySQL's (critical, the action first, then Cancel).
+- (NSAlert *)_tableActionAlert:(NSString *)action message:(NSString *)message informativeText:(NSString *)informativeText
+{
+	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+	[alert addButtonWithTitle:action];
+	[alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"cancel button")];
+	[[[alert buttons] objectAtIndex:0] setHasDestructiveAction:YES];
+	[[[alert buttons] objectAtIndex:0] setKeyEquivalent:@"\r"];
+	[[[alert buttons] objectAtIndex:1] setKeyEquivalent:@"\033"];
+	[alert setAlertStyle:NSAlertStyleCritical];
+	[alert setMessageText:message];
+	[alert setInformativeText:informativeText];
+	return alert;
+}
+
+/// "Truncate Table(s)": MySQL's question (after the shown pane's edits are applied), then every row of the tables is
+/// deleted in one TRUNCATE (never CASCADE): all of them or, on an error, none.
+- (void)sidebar:(SPPostgresSidebarController *)theSidebar truncateTables:(NSArray<NSString *> *)tables
+{
+	if (tornDown || ![tables count] || isProcessing || !parentWindow || [parentWindow attachedSheet]) return;
+	if (![self _endPaneEditing]) return;
+
+	NSString *schema = [[[sidebar selectedSchema] copy] autorelease];
+	NSArray *names = [[tables copy] autorelease];
+
+	NSString *message, *informativeText;
+	if ([names count] == 1) {
+		NSString *name = [names firstObject];
+		message = [NSString stringWithFormat:NSLocalizedString(@"Truncate table '%@'?", @"truncate table message"), name];
+		informativeText = [NSString stringWithFormat:NSLocalizedString(@"Are you sure you want to delete ALL records in the table '%@'? This operation cannot be undone.", @"truncate table informative message"), name];
+	}
+	else {
+		message = NSLocalizedString(@"Truncate selected tables?", @"truncate tables message");
+		informativeText = NSLocalizedString(@"Are you sure you want to delete ALL records in the selected tables? This operation cannot be undone.", @"truncate tables informative message");
+	}
+	NSAlert *alert = [self _tableActionAlert:NSLocalizedString(@"Truncate", @"truncate button") message:message informativeText:informativeText];
+
+	// The document stays alive until the answer comes (a sheet's or a presenter's)
+	[self retain];
+	[self _confirm:alert completion:^(BOOL confirmed) {
+		if (confirmed && !tornDown) [self _truncateTables:names inSchema:schema];
+		[self release];
+	}];
+}
+
+- (void)_truncateTables:(NSArray *)tables inSchema:(NSString *)schema
+{
+	if ([self _refuseWriteWhileBusy]) return;
+	NSError *error = nil;
+	if (![SPPostgresTableActions truncateTables:tables inSchema:schema connection:connection error:&error]) {
+		[self _presentTableActionError:error title:NSLocalizedString(@"Error truncating table", @"error truncating table message")];
+		return;
+	}
+
+	// The rows (and the sizes and row estimate) are gone
+	contentNeedsReset = YES;
+	infoNeedsReset = YES;
+	[self _relationsDidChangeInSchema:schema];
+}
+
+/// "Delete Table/View/Tables/Views/Items": MySQL's question (after the shown pane's edits are applied), then the
+/// tables and views are dropped in one structure change (never CASCADE): all of them or, on an error, none.
+- (void)sidebar:(SPPostgresSidebarController *)theSidebar removeRelations:(NSArray<NSString *> *)names
+{
+	if (tornDown || ![names count] || isProcessing || !parentWindow || [parentWindow attachedSheet]) return;
+	if (![self _endPaneEditing]) return;
+
+	NSString *schema = [[[sidebar selectedSchema] copy] autorelease];
+	NSArray *relations = [[names copy] autorelease];
+
+	NSUInteger views = 0;
+	for (NSString *name in relations) {
+		if ([sidebar relationIsView:name]) views++;
+	}
+
+	NSString *message, *informativeText;
+	if ([relations count] == 1) {
+		NSString *name = [relations firstObject];
+		NSString *kind = views ? NSLocalizedString(@"view", @"view") : NSLocalizedString(@"table", @"table");
+		message = [NSString stringWithFormat:NSLocalizedString(@"Delete %@ '%@'?", @"delete table/view message"), kind, name];
+		informativeText = [NSString stringWithFormat:NSLocalizedString(@"Are you sure you want to delete the %@ '%@'? This operation cannot be undone.", @"delete table/view informative message"), kind, name];
+	}
+	else {
+		NSString *kinds;
+		if (!views) kinds = NSLocalizedString(@"tables", @"tables");
+		else if (views == [relations count]) kinds = NSLocalizedString(@"views", @"views");
+		else kinds = NSLocalizedString(@"items", @"items");
+		message = [NSString stringWithFormat:NSLocalizedString(@"Delete selected %@?", @"delete tables/views message"), kinds];
+		informativeText = [NSString stringWithFormat:NSLocalizedString(@"Are you sure you want to delete the selected %@? This operation cannot be undone.", @"delete tables/views informative message"), kinds];
+	}
+	NSAlert *alert = [self _tableActionAlert:NSLocalizedString(@"Delete", @"delete button") message:message informativeText:informativeText];
+
+	// The document stays alive until the answer comes (a sheet's or a presenter's)
+	[self retain];
+	[self _confirm:alert completion:^(BOOL confirmed) {
+		if (confirmed && !tornDown) [self _removeRelations:relations inSchema:schema];
+		[self release];
+	}];
+}
+
+/**
+ * Drops the tables and views; on success the lists reload, and a removed relation that was selected leaves nothing
+ * selected (the panes show no table). History keeps its entries: going to a removed table's selects nothing, as for
+ * any table that has gone.
+ */
+- (void)_removeRelations:(NSArray *)names inSchema:(NSString *)schema
+{
+	if ([self _refuseWriteWhileBusy]) return;
+	NSError *error = nil;
+	if (![SPPostgresTableActions dropRelations:names inSchema:schema connection:connection error:&error]) {
+		[self _presentTableActionError:error title:NSLocalizedString(@"Error deleting table", @"error deleting table message")];
+		return;
+	}
+
+	// A dropped table takes its owned sequences with it (a shown Sequence pane reads afresh)
+	contentNeedsReset = YES;
+	infoNeedsReset = YES;
+	sequenceNeedsReset = YES;
+	[self _relationsDidChangeInSchema:schema];
+}
+
+/// After a Truncate or Remove: the table panes read afresh and the lists reload keeping the selection (if still
+/// listed), not as a place the user went to; then the shown pane is refreshed.
+- (void)_relationsDidChangeInSchema:(NSString *)schema
+{
+	structureNeedsReset = YES;
+	relationsNeedReset = YES;
+	triggersNeedReset = YES;
+	if (![schema isEqualToString:[sidebar selectedSchema]]) return;
+	[sidebar reloadKeepingSelection:[self _quietSidebarCompletion:^(BOOL loaded) {
+		[self updateWindowTitle:self];
+		[self _refreshCurrentPaneIfStale];
+	}]];
+}
+
+/// A Truncate or Remove error as MySQL's: its title, then the server's message; objects that depend on a table are
+/// listed one per line (the server's hint, CASCADE, is not offered).
+- (void)_presentTableActionError:(NSError *)error title:(NSString *)title
+{
+	NSString *text = [error localizedDescription] ?: @"";
+	if ([[error domain] isEqualToString:SPPostgresErrorDomain] && [error code] == SPPostgresErrorHasDependents) {
+		NSString *serverMessage = [[text componentsSeparatedByString:@"\n"] firstObject];
+		NSString *dependents = [[[error userInfo] objectForKey:SPPostgresDependentsErrorKey] componentsJoinedByString:@"\n"];
+		text = [dependents length] ? [NSString stringWithFormat:@"%@\n\n%@", serverMessage, dependents] : serverMessage;
+	}
+
+	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+	[alert setAlertStyle:NSAlertStyleCritical];
+	[alert setMessageText:title];
+	[alert setInformativeText:text];
+	[self _presentAlert:alert];
 }
 
 #pragma mark - Extensions
