@@ -840,8 +840,8 @@ static NSArray *SPOneViewTitles(void)
 	XCTAssertFalse([self choose:@selector(renameTable:) inMenu:sidebar.tableMenu], @"Rename stays tables-only");
 	XCTAssertTrue([self choose:@selector(showCreateSyntax:) inMenu:sidebar.tableMenu]);
 	XCTAssertTrue([self choose:@selector(openRelationInNewWindow:) inMenu:sidebar.tableMenu]);
-	XCTAssertTrue([self choose:@selector(exportRelations:) tag:1 inMenu:sidebar.tableMenu]);
-	XCTAssertEqualObjects(recorder.calls, (@[@[@"syntax", @[@"v_customers"], @NO], @[@"open", @"v_customers", @YES], @[@"export", @[@"v_customers"], @1]]));
+	XCTAssertFalse([self choose:@selector(exportRelations:) tag:1 inMenu:sidebar.tableMenu], @"an export takes tables only");
+	XCTAssertEqualObjects(recorder.calls, (@[@[@"syntax", @[@"v_customers"], @NO], @[@"open", @"v_customers", @YES]]));
 
 	// On a table outside the selection: Rename and Duplicate act on it
 	[recorder.calls removeAllObjects];
@@ -1253,6 +1253,47 @@ static NSArray *SPOneViewTitles(void)
 	XCTAssertEqualObjects(controller.checkedTables, (@[@[@"public", @"customers"], @[@"public", @"sp9_a"]]));
 	XCTAssertEqual(controller.formatControl.selectedSegment, 1);
 	[self cancelExport:controller];
+}
+
+- (void)testExportDisabledForViewOnlyTargets
+{
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	NSMenu *gear = sidebar.gearButton.menu;
+
+	// A view alone: neither format can be chosen (the sheet would have nothing to check)
+	XCTAssertTrue([sidebar selectTableNamed:@"v_customers"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	[self validateMenu:gear];
+	XCTAssertFalse([self itemWithAction:@selector(exportRelations:) tag:0 inMenu:gear].isEnabled);
+	XCTAssertFalse([self itemWithAction:@selector(exportRelations:) tag:1 inMenu:gear].isEnabled);
+	[self validateMenu:sidebar.tableMenu];
+	XCTAssertFalse([self itemWithAction:@selector(exportRelations:) tag:1 inMenu:sidebar.tableMenu].isEnabled);
+	XCTAssertTrue([self itemWithAction:@selector(showCreateSyntax:) inMenu:gear].isEnabled, @"Create Syntax still takes a view");
+
+	// With a table among the targets: enabled
+	XCTAssertTrue(([sidebar selectRelationsNamed:@[@"customers", @"v_customers"]]));
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	[self validateMenu:gear];
+	XCTAssertTrue([self itemWithAction:@selector(exportRelations:) tag:0 inMenu:gear].isEnabled);
+	XCTAssertTrue([self itemWithAction:@selector(exportRelations:) tag:1 inMenu:gear].isEnabled);
+}
+
+/// A pane read cancelled (as Stop cancels the tab's loads) leaves "INFORMATION", not a header over no facts.
+- (void)testInfoPaneCancelledReadShowsInformation
+{
+	SPPostgresSidebarController *sidebar = [self expandedSidebar];
+	SPPostgresTaskRunner *runner = self.document.taskRunner;
+	[SPPostgresTestServers queueSleep:1 onRunner:runner];
+	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
+	XCTAssertEqualObjects(sidebar.infoPane.lines, (@[@"INFORMATION"]), @"while it is read");
+	[runner cancelAll];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	XCTAssertEqualObjects(sidebar.infoPane.lines, (@[@"INFORMATION"]));
+
+	// Read again on the next reload
+	[sidebar reloadKeepingSelection];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	XCTAssertEqualObjects(sidebar.infoPane.lines[0], @"TABLE INFORMATION");
 }
 
 @end

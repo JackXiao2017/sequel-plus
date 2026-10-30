@@ -30,14 +30,19 @@ __attribute__((visibility("default")))
 /// Runs the reads. Until one is set, an inline runner on the connection of the last -showRelation:… call.
 @property (nonatomic, retain) SPPostgresTaskRunner *taskRunner;
 
-/// Reads and shows a table or view of schema (the header guessed "TABLE INFORMATION" until the read says).
+/// Reads and shows a table or view of schema ("INFORMATION" until the read has completed, and if it is cancelled).
 - (void)showRelation:(NSString *)name inSchema:(NSString *)schema connection:(PGPostgresConnection *)connection;
-/// The same, isView giving the header shown while the read runs and if it fails.
+/// The same, isView giving the header shown if the read fails.
 - (void)showRelation:(NSString *)name inSchema:(NSString *)schema view:(BOOL)isView connection:(PGPostgresConnection *)connection;
 /// "INFORMATION" (a read in progress is dropped; nothing is queued).
 - (void)showNothing;
 /// "INFORMATION", "multiple selection" (a read in progress is dropped; nothing is queued).
 - (void)showMultipleSelection;
+/**
+ * The comment of schema.name is now comment (nil or empty: none): the "comment:" line of the facts shown for that
+ * relation is updated, added or removed. Nothing is read; another relation shown (or none, or no facts) is left as is.
+ */
+- (void)setComment:(NSString *)comment forRelation:(NSString *)name inSchema:(NSString *)schema;
 /// No read is applied after this; the table view is detached.
 - (void)invalidate;
 

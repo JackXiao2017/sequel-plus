@@ -1478,8 +1478,10 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 	NSUInteger count = [targets count];
 	BOOL oneTable = (count == 1 && ![self relationIsView:[targets firstObject]]);
 	BOOL allTables = (count > 0);
+	BOOL anyTable = NO;
 	for (NSString *name in targets) {
 		if ([self relationIsView:name]) allTables = NO;
+		else anyTable = YES;
 	}
 
 	if (action == @selector(renameTable:)) return oneTable && [delegate respondsToSelector:@selector(sidebar:renameTableNamed:)];
@@ -1487,7 +1489,8 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 	if (action == @selector(truncateTables:)) return allTables && [delegate respondsToSelector:@selector(sidebar:truncateTables:)];
 	if (action == @selector(removeRelations:)) return count && [delegate respondsToSelector:@selector(sidebar:removeRelations:)];
 	if (action == @selector(openRelationInNewTab:) || action == @selector(openRelationInNewWindow:)) return count == 1 && [delegate respondsToSelector:@selector(sidebar:openRelation:inNewWindow:)];
-	if (action == @selector(exportRelations:)) return count && [delegate respondsToSelector:@selector(sidebar:exportRelations:format:)];
+	// An export takes tables only (a view would leave the sheet with nothing checked)
+	if (action == @selector(exportRelations:)) return anyTable && [delegate respondsToSelector:@selector(sidebar:exportRelations:format:)];
 	return count && [delegate respondsToSelector:@selector(sidebar:showCreateSyntaxForRelations:copy:)];
 }
 

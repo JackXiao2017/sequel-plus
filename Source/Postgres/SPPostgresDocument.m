@@ -23,6 +23,7 @@
 #import "SPPostgresTableDuplicator.h"
 #import "SPPostgresTableActions.h"
 #import "SPPostgresCreateStatement.h"
+#import "SPPostgresSidebarInfoPane.h"
 #import "SPPostgresConsoleLogger.h"
 #import "SPPostgresCatalog.h"
 #import "SPPostgresConnector.h"
@@ -268,6 +269,9 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	NSPanel *createSyntaxSheet;
 	NSTextView *createSyntaxTextView;
 	NSPasteboard *createSyntaxPasteboard;
+	/// A Create Syntax sheet whose read completed while another sheet was attached: @[syntax, title], shown when that
+	/// sheet ends (see -_showCreateSyntax:title:)
+	NSArray *pendingCreateSyntax;
 
 	BOOL tornDown;
 }
@@ -392,6 +396,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[createSyntaxSheet release];
 	[createSyntaxTextView release];
 	[createSyntaxPasteboard release];
+	[[NSNotificationCenter defaultCenter] removeObserver:self name:NSWindowDidEndSheetNotification object:nil];
+	[pendingCreateSyntax release];
 	[taskRunner release];
 	[taskDisplay release];
 
@@ -1216,8 +1222,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 {
 	if (tornDown) return;
 	structureNeedsReset = YES;
-	// The information pane under the table list shows the new comment
-	[sidebar reloadInfoPane];
+	// The information pane under the table list shows the saved comment (patched: nothing is read)
+	[[sidebar infoPane] setComment:[[infoController commentView] string] forRelation:[infoController table] inSchema:[infoController schema]];
 }
 
 /// The shown pane reloads if it may be stale.
@@ -1676,6 +1682,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 	// The Show Create Syntax sheet
 	[self closeCreateSyntaxSheet:nil];
+	[self _dropPendingCreateSyntax];
 
 	// A Duplicate Table sheet still up (its completion sees tornDown)
 	if (duplicateSheet) [[duplicateSheet sheetParent] endSheet:duplicateSheet returnCode:NSModalResponseCancel];
@@ -2225,8 +2232,13 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// view, Copy and Close.
 - (void)_showCreateSyntax:(NSString *)syntax title:(NSString *)title
 {
-	if (tornDown || !parentWindow || [parentWindow attachedSheet]) {
-		NSBeep();
+	if (tornDown || !parentWindow) return;
+	// Another sheet is up: shown once it has ended (the latest result only)
+	if ([parentWindow attachedSheet]) {
+		BOOL observing = (pendingCreateSyntax != nil);
+		[pendingCreateSyntax release];
+		pendingCreateSyntax = [@[syntax, title] retain];
+		if (!observing) [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_sheetDidEndWhileCreateSyntaxPending:) name:NSWindowDidEndSheetNotification object:parentWindow];
 		return;
 	}
 
@@ -2281,11 +2293,42 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[copyButton setIdentifier:@"createSyntaxCopyButton"];
 	[content addSubview:copyButton];
 
+	// As MySQL's hidden "Close via ESC" button: out of sight, Escape closes the sheet
+	NSButton *escape = [NSButton buttonWithTitle:@"" target:self action:@selector(closeCreateSyntaxSheet:)];
+	[escape setFrame:NSMakeRect(-200, -200, 10, 10)];
+	[escape setKeyEquivalent:@"\e"];
+	[escape setRefusesFirstResponder:YES];
+	[escape setIdentifier:@"createSyntaxEscapeButton"];
+	[content addSubview:escape];
+
 	[createSyntaxSheet release];
 	createSyntaxSheet = panel; // takes the alloc's reference
 	[createSyntaxTextView release];
 	createSyntaxTextView = [textView retain];
 	[parentWindow beginSheet:panel completionHandler:nil];
+}
+
+/// A sheet ended on the window: the waiting Create Syntax sheet comes up on the next run loop turn (once the ended
+/// sheet is off the window), unless another sheet is attached by then (it waits for that one).
+- (void)_sheetDidEndWhileCreateSyntaxPending:(NSNotification *)notification
+{
+	[self performSelector:@selector(_presentPendingCreateSyntax) withObject:nil afterDelay:0];
+}
+
+- (void)_presentPendingCreateSyntax
+{
+	if (!pendingCreateSyntax || tornDown || [parentWindow attachedSheet]) return;
+	NSArray *pending = [[pendingCreateSyntax retain] autorelease];
+	[self _dropPendingCreateSyntax];
+	[self _showCreateSyntax:[pending objectAtIndex:0] title:[pending objectAtIndex:1]];
+}
+
+- (void)_dropPendingCreateSyntax
+{
+	[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(_presentPendingCreateSyntax) object:nil];
+	[[NSNotificationCenter defaultCenter] removeObserver:self name:NSWindowDidEndSheetNotification object:nil];
+	[pendingCreateSyntax release];
+	pendingCreateSyntax = nil;
 }
 
 /// The sheet's Copy: the statements to createSyntaxPasteboard.
