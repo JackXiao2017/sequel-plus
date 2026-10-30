@@ -161,6 +161,15 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 @synthesize countField;
 @synthesize defaults;
 
+#pragma mark - Columns
+
+- (NSArray<NSString *> *)columnNames
+{
+	NSMutableArray *names = [NSMutableArray arrayWithCapacity:[columns count]];
+	for (SPPostgresColumn *column in columns) [names addObject:[column name]];
+	return names;
+}
+
 #pragma mark - Setup
 
 - (instancetype)initWithConnection:(PGPostgresConnection *)theConnection

@@ -2,6 +2,14 @@
 #import <PostgresKit/PostgresKit.h>
 #import "../Source/Postgres/SPPostgresQueryController.h"
 #import "../Source/Postgres/SPPostgresTextView.h"
+#import "SPPostgresTestServers.h"
+#import "../Source/SPWindowController.h"
+#import "../Source/Postgres/SPPostgresDocument.h"
+#import "../Source/Postgres/SPPostgresSidebarController.h"
+#import "../Source/Postgres/SPPostgresConnector.h"
+#import "../Source/Postgres/SPPostgresFavorite.h"
+#import "../Source/Postgres/SPPostgresContentController.h"
+#import "../Source/Postgres/SPPostgresTaskRunner.h"
 
 // MySQL's preference keys (Source/SPConstants.m; the header is not ARC-clean)
 static NSString * const SPTextViewTestFontKey = @"CustomQueryEditorFont";
@@ -18,6 +26,14 @@ static NSString * const SPTextViewTestAutoUppercaseKey = @"CustomQueryAutoUpperc
 static NSString * const SPTextViewTestAutoHelpKey = @"CustomQueryUpdateAutoHelp";
 static NSString * const SPTextViewTestAutoCompleteKey = @"CustomQueryAutoComplete";
 static NSString * const SPTextViewTestHighlightQueryKey = @"CustomQueryHighlightCurrentQuery";
+static NSString * const SPTextViewTestCompleteWithBackticksKey = @"SPCustomQueryEditorCompleteWithBackticks";
+static NSString * const SPTextViewTestFunctionArgumentsKey = @"CustomQueryFunctionCompletionInsertsArguments";
+static const NSUInteger SPTextViewTestPort = 55418;
+
+/// SPNarrowDownCompletion's private action (what Return or Tab does in the pop-up): inserts the selected item.
+@interface NSWindow (SPTextViewTestCompletion)
+- (void)completeAndInsertSnippet;
+@end
 
 /// The Query editor (Stage 11 Task 4): MySQL's SPTextView with Postgres colouring, auto-uppercase, auto-pair and
 /// indent. The Query view is built (without a connection) in an offscreen window; SPTextView's preference reads are
@@ -26,6 +42,9 @@ static NSString * const SPTextViewTestHighlightQueryKey = @"CustomQueryHighlight
 @property (strong) SPPostgresQueryController *query;
 @property (strong) NSWindow *window;
 @property (strong) NSDictionary<NSString *, NSColor *> *colors;
+// A connected tab (the tests that need one: -openDocument)
+@property (strong) SPWindowController *windowController;
+@property (strong) SPPostgresDocument *document;
 @end
 
 @implementation SPPostgresTextViewTests
@@ -91,6 +110,20 @@ static NSString * const SPTextViewTestHighlightQueryKey = @"CustomQueryHighlight
 
 - (void)tearDown
 {
+	// A pop-up a failed test left open (closed before the run loop turns again, so its event loop never starts)
+	for (SPPostgresTextView *editor in @[[self editor] ?: (id)[NSNull null], [self documentEditor] ?: (id)[NSNull null]]) {
+		if ([editor isKindOfClass:[SPPostgresTextView class]] && [editor completionIsOpen]) [[self popupOfEditor:editor] close];
+	}
+
+	if (self.document) {
+		NSWindow *window = [self.windowController window];
+		if (window.attachedSheet) [window endSheet:window.attachedSheet];
+		NSTabView *tabView = [self.windowController valueForKey:@"tabView"];
+		for (NSTabViewItem *item in [tabView tabViewItems]) [tabView removeTabViewItem:item];
+		[window orderOut:nil];
+		self.document = nil;
+		self.windowController = nil;
+	}
 	[self.query invalidate];
 	[[self.query view] removeFromSuperview];
 	[self.window close];
@@ -142,6 +175,109 @@ static NSString * const SPTextViewTestHighlightQueryKey = @"CustomQueryHighlight
 								  windowNumber:[self.window windowNumber] context:nil characters:characters
 				   charactersIgnoringModifiers:characters isARepeat:NO keyCode:0];
 	[[self editor] keyDown:event];
+}
+
+#pragma mark - Completion helpers
+
+- (BOOL)spinUntil:(BOOL (^)(void))condition timeout:(NSTimeInterval)timeout
+{
+	NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
+	while (!condition() && [deadline timeIntervalSinceNow] > 0) {
+		[[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+	}
+	return condition();
+}
+
+- (NSArray<NSDictionary *> *)suggestionsFor:(NSString *)word inEditor:(SPPostgresTextView *)editor
+{
+	return [editor suggestionsForSQLCompletionWith:word dictMode:NO browseMode:NO withTableName:nil withDbName:nil];
+}
+
+- (NSArray<NSDictionary *> *)suggestionsFor:(NSString *)word
+{
+	return [self suggestionsFor:word inEditor:[self editor]];
+}
+
+/// The first suggestion displayed as display, or nil.
+- (NSDictionary *)item:(NSString *)display inSuggestions:(NSArray<NSDictionary *> *)suggestions
+{
+	for (NSDictionary *item in suggestions) {
+		if ([item[@"display"] isEqualToString:display]) return item;
+	}
+	return nil;
+}
+
+/// The completion pop-up the editor opened last (SPTextView's completionPopup), or nil.
+- (NSWindow *)popupOfEditor:(SPPostgresTextView *)editor
+{
+	return [editor valueForKey:@"completionPopup"];
+}
+
+/// What a pop-up offers (its items before filtering) and what it shows (after).
+- (NSArray<NSString *> *)displaysOf:(NSArray<NSDictionary *> *)items
+{
+	NSMutableArray *displays = [NSMutableArray array];
+	for (NSDictionary *item in items) [displays addObject:item[@"display"]];
+	return displays;
+}
+
+/// Closes the pop-up (before the run loop turns, so its event loop never starts).
+- (void)closePopup:(NSWindow *)popup
+{
+	[popup close];
+	XCTAssertFalse([[self editor] completionIsOpen]);
+}
+
+/// A connected tab on the content fixture, in an SPWindowController (as SPPostgresQueryControllerTests).
+- (void)openDocument
+{
+	[SPPostgresTestServers loadFixtureNamed:@"content" onPort:SPTextViewTestPort];
+
+	SPPostgresFavorite *favorite = [[SPPostgresFavorite alloc] init];
+	favorite.name = @"pg18 completion";
+	favorite.type = SPPostgresTCPIPConnection;
+	favorite.host = @"127.0.0.1";
+	favorite.port = SPTextViewTestPort;
+	favorite.user = @"pgkit_test";
+	favorite.database = @"pgkit_test";
+
+	self.windowController = [[SPWindowController alloc] initWithWindowNibName:@"MainWindow"];
+	XCTAssertNotNil([self.windowController window]);
+
+	SPPostgresConnector *connector = [[SPPostgresConnector alloc] initWithFavorite:favorite password:@"pgkit" sshPassword:nil parentWindow:nil];
+	__block PGPostgresConnection *connection = nil;
+	__block NSError *error = nil;
+	__block BOOL done = NO;
+	[connector connectWithCompletion:^(PGPostgresConnection *theConnection, NSError *theError) {
+		connection = theConnection;
+		error = theError;
+		done = YES;
+	}];
+	XCTAssertTrue([self spinUntil:^BOOL{ return done; } timeout:20]);
+	XCTAssertNotNil(connection, @"%@", error);
+
+	self.document = [[SPPostgresDocument alloc] initWithConnection:connection connector:connector favorite:favorite];
+	self.document.alertPresenter = ^(NSAlert *alert) { XCTFail(@"alert: %@ %@", alert.messageText, alert.informativeText); };
+	[self.windowController addTabDocument:self.document atIndex:0 select:YES];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+
+	// content_test.items selected
+	[self.document.sidebar reloadSchema:@"content_test"];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertTrue([self.document.sidebar selectTableNamed:@"items"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+}
+
+- (SPPostgresTextView *)documentEditor
+{
+	return (SPPostgresTextView *)self.document.queryController.editor;
+}
+
+/// The console's messages (test-only read of SPQueryController's storage, as SPPostgresQueryControllerTests).
+- (NSUInteger)consoleMessageCount
+{
+	id console = [(id)NSClassFromString(@"SPQueryController") valueForKey:@"sharedQueryController"];
+	return [[console valueForKey:@"messagesFullSet"] count];
 }
 
 #pragma mark - Tests
@@ -255,6 +391,195 @@ static NSString * const SPTextViewTestHighlightQueryKey = @"CustomQueryHighlight
 	NSScrollView *scrollView = [editor enclosingScrollView];
 	XCTAssertTrue([scrollView hasVerticalRuler]);
 	XCTAssertEqual([[scrollView verticalRulerView] clientView], editor);
+}
+
+
+#pragma mark - Completion
+
+- (void)testSuggestionsIncludeKeywordsFunctionsAndNames
+{
+	[self editor].completionNamesProvider = ^NSDictionary *{
+		return @{@"tables": @[@"items", @"Order Items"]};
+	};
+	[[self editor] setString:@"SELECT * FROM "];
+
+	NSArray *suggestions = [self suggestionsFor:@"it"];
+	XCTAssertNotNil([self item:@"items" inSuggestions:suggestions], @"%@", [self displaysOf:suggestions]);
+	XCTAssertEqualObjects([self item:@"items" inSuggestions:suggestions][@"image"], @"table-small-square");
+	XCTAssertNil([self item:@"items" inSuggestions:suggestions][@"match"], @"inserted as shown");
+
+	suggestions = [self suggestionsFor:@"ret"];
+	XCTAssertNotNil([self item:@"RETURNING" inSuggestions:suggestions], @"keywords, shown uppercased");
+	XCTAssertNil([self item:@"returning" inSuggestions:suggestions]);
+
+	suggestions = [self suggestionsFor:@"pg_sl"];
+	XCTAssertNotNil([self item:@"pg_sleep" inSuggestions:suggestions], @"function names");
+	XCTAssertEqualObjects([self item:@"pg_sleep" inSuggestions:suggestions][@"image"], @"func-small");
+
+	// The buffer's words
+	[[self editor] setString:@"SELECT widget_count FROM "];
+	XCTAssertNotNil([self item:@"widget_count" inSuggestions:[self suggestionsFor:@"wid"]]);
+
+	// Never a reference SPNarrowDownCompletion would backtick-quote
+	for (NSDictionary *item in suggestions) XCTAssertNil(item[@"isRef"], @"%@", item);
+
+	// No provider: keywords and words only
+	[self editor].completionNamesProvider = nil;
+	XCTAssertNil([self item:@"items" inSuggestions:[self suggestionsFor:@"it"]]);
+	XCTAssertNotNil([self item:@"SELECT" inSuggestions:[self suggestionsFor:@"sel"]]);
+}
+
+- (void)testCompletionQuotesMixedCaseNames
+{
+	[self overridePrefs:@{SPTextViewTestCompleteWithBackticksKey: @YES, SPTextViewTestFunctionArgumentsKey: @YES}];
+	[self editor].completionNamesProvider = ^NSDictionary *{
+		return @{@"schemas": @[@"Sales", @"content_test"], @"tables": @[@"items", @"Order Items", @"order", @"say\"hi"]};
+	};
+
+	NSArray *suggestions = [self suggestionsFor:@"Ord"];
+	XCTAssertEqualObjects([self item:@"Order Items" inSuggestions:suggestions][@"match"], @"\"Order Items\"");
+	XCTAssertEqualObjects([self item:@"order" inSuggestions:suggestions][@"match"], @"\"order\"", @"a keyword is quoted");
+	XCTAssertEqualObjects([self item:@"Sales" inSuggestions:suggestions][@"match"], @"\"Sales\"");
+	XCTAssertEqualObjects([self item:@"say\"hi" inSuggestions:suggestions][@"match"], @"\"say\"\"hi\"");
+	XCTAssertNil([self item:@"content_test" inSuggestions:suggestions][@"match"]);
+	for (NSDictionary *item in suggestions) XCTAssertNil(item[@"isRef"], @"%@", item);
+
+	// Through the pop-up, as Return inserts the selected item: typed unquoted, the quoted name is offered and inserted
+	[[self editor] setString:@"SELECT * FROM Ord"];
+	[[self editor] setSelectedRange:NSMakeRange(17, 0)];
+	[[self editor] doCompletionByUsingSpellChecker:NO fuzzyMode:NO autoCompleteMode:NO];
+	NSWindow *popup = [self popupOfEditor:[self editor]];
+	XCTAssertNotNil(popup);
+	NSArray *shown = [popup valueForKey:@"filtered"];
+	XCTAssertTrue([[self displaysOf:shown] containsObject:@"Order Items"], @"%@", [self displaysOf:shown]);
+	NSUInteger row = [[self displaysOf:shown] indexOfObject:@"Order Items"];
+	[(NSTableView *)[popup valueForKey:@"theTableView"] selectRowIndexes:[NSIndexSet indexSetWithIndex:row] byExtendingSelection:NO];
+	[popup completeAndInsertSnippet];
+	XCTAssertEqualObjects([[self editor] string], @"SELECT * FROM \"Order Items\"");
+	XCTAssertFalse([[[self editor] string] containsString:@"`"]);
+	[self closePopup:popup];
+
+	// Typed after an opening quote (auto-paired): the closing quote is replaced, not doubled
+	[[self editor] setString:@"SELECT * FROM \"Ord\""];
+	[[self editor] setSelectedRange:NSMakeRange(18, 0)];
+	[[self editor] doCompletionByUsingSpellChecker:NO fuzzyMode:NO autoCompleteMode:NO];
+	popup = [self popupOfEditor:[self editor]];
+	shown = [popup valueForKey:@"filtered"];
+	XCTAssertEqualObjects([self displaysOf:shown], (@[@"Order Items", @"order"]), @"only names, inside quotes");
+	[popup completeAndInsertSnippet];
+	XCTAssertEqualObjects([[self editor] string], @"SELECT * FROM \"Order Items\"");
+	[self closePopup:popup];
+
+	// A function gets "()" (no MySQL argument snippet), the caret inside
+	[[self editor] setString:@"SELECT pg_sle"];
+	[[self editor] setSelectedRange:NSMakeRange(13, 0)];
+	[[self editor] doCompletionByUsingSpellChecker:NO fuzzyMode:NO autoCompleteMode:NO];
+	popup = [self popupOfEditor:[self editor]];
+	XCTAssertEqualObjects([self displaysOf:[popup valueForKey:@"filtered"]], @[@"pg_sleep"]);
+	[popup completeAndInsertSnippet];
+	XCTAssertEqualObjects([[self editor] string], @"SELECT pg_sleep()");
+	XCTAssertEqual([[self editor] selectedRange].location, 16u);
+	[self closePopup:popup];
+}
+
+- (void)testCompletionListKinds
+{
+	[self editor].completionNamesProvider = ^NSDictionary *{
+		return @{@"databases": @[@"pgkit_test", @"Other DB"], @"schemas": @[@"public"], @"tables": @[@"items"],
+				 @"views": @[@"items_view"], @"columns": @[@"id", @"Name"]};
+	};
+	[[self editor] setString:@"SELECT "];
+	[[self editor] setSelectedRange:NSMakeRange(7, 0)];
+
+	NSDictionary *expected = @{@"$SP_ASLIST_ALL_DATABASES": @[@"pgkit_test", @"Other DB"],
+							   @"$SP_ASLIST_ALL_TABLES": @[@"items", @"items_view"],
+							   @"$SP_ASLIST_ALL_FIELDS": @[@"id", @"Name"]};
+	for (NSString *kind in expected) {
+		// The delegate (the Query controller) is never asked for MySQL's tablesListInstance
+		XCTAssertNoThrow([[self editor] showCompletionListFor:kind atRange:NSMakeRange(7, 0) fuzzySearch:NO], @"%@", kind);
+		NSWindow *popup = [self popupOfEditor:[self editor]];
+		XCTAssertNotNil(popup, @"%@", kind);
+		XCTAssertTrue([[self editor] completionIsOpen]);
+		NSArray *items = [popup valueForKey:@"suggestions"];
+		XCTAssertEqualObjects([self displaysOf:items], expected[kind], @"%@", kind);
+		for (NSDictionary *item in items) XCTAssertNil(item[@"isRef"], @"%@", item);
+		if ([kind isEqualToString:@"$SP_ASLIST_ALL_FIELDS"]) {
+			XCTAssertEqualObjects([self item:@"Name" inSuggestions:items][@"match"], @"\"Name\"");
+		}
+		[self closePopup:popup];
+	}
+}
+
+- (void)testCompletionWhileBusyUsesHeldLists
+{
+	[self overridePrefs:@{@"ConsoleEnableLogging": @YES, @"ConsoleEnableInterfaceLogging": @YES, @"ConsoleEnableCustomQueryLogging": @YES, @"ConsoleEnableErrorLogging": @YES}];
+	[self openDocument];
+	[self.document viewQuery:nil];
+	SPPostgresQueryController *query = self.document.queryController;
+	SPPostgresTaskRunner *runner = self.document.taskRunner;
+	SPPostgresTextView *editor = [self documentEditor];
+
+	[editor setString:@"SELECT pg_sleep(2)"];
+	[editor setSelectedRange:NSMakeRange(0, 0)];
+	[query runAllQueries:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [runner.currentDescription isEqualToString:@"Running query..."]; } timeout:10], @"%@", runner.currentDescription);
+	[self spinUntil:^BOOL{ return NO; } timeout:0.3]; // the run's own statement reaches the console
+	NSUInteger messages = [self consoleMessageCount];
+
+	// Names, keywords and functions while the runner holds the connection
+	NSArray *suggestions = [self suggestionsFor:@"ite" inEditor:editor];
+	XCTAssertNotNil([self item:@"items" inSuggestions:suggestions], @"%@", [self displaysOf:suggestions]);
+	XCTAssertNotNil([self item:@"SELECT" inSuggestions:suggestions]);
+	XCTAssertNotNil([self item:@"pg_sleep" inSuggestions:suggestions]);
+
+	// The pop-up too
+	[editor setString:@"SELECT * FROM ite"];
+	[editor setSelectedRange:NSMakeRange(17, 0)];
+	[editor doCompletionByUsingSpellChecker:NO fuzzyMode:NO autoCompleteMode:NO];
+	NSWindow *popup = [self popupOfEditor:editor];
+	XCTAssertTrue([[self displaysOf:[popup valueForKey:@"filtered"]] containsObject:@"items"]);
+	[popup close];
+	[editor showCompletionListFor:@"$SP_ASLIST_ALL_TABLES" atRange:NSMakeRange(17, 0) fuzzySearch:NO];
+	popup = [self popupOfEditor:editor];
+	XCTAssertTrue([[self displaysOf:[popup valueForKey:@"suggestions"]] containsObject:@"items"]);
+	[popup close];
+
+	[self spinUntil:^BOOL{ return NO; } timeout:0.3];
+	XCTAssertTrue(runner.isBusy, @"measured during the run");
+	XCTAssertEqual([self consoleMessageCount], messages, @"no query was sent for the completion");
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+}
+
+- (void)testDocumentProviderListsSidebarAndContent
+{
+	[self openDocument];
+	[self.document viewContent:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	NSMutableArray *gridColumns = [NSMutableArray array];
+	for (NSTableColumn *column in [self.document.contentController.tableView tableColumns]) [gridColumns addObject:[[column headerCell] stringValue]];
+	XCTAssertTrue([gridColumns containsObject:@"name"], @"%@", gridColumns);
+
+	NSDictionary *(^provider)(void) = [self documentEditor].completionNamesProvider;
+	XCTAssertNotNil(provider);
+	NSDictionary *names = provider();
+	XCTAssertTrue([names[@"databases"] containsObject:@"pgkit_test"], @"%@", names[@"databases"]);
+	XCTAssertFalse([names[@"databases"] containsObject:@"Refresh Databases"]);
+	XCTAssertTrue([names[@"schemas"] containsObject:@"content_test"], @"%@", names[@"schemas"]);
+	XCTAssertTrue([names[@"tables"] containsObject:@"items"], @"%@", names[@"tables"]);
+	XCTAssertFalse([names[@"tables"] containsObject:@"items_view"]);
+	XCTAssertTrue([names[@"views"] containsObject:@"items_view"], @"%@", names[@"views"]);
+	XCTAssertEqualObjects(names[@"columns"], gridColumns);
+
+	// Another table selected, its columns not loaded yet (Content not shown): none
+	[self.document viewQuery:nil];
+	XCTAssertTrue([self.document.sidebar selectTableNamed:@"no_pk"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	NSArray *columns = provider()[@"columns"];
+	XCTAssertTrue(columns.count == 0 || [columns isEqualToArray:(@[@"x", @"y"])], @"%@", columns);
+
+	// Dropped with the controller
+	[self.document.queryController invalidate];
+	XCTAssertNil([self documentEditor].completionNamesProvider);
 }
 
 @end

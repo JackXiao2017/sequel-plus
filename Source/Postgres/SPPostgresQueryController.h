@@ -151,10 +151,11 @@ __attribute__((visibility("default")))
 /// task's).
 @property (readonly) PGPostgresTransactionStatus lastRunTransactionStatus;
 
-/// Detaches the grid, editor, bars and bindings from this controller (called by the tab when it closes or replaces it; also on dealloc).
+/// Detaches the grid, editor, bars and bindings from this controller, and drops the editor's completionNamesProvider
+/// (called by the tab when it closes or replaces it; also on dealloc).
 - (void)invalidate;
 
-/// An SPPostgresTextView.
+/// An SPPostgresTextView. Its completionNamesProvider is set by the tab and dropped by -invalidate (it may capture the tab).
 @property (readonly) NSTextView *editor;
 @property (readonly) NSTableView *resultsView;
 /// The column names of the row set the grid shows, or nil when it shows none.
