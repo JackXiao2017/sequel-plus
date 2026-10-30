@@ -19,14 +19,25 @@
  *
  * Statements (see SPPostgresStatementSplitter) run in order on the tab's connection, in one task of taskRunner. The
  * grid shows the last row set the run returned, values in PostgreSQL's text format and NULL as MySQL's NULL
- * placeholder preference, in grey. The status line says "N rows" (a row set) or "N rows affected" (a command)
- * for the last statement. On an error the run stops: the grid keeps the run's earlier row set and the status
- * line says "Error in statement K: <server message>" (noting an aborted transaction). Statements are logged to
- * the console as MySQL's custom queries, and errors as MySQL's.
+ * placeholder preference, in grey. On an error the run stops (MySQL's error sheet is not cloned): the grid keeps
+ * the run's earlier row set. Statements are logged to the console as MySQL's custom queries, and errors as MySQL's.
+ *
+ * The status line and the info pane use MySQL's words (SPCustomQuery.m), times as +[NSString stringForTimeInterval:]:
+ * - the status line: "No errors; 3 rows affected, taking 1.2 ms" (a row set with rows: ", first row available
+ *   after …"), "Errors; 1 row affected in total, by 2 queries taking 3 ms", "No errors; Cancelled after 5 s" or
+ *   "No errors; Cancelled in query K, after …" (a run of several statements). Rows are a row set's rows or a
+ *   command's affected rows, summed over the statements that succeeded; the queries are those sent, the failing one
+ *   too. The status line is cleared when a run starts.
+ * - the info pane: while running, "Query Status" and the run's description ("Running query..."), without opening.
+ *   On an error it opens, titled "Last Error Message", with the server's message and its DETAIL/HINT lines (in a
+ *   run of several statements "[ERROR in query K] <message>", then "Execution stopped!" when statements remain);
+ *   otherwise it closes and says "There were no errors." (cancelled: "Query cancelled."). The Postgres-only notes
+ *   follow, one per line: COPY … TO STDOUT output not shown, the grid's rows being an earlier statement's (after
+ *   a run that completed: "Note: results shown from statement N, …"), an aborted transaction.
  *
  * A run is described as MySQL's ("Running query..." / "Running query K of N...", per statement) and can be
- * stopped ("Stop query" / "Stop queries"): the status line then says "Query cancelled.", the grid shows the
- * last row set returned before the cancel, and what ran before it is still reported (runDidChangeDatabase).
+ * stopped ("Stop query" / "Stop queries"): the grid then shows the last row set returned before the cancel, and
+ * what ran before it is still reported (runDidChangeDatabase).
  * While the runner is busy the run button and its run items are disabled, and ⌘R, ⌥⌘R and the run actions do
  * nothing (NSBeep). The editor's text is read on the main thread when the run is asked for; the statements run on
  * the runner's thread. The tests' statement hook (-setStatementWillRunHook:, a test seam) is called on that thread,
@@ -93,9 +104,21 @@ __attribute__((visibility("default")))
 @property (readonly) NSButton *editModeButton;
 @property (readonly) NSTextField *statusField;
 
-/// The query information pane's text, and the split view whose second subview (the pane) collapses.
+/// The query information pane's title (MySQL's errorTextTitle: "Query Status", or "Last Error Message" after an
+/// error), its text, and the split view whose second subview (the pane) collapses.
+@property (readonly) NSTextField *infoPaneTitle;
 @property (readonly) NSTextView *infoPaneText;
 @property (readonly) SPSplitView *infoPaneSplitView;
+
+/// The info pane's text (see the class comment).
+- (NSString *)infoPaneString;
+
+/// Whether a run opens and closes the info pane animated (default YES; the tests turn it off).
+@property (assign) BOOL infoPaneAnimates;
+
+/// The statements the last run ran (the failing one too), joined with ";\n", as MySQL's usedQuery; nil before the
+/// first run.
+@property (readonly, copy) NSString *lastRunQueryText;
 
 /// The editor font from MySQL's query editor font preference data (an archived NSFont), else the monospaced system font.
 + (NSFont *)editorFontFromPreferenceData:(NSData *)data;
@@ -137,7 +160,7 @@ __attribute__((visibility("default")))
 /// How many rows the grid shows (0 when it shows none), without copying them.
 - (NSUInteger)lastResultRowCount;
 
-/// The status line: @"" before the first run.
+/// The status line (see the class comment): @"" before the first run and while a run runs.
 @property (readonly, copy) NSString *statusText;
 
 @end
