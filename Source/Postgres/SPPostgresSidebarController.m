@@ -1294,11 +1294,6 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	return [(SPPostgresSidebarItem *)item kind] == SPPostgresSidebarSection;
 }
 
-- (BOOL)outlineView:(NSOutlineView *)theOutlineView shouldSelectItem:(id)item
-{
-	return [(SPPostgresSidebarItem *)item kind] != SPPostgresSidebarSection;
-}
-
 - (BOOL)outlineView:(NSOutlineView *)theOutlineView shouldShowOutlineCellForItem:(id)item
 {
 	// Sections are always expanded, as in the MySQL table list
@@ -1385,8 +1380,10 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 }
 
 /**
- * Section headers are never selected; several rows only when every one is a table or view. Otherwise (a sequence or
- * extension among them) just the row the user clicked, or else the one the change adds, is kept.
+ * Which rows are selected (in place of -outlineView:shouldSelectItem:, which the outline doesn't ask once this is
+ * implemented): section headers never; several rows only when every one is a table or view. A mix with a sequence or
+ * extension keeps the row the user clicked; with no click in it (Select All, Shift-arrow), its tables and views, or
+ * else (none among them) the row the change adds.
  */
 - (NSIndexSet *)outlineView:(NSOutlineView *)theOutlineView selectionIndexesForProposedSelection:(NSIndexSet *)proposed
 {
@@ -1402,13 +1399,18 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	if (![rows count] && [proposed count]) return [theOutlineView selectedRowIndexes];
 	if ([rows count] <= 1 || allRelations) return rows;
 
-	NSInteger keep = [theOutlineView clickedRow];
-	if (keep < 0 || ![rows containsIndex:(NSUInteger)keep]) {
-		NSMutableIndexSet *added = [[rows mutableCopy] autorelease];
-		[added removeIndexes:[theOutlineView selectedRowIndexes]];
-		keep = (NSInteger)([added count] ? [added lastIndex] : [rows lastIndex]);
-	}
-	return [NSIndexSet indexSetWithIndex:(NSUInteger)keep];
+	NSInteger clicked = [theOutlineView clickedRow];
+	if (clicked >= 0 && [rows containsIndex:(NSUInteger)clicked]) return [NSIndexSet indexSetWithIndex:(NSUInteger)clicked];
+
+	NSIndexSet *relations = [rows indexesPassingTest:^BOOL(NSUInteger row, BOOL *stop) {
+		SPPostgresSidebarItem *item = [theOutlineView itemAtRow:(NSInteger)row];
+		return [item kind] == SPPostgresSidebarTable || [item kind] == SPPostgresSidebarView;
+	}];
+	if ([relations count]) return relations;
+
+	NSMutableIndexSet *added = [[rows mutableCopy] autorelease];
+	[added removeIndexes:[theOutlineView selectedRowIndexes]];
+	return [NSIndexSet indexSetWithIndex:([added count] ? [added lastIndex] : [rows lastIndex])];
 }
 
 /// The user's selection change (not the API's) asks the delegate first.
