@@ -103,6 +103,8 @@ static NSString * const SPTestDefaultsSuite = @"SPPostgresStage9Tests";
 	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPPostgresSidebarBarTestPort];
 	[admin execute:@"DROP TABLE IF EXISTS public.sp9_new"];
 	[admin execute:@"DROP SEQUENCE IF EXISTS public.sp9_seq"];
+	[admin execute:@"DROP TABLE IF EXISTS public.sp9_a"];
+	[admin execute:@"DROP TABLE IF EXISTS public.sp9_b"];
 	[admin execute:@"DELETE FROM public.customers WHERE id = 9001"];
 
 	self.scratchDefaults = nil;
@@ -386,19 +388,27 @@ static NSString * const SPTestDefaultsSuite = @"SPPostgresStage9Tests";
 	[relations addIndex:(NSUInteger)view];
 	XCTAssertEqualObjects([sidebar outlineView:outline selectionIndexesForProposedSelection:relations], relations);
 
-	// customers selected, the sequence added (as a Command-click would): just the row added
+	// customers selected, the sequence added with no click (as Shift-arrow or Select All would): the tables and views stay
 	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	NSMutableIndexSet *withSequence = [NSMutableIndexSet indexSetWithIndex:(NSUInteger)table];
 	[withSequence addIndex:(NSUInteger)sequence];
 	NSIndexSet *kept = [sidebar outlineView:outline selectionIndexesForProposedSelection:withSequence];
-	XCTAssertEqual(kept.count, 1u);
-	XCTAssertEqualObjects(kept, [NSIndexSet indexSetWithIndex:(NSUInteger)sequence]);
+	XCTAssertEqualObjects(kept, [NSIndexSet indexSetWithIndex:(NSUInteger)table]);
 
-	// So does an extension
+	// So with an extension
 	NSMutableIndexSet *withExtension = [NSMutableIndexSet indexSetWithIndex:(NSUInteger)table];
 	[withExtension addIndex:(NSUInteger)extension];
-	XCTAssertEqualObjects([sidebar outlineView:outline selectionIndexesForProposedSelection:withExtension], [NSIndexSet indexSetWithIndex:(NSUInteger)extension]);
+	XCTAssertEqualObjects([sidebar outlineView:outline selectionIndexesForProposedSelection:withExtension], [NSIndexSet indexSetWithIndex:(NSUInteger)table]);
+
+	// A sequence and an extension, no table or view among them: just the row added (the extension)
+	XCTAssertTrue([sidebar selectSequenceNamed:@"sp9_seq"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	NSMutableIndexSet *sequenceAndExtension = [NSMutableIndexSet indexSetWithIndex:(NSUInteger)sequence];
+	[sequenceAndExtension addIndex:(NSUInteger)extension];
+	XCTAssertEqualObjects([sidebar outlineView:outline selectionIndexesForProposedSelection:sequenceAndExtension], [NSIndexSet indexSetWithIndex:(NSUInteger)extension]);
+	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	// A shift-click range from a table to a view crosses the VIEWS header: the header isn't selected
 	NSIndexSet *range = [NSIndexSet indexSetWithIndexesInRange:NSMakeRange((NSUInteger)table, (NSUInteger)(view - table + 1))];
@@ -472,6 +482,116 @@ static NSString * const SPTestDefaultsSuite = @"SPPostgresStage9Tests";
 	[sidebar.refreshButton performClick:nil];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(sidebar.selectedRelationNames, (@[@"customers", @"v_customers"]));
+}
+
+/// The outline's own handling of an arrow key (as the keyboard sends it), shift: extending the selection.
+- (void)pressArrow:(unichar)arrow shift:(BOOL)shift inOutline:(NSOutlineView *)outline
+{
+	NSString *characters = [NSString stringWithCharacters:&arrow length:1];
+	unsigned short keyCode = (arrow == NSDownArrowFunctionKey) ? 125 : 126;
+	NSEventModifierFlags flags = NSEventModifierFlagFunction | NSEventModifierFlagNumericPad | (shift ? NSEventModifierFlagShift : 0);
+	NSEvent *event = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:flags timestamp:0 windowNumber:outline.window.windowNumber context:nil characters:characters charactersIgnoringModifiers:characters isARepeat:NO keyCode:keyCode];
+	[outline keyDown:event];
+}
+
+/// Every table and view of the shown schema, in display order.
+- (NSArray<NSString *> *)relationsOfSidebar:(SPPostgresSidebarController *)sidebar
+{
+	return [[sidebar itemTitlesInSection:@"TABLES"] arrayByAddingObjectsFromArray:[sidebar itemTitlesInSection:@"VIEWS"]];
+}
+
+- (void)testSelectAllSelectsEveryRelation
+{
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	NSOutlineView *outline = [self outlineOfSidebar:sidebar];
+	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertGreaterThan([sidebar itemTitlesInSection:@"EXTENSIONS"].count, 0u);
+
+	[outline selectAll:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertEqualObjects(sidebar.selectedRelationNames, [self relationsOfSidebar:sidebar]);
+	XCTAssertNil(sidebar.selectedExtensionName);
+	XCTAssertNil(sidebar.selectedSequenceName);
+	XCTAssertNotEqualObjects(self.document.currentPane, @"extension");
+
+	// From an extension too
+	XCTAssertTrue([sidebar selectExtensionNamed:@"pg_trgm"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	[outline selectAll:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertEqualObjects(sidebar.selectedRelationNames, [self relationsOfSidebar:sidebar]);
+	XCTAssertNil(sidebar.selectedExtensionName);
+}
+
+- (void)testDownArrowFromLastTableMovesToFirstView
+{
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	NSOutlineView *outline = [self outlineOfSidebar:sidebar];
+	NSString *lastTable = [[sidebar itemTitlesInSection:@"TABLES"] lastObject];
+	NSString *firstView = [[sidebar itemTitlesInSection:@"VIEWS"] firstObject];
+	XCTAssertNotNil(lastTable);
+	XCTAssertNotNil(firstView);
+	XCTAssertTrue([sidebar selectTableNamed:lastTable]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+
+	[self pressArrow:NSDownArrowFunctionKey shift:NO inOutline:outline];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertEqualObjects(sidebar.selectedRelationNames, @[firstView]);
+	XCTAssertEqualObjects(sidebar.selectedTableName, firstView);
+
+	// And back up across the header
+	[self pressArrow:NSUpArrowFunctionKey shift:NO inOutline:outline];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertEqualObjects(sidebar.selectedTableName, lastTable);
+}
+
+- (void)testShiftDownExtendsAcrossViewsHeader
+{
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	NSOutlineView *outline = [self outlineOfSidebar:sidebar];
+	NSString *lastTable = [[sidebar itemTitlesInSection:@"TABLES"] lastObject];
+	NSString *firstView = [[sidebar itemTitlesInSection:@"VIEWS"] firstObject];
+	XCTAssertTrue([sidebar selectTableNamed:lastTable]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+
+	[self pressArrow:NSDownArrowFunctionKey shift:YES inOutline:outline];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertEqualObjects(sidebar.selectedRelationNames, (@[lastTable, firstView]));
+	XCTAssertNil(sidebar.selectedTableName);
+}
+
+- (void)testReloadWithVanishedNameKeepsSurvivor
+{
+	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPPostgresSidebarBarTestPort];
+	XCTAssertNotNil([admin execute:@"DROP TABLE IF EXISTS public.sp9_a"]);
+	XCTAssertNotNil([admin execute:@"DROP TABLE IF EXISTS public.sp9_b"]);
+	XCTAssertNotNil([admin execute:@"CREATE TABLE public.sp9_a (id int)"]);
+	XCTAssertNotNil([admin execute:@"CREATE TABLE public.sp9_b (id int)"]);
+
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	[sidebar reloadKeepingSelection];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertTrue(([sidebar selectRelationsNamed:@[@"sp9_a", @"sp9_b"]]));
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertEqualObjects(sidebar.selectedRelationNames, (@[@"sp9_a", @"sp9_b"]));
+
+	XCTAssertNotNil([admin execute:@"DROP TABLE public.sp9_b"]);
+	[sidebar reloadKeepingSelection];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertFalse([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"sp9_b"]);
+	XCTAssertEqualObjects(sidebar.selectedRelationNames, @[@"sp9_a"]);
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"sp9_a");
+	XCTAssertEqualObjects(self.document.contentController.table, @"sp9_a");
+}
+
+- (void)testPartialSelectRelationsNamed
+{
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	XCTAssertFalse(([sidebar selectRelationsNamed:@[@"customers", @"no_such"]]));
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertEqualObjects(sidebar.selectedRelationNames, @[@"customers"]);
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"customers");
 }
 
 @end
