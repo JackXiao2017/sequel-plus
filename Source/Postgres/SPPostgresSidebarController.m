@@ -1,6 +1,7 @@
 #import "SPPostgresSidebarController.h"
 #import "SPPostgresCatalog.h"
 #import "SPPostgresTaskRunner.h"
+#import "SPPostgresSidebarInfoPane.h"
 #import "SPButtonBar.h"
 #import "SPSplitView.h"
 #import "SPConstants.h"
@@ -204,6 +205,9 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	NSImageView *splitHandleView;
 	SPSplitView *infoSplitView;
 	NSView *infoPaneContainer;
+	SPPostgresSidebarInfoPane *infoPane;
+	/// Inside a reload's apply: the information pane reads once, at its end (see -_runReload:…)
+	NSUInteger applyingReload;
 	NSUserDefaults *defaults;
 	BOOL actionsEnabled;
 
@@ -247,6 +251,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 @synthesize splitHandleView;
 @synthesize infoSplitView;
 @synthesize infoPaneContainer;
+@synthesize infoPane;
 @synthesize defaults;
 @synthesize actionsEnabled;
 
@@ -266,6 +271,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 		taskRunner = [[SPPostgresTaskRunner inlineRunnerWithConnection:[theCatalog connection]] retain];
 		ownsTaskRunner = YES;
+		[infoPane setTaskRunner:taskRunner];
 		[self reloadWithCatalog:theCatalog];
 	}
 	return self;
@@ -295,6 +301,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[splitHandleView release];
 	[infoSplitView release];
 	[infoPaneContainer release];
+	[infoPane release];
 	[defaults release];
 	[selectedSchema release];
 	[pendingSchema release];
@@ -335,6 +342,7 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	[refreshButton setTarget:nil];
 	[infoToggleButton setTarget:nil];
 	[infoSplitView setDelegate:nil];
+	[infoPane invalidate];
 }
 
 #pragma mark - View
@@ -433,6 +441,8 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	// Not height-sizable: the pane keeps its height as the panel resizes (the outline takes the difference)
 	infoPaneContainer = [[NSView alloc] initWithFrame:NSMakeRect(0, outlineHeight + [infoSplitView dividerThickness], NSWidth(frame), SPPostgresSidebarInfoPaneHeight)];
 	[infoPaneContainer setAutoresizingMask:NSViewWidthSizable];
+	infoPane = [[SPPostgresSidebarInfoPane alloc] initWithFrame:[infoPaneContainer bounds]];
+	[infoPaneContainer addSubview:[infoPane view]];
 	[infoSplitView addSubview:infoPaneContainer];
 	[infoSplitView adjustSubviews];
 	[container addSubview:infoSplitView];
@@ -568,7 +578,9 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 /// Collapses or expands the information pane (without animating) as SPTableInformationPanelCollapsed in defaults says.
 - (void)_applyStoredInfoPaneState
 {
+	BOOL wasCollapsed = [infoSplitView isCollapsibleSubviewCollapsed];
 	[infoSplitView setCollapsibleSubviewCollapsed:[[defaults objectForKey:SPTableInformationPanelCollapsed] boolValue] animate:NO];
+	if (wasCollapsed != [infoSplitView isCollapsibleSubviewCollapsed]) [self reloadInfoPane];
 }
 
 - (IBAction)addTable:(id)sender
@@ -589,6 +601,32 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	[infoSplitView toggleCollapse:sender];
 
 	[defaults setObject:[NSNumber numberWithBool:[infoSplitView isCollapsibleSubviewCollapsed]] forKey:SPTableInformationPanelCollapsed];
+
+	// Expanded: it shows the selection now (it read nothing while collapsed)
+	[self reloadInfoPane];
+}
+
+- (void)reloadInfoPane
+{
+	if (invalidated || !infoPane) return;
+
+	// Collapsed: nothing is read (expanding reads the selection)
+	if ([infoSplitView isCollapsibleSubviewCollapsed]) {
+		[infoPane showNothing];
+		return;
+	}
+
+	NSArray *relations = selectedRelationNames;
+	if ([relations count] > 1) {
+		[infoPane showMultipleSelection];
+	}
+	else if ([relations count] == 1 && [selectedSchema length]) {
+		NSString *name = [relations firstObject];
+		[infoPane showRelation:name inSchema:selectedSchema view:[self relationIsView:name] connection:[catalog connection]];
+	}
+	else {
+		[infoPane showNothing];
+	}
 }
 
 /// The information pane keeps its height as the panel resizes; the outline takes the difference. While the pane is
@@ -623,6 +661,8 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	[taskRunner release];
 	taskRunner = [runner retain];
 	ownsTaskRunner = NO;
+	// The pane reads on the same runner (the tab's, replaced on a database switch)
+	[infoPane setTaskRunner:runner];
 	// A schema reload queued on the previous runner never completes now
 	pendingSchemaToken++;
 	[pendingSchema release];
@@ -660,6 +700,7 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 		if (invalidated) return;
 
 		BOOL loaded = NO;
+		applyingReload++;
 		if (result) {
 			loaded = apply(result);
 		}
@@ -677,6 +718,10 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 			[self _reloadSchemaPopup];
 			[self _endReload];
 		}
+		applyingReload--;
+
+		// The pane reads the selection the reload left (the same tables' facts, e.g. after a truncate, read afresh)
+		if (result || (cancelled && cancelApply)) [self reloadInfoPane];
 
 		if (completion) completion(loaded);
 	}];
@@ -709,6 +754,7 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	if (ownsTaskRunner && [taskRunner connection] != [catalog connection]) {
 		[taskRunner release];
 		taskRunner = [[SPPostgresTaskRunner inlineRunnerWithConnection:[catalog connection]] retain];
+		[infoPane setTaskRunner:taskRunner];
 	}
 
 	BOOL (^apply)(NSDictionary *) = ^BOOL(NSDictionary *read) {
@@ -1171,6 +1217,8 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	[self _updateGearMenu];
 
 	if (!holdingSelectionChanges) [delegate sidebarSelectionDidChange:self];
+	// A reload's selection changes: the pane reads once, when the reload has been applied
+	if (!applyingReload) [self reloadInfoPane];
 }
 
 - (void)chooseSchema:(id)sender

@@ -161,6 +161,10 @@ __attribute__((visibility("default")))
 /// The Export sheet's controller while it is shown or its export runs, else nil.
 @property (readonly) SPPostgresExportController *exportController;
 
+/// Where "Copy Create … Syntax" (and the Create Syntax sheet's Copy) puts the statements: the general pasteboard
+/// unless set (tests set a private one).
+@property (nonatomic, retain) NSPasteboard *createSyntaxPasteboard;
+
 /**
  * File ▸ Import…: the open panel, then (for CSV) the mapping sheet, then the import (SPPostgresImportController).
  * Enabled while connected, not processing and no sheet is attached. Import from Clipboard stays disabled.

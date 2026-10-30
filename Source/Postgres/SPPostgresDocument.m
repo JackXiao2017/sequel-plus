@@ -22,6 +22,7 @@
 #import "SPPostgresHistory.h"
 #import "SPPostgresTableDuplicator.h"
 #import "SPPostgresTableActions.h"
+#import "SPPostgresCreateStatement.h"
 #import "SPPostgresConsoleLogger.h"
 #import "SPPostgresCatalog.h"
 #import "SPPostgresConnector.h"
@@ -263,6 +264,11 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	SPPostgresImportController *importController;
 	SPPostgresTransferController *transferController;
 
+	/// The Show Create Syntax sheet while it is shown, and its text view (see -_showCreateSyntax:title:)
+	NSPanel *createSyntaxSheet;
+	NSTextView *createSyntaxTextView;
+	NSPasteboard *createSyntaxPasteboard;
+
 	BOOL tornDown;
 }
 
@@ -286,6 +292,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 @synthesize exportController;
 @synthesize importController;
 @synthesize transferController;
+@synthesize createSyntaxPasteboard;
 @synthesize currentDatabase;
 @synthesize isProcessing;
 @synthesize taskRunner;
@@ -382,6 +389,9 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[exportController release];
 	[importController release];
 	[transferController release];
+	[createSyntaxSheet release];
+	[createSyntaxTextView release];
+	[createSyntaxPasteboard release];
 	[taskRunner release];
 	[taskDisplay release];
 
@@ -1206,6 +1216,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 {
 	if (tornDown) return;
 	structureNeedsReset = YES;
+	// The information pane under the table list shows the new comment
+	[sidebar reloadInfoPane];
 }
 
 /// The shown pane reloads if it may be stale.
@@ -1661,6 +1673,9 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 	// The Transfer sheet ends; a transfer running is cancelled (the target's transaction rolls back)
 	[transferController cancel:nil];
+
+	// The Show Create Syntax sheet
+	[self closeCreateSyntaxSheet:nil];
 
 	// A Duplicate Table sheet still up (its completion sees tornDown)
 	if (duplicateSheet) [[duplicateSheet sheetParent] endSheet:duplicateSheet returnCode:NSModalResponseCancel];
@@ -2119,6 +2134,180 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[alert setMessageText:title];
 	[alert setInformativeText:text];
 	[self _presentAlert:alert];
+}
+
+#pragma mark - Export and Create Syntax from the table list
+
+/**
+ * Export ▸ "As SQL dump…" (format 0) or "As CSV file…" (1) from the table list: the Export sheet (as File ▸ Export…,
+ * when it can open), its Selected tables source with exactly these tables checked and the format chosen. A view can't
+ * be exported as a table: it is left unchecked.
+ */
+- (void)sidebar:(SPPostgresSidebarController *)theSidebar exportRelations:(NSArray<NSString *> *)names format:(NSInteger)format
+{
+	if (tornDown || ![names count]) return;
+
+	SPPostgresExportController *previous = exportController;
+	[self export:nil];
+	SPPostgresExportController *controller = exportController;
+	// Not opened (a sheet job couldn't run), or it ended at once
+	if (!controller || controller == previous || ![controller sheet]) return;
+
+	NSString *schema = [sidebar selectedSchema];
+	for (NSArray *pair in [[[controller checkedTables] copy] autorelease]) {
+		[controller setChecked:NO table:[pair objectAtIndex:1] schema:[pair objectAtIndex:0]];
+	}
+	for (NSString *name in names) {
+		if ([sidebar relationIsView:name]) continue;
+		[controller setChecked:YES table:name schema:schema];
+	}
+
+	// Selected tables (the source popup's third item), and the format: the controls follow through their actions
+	NSPopUpButton *source = [controller sourcePopup];
+	[source selectItemAtIndex:2];
+	[source sendAction:[source action] to:[source target]];
+	NSSegmentedControl *formatControl = [controller formatControl];
+	[formatControl setSelectedSegment:(format == 1) ? 1 : 0];
+	[formatControl sendAction:[formatControl action] to:[formatControl target]];
+}
+
+- (NSPasteboard *)createSyntaxPasteboard
+{
+	return createSyntaxPasteboard ?: [NSPasteboard generalPasteboard];
+}
+
+/**
+ * "Show Create … Syntax…" (copy NO: a sheet) or "Copy Create … Syntax" (copy YES: createSyntaxPasteboard), as MySQL's:
+ * the statements are read in a task of the tab's runner (SPPostgresCreateStatement), each headed "-- Create syntax for
+ * TABLE|VIEW 'name'" when there are several. A failure shows MySQL's alert with the server's message.
+ */
+- (void)sidebar:(SPPostgresSidebarController *)theSidebar showCreateSyntaxForRelations:(NSArray<NSString *> *)names copy:(BOOL)copy
+{
+	if (tornDown || ![names count] || isProcessing) return;
+
+	NSString *schema = [[[sidebar selectedSchema] copy] autorelease];
+	NSArray *relations = [[names copy] autorelease];
+	NSMutableArray *types = [NSMutableArray arrayWithCapacity:[relations count]];
+	for (NSString *name in relations) [types addObject:[sidebar relationIsView:name] ? @"VIEW" : @"TABLE"];
+	NSArray *typeStrings = [[types copy] autorelease];
+
+	[taskRunner runTaskWithDescription:NSLocalizedString(@"Loading...", @"Postgres create syntax: loading task") cancelTitle:NSLocalizedString(@"Cancel", @"cancel button") work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		NSMutableArray *parts = [NSMutableArray arrayWithCapacity:[relations count]];
+		for (NSUInteger i = 0; i < [relations count]; i++) {
+			NSString *statement = [SPPostgresCreateStatement createStatementForTable:[relations objectAtIndex:i] inSchema:schema connection:theConnection error:error];
+			if (!statement) return nil;
+			if ([relations count] > 1) {
+				statement = [NSString stringWithFormat:@"-- Create syntax for %@ '%@'\n%@", [typeStrings objectAtIndex:i], [relations objectAtIndex:i], statement];
+			}
+			[parts addObject:statement];
+		}
+		return [parts componentsJoinedByString:@"\n"];
+	} completion:^(id result, NSError *error, BOOL cancelled) {
+		if (tornDown || cancelled) return;
+		if (!result) {
+			[self _presentTableActionError:error title:NSLocalizedString(@"An error occured while creating table syntax.", @"Postgres create syntax error message")];
+			return;
+		}
+		if (copy) {
+			NSPasteboard *pasteboard = [self createSyntaxPasteboard];
+			[pasteboard clearContents];
+			[pasteboard setString:result forType:NSPasteboardTypeString];
+			return;
+		}
+		NSString *title = ([relations count] == 1)
+			? [NSString stringWithFormat:NSLocalizedString(@"Create syntax for %@ '%@'", @"Create syntax label"), [typeStrings firstObject], [relations firstObject]]
+			: NSLocalizedString(@"Create syntaxes for selected items", @"Create syntaxes for selected items label");
+		[self _showCreateSyntax:result title:title];
+	}];
+}
+
+/// MySQL's Create Syntax sheet (createTableSyntaxWindow), built in code: its label, a non-editable monospaced text
+/// view, Copy and Close.
+- (void)_showCreateSyntax:(NSString *)syntax title:(NSString *)title
+{
+	if (tornDown || !parentWindow || [parentWindow attachedSheet]) {
+		NSBeep();
+		return;
+	}
+
+	NSRect frame = NSMakeRect(0, 0, 620, 420);
+	NSPanel *panel = [[NSPanel alloc] initWithContentRect:frame styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:YES];
+	[panel setReleasedWhenClosed:NO];
+	[panel setTitle:title];
+	[panel setMinSize:NSMakeSize(400, 250)];
+	NSView *content = [panel contentView];
+
+	NSTextField *label = [NSTextField labelWithString:title];
+	[label setFrame:NSMakeRect(20, NSHeight(frame) - 36, NSWidth(frame) - 40, 17)];
+	[label setFont:[NSFont boldSystemFontOfSize:[NSFont systemFontSize]]];
+	[label setLineBreakMode:NSLineBreakByTruncatingMiddle];
+	[label setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+	[label setIdentifier:@"createSyntaxLabel"];
+	[content addSubview:label];
+
+	NSScrollView *scrollView = [[[NSScrollView alloc] initWithFrame:NSMakeRect(20, 60, NSWidth(frame) - 40, NSHeight(frame) - 108)] autorelease];
+	[scrollView setBorderType:NSBezelBorder];
+	[scrollView setHasVerticalScroller:YES];
+	[scrollView setHasHorizontalScroller:YES];
+	[scrollView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+	NSTextView *textView = [[[NSTextView alloc] initWithFrame:[[scrollView contentView] bounds]] autorelease];
+	[textView setIdentifier:@"createSyntaxText"];
+	[textView setRichText:NO];
+	[textView setFont:[NSFont monospacedSystemFontOfSize:[NSFont systemFontSize] weight:NSFontWeightRegular]];
+	[textView setAutomaticQuoteSubstitutionEnabled:NO];
+	[textView setAutomaticDashSubstitutionEnabled:NO];
+	[textView setString:syntax];
+	[textView setEditable:NO];
+	[textView setSelectable:YES];
+	// No wrapping: long lines scroll sideways
+	[textView setHorizontallyResizable:YES];
+	[textView setMaxSize:NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX)];
+	[[textView textContainer] setWidthTracksTextView:NO];
+	[[textView textContainer] setContainerSize:NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX)];
+	[textView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+	[scrollView setDocumentView:textView];
+	[content addSubview:scrollView];
+
+	NSButton *close = [NSButton buttonWithTitle:NSLocalizedString(@"Close", @"close button") target:self action:@selector(closeCreateSyntaxSheet:)];
+	[close setFrame:NSMakeRect(NSWidth(frame) - 20 - 100, 14, 100, 32)];
+	[close setKeyEquivalent:@"\r"];
+	[close setAutoresizingMask:NSViewMinXMargin | NSViewMaxYMargin];
+	[close setIdentifier:@"createSyntaxCloseButton"];
+	[content addSubview:close];
+
+	NSButton *copyButton = [NSButton buttonWithTitle:NSLocalizedString(@"Copy", @"copy button") target:self action:@selector(copyCreateSyntax:)];
+	[copyButton setFrame:NSMakeRect(NSWidth(frame) - 20 - 100 - 100, 14, 100, 32)];
+	[copyButton setAutoresizingMask:NSViewMinXMargin | NSViewMaxYMargin];
+	[copyButton setIdentifier:@"createSyntaxCopyButton"];
+	[content addSubview:copyButton];
+
+	[createSyntaxSheet release];
+	createSyntaxSheet = panel; // takes the alloc's reference
+	[createSyntaxTextView release];
+	createSyntaxTextView = [textView retain];
+	[parentWindow beginSheet:panel completionHandler:nil];
+}
+
+/// The sheet's Copy: the statements to createSyntaxPasteboard.
+- (IBAction)copyCreateSyntax:(id)sender
+{
+	if (!createSyntaxTextView) return;
+	NSPasteboard *pasteboard = [self createSyntaxPasteboard];
+	[pasteboard clearContents];
+	[pasteboard setString:[createSyntaxTextView string] forType:NSPasteboardTypeString];
+}
+
+/// The sheet's Close (also on teardown).
+- (IBAction)closeCreateSyntaxSheet:(id)sender
+{
+	if (!createSyntaxSheet) return;
+	NSPanel *panel = createSyntaxSheet;
+	createSyntaxSheet = nil;
+	if ([panel sheetParent]) [[panel sheetParent] endSheet:panel];
+	[panel orderOut:nil];
+	[panel release];
+	[createSyntaxTextView release];
+	createSyntaxTextView = nil;
 }
 
 #pragma mark - Extensions

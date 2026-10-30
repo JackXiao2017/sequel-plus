@@ -4,6 +4,7 @@
 @class SPPostgresTaskRunner;
 @class SPPostgresSidebarController;
 @class SPSplitView;
+@class SPPostgresSidebarInfoPane;
 
 @protocol SPPostgresSidebarControllerDelegate <NSObject>
 /// The selected schema or table changed (by the user or through the API).
@@ -228,6 +229,14 @@ __attribute__((visibility("default")))
 @property (readonly) SPSplitView *infoSplitView;
 /// The information pane's container, 166 pt tall.
 @property (readonly) NSView *infoPaneContainer;
+/**
+ * The information pane in infoPaneContainer: the selected table's or view's facts, "multiple selection", or nothing.
+ * It reads (on taskRunner, which it follows) when the selection changes, after every reload, and when it is expanded;
+ * while collapsed it reads nothing.
+ */
+@property (readonly) SPPostgresSidebarInfoPane *infoPane;
+/// Shows the selection in the information pane again (reading its facts afresh), unless the pane is collapsed.
+- (void)reloadInfoPane;
 
 /// Where the information pane's collapsed state (SPTableInformationPanelCollapsed) is read and stored (default:
 /// standardUserDefaults). Setting it applies the state it stores (as a view built with it would start).
