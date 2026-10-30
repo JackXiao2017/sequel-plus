@@ -2269,6 +2269,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	if (tornDown || restoringHistory || pendingHistoryEntry || ![currentDatabase length]) return;
 	// Extensions are the database's, and History entries a schema's: an extension (and its pane) isn't recorded
 	if ([[sidebar selectedExtensionName] length] || [currentPane isEqualToString:SPPostgresPaneExtension]) return;
+	// Nor is a selection of several tables and views (the panes show none of them)
+	if ([[sidebar selectedRelationNames] count] > 1) return;
 	// A selected sequence is recorded as the entry's table (names are unique among a schema's relations)
 	NSString *table = [sidebar selectedTableName] ?: [sidebar selectedSequenceName];
 	[history recordDatabase:currentDatabase schema:[sidebar selectedSchema] table:table pane:currentPane];
