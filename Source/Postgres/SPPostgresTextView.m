@@ -151,7 +151,8 @@ static const NSInteger SPPostgresHelpMenuItemTag = 1000;
 #pragma mark -
 
 /// The name as completion inserts it: double-quoted ("" for ") unless it is an all-lowercase identifier and not a
-/// RESERVED keyword (an unreserved one, e.g. name or type, is a valid column name as it is).
+/// reserved or type_func_name keyword (+[SPPostgresSQLTokenizer reservedKeywords]; an unreserved one, e.g. name or
+/// type, is a valid column name as it is).
 static NSString *SPPostgresCompletionInsertedName(NSString *name)
 {
 	static NSCharacterSet *notIdentifier = nil;

@@ -38,7 +38,7 @@ __attribute__((visibility("default")))
  * differs; never "isRef", which SPNarrowDownCompletion would backtick-quote): the buffer's words (its identifier and
  * keyword tokens) starting with currentWord (as SPTextView, not in browse mode), SPPostgresSQLTokenizer's keywords (uppercased) and
  * function names, then the provider's databases, schemas, tables, views and columns. A name that is not an all-lowercase
- * identifier, or is a RESERVED keyword (+[SPPostgresSQLTokenizer reservedKeywords]), is inserted double-quoted ("match": "Order Items" → "\"Order Items\""). In browse mode
+ * identifier, or is a reserved or type_func_name keyword (+[SPPostgresSQLTokenizer reservedKeywords]), is inserted double-quoted ("match": "Order Items" → "\"Order Items\""). In browse mode
  * (after "name.") only the tables, views and columns.
  */
 - (NSArray *)suggestionsForSQLCompletionWith:(NSString *)currentWord dictMode:(BOOL)isDictMode browseMode:(BOOL)dbBrowseMode withTableName:(NSString *)aTableName withDbName:(NSString *)aDbName;

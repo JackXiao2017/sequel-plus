@@ -1331,47 +1331,80 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 }
 
 /**
+ * The text escaped so that it holds no comment delimiter: a backslash is inserted between "/" and "*", and between "*"
+ * and "/" (so "/ *" reads "/\*" and "* /" reads "*\/", spaces added here); also after a "/" or "*" followed by a backslash, so that
+ * -_unescapedCommentText: restores the text exactly. PostgreSQL's block comments nest, and quotes mean nothing inside
+ * one, so an escaped "/ *" (in a comment or a string) can't leave the wrapping comment open.
+ */
++ (NSString *)_escapedCommentText:(NSString *)text
+{
+	NSUInteger length = [text length];
+	NSMutableString *escaped = [NSMutableString stringWithCapacity:length + 8];
+	for (NSUInteger i = 0; i < length; i++) {
+		unichar c = [text characterAtIndex:i];
+		[escaped appendFormat:@"%C", c];
+		if ((c == '/' || c == '*') && i + 1 < length) {
+			unichar next = [text characterAtIndex:i + 1];
+			if ((c == '/' && next == '*') || (c == '*' && next == '/') || next == '\\') [escaped appendString:@"\\"];
+		}
+	}
+	return escaped;
+}
+
+/// The inverse of +_escapedCommentText:: a backslash right after a "/" or "*" is dropped.
++ (NSString *)_unescapedCommentText:(NSString *)text
+{
+	NSUInteger length = [text length];
+	NSMutableString *unescaped = [NSMutableString stringWithCapacity:length];
+	for (NSUInteger i = 0; i < length; i++) {
+		unichar c = [text characterAtIndex:i];
+		[unescaped appendFormat:@"%C", c];
+		if ((c == '/' || c == '*') && i + 1 < length && [text characterAtIndex:i + 1] == '\\') i++;
+	}
+	return unescaped;
+}
+
+/**
  * As MySQL's -commentOutCurrentQueryTakingSelection: (SPCustomQuery.m): wraps the current statement (or the selection)
- * in / * * / (a "* /" inside is escaped as "*\/"), or unwraps it when it is wrapped already; the caret then goes after
- * the opening / *.
+ * in a block comment ("/ * " … " * /"), its delimiters escaped (+_escapedCommentText:: PostgreSQL's comments nest, so
+ * MySQL's escaping of "* /" alone would leave the comment open after an inner "/ *"); or, when it is one block comment
+ * already, unwraps and unescapes it, restoring what was wrapped. After wrapping, the caret goes after the opening "/ *".
  */
 - (void)_commentOutCurrentQueryTakingSelection:(BOOL)takeSelection
 {
-	BOOL isUncomment = NO;
-
 	NSRange workingRange = takeSelection ? [editor selectedRange] : [self _commentQueryRange];
 	if (workingRange.location == NSNotFound || !workingRange.length) {
 		NSBeep();
 		return;
 	}
 
-	NSMutableString *n = [NSMutableString stringWithString:[[editor string] substringWithRange:workingRange]];
-
-	if ([n hasSuffix:@"\n"]) {
+	NSString *text = [[editor string] substringWithRange:workingRange];
+	if ([text hasSuffix:@"\n"]) {
 		workingRange.length--;
-		[n deleteCharactersInRange:NSMakeRange([n length] - 1, 1)];
+		text = [text substringToIndex:[text length] - 1];
 	}
 
-	// Escape given */ by *\/
-	SPPostgresReplace(n, @"\\*/(?=.)", @"*\\\\/");
-	SPPostgresReplace(n, @"\\*/(?=\\n)", @"*\\\\/");
+	// Already one block comment (whitespace around it aside): uncomment it
+	NSString *trimmed = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	NSArray *tokens = [SPPostgresSQLTokenizer tokensInString:trimmed range:NSMakeRange(0, [trimmed length])];
+	BOOL isUncomment = [tokens count] == 1 && [(SPPostgresSQLToken *)[tokens firstObject] kind] == SPPostgresTokenComment
+		&& [trimmed hasPrefix:@"/*"] && [trimmed hasSuffix:@"*/"] && [trimmed length] >= 4;
 
-	// Wrap current query into /* */
-	[n insertString:@"/* " atIndex:0];
-	[n appendString:@" */"];
-
-	// Check if current query/selection is already commented out, if so uncomment it
-	if (SPPostgresMatches(n, @"^/\\* \\s*/\\*\\s*(.|\\n)*?\\s*\\*/ \\*/\\s*$")) {
-		SPPostgresReplace(n, @"^/\\* \\s*/\\*\\s*", @"");
-		SPPostgresReplace(n, @"\\s*\\*/ \\*/\\s*\\Z", @"");
-		// unescape *\/
-		SPPostgresReplace(n, @"\\*\\\\/", @"*/");
-		isUncomment = YES;
+	NSString *replacement;
+	if (isUncomment) {
+		NSString *body = [trimmed substringWithRange:NSMakeRange(2, [trimmed length] - 4)];
+		if ([body hasPrefix:@" "]) body = [body substringFromIndex:1];
+		if ([body hasSuffix:@" "]) body = [body substringToIndex:[body length] - 1];
+		replacement = [[self class] _unescapedCommentText:body];
+		workingRange = NSMakeRange(workingRange.location + [text rangeOfString:trimmed].location, [trimmed length]);
+	}
+	else {
+		replacement = [NSString stringWithFormat:@"/* %@ */", [[self class] _escapedCommentText:text]];
 	}
 
 	// Replace current query/selection by (un)commented string
 	[editor setSelectedRange:workingRange];
-	[editor insertText:n replacementRange:workingRange];
+	[editor insertText:replacement replacementRange:workingRange];
 
 	// If commenting out locate the caret just after the first /*
 	if (!isUncomment) [editor setSelectedRange:NSMakeRange(workingRange.location + 2, 0)];

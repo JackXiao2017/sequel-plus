@@ -1582,6 +1582,7 @@
 		ED54B7F9B6BE4F6B0638EA99 /* SPPostgresTransferController.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; name = SPPostgresTransferController.h; path = Source/Postgres/SPPostgresTransferController.h; sourceTree = SOURCE_ROOT; };
 		EF862787DAAE51D399F3F9CB /* SPPostgresCatalog.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPPostgresCatalog.m; path = Source/Postgres/SPPostgresCatalog.m; sourceTree = SOURCE_ROOT; };
 		EFACC61395E5F5296CEBF4B9 /* SPPostgresExtensions.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPPostgresExtensions.m; path = Source/Postgres/SPPostgresExtensions.m; sourceTree = SOURCE_ROOT; };
+		F045FE8A92ED0903BED9385F /* SPPostgresHelpDataSource.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; name = SPPostgresHelpDataSource.h; path = Source/Postgres/SPPostgresHelpDataSource.h; sourceTree = SOURCE_ROOT; };
 		F074F09D97D4BF37FCEEB1AC /* SPPostgresTransferController.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPPostgresTransferController.m; path = Source/Postgres/SPPostgresTransferController.m; sourceTree = SOURCE_ROOT; };
 		F1C6AC65BDAB6DFE8A770A29 /* SPPostgresFavoritesStoreTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPPostgresFavoritesStoreTests.m; path = PostgresTests/SPPostgresFavoritesStoreTests.m; sourceTree = SOURCE_ROOT; };
 		F340D8D09E8451446F4AF399 /* SPPostgresSQLImporter.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; name = SPPostgresSQLImporter.h; path = Source/Postgres/SPPostgresSQLImporter.h; sourceTree = SOURCE_ROOT; };
@@ -3001,6 +3002,7 @@
 				179499919E4E8EC0ADC96536 /* SPPostgresTextView.m */,
 				4DC975AF969841DDF74BBD00 /* SPPostgresHelp.h */,
 				A94F5998D1A1C967F840E62B /* SPPostgresHelp.m */,
+				F045FE8A92ED0903BED9385F /* SPPostgresHelpDataSource.h */,
 			);
 			name = Postgres;
 			sourceTree = "<group>";
