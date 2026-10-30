@@ -175,6 +175,10 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 	/// A database switch in progress (see -switchToDatabase:)
 	SPPostgresConnector *pendingConnector;
+	/// An Open Table in New Tab or Window connecting (see -openRelation:inSchema:inNewWindow:), and what makes its
+	/// connector
+	SPPostgresConnector *pendingOpenConnector;
+	SPPostgresConnector *(^openRelationConnectorFactory)(SPPostgresFavorite *, NSString *, NSString *, NSWindow *);
 
 	/// The current connection's runner, observed (its busy) while observingRunner, and its task display
 	SPPostgresTaskRunner *taskRunner;
@@ -292,6 +296,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 @synthesize alertPresenter;
 @synthesize confirmationPresenter;
 @synthesize connectionProvider;
+@synthesize openRelationConnectorFactory;
 @synthesize usersController;
 @synthesize exportController;
 @synthesize importController;
@@ -389,6 +394,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[alertPresenter release];
 	[confirmationPresenter release];
 	[connectionProvider release];
+	[openRelationConnectorFactory release];
 	[usersController release];
 	[exportController release];
 	[importController release];
@@ -474,10 +480,11 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[self _updateIsProcessing];
 }
 
-/// isProcessing: the runner is busy or a database switch is connecting (never once torn down).
+/// isProcessing: the runner is busy, or a database switch or an Open Table in New Tab/Window is connecting (never once
+/// torn down).
 - (void)_updateIsProcessing
 {
-	BOOL processing = !tornDown && ([taskRunner isBusy] || pendingConnector);
+	BOOL processing = !tornDown && ([taskRunner isBusy] || pendingConnector || pendingOpenConnector);
 	if (processing == isProcessing) return;
 	[self setIsProcessing:processing];
 
@@ -1664,6 +1671,13 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	pendingConnector = nil;
 	[pending cancel];
 	[pending release];
+	// The same for an Open Table in New Tab or Window: nothing is opened
+	SPPostgresConnector *pendingOpen = pendingOpenConnector;
+	pendingOpenConnector = nil;
+	[pendingOpen cancel];
+	[pendingOpen release];
+	[openRelationConnectorFactory release];
+	openRelationConnectorFactory = nil;
 	[self _updateIsProcessing]; // NO from now on
 	[pendingHistoryEntry release];
 	pendingHistoryEntry = nil;
@@ -2351,6 +2365,122 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[panel release];
 	[createSyntaxTextView release];
 	createSyntaxTextView = nil;
+}
+
+#pragma mark - Open Table in New Tab or Window
+
+- (void)sidebar:(SPPostgresSidebarController *)theSidebar openRelation:(NSString *)name inNewWindow:(BOOL)newWindow
+{
+	[self openRelation:name inSchema:[theSidebar selectedSchema] inNewWindow:newWindow];
+}
+
+- (void)openRelation:(NSString *)name inSchema:(NSString *)schema inNewWindow:(BOOL)newWindow
+{
+	if (tornDown || ![name length]) return;
+	// Also while one is connecting already (isProcessing)
+	if (isProcessing) {
+		NSBeep();
+		return;
+	}
+
+	// The favorite on this tab's database, and the passwords this session was opened with (as a database switch's), so
+	// nothing is asked again or read from the Keychain that this session didn't need; an SSH favorite's connector opens
+	// a tunnel of its own (its sheets, if any, on this window)
+	SPPostgresFavorite *target = [[favorite copy] autorelease];
+	[target setDatabase:currentDatabase];
+	NSString *thePassword = [connector password] ?: [connection password];
+	NSString *theSSHPassword = [connector sshPassword];
+	SPPostgresConnector *newConnector = openRelationConnectorFactory
+		? [openRelationConnectorFactory(target, thePassword, theSSHPassword, parentWindow) retain]
+		: [[SPPostgresConnector alloc] initWithFavorite:target password:thePassword sshPassword:theSSHPassword parentWindow:parentWindow];
+	if (!newConnector) return;
+
+	pendingOpenConnector = newConnector;
+	[self _updateIsProcessing]; // the tab shows it is connecting
+
+	// The connector keeps the completion until it is called (always exactly once), which keeps self alive meanwhile;
+	// the connector is captured unretained (no connector -> block -> connector cycle)
+	__block SPPostgresConnector *blockConnector = newConnector;
+	NSString *theName = [[name copy] autorelease];
+	NSString *theSchema = [[schema copy] autorelease];
+	[newConnector connectWithCompletion:^(PGPostgresConnection *newConnection, NSError *error) {
+		[self _openRelation:theName inSchema:theSchema inNewWindow:newWindow favorite:target by:blockConnector finishedWithConnection:newConnection error:error];
+	}];
+}
+
+- (void)_openRelation:(NSString *)name inSchema:(NSString *)schema inNewWindow:(BOOL)newWindow favorite:(SPPostgresFavorite *)theFavorite by:(SPPostgresConnector *)theConnector finishedWithConnection:(PGPostgresConnection *)newConnection error:(NSError *)error
+{
+	// Cancelled by the tab closing (the teardown let go of it)
+	if (tornDown || theConnector != pendingOpenConnector) return;
+
+	SPPostgresConnector *newConnector = pendingOpenConnector; // takes over our reference
+	pendingOpenConnector = nil;
+	[self _updateIsProcessing];
+
+	SPWindowController *windowController = newWindow ? nil : parentWindowController;
+	if (!newConnection || (!newWindow && !windowController)) {
+		[newConnector disconnect];
+		[newConnector release];
+		if (!newConnection && ([error code] != SPPostgresErrorCancelled || ![[error domain] isEqualToString:SPPostgresErrorDomain])) {
+			NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+			[alert setAlertStyle:NSAlertStyleWarning];
+			[alert setMessageText:[NSString stringWithFormat:(newWindow
+				? NSLocalizedString(@"Could not open “%@” in a new window", @"PostgreSQL open table in new window failed (table)")
+				: NSLocalizedString(@"Could not open “%@” in a new tab", @"PostgreSQL open table in new tab failed (table)")), name]];
+			[alert setInformativeText:[error localizedDescription] ?: @""];
+			[self _presentAlert:alert];
+		}
+		return;
+	}
+
+	// The new tab takes over the connector (and disconnects it when it closes)
+	SPPostgresDocument *document = [[[SPPostgresDocument alloc] initWithConnection:newConnection connector:newConnector favorite:theFavorite] autorelease];
+	[newConnector release];
+
+	if (newWindow) {
+		// As -[SPAppController newWindow]: the window's delegate is its controller, which lets go of itself when the
+		// window closes (-windowWillClose:)
+		windowController = [[SPWindowController alloc] initWithWindowNibName:@"MainWindow"];
+		NSWindow *window = [windowController window];
+		if (parentWindow) {
+			// This window's size (without its toolbar, which the new tab installs), cascaded from it
+			NSRect frame = [parentWindow frame];
+			if ([[parentWindow toolbar] isVisible]) {
+				NSRect content = [NSWindow contentRectForFrameRect:frame styleMask:[parentWindow styleMask]];
+				frame.size.height -= content.size.height - [[parentWindow contentView] frame].size.height;
+			}
+			[window setFrame:frame display:NO];
+			NSPoint next = [window cascadeTopLeftFromPoint:NSMakePoint(NSMinX([parentWindow frame]), NSMaxY([parentWindow frame]))];
+			[window setFrameTopLeftPoint:next];
+		}
+		[window setDelegate:windowController];
+		[windowController addTabDocument:document atIndex:0 select:YES];
+		[windowController showWindow:self];
+	}
+	else {
+		// Right after this tab, selected
+		NSUInteger index = [[windowController tabDocuments] indexOfObjectIdenticalTo:self];
+		NSInteger position = (index == NSNotFound) ? (NSInteger)[[windowController tabDocuments] count] : (NSInteger)index + 1;
+		[windowController addTabDocument:document atIndex:position select:YES];
+	}
+
+	[document selectRelationAfterLoad:name inSchema:schema];
+}
+
+- (void)selectRelationAfterLoad:(NSString *)name inSchema:(NSString *)schema
+{
+	if (tornDown || ![name length]) return;
+
+	// The reload queues on the runner behind the loads asked for so far (the first ones of a new tab), and its
+	// selection changes on the way aren't places the user went to; the table or view, once its schema is shown, is
+	NSString *theName = [[name copy] autorelease];
+	NSString *theSchema = [[schema copy] autorelease];
+	void (^select)(BOOL) = ^(BOOL loaded) {
+		if ([theSchema length] && ![theSchema isEqualToString:[sidebar selectedSchema]]) return;
+		[sidebar selectTableNamed:theName];
+	};
+	if ([theSchema length]) [sidebar reloadSchema:theSchema completion:[self _quietSidebarCompletion:select]];
+	else [sidebar reloadKeepingSelection:[self _quietSidebarCompletion:select]];
 }
 
 #pragma mark - Extensions
