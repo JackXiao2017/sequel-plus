@@ -131,6 +131,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 - (void)_showDuplicateTableSheetForTable:(NSString *)table;
 - (void)_duplicateTable:(NSString *)table inSchema:(NSString *)schema toName:(NSString *)newName withContent:(BOOL)withContent;
 - (void)_showRenameTableSheetForTable:(NSString *)table;
+- (NSString *)_addTableName;
 - (void)_renameTable:(NSString *)table inSchema:(NSString *)schema toName:(NSString *)newName;
 - (void)_validateNameSheets;
 - (BOOL)_refuseWriteWhileBusy;
@@ -239,6 +240,12 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	NSButton *renameButton;
 	NSString *renameOriginalName;
 
+	/// The New Table sheet while it is shown, its controls, and the schema the table is added to
+	NSWindow *addTableSheet;
+	NSTextField *addTableNameField;
+	NSButton *addTableButton;
+	NSString *addTableSchema;
+
 	SPSplitView *splitView;
 	NSToolbar *toolbar;
 	NSPopUpButton *databasePopup;
@@ -247,7 +254,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 	/// An alert that came up while the tab couldn't show it (presented once the tab is active in a visible window)
 	NSAlert *pendingAlert;
-	/// A Truncate or Remove question waiting for the runner to be idle (see -_presentWhenIdle:)
+	/// A Truncate or Remove question, or the New Table sheet, waiting for the runner to be idle (see -_presentWhenIdle:)
 	void (^pendingConfirmation)(void);
 
 	/// The Users sheet while it is shown (or connecting)
@@ -356,6 +363,10 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[duplicateNameField release];
 	[duplicateContentSwitch release];
 	[duplicateButton release];
+	[addTableSheet release];
+	[addTableNameField release];
+	[addTableButton release];
+	[addTableSchema release];
 	[serverVersion release];
 	[currentDatabase release];
 	[splitView release];
@@ -462,8 +473,10 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	// What isProcessing disables (as MySQL's task start and end revalidate the toolbar)
 	[self _updateHistoryControl];
 	if (!tornDown && [parentWindow toolbar] == toolbar) [toolbar validateVisibleItems];
+	// The New Table sheet's Add (it writes)
+	[self _validateNameSheets];
 
-	// A Truncate or Remove question waiting for the tab to be idle (see -_presentWhenIdle:)
+	// A Truncate or Remove question, or the New Table sheet, waiting for the tab to be idle (see -_presentWhenIdle:)
 	if (!processing && pendingConfirmation) [self performSelector:@selector(_presentPendingConfirmation) withObject:nil afterDelay:0];
 }
 
@@ -1668,6 +1681,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[sidebar setDelegate:nil];
 	// A Rename Table sheet still up (its completion sees tornDown)
 	if (renameSheet) [[renameSheet sheetParent] endSheet:renameSheet returnCode:NSModalResponseCancel];
+	// A New Table sheet still up
+	if (addTableSheet) [[addTableSheet sheetParent] endSheet:addTableSheet returnCode:NSModalResponseCancel];
 	// An Add Sequence sheet still up (its completion sees tornDown)
 	if (addSequenceSheet) [[addSequenceSheet sheetParent] endSheet:addSequenceSheet returnCode:NSModalResponseCancel];
 	// An Install Extension sheet still up (an alert on it first; its completion sees tornDown)
@@ -1891,10 +1906,10 @@ NSString * const SPPostgresPaneExtension = @"extension";
 }
 
 /**
- * Runs present (a Truncate or Remove question) once the tab's runner is idle: at once if it is, else when processing
- * ends (see -_updateIsProcessing). Saving an edit before the question may have queued a list reload, and a write
- * confirmed while it runs would be refused. One question waits at a time (a second is ignored); it is dropped on
- * teardown and when the runner is replaced.
+ * Runs present (a Truncate or Remove question, or the New Table sheet) once the tab's runner is idle: at once if it
+ * is, else when processing ends (see -_updateIsProcessing). Saving an edit before the question may have queued a list
+ * reload, and a write confirmed while it runs would be refused. One question waits at a time (a second is ignored);
+ * it is dropped on teardown and when the runner is replaced.
  */
 - (void)_presentWhenIdle:(void (^)(void))present
 {
@@ -2767,6 +2782,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 - (void)_validateNameSheets
 {
+	// Add also waits for the tab to be idle: it writes as soon as it is clicked
+	if (addTableSheet) [addTableButton setEnabled:!isProcessing && [SPPostgresTableDuplicator isValidTableName:[self _addTableName]]];
 	if (duplicateSheet) [duplicateButton setEnabled:[SPPostgresTableDuplicator isValidTableName:[self _duplicateTableName]]];
 	if (renameSheet) {
 		NSString *name = [self _renameTableName];
@@ -2943,6 +2960,142 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}
 	[sidebar reloadSchema:schema completion:[self _quietSidebarCompletion:^(BOOL loaded) {
 		if ([reselect count]) [sidebar selectRelationsNamed:reselect];
+	}]];
+}
+
+#pragma mark - Add Table
+
+/**
+ * The bar's Add, as MySQL's: the shown pane's edits are saved, then (once the tab is idle: saving may have queued a
+ * list reload) MySQL's New Table sheet asks for the name of a table to add to the selected schema.
+ */
+- (void)sidebarAddTable:(SPPostgresSidebarController *)theSidebar
+{
+	if (tornDown || addTableSheet || !parentWindow || isProcessing || [parentWindow attachedSheet]) return;
+
+	NSString *schema = [[[sidebar selectedSchema] copy] autorelease];
+	if (![schema length]) return;
+
+	// An edit in progress (and a Structure draft column) is ended (saved) first, as MySQL's
+	if (![self _endPaneEditing] || ![parentWindow makeFirstResponder:nil]) return;
+
+	[self _presentWhenIdle:^{
+		// Nothing changed under it meanwhile (the tab, a sheet, the schema)
+		if (tornDown || addTableSheet || !parentWindow || isProcessing || [parentWindow attachedSheet]) return;
+		if (![schema isEqualToString:[sidebar selectedSchema]]) return;
+		[self _showAddTableSheetInSchema:schema];
+	}];
+}
+
+/// A sheet as MySQL's New Table sheet (DBView.xib), with its name row only (PostgreSQL has no engine or table
+/// charset): "Table Name:", then Cancel (Escape) and Add (Return, enabled for a name PostgreSQL keeps as given).
+- (void)_showAddTableSheetInSchema:(NSString *)schema
+{
+	NSRect frame = NSMakeRect(0, 0, 425, 87);
+	addTableSheet = [[NSWindow alloc] initWithContentRect:frame styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:YES];
+	[addTableSheet setReleasedWhenClosed:NO];
+	[addTableSheet setTitle:NSLocalizedString(@"New Table", @"PostgreSQL new table sheet title")];
+	[addTableSheet setContentMinSize:NSMakeSize(425, 87)];
+	[addTableSheet setContentMaxSize:NSMakeSize(600, 87)];
+	NSView *content = [addTableSheet contentView];
+	NSFont *smallFont = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
+
+	NSTextField *label = [NSTextField labelWithString:NSLocalizedString(@"Table Name:", @"PostgreSQL new table sheet: table name label")];
+	[label setFrame:NSMakeRect(5, 50, 128, 14)];
+	[label setFont:smallFont];
+	[label setAlignment:NSTextAlignmentRight];
+	[label setAutoresizingMask:NSViewMaxXMargin | NSViewMinYMargin];
+	[content addSubview:label];
+
+	addTableNameField = [[NSTextField alloc] initWithFrame:NSMakeRect(138, 49, 267, 18)];
+	[addTableNameField setIdentifier:@"addTableName"];
+	[[addTableNameField cell] setControlSize:NSControlSizeSmall];
+	[addTableNameField setFont:smallFont];
+	[[addTableNameField cell] setUsesSingleLineMode:YES];
+	[[addTableNameField cell] setScrollable:YES];
+	[addTableNameField setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+	[addTableNameField setDelegate:(id<NSTextFieldDelegate>)self];
+	[content addSubview:addTableNameField];
+
+	NSButton *cancel = [NSButton buttonWithTitle:NSLocalizedString(@"Cancel", @"cancel button") target:self action:@selector(closeAddTableSheet:)];
+	[cancel setFrame:NSMakeRect(250, 13, 84, 28)];
+	[cancel setControlSize:NSControlSizeSmall];
+	[cancel setFont:smallFont];
+	[cancel setTag:NSModalResponseCancel];
+	[cancel setKeyEquivalent:@"\e"];
+	[cancel setAutoresizingMask:NSViewMinXMargin | NSViewMaxYMargin];
+	[content addSubview:cancel];
+
+	addTableButton = [[NSButton buttonWithTitle:NSLocalizedString(@"Add", @"PostgreSQL new table sheet: add button") target:self action:@selector(closeAddTableSheet:)] retain];
+	[addTableButton setIdentifier:@"addTableButton"];
+	[addTableButton setFrame:NSMakeRect(332, 13, 78, 28)];
+	[addTableButton setControlSize:NSControlSizeSmall];
+	[addTableButton setFont:smallFont];
+	[addTableButton setTag:NSModalResponseOK];
+	[addTableButton setKeyEquivalent:@"\r"];
+	[addTableButton setAutoresizingMask:NSViewMinXMargin | NSViewMaxYMargin];
+	[content addSubview:addTableButton];
+
+	[addTableSchema release];
+	addTableSchema = [schema copy];
+	[addTableSheet setInitialFirstResponder:addTableNameField];
+	[self _validateNameSheets];
+
+	[parentWindow beginSheet:addTableSheet completionHandler:^(NSModalResponse returnCode) {
+		[addTableNameField setDelegate:nil];
+		[addTableSheet orderOut:nil];
+		[addTableSheet release], addTableSheet = nil;
+		[addTableNameField release], addTableNameField = nil;
+		[addTableButton release], addTableButton = nil;
+		[addTableSchema release], addTableSchema = nil;
+	}];
+}
+
+/// The sheet's name, trimmed.
+- (NSString *)_addTableName
+{
+	return [[addTableNameField stringValue] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+/**
+ * Cancel ends the sheet. Add (or Return) runs only while it is enabled (a valid name, the tab idle); otherwise the
+ * sheet stays up with the name, to try again. The table is created before the sheet ends, so nothing can start in
+ * between; then, as MySQL's, it is listed, selected and shown in Structure, or the server's message is shown.
+ */
+- (void)closeAddTableSheet:(id)sender
+{
+	if (!addTableSheet) return;
+	if ([sender tag] != NSModalResponseOK) {
+		[parentWindow endSheet:addTableSheet returnCode:NSModalResponseCancel];
+		return;
+	}
+	if (tornDown || ![addTableButton isEnabled]) {
+		NSBeep();
+		return;
+	}
+	if ([self _refuseWriteWhileBusy]) return;
+
+	NSString *name = [[[self _addTableName] copy] autorelease];
+	NSString *schema = [[addTableSchema copy] autorelease];
+	NSError *error = nil;
+	BOOL created = [SPPostgresTableActions createTableNamed:name inSchema:schema connection:connection error:&error];
+	[parentWindow endSheet:addTableSheet returnCode:NSModalResponseOK];
+
+	if (!created) {
+		NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+		[alert setAlertStyle:NSAlertStyleWarning];
+		[alert setMessageText:NSLocalizedString(@"Error adding new table", @"error adding new table message")];
+		[alert setInformativeText:[NSString stringWithFormat:NSLocalizedString(@"An error occurred while trying to add the new table '%@'.\n\nPostgreSQL said: %@", @"PostgreSQL error adding new table informative message"), name, [error localizedDescription] ?: @""]];
+		[alert addButtonWithTitle:NSLocalizedString(@"OK", @"OK button")];
+		[self _presentAlert:alert];
+		return;
+	}
+
+	// The table is in the schema the sidebar shows (the sheet was modal). The reload's empty selection on the way is
+	// not a place the user went to; selecting the new table is, and so is its Structure view (as MySQL's).
+	if (![schema isEqualToString:[sidebar selectedSchema]]) return;
+	[sidebar reloadSchema:schema completion:[self _quietSidebarCompletion:^(BOOL loaded) {
+		if ([sidebar selectTableNamed:name]) [self showPane:SPPostgresPaneStructure];
 	}]];
 }
 
