@@ -13,6 +13,47 @@ static const NSUInteger SPContentBarTestPort = 55418;
 // MySQL's preference keys (Source/SPConstants.m; the header is not ARC-clean)
 static NSString * const SPLimitResults = @"LimitResults";
 static NSString * const SPLimitResultsValue = @"LimitResultsValue";
+static NSString * const SPEditInSheetEnabled = @"EditInSheetEnabled";
+static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
+
+/// Records the statements a connection is about to send (PostgresKit reports willExecute only to a delegate passed at init).
+@interface SPContentBarStatementRecorder : NSObject <PGPostgresConnectionDelegate>
+@property (nonatomic, strong) NSMutableArray<NSString *> *statements;
+@end
+
+@implementation SPContentBarStatementRecorder
+- (instancetype)init { if ((self = [super init])) _statements = [NSMutableArray array]; return self; }
+- (void)connectionEstablished:(PGPostgresConnection *)connection {}
+- (void)connectionReset:(PGPostgresConnection *)connection {}
+- (void)connectionDisconnected:(PGPostgresConnection *)connection {}
+- (void)connection:(PGPostgresConnection *)connection notice:(NSString *)notice {}
+- (void)connection:(PGPostgresConnection *)connection willExecute:(NSObject *)query withValues:(NSArray *)values
+{
+	@synchronized (self) { [self.statements addObject:[query description]]; }
+}
+/// Statements that change data.
+- (NSArray *)writes
+{
+	NSMutableArray *writes = [NSMutableArray array];
+	@synchronized (self) {
+		for (NSString *statement in self.statements) {
+			NSString *upper = [[statement stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] uppercaseString];
+			if ([upper hasPrefix:@"UPDATE"] || [upper hasPrefix:@"INSERT"] || [upper hasPrefix:@"DELETE"]) [writes addObject:statement];
+		}
+	}
+	return writes;
+}
+@end
+
+/// One call of the field editor presenter.
+@interface SPContentBarSheetCall : NSObject
+@property (copy) NSString *value, *columnName, *typeName;
+@property BOOL editable, allowNull;
+@property (copy) void (^completion)(id newValue);
+@end
+
+@implementation SPContentBarSheetCall
+@end
 
 /// The Content tab's bottom bar (Stage 10): MySQL's layout, images, tooltips and keys, ⌫ in the grid, the busy state.
 @interface SPPostgresContentBarTests : XCTestCase
@@ -20,6 +61,7 @@ static NSString * const SPLimitResultsValue = @"LimitResultsValue";
 @property (strong) SPPostgresDocument *document;
 @property (strong) PGPostgresConnection *other;
 @property (strong) NSMutableArray<NSAlert *> *alerts;
+@property (strong) NSUserDefaults *scratch;
 @end
 
 @implementation SPPostgresContentBarTests
@@ -101,6 +143,10 @@ static NSString * const SPLimitResultsValue = @"LimitResultsValue";
 	[self.other disconnect];
 	self.other = nil;
 	self.alerts = nil;
+	if (self.scratch) {
+		[self.scratch removePersistentDomainForName:SPContentBarScratchSuite];
+		self.scratch = nil;
+	}
 	[super tearDown];
 }
 
@@ -432,5 +478,257 @@ static NSString * const SPLimitResultsValue = @"LimitResultsValue";
 	XCTAssertFalse([content.removeButton isEnabled]);
 	XCTAssertEqual(self.alerts.count, 0u);
 }
+
+#pragma mark - Edit mode (field editor sheet)
+
+/// Scratch preferences (never the saved ones), with the edit mode preference set; removed in tearDown.
+- (NSUserDefaults *)scratchDefaultsInSheetMode:(BOOL)sheetMode
+{
+	if (!self.scratch) {
+		self.scratch = [[NSUserDefaults alloc] initWithSuiteName:SPContentBarScratchSuite];
+		[self.scratch removePersistentDomainForName:SPContentBarScratchSuite];
+	}
+	[self.scratch setBool:sheetMode forKey:SPEditInSheetEnabled];
+	return self.scratch;
+}
+
+/// A Content view of its own on a connection whose writes are recorded, showing content_test.<table>.
+- (SPPostgresContentController *)recordedContentShowing:(NSString *)table recorder:(SPContentBarStatementRecorder *)recorder sheetMode:(BOOL)sheetMode
+{
+	PGPostgresConnection *recorded = [SPPostgresTestServers connectedConnectionOnPort:SPContentBarTestPort database:@"pgkit_test" delegate:recorder];
+	SPPostgresContentController *content = [[SPPostgresContentController alloc] initWithConnection:recorded];
+	[self addTeardownBlock:^{
+		[content invalidate];
+		[recorded disconnect];
+		(void)recorder; // the connection's delegate (not retained by it) outlives the disconnect
+	}];
+	content.defaults = [self scratchDefaultsInSheetMode:sheetMode];
+	NSMutableArray *alerts = self.alerts;
+	content.alertPresenter = ^(NSAlert *alert) { [alerts addObject:alert]; };
+	[content showTable:table inSchema:@"content_test"];
+	return content;
+}
+
+- (NSMutableArray<SPContentBarSheetCall *> *)recordSheetsOf:(SPPostgresContentController *)content
+{
+	NSMutableArray<SPContentBarSheetCall *> *calls = [NSMutableArray array];
+	content.fieldEditorPresenter = ^(NSString *value, NSString *columnName, NSString *typeName, BOOL editable, BOOL allowNull, void (^completion)(id)) {
+		SPContentBarSheetCall *call = [[SPContentBarSheetCall alloc] init];
+		call.value = value;
+		call.columnName = columnName;
+		call.typeName = typeName;
+		call.editable = editable;
+		call.allowNull = allowNull;
+		call.completion = completion;
+		[calls addObject:call];
+	};
+	return calls;
+}
+
+- (NSTableColumn *)columnNamed:(NSString *)name of:(SPPostgresContentController *)content
+{
+	for (NSTableColumn *column in [content.tableView tableColumns]) {
+		if ([[[column headerCell] stringValue] isEqualToString:name]) return column;
+	}
+	XCTFail(@"no column %@", name);
+	return nil;
+}
+
+- (BOOL)content:(SPPostgresContentController *)content shouldEditRow:(NSInteger)row column:(NSString *)name
+{
+	return [content tableView:content.tableView shouldEditTableColumn:[self columnNamed:name of:content] row:row];
+}
+
+- (void)testEditModeButtonReflectsAndWritesSharedPreference
+{
+	NSUserDefaults *standard = [NSUserDefaults standardUserDefaults];
+	id standardBefore = [standard objectForKey:SPEditInSheetEnabled];
+
+	for (NSNumber *initial in @[@NO, @YES]) {
+		SPPostgresContentController *content = [self standaloneContent];
+		content.defaults = [self scratchDefaultsInSheetMode:[initial boolValue]];
+		XCTAssertEqual([content.editModeButton state], [initial boolValue] ? NSControlStateValueOn : NSControlStateValueOff);
+		XCTAssertEqual([content.editModeButton target], content);
+		XCTAssertEqual([content.editModeButton action], @selector(toggleEditMode:));
+		XCTAssertTrue([content.editModeButton isEnabled]);
+
+		[content.editModeButton performClick:nil];
+		XCTAssertEqual([self.scratch boolForKey:SPEditInSheetEnabled], ![initial boolValue]);
+		XCTAssertEqual([content.editModeButton state], [initial boolValue] ? NSControlStateValueOff : NSControlStateValueOn);
+	}
+	XCTAssertEqualObjects([standard objectForKey:SPEditInSheetEnabled], standardBefore, @"the saved preferences are untouched");
+}
+
+- (void)testEditModeButtonFollowsPreferenceChangedElsewhere
+{
+	SPPostgresContentController *content = [self standaloneContent];
+	NSUserDefaults *scratch = [self scratchDefaultsInSheetMode:NO];
+	content.defaults = scratch;
+	XCTAssertEqual([content.editModeButton state], NSControlStateValueOff);
+
+	[scratch setBool:YES forKey:SPEditInSheetEnabled];
+	XCTAssertEqual([content.editModeButton state], NSControlStateValueOn);
+	[scratch setBool:NO forKey:SPEditInSheetEnabled];
+	XCTAssertEqual([content.editModeButton state], NSControlStateValueOff);
+
+	// Once replaced, the old preferences are no longer followed
+	NSUserDefaults *other = [[NSUserDefaults alloc] initWithSuiteName:@"SPPostgresStage10TestsOther"];
+	[other removePersistentDomainForName:@"SPPostgresStage10TestsOther"];
+	[self addTeardownBlock:^{ [other removePersistentDomainForName:@"SPPostgresStage10TestsOther"]; }];
+	content.defaults = other;
+	[scratch setBool:YES forKey:SPEditInSheetEnabled];
+	XCTAssertEqual([content.editModeButton state], NSControlStateValueOff);
+	[other setBool:YES forKey:SPEditInSheetEnabled];
+	XCTAssertEqual([content.editModeButton state], NSControlStateValueOn);
+	[content invalidate];
+	[other setBool:NO forKey:SPEditInSheetEnabled]; // no observer left to call back
+}
+
+- (void)testSheetModeOpensFieldEditorInsteadOfInlineEdit
+{
+	SPContentBarStatementRecorder *recorder = [[SPContentBarStatementRecorder alloc] init];
+	SPPostgresContentController *content = [self recordedContentShowing:@"items" recorder:recorder sheetMode:YES];
+	NSMutableArray<SPContentBarSheetCall *> *calls = [self recordSheetsOf:content];
+	XCTAssertEqual([content.tableView numberOfRows], 30);
+
+	XCTAssertFalse([self content:content shouldEditRow:0 column:@"name"]);
+	XCTAssertEqual(calls.count, 1u);
+	XCTAssertEqualObjects(calls[0].value, @"item 1");
+	XCTAssertEqualObjects(calls[0].columnName, @"name");
+	XCTAssertEqualObjects(calls[0].typeName, @"text");
+	XCTAssertTrue(calls[0].editable);
+	XCTAssertTrue(calls[0].allowNull);
+
+	// One sheet at a time
+	XCTAssertFalse([self content:content shouldEditRow:1 column:@"name"]);
+	XCTAssertEqual(calls.count, 1u);
+	calls[0].completion(nil);
+
+	// NULL is shown as the placeholder; a NOT NULL column doesn't allow it
+	XCTAssertFalse([self content:content shouldEditRow:0 column:@"note"]);
+	XCTAssertEqual(calls.count, 2u);
+	XCTAssertEqualObjects(calls[1].value, @"NULL");
+	XCTAssertTrue(calls[1].allowNull);
+	calls[1].completion(nil);
+
+	XCTAssertFalse([self content:content shouldEditRow:0 column:@"id"]);
+	XCTAssertEqual(calls.count, 3u);
+	XCTAssertEqualObjects(calls[2].value, @"1");
+	XCTAssertEqualObjects(calls[2].typeName, @"integer");
+	XCTAssertFalse(calls[2].allowNull);
+	calls[2].completion(nil);
+
+	XCTAssertEqualObjects([recorder writes], (@[]));
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testSheetResultUpdatesServer
+{
+	SPContentBarStatementRecorder *recorder = [[SPContentBarStatementRecorder alloc] init];
+	SPPostgresContentController *content = [self recordedContentShowing:@"items" recorder:recorder sheetMode:YES];
+	NSMutableArray<SPContentBarSheetCall *> *calls = [self recordSheetsOf:content];
+
+	// Cancelled: nothing sent
+	XCTAssertFalse([self content:content shouldEditRow:1 column:@"name"]);
+	calls[0].completion(nil);
+	XCTAssertEqualObjects([recorder writes], (@[]));
+
+	XCTAssertFalse([self content:content shouldEditRow:1 column:@"name"]);
+	XCTAssertEqual(calls.count, 2u);
+	calls[1].completion(@"changed");
+	XCTAssertEqual([recorder writes].count, 1u, @"%@", [recorder writes]);
+	XCTAssertEqualObjects([self serverValue:@"SELECT name FROM content_test.items WHERE id = 2"], @"changed");
+	XCTAssertEqualObjects([content tableView:content.tableView objectValueForTableColumn:[self columnNamed:@"name" of:content] row:1], @"changed");
+
+	// A completion called again sends nothing more
+	calls[1].completion(@"again");
+	XCTAssertEqual([recorder writes].count, 1u);
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testSheetNullPlaceholderWritesNull
+{
+	SPContentBarStatementRecorder *recorder = [[SPContentBarStatementRecorder alloc] init];
+	SPPostgresContentController *content = [self recordedContentShowing:@"items" recorder:recorder sheetMode:YES];
+	NSMutableArray<SPContentBarSheetCall *> *calls = [self recordSheetsOf:content];
+
+	XCTAssertFalse([self content:content shouldEditRow:2 column:@"note"]);
+	XCTAssertEqualObjects(calls[0].value, @"note 3");
+	calls[0].completion(@"NULL");
+	XCTAssertEqual([recorder writes].count, 1u);
+	XCTAssertEqualObjects([self serverValue:@"SELECT note IS NULL FROM content_test.items WHERE id = 3"], @YES);
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testSheetModeOnReadOnlyRelationOpensReadOnly
+{
+	SPContentBarStatementRecorder *recorder = [[SPContentBarStatementRecorder alloc] init];
+	SPPostgresContentController *content = [self recordedContentShowing:@"items_view" recorder:recorder sheetMode:YES];
+	NSMutableArray<SPContentBarSheetCall *> *calls = [self recordSheetsOf:content];
+	XCTAssertEqual([content.tableView numberOfRows], 30);
+
+	XCTAssertFalse([self content:content shouldEditRow:0 column:@"name"]);
+	XCTAssertEqual(calls.count, 1u);
+	XCTAssertEqualObjects(calls[0].value, @"item 1");
+	XCTAssertFalse(calls[0].editable);
+	calls[0].completion(@"x");
+	XCTAssertEqualObjects([recorder writes], (@[]));
+	XCTAssertEqualObjects([self serverValue:@"SELECT name FROM content_test.items WHERE id = 1"], @"item 1");
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testSheetResultAfterTableSwitchOrInvalidateSendsNothing
+{
+	SPContentBarStatementRecorder *recorder = [[SPContentBarStatementRecorder alloc] init];
+	SPPostgresContentController *content = [self recordedContentShowing:@"items" recorder:recorder sheetMode:YES];
+	NSMutableArray<SPContentBarSheetCall *> *calls = [self recordSheetsOf:content];
+
+	XCTAssertFalse([self content:content shouldEditRow:0 column:@"name"]);
+	[content showTable:@"items" inSchema:@"content_test"];
+	XCTAssertEqual([content.tableView numberOfRows], 30);
+	calls[0].completion(@"after switch");
+	XCTAssertEqualObjects([recorder writes], (@[]));
+
+	XCTAssertFalse([self content:content shouldEditRow:0 column:@"name"]);
+	XCTAssertEqual(calls.count, 2u, @"the late completion ended the pending sheet");
+	SPPostgresContentController *invalidated = content;
+	void (^completion)(id) = calls[1].completion;
+	[invalidated invalidate];
+	completion(@"after invalidate");
+	XCTAssertEqualObjects([recorder writes], (@[]));
+	XCTAssertEqualObjects([self serverValue:@"SELECT name FROM content_test.items WHERE id = 1"], @"item 1");
+}
+
+- (void)testAddRowInSheetModeOpensOneSheet
+{
+	[self selectTable:@"items"];
+	SPPostgresContentController *content = self.content;
+	content.defaults = [self scratchDefaultsInSheetMode:YES];
+	NSMutableArray<SPContentBarSheetCall *> *calls = [self recordSheetsOf:content];
+	XCTAssertNotNil([[self grid] window]);
+
+	[content addRow:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:content.taskRunner timeout:30]);
+
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
+	XCTAssertEqual([[self grid] numberOfRows], 31);
+	XCTAssertEqual(calls.count, 1u);
+	XCTAssertEqualObjects(calls[0].columnName, @"id", @"the first editable column");
+	XCTAssertTrue(calls[0].editable);
+	XCTAssertNil([[self grid] currentEditor], @"no inline editor");
+	calls[0].completion(nil);
+	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.items"], @31);
+}
+
+- (void)testInlineEditUnchangedWhenSheetModeOff
+{
+	SPContentBarStatementRecorder *recorder = [[SPContentBarStatementRecorder alloc] init];
+	SPPostgresContentController *content = [self recordedContentShowing:@"items" recorder:recorder sheetMode:NO];
+	NSMutableArray<SPContentBarSheetCall *> *calls = [self recordSheetsOf:content];
+
+	XCTAssertTrue([self content:content shouldEditRow:0 column:@"name"]);
+	XCTAssertEqual(calls.count, 0u);
+}
+
 
 @end

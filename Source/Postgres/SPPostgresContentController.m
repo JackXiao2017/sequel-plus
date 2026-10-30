@@ -5,6 +5,7 @@
 #import "SPTableView.h"
 #import "SPButtonBar.h"
 #import "SPConstants.h"
+#import "SPFieldEditorController.h"
 
 // MySQL's Content tab (DBView.xib): 23 pt button bar, 32 x 25 textured buttons
 static const CGFloat SPPostgresContentBottomBarHeight = 23;
@@ -17,6 +18,7 @@ static const CGFloat SPPostgresContentMaxColumnWidth = 300;
 static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 
 static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
+static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContext;
 
 /// One page as a load fetched it (on the runner's thread), with the state it was asked for; applied on the main thread.
 @interface SPPostgresContentPage : NSObject
@@ -61,7 +63,7 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 
 @end
 
-@interface SPPostgresContentController ()
+@interface SPPostgresContentController () <SPFieldEditorControllerDelegate>
 
 @property (readwrite, copy) NSString *schema;
 @property (readwrite, copy) NSString *table;
@@ -119,6 +121,11 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 
 	NSUserDefaults *defaults;
 	BOOL observingRunner;           // observing taskRunner's busy (the bar is disabled while it is)
+	BOOL observingDefaults;         // observing defaults' SPEditInSheetEnabled (editModeButton follows it)
+	BOOL fieldEditorPending;        // a field editor sheet is open (one at a time)
+	SPFieldEditorController *fieldEditor;    // the default presenter's sheet
+	void (^fieldEditorCompletion)(id);       // its completion
+	NSString *fieldEditorType;               // its field type (SPFieldEditorController doesn't retain it)
 	BOOL invalidated;
 }
 
@@ -130,6 +137,7 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 @synthesize pageCount;
 @synthesize alertPresenter;
 @synthesize confirmationPresenter;
+@synthesize fieldEditorPresenter;
 @synthesize taskRunner;
 @synthesize stale;
 @synthesize addButton;
@@ -159,6 +167,8 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 		countText = [@"" copy];
 		noticeText = [@"" copy];
 		[self _buildView];
+		[self _startObservingDefaults];
+		[self _updateEditModeButton];
 		[self setTaskRunner:[SPPostgresTaskRunner inlineRunnerWithConnection:theConnection]]; // updates the bar
 	}
 
@@ -210,6 +220,7 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 	invalidated = YES;
 	loadGeneration++;
 	[self _stopObservingRunner];
+	[self _stopObservingDefaults];
 
 	// An edit in progress must not call back into a controller that is going away
 	if ([tableView currentEditor]) [tableView abortEditing];
@@ -227,6 +238,8 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 	alertPresenter = nil;
 	[confirmationPresenter release];
 	confirmationPresenter = nil;
+	[fieldEditorPresenter release];
+	fieldEditorPresenter = nil;
 }
 
 #pragma mark - The runner
@@ -256,8 +269,46 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 	observingRunner = NO;
 }
 
+#pragma mark - Preferences observed
+
+- (void)setDefaults:(NSUserDefaults *)newDefaults
+{
+	if (newDefaults == defaults) return;
+	[self _stopObservingDefaults];
+	[defaults release];
+	defaults = [newDefaults retain];
+	[self _startObservingDefaults];
+	[self _updateEditModeButton];
+}
+
+- (void)_startObservingDefaults
+{
+	if (observingDefaults || !defaults || invalidated) return;
+	[defaults addObserver:self forKeyPath:SPEditInSheetEnabled options:0 context:SPPostgresContentDefaultsContext];
+	observingDefaults = YES;
+}
+
+- (void)_stopObservingDefaults
+{
+	if (!observingDefaults) return;
+	[defaults removeObserver:self forKeyPath:SPEditInSheetEnabled context:SPPostgresContentDefaultsContext];
+	observingDefaults = NO;
+}
+
+- (void)_updateEditModeButton
+{
+	if (invalidated) return;
+	[editModeButton setState:[self _editsInSheet] ? NSControlStateValueOn : NSControlStateValueOff];
+}
+
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context
 {
+	if (context == SPPostgresContentDefaultsContext) {
+		// The preference may be changed on any thread
+		if ([NSThread isMainThread]) [self _updateEditModeButton];
+		else dispatch_async(dispatch_get_main_queue(), ^{ [self _updateEditModeButton]; });
+		return;
+	}
 	if (context != SPPostgresContentRunnerContext) {
 		[super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
 		return;
@@ -381,7 +432,7 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 	[view addSubview:scrollView];
 
 	// Bottom bar, at DBView.xib's frames: + − duplicate refresh edit-mode filter | count, notice | previous, jump, next.
-	// Edit mode, the filter toggle and Jump to page are not wired yet (disabled, no action).
+	// The filter toggle and Jump to page are not wired yet (disabled, no action).
 	SPButtonBar *bottomBar = [[[SPButtonBar alloc] initWithFrame:NSMakeRect(0, 0, width, SPPostgresContentBottomBarHeight)] autorelease];
 	[bottomBar setAutoresizingMask:NSViewWidthSizable | NSViewMaxYMargin];
 
@@ -396,7 +447,7 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 	refreshButton = [self _newBarButtonWithImage:@"button_refresh" alternateImage:@"button_refresh" toolTip:NSLocalizedString(@"Refresh table contents (⌘R)", @"refresh table contents button tooltip") action:@selector(refresh:) x:93];
 	[refreshButton setKeyEquivalent:@"r"];
 	[refreshButton setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
-	editModeButton = [self _newBarButtonWithImage:@"button_edit_mode" alternateImage:@"button_edit_mode_selected" toolTip:NSLocalizedString(@"Toggle between editing simple text cells as a spreadsheet or in pop-up sheets", @"edit mode toggle button tooltip") action:NULL x:124];
+	editModeButton = [self _newBarButtonWithImage:@"button_edit_mode" alternateImage:@"button_edit_mode_selected" toolTip:NSLocalizedString(@"Toggle between editing simple text cells as a spreadsheet or in pop-up sheets", @"edit mode toggle button tooltip") action:@selector(toggleEditMode:) x:124];
 	[editModeButton setButtonType:NSButtonTypeToggle];
 	filterToggleButton = [self _newBarButtonWithImage:@"button_filter" alternateImage:@"button_filter_active" toolTip:NSLocalizedString(@"Show/Hide table content filters", @"show hide content filters button tooltip") action:NULL x:155];
 	[filterToggleButton setButtonType:NSButtonTypeToggle];
@@ -448,6 +499,12 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 	if (![defaults boolForKey:SPLimitResults]) return 0;
 	NSInteger size = [defaults integerForKey:SPLimitResultsValue];
 	return size > 0 ? (NSUInteger)size : 0;
+}
+
+/// MySQL's "edit in sheet" preference (the edit mode toggle).
+- (BOOL)_editsInSheet
+{
+	return [defaults boolForKey:SPEditInSheetEnabled];
 }
 
 - (NSString *)_nullPlaceholder
@@ -927,6 +984,12 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 	return reloadOwed;
 }
 
+- (IBAction)toggleEditMode:(id)sender
+{
+	if (invalidated) return;
+	[defaults setBool:([editModeButton state] == NSControlStateValueOn) forKey:SPEditInSheetEnabled];
+}
+
 - (IBAction)refresh:(id)sender
 {
 	[self reload];
@@ -983,17 +1046,22 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 		return;
 	}
 
-	// Shown at the end of this page, to be edited in place
+	// Shown at the end of this page, to be edited in place (or in the sheet, in edit mode)
 	NSInteger newRow = [self _showInsertedRow:row];
 
 	// Start editing the first column that can be edited
-	if ([tableView window]) {
+	BOOL inSheet = [self _editsInSheet];
+	if (inSheet || [tableView window]) {
 		for (NSTableColumn *tableColumn in [tableView tableColumns]) {
-			if ([self tableView:tableView shouldEditTableColumn:tableColumn row:newRow]) {
+			if (![self _canEditTableColumn:tableColumn row:newRow]) continue;
+			if (inSheet) {
+				[self _editInSheetTableColumn:tableColumn row:newRow];
+			}
+			else {
 				[[tableView window] makeFirstResponder:tableView];
 				[tableView editColumn:[tableView columnWithIdentifier:[tableColumn identifier]] row:newRow withEvent:nil select:YES];
-				break;
 			}
+			break;
 		}
 	}
 
@@ -1134,17 +1202,24 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 	return [value isKindOfClass:[NSString class]] ? value : [self _nullPlaceholder];
 }
 
-/// The end of a cell edit: updates that column of the row on the server, then shows the row as the server has it.
+/// The end of a cell edit.
 - (void)tableView:(NSTableView *)theTableView setObjectValue:(id)object forTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
+{
+	[self _commitValue:object forColumn:[self _columnForTableColumn:tableColumn] row:rowIndex];
+}
+
+/// A cell's new value (from the grid or the field editor sheet): updates that column of the row on the server, then
+/// shows the row as the server has it.
+- (void)_commitValue:(id)object forColumn:(SPPostgresColumn *)column row:(NSInteger)rowIndex
 {
 	if (invalidated || !tableData || !editable || !loaded) return;
 	if (rowIndex < 0 || (NSUInteger)rowIndex >= [rows count]) return;
-
-	SPPostgresColumn *column = [self _columnForTableColumn:tableColumn];
 	if (!column || [column isGenerated]) return;
+	NSUInteger columnIndex = [columns indexOfObjectIdenticalTo:column];
+	if (columnIndex == NSNotFound) return;
 
 	NSArray *originalRow = [[[rows objectAtIndex:(NSUInteger)rowIndex] retain] autorelease];
-	id oldValue = [originalRow objectAtIndex:(NSUInteger)[[tableColumn identifier] integerValue]];
+	id oldValue = [originalRow objectAtIndex:columnIndex];
 
 	id newValue = [object isKindOfClass:[NSString class]] ? object : ([object respondsToSelector:@selector(stringValue)] ? [object stringValue] : nil);
 	if (!newValue) newValue = [NSNull null];
@@ -1163,7 +1238,7 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 	if ([tableData updateRow:originalRow column:[column name] value:newValue error:&error]) {
 		// Shown as sent until the reload brings Postgres's own format
 		NSMutableArray *changedRow = [[originalRow mutableCopy] autorelease];
-		[changedRow replaceObjectAtIndex:(NSUInteger)[[tableColumn identifier] integerValue] withObject:newValue];
+		[changedRow replaceObjectAtIndex:columnIndex withObject:newValue];
 		[rows replaceObjectAtIndex:(NSUInteger)rowIndex withObject:changedRow];
 	}
 	else {
@@ -1177,9 +1252,9 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 		return;
 	}
 
-	// Committed by the grid's own editing ending (Return, Tab, a click elsewhere) or called directly. Inline: now,
-	// inside the commit, as before (the grid's next edit, after Tab, starts once this returns).
-	BOOL gridEditing = [theTableView currentEditor] || [theTableView editedRow] >= 0;
+	// Committed by the grid's own editing ending (Return, Tab, a click elsewhere), by the sheet, or called directly.
+	// Inline: now, inside the commit, as before (the grid's next edit, after Tab, starts once this returns).
+	BOOL gridEditing = [tableView currentEditor] || [tableView editedRow] >= 0;
 	if (!gridEditing || [taskRunner isInline]) {
 		committingInGrid = gridEditing;
 		[self reload];
@@ -1214,13 +1289,103 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 
 #pragma mark - Table view delegate
 
+/// In edit mode every cell opens the field editor sheet (read-only where the cell can't be edited) instead.
 - (BOOL)tableView:(NSTableView *)theTableView shouldEditTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
+{
+	if (invalidated) return NO;
+	if ([self _editsInSheet]) {
+		[self _editInSheetTableColumn:tableColumn row:rowIndex];
+		return NO;
+	}
+	return [self _canEditTableColumn:tableColumn row:rowIndex];
+}
+
+/// Whether the cell can be edited now (never opens the sheet).
+- (BOOL)_canEditTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
 {
 	if (invalidated || !tableData || !editable || !loaded || [taskRunner isBusy]) return NO;
 	if (rowIndex < 0 || (NSUInteger)rowIndex >= [rows count]) return NO;
 
 	SPPostgresColumn *column = [self _columnForTableColumn:tableColumn];
 	return column && ![column isGenerated];
+}
+
+#pragma mark - Field editor sheet
+
+/**
+ * Opens the field editor sheet on a cell (unless one is open), editable where the cell could be edited in place. Its
+ * result is committed as a cell edit, to this table only, and to the row it was opened on where that row now is (a
+ * reload may have moved it); after a table switch or -invalidate, or with the row gone, nothing is sent.
+ */
+- (void)_editInSheetTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
+{
+	if (invalidated || fieldEditorPending) return;
+	if (rowIndex < 0 || (NSUInteger)rowIndex >= [rows count]) return;
+	SPPostgresColumn *column = [self _columnForTableColumn:tableColumn];
+	if (!column) return;
+
+	BOOL canEdit = [self _canEditTableColumn:tableColumn row:rowIndex];
+	NSArray *row = [rows objectAtIndex:(NSUInteger)rowIndex];
+	id value = [row objectAtIndex:(NSUInteger)[[tableColumn identifier] integerValue]];
+	NSString *text = [value isKindOfClass:[NSString class]] ? value : [self _nullPlaceholder];
+	SPPostgresTableData *data = tableData;
+	fieldEditorPending = YES;
+
+	// A heap copy that keeps this controller, the row and the table alive until it is called. It runs once and then
+	// balances its own Block_copy (deferred to the autorelease pool, as it is still running).
+	__block BOOL done = NO;
+	__block void (^once)(id) = nil;
+	once = Block_copy(^(id newValue) {
+		if (done) return;
+		done = YES;
+		fieldEditorPending = NO;
+		if (newValue && canEdit && !invalidated && data == tableData) {
+			NSUInteger index = (NSUInteger)rowIndex;
+			if (index >= [rows count] || ![[rows objectAtIndex:index] isEqual:row]) index = [rows indexOfObject:row];
+			if (index != NSNotFound) [self _commitValue:newValue forColumn:column row:(NSInteger)index];
+		}
+		[(id)once autorelease];
+	});
+
+	if (fieldEditorPresenter) fieldEditorPresenter(text, [column name], [column typeName], canEdit, [column nullable], once);
+	else [self _showFieldEditorWithValue:text columnName:[column name] typeName:[column typeName] editable:canEdit allowNull:[column nullable] completion:once];
+}
+
+/// MySQL's field editor as a sheet on the view's window (cancelled at once when there is none, or a sheet is up).
+- (void)_showFieldEditorWithValue:(NSString *)value columnName:(NSString *)columnName typeName:(NSString *)typeName
+						 editable:(BOOL)canEdit allowNull:(BOOL)allowNull completion:(void (^)(id newValue))completion
+{
+	NSWindow *window = [view window];
+	if (!window || [window attachedSheet] || fieldEditor) {
+		completion(nil);
+		return;
+	}
+
+	// These types trigger MySQL-only handling (JSON reformatting, the bit sheet...) that would rewrite unchanged values
+	NSArray *mySQLOnlyTypes = @[@"BIT", @"JSON", @"GEOMETRY", @"BINARY", @"VARBINARY", @"FLOAT"];
+	fieldEditorType = [([mySQLOnlyTypes containsObject:[typeName uppercaseString]] ? @"" : (typeName ?: @"")) copy];
+	fieldEditorCompletion = [completion copy];
+	fieldEditor = [[SPFieldEditorController alloc] init];
+	[fieldEditor setTextMaxLength:0];
+	[fieldEditor setFieldType:fieldEditorType];
+	[fieldEditor setAllowNULL:allowNull];
+	[fieldEditor editWithObject:value fieldName:columnName usingEncoding:NSUTF8StringEncoding isObjectBlob:NO
+					 isEditable:canEdit withWindow:window sender:self contextInfo:nil];
+}
+
+/// The field editor's result: the new value, or nil when cancelled or not editable.
+- (void)processFieldEditorResult:(id)data contextInfo:(NSDictionary *)contextInfo
+{
+	// Called by the field editor: released once it has returned (as MySQL's)
+	[fieldEditor autorelease];
+	fieldEditor = nil;
+	[fieldEditorType autorelease];
+	fieldEditorType = nil;
+	void (^completion)(id) = [fieldEditorCompletion autorelease];
+	fieldEditorCompletion = nil;
+
+	if (!invalidated) [[tableView window] makeFirstResponder:tableView];
+	if (completion) completion(data);
 }
 
 - (void)tableView:(NSTableView *)theTableView willDisplayCell:(id)cell forTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
