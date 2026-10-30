@@ -276,23 +276,53 @@ static const NSUInteger SPHistoryTestPort = 55418;
 	XCTAssertEqual([[self entryItems] count], 0u);
 	for (NSUInteger i = 1; i < 4; i++) XCTAssertFalse([[[self historyMenu] itemAtIndex:i] isEnabled], @"nothing to copy, save or clear");
 
-	// A corrupt store: Clear reports the failure, and the file is left untouched
-	NSURL *badURL = [NSURL fileURLWithPath:[self.directory stringByAppendingPathComponent:@"Bad.plist"]];
-	NSData *garbage = [@"garbage" dataUsingEncoding:NSUTF8StringEncoding];
-	XCTAssertTrue([garbage writeToURL:badURL atomically:YES]);
-	__block NSAlert *shown = nil;
-	self.query.alertPresenter = ^(NSAlert *alert) { shown = alert; };
-	self.query.historyStore = [[SPPostgresQueryStore alloc] initWithFileURL:badURL];
-	[self.query clearQueryHistory:nil];
-	XCTAssertNotNil(shown, @"a failed save is reported");
-	XCTAssertEqualObjects([NSData dataWithContentsOfURL:badURL], garbage);
-
 	// Hidden when CustomQueryMaxHistoryItems is 0, following defaults
 	XCTAssertFalse([self.query.historyButton isHidden]);
 	[self.scratch setInteger:0 forKey:SPHistoryTestMaxItemsKey];
 	XCTAssertTrue([self spinUntil:^BOOL{ return [self.query.historyButton isHidden]; } timeout:2]);
 	[self.scratch setInteger:5 forKey:SPHistoryTestMaxItemsKey];
 	XCTAssertTrue([self spinUntil:^BOOL{ return ![self.query.historyButton isHidden]; } timeout:2]);
+}
+
+- (void)testCorruptHistoryStore
+{
+	NSURL *badURL = [NSURL fileURLWithPath:[self.directory stringByAppendingPathComponent:@"Bad.plist"]];
+	NSData *garbage = [@"garbage" dataUsingEncoding:NSUTF8StringEncoding];
+	XCTAssertTrue([garbage writeToURL:badURL atomically:YES]);
+	NSMutableArray<NSAlert *> *shown = [NSMutableArray array];
+	self.query.alertPresenter = ^(NSAlert *alert) { [shown addObject:alert]; };
+	self.query.historyStore = [[SPPostgresQueryStore alloc] initWithFileURL:badURL];
+	XCTAssertEqual([[self entryItems] count], 0u);
+
+	// Recording a run refuses (the file is left as it is) and is reported once
+	[self runAll:@"SELECT 1"];
+	[self runAll:@"SELECT 2"];
+	XCTAssertEqualObjects([NSData dataWithContentsOfURL:badURL], garbage);
+	XCTAssertEqual([shown count], 1u, @"a failed save is reported, once");
+
+	// Cancelled: nothing changes
+	__block BOOL answer = NO;
+	self.query.confirmationPresenter = ^(NSAlert *alert, void (^completion)(BOOL confirmed)) { completion(answer); };
+	[self.query clearQueryHistory:nil];
+	XCTAssertEqualObjects([NSData dataWithContentsOfURL:badURL], garbage);
+
+	// A confirmed Clear replaces it, moving the unreadable file aside
+	answer = YES;
+	[self.query clearQueryHistory:nil];
+	XCTAssertEqual([shown count], 1u, @"no error");
+	XCTAssertNil(self.query.historyStore.lastLoadError);
+	XCTAssertEqualObjects(self.query.historyStore.items, @[]);
+	NSArray *names = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:self.directory error:NULL];
+	NSString *aside = nil;
+	for (NSString *name in names) if ([name hasPrefix:@"Bad.unreadable-"]) aside = name;
+	XCTAssertNotNil(aside, @"%@", names);
+	XCTAssertEqualObjects([NSData dataWithContentsOfFile:[self.directory stringByAppendingPathComponent:aside]], garbage);
+
+	// The history works again
+	[self runAll:@"SELECT 3"];
+	XCTAssertEqualObjects(self.query.historyStore.items, @[@"SELECT 3"]);
+	XCTAssertEqualObjects([[self entryItems] valueForKey:@"title"], @[@"SELECT 3"]);
+	XCTAssertTrue([[[self historyMenu] itemAtIndex:3] isEnabled]);
 }
 
 - (void)testSearchFiltersHistory

@@ -1314,7 +1314,8 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	return [historyEntries componentsJoinedByString:@";\n"];
 }
 
-/// Inserts text in range of the editor, undoably (as typing it would), then updates the run button's title.
+/// Inserts text in range of the editor, undoably (as typing it would). Callers then update the run button's title
+/// and the gear's items (-_editorChangedByGear).
 - (void)_insertEditorText:(NSString *)text inRange:(NSRange)range
 {
 	[editor breakUndoCoalescing];
@@ -1445,7 +1446,8 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[self _confirm:alert completion:^(BOOL confirmed) {
 		if (!confirmed || invalidated) return;
 		NSError *error = nil;
-		if (![historyStore setItems:@[] error:&error]) {
+		// User-confirmed: an unreadable history file is moved aside and replaced (Ruling 7)
+		if (![historyStore replaceItems:@[] error:&error]) {
 			[self _presentHistoryError:error title:NSLocalizedString(@"The history could not be cleared.", @"Postgres query history: clear failed")];
 		}
 	}];
