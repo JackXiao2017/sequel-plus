@@ -397,9 +397,9 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 	[refreshButton setKeyEquivalent:@"r"];
 	[refreshButton setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
 	editModeButton = [self _newBarButtonWithImage:@"button_edit_mode" alternateImage:@"button_edit_mode_selected" toolTip:NSLocalizedString(@"Toggle between editing simple text cells as a spreadsheet or in pop-up sheets", @"edit mode toggle button tooltip") action:NULL x:124];
-	[editModeButton setButtonType:NSButtonTypePushOnPushOff];
+	[editModeButton setButtonType:NSButtonTypeToggle];
 	filterToggleButton = [self _newBarButtonWithImage:@"button_filter" alternateImage:@"button_filter_active" toolTip:NSLocalizedString(@"Show/Hide table content filters", @"show hide content filters button tooltip") action:NULL x:155];
-	[filterToggleButton setButtonType:NSButtonTypePushOnPushOff];
+	[filterToggleButton setButtonType:NSButtonTypeToggle];
 
 	previousPageButton = [self _newBarButtonWithImage:@"button_left" alternateImage:@"button_left" toolTip:NSLocalizedString(@"View previous page of results", @"Postgres content: previous page tooltip") action:@selector(previousPage:) x:width - 110];
 	paginationButton = [self _newBarButtonWithImage:@"button_pagination" toolTip:NSLocalizedString(@"Jump to page (⌘J) or view pagination options", @"jump to page button tooltip") action:NULL x:width - 79];

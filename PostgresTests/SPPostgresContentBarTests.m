@@ -199,12 +199,13 @@ static NSString * const SPLimitResultsValue = @"LimitResultsValue";
 		XCTAssertEqualObjects([buttons[i] toolTip], toolTips[i]);
 	}
 
-	// The two toggles are on/off buttons
+	// The two toggles are Toggle buttons (MySQL's pushIn + changeContents + lightByContents): when on they show the alternate image
 	NSButton *reference = [[NSButton alloc] initWithFrame:NSZeroRect];
-	[reference setButtonType:NSButtonTypePushOnPushOff];
+	[reference setButtonType:NSButtonTypeToggle];
 	for (NSButton *toggle in @[content.editModeButton, content.filterToggleButton]) {
 		XCTAssertEqual([[toggle cell] showsStateBy], [[reference cell] showsStateBy], @"%@", [toggle toolTip]);
 		XCTAssertEqual([[toggle cell] highlightsBy], [[reference cell] highlightsBy], @"%@", [toggle toolTip]);
+		XCTAssertTrue([[toggle cell] showsStateBy] & NSContentsCellMask, @"%@ shows its alternate image when on", [toggle toolTip]);
 	}
 
 	XCTAssertEqualObjects([content.addButton keyEquivalent], @"a");
