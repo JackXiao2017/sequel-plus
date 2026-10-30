@@ -5,7 +5,7 @@
 
 /**
  * The Content view of a PostgreSQL tab, laid out as MySQL's Content tab: a filter bar on top (column,
- * comparison, value, Filter), the rows in an SPTableView, and MySQL's bottom bar (see addButton). ⌫ or ⌦ in the
+ * comparison, value, Filter; shown or hidden by filterToggleButton, see toggleFilterBar:), the rows in an SPTableView, and MySQL's bottom bar (see addButton). ⌫ or ⌦ in the
  * grid deletes the selected rows (see removeRows:). Built in code.
  * Use on the main thread.
  *
@@ -55,6 +55,14 @@ __attribute__((visibility("default")))
 - (IBAction)previousPage:(id)sender;
 /// Applies the filter bar (an empty value, except for IS NULL / IS NOT NULL, removes the filter).
 - (IBAction)applyFilter:(id)sender;
+/// Shows or hides the filter bar (filterToggleButton) and writes the choice to MySQL's preference
+/// (SPRuleFilterEditorLastVisibilityChoice) in defaults. Hiding it while a filter is applied loads the first page
+/// unfiltered, keeping the sort.
+- (IBAction)toggleFilterBar:(id)sender;
+
+/// Whether the filter bar is shown (the grid takes its place when it isn't). Read from defaults' "filter bar visible"
+/// preference (SPRuleFilterEditorLastVisibilityChoice, hidden when unset) at each -showTable:inSchema:.
+@property (readonly, getter=isFilterBarVisible) BOOL filterBarVisible;
 
 @property (readonly) NSTableView *tableView;
 
@@ -63,8 +71,8 @@ __attribute__((visibility("default")))
 @property (readonly) NSButton *addButton, *removeButton, *duplicateButton, *refreshButton, *editModeButton, *filterToggleButton, *previousPageButton, *paginationButton, *nextPageButton;
 @property (readonly) NSTextField *countField;
 
-/// Where the preferences the view reads (page size, NULL placeholder, table font, gridlines, edit mode) come from, and the
-/// edit mode toggle writes to. Default: standardUserDefaults.
+/// Where the preferences the view reads (page size, NULL placeholder, table font, gridlines, edit mode, filter bar
+/// visibility) come from, and the edit mode and filter toggles write to. Default: standardUserDefaults.
 /// The gridlines are read when the view is built.
 @property (nonatomic, retain) NSUserDefaults *defaults;
 @property (readonly, copy) NSString *schema;

@@ -102,6 +102,8 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	SPPostgresContentGrid *tableView;
 	NSScrollView *scrollView;
 
+	NSView *filterBar;
+	BOOL filterBarVisible;
 	NSPopUpButton *filterColumnPopup;
 	NSPopUpButton *filterComparisonPopup;
 	NSTextField *filterValueField;
@@ -146,6 +148,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 @synthesize refreshButton;
 @synthesize editModeButton;
 @synthesize filterToggleButton;
+@synthesize filterBarVisible;
 @synthesize previousPageButton;
 @synthesize paginationButton;
 @synthesize nextPageButton;
@@ -195,6 +198,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	[view release];
 	[tableView release];
 	[scrollView release];
+	[filterBar release];
 	[filterColumnPopup release];
 	[filterComparisonPopup release];
 	[filterValueField release];
@@ -369,7 +373,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	CGFloat height = NSHeight(frame);
 
 	// Filter bar: column, comparison, value, Filter
-	NSView *filterBar = [[[NSView alloc] initWithFrame:NSMakeRect(0, height - SPPostgresContentFilterBarHeight, width, SPPostgresContentFilterBarHeight)] autorelease];
+	filterBar = [[NSView alloc] initWithFrame:NSMakeRect(0, height - SPPostgresContentFilterBarHeight, width, SPPostgresContentFilterBarHeight)];
 	[filterBar setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
 
 	NSFont *smallFont = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
@@ -432,7 +436,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	[view addSubview:scrollView];
 
 	// Bottom bar, at DBView.xib's frames: + − duplicate refresh edit-mode filter | count, notice | previous, jump, next.
-	// The filter toggle and Jump to page are not wired yet (disabled, no action).
+	// Jump to page is not wired yet (disabled, no action).
 	SPButtonBar *bottomBar = [[[SPButtonBar alloc] initWithFrame:NSMakeRect(0, 0, width, SPPostgresContentBottomBarHeight)] autorelease];
 	[bottomBar setAutoresizingMask:NSViewWidthSizable | NSViewMaxYMargin];
 
@@ -449,7 +453,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	[refreshButton setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
 	editModeButton = [self _newBarButtonWithImage:@"button_edit_mode" alternateImage:@"button_edit_mode_selected" toolTip:NSLocalizedString(@"Toggle between editing simple text cells as a spreadsheet or in pop-up sheets", @"edit mode toggle button tooltip") action:@selector(toggleEditMode:) x:124];
 	[editModeButton setButtonType:NSButtonTypeToggle];
-	filterToggleButton = [self _newBarButtonWithImage:@"button_filter" alternateImage:@"button_filter_active" toolTip:NSLocalizedString(@"Show/Hide table content filters", @"show hide content filters button tooltip") action:NULL x:155];
+	filterToggleButton = [self _newBarButtonWithImage:@"button_filter" alternateImage:@"button_filter_active" toolTip:NSLocalizedString(@"Show/Hide table content filters", @"show hide content filters button tooltip") action:@selector(toggleFilterBar:) x:155];
 	[filterToggleButton setButtonType:NSButtonTypeToggle];
 
 	previousPageButton = [self _newBarButtonWithImage:@"button_left" alternateImage:@"button_left" toolTip:NSLocalizedString(@"View previous page of results", @"Postgres content: previous page tooltip") action:@selector(previousPage:) x:width - 110];
@@ -479,6 +483,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	[view addSubview:bottomBar];
 
 	[self _filterComparisonChanged:nil];
+	[self _setFilterBarVisible:[defaults boolForKey:SPRuleFilterEditorLastVisibilityChoice]];
 }
 
 - (NSView *)view
@@ -632,6 +637,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	loadingTable = NO;
 	stale = NO;
 	NSUInteger generation = ++loadGeneration;
+	[self _setFilterBarVisible:[defaults boolForKey:SPRuleFilterEditorLastVisibilityChoice]];
 
 	if ([theTable length] && [theSchema length]) {
 		tableData = [[SPPostgresTableData alloc] initWithConnection:connection schema:theSchema table:theTable];
@@ -895,6 +901,47 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	[filterValueField setEnabled:[columns count] && [self _comparisonTakesValue:[filterComparisonPopup titleOfSelectedItem]]];
 }
 
+/// Shows or hides the filter bar (the grid takes its 30 pt when it is hidden) and sets the toggle to match. Hiding
+/// it moves the focus out of it, to the grid.
+- (void)_setFilterBarVisible:(BOOL)visible
+{
+	filterBarVisible = visible;
+	[filterToggleButton setState:visible ? NSControlStateValueOn : NSControlStateValueOff];
+
+	if (!visible) {
+		NSWindow *window = [view window];
+		id responder = [window firstResponder];
+		// A text field being edited has the window's field editor as first responder, with the field as its delegate
+		if ([responder isKindOfClass:[NSText class]] && [responder isFieldEditor]) responder = [(NSText *)responder delegate];
+		if ([responder isKindOfClass:[NSView class]] && [responder isDescendantOf:filterBar]) [window makeFirstResponder:tableView];
+	}
+	[filterBar setHidden:!visible];
+
+	NSRect frame = [scrollView frame];
+	frame.size.height = NSHeight([view bounds]) - NSMinY(frame) - (visible ? SPPostgresContentFilterBarHeight : 0);
+	[scrollView setFrame:frame];
+}
+
+- (IBAction)toggleFilterBar:(id)sender
+{
+	if (invalidated) return;
+	BOOL show = !filterBarVisible;
+	[defaults setBool:show forKey:SPRuleFilterEditorLastVisibilityChoice];
+	[self _setFilterBarVisible:show];
+
+	if (show) {
+		// Shown by a click: ready to type a value
+		if (sender && [view window] && [filterValueField isEnabled]) [[view window] makeFirstResponder:filterValueField];
+		return;
+	}
+
+	// Hidden, the filter can't be seen or changed: it no longer applies (as MySQL's)
+	if (filter) {
+		[self _loadWithFilter:nil sortColumn:sortColumn ascending:sortAscending page:1
+				  description:NSLocalizedString(@"Filtering table...", @"Filtering table task description")];
+	}
+}
+
 - (IBAction)applyFilter:(id)sender
 {
 	if (invalidated || ![columns count]) return;
@@ -965,6 +1012,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	[addButton setEnabled:idle && hasTable && editable];
 	[removeButton setEnabled:idle && hasTable && editable && [tableView numberOfSelectedRows] > 0];
 	[duplicateButton setEnabled:idle && hasTable && editable && [tableView numberOfSelectedRows] == 1];
+	[filterToggleButton setEnabled:idle && hasTable];
 	[previousPageButton setEnabled:idle && hasTable && currentPage > 1];
 	[nextPageButton setEnabled:idle && hasTable && currentPage < pageCount];
 }

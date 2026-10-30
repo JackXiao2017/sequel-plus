@@ -86,7 +86,8 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	self.continueAfterFailure = NO;
 	[SPPostgresTestServers loadFixtureNamed:@"content" onPort:SPContentTestPort];
 
-	[self overridePrefs:@{SPLimitResults: @YES, SPLimitResultsValue: @1000, SPNullValue: SPContentTestNull}];
+	// The filter bar hidden (its default): the filters are applied without it being shown
+	[self overridePrefs:@{SPLimitResults: @YES, SPLimitResultsValue: @1000, SPNullValue: SPContentTestNull, @"RuleFilterEditorLastVisibilityChoice": @NO}];
 	XCTAssertEqualObjects([[NSUserDefaults standardUserDefaults] stringForKey:SPNullValue], SPContentTestNull);
 
 	SPPostgresFavorite *favorite = [[SPPostgresFavorite alloc] init];
