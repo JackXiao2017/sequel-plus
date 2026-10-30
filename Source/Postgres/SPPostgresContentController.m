@@ -16,6 +16,8 @@ static const CGFloat SPPostgresContentMinColumnWidth = 40;
 static const CGFloat SPPostgresContentMaxColumnWidth = 300;
 static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 
+static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
+
 /// One page as a load fetched it (on the runner's thread), with the state it was asked for; applied on the main thread.
 @interface SPPostgresContentPage : NSObject
 @property (retain) SPPostgresFilter *filter;
@@ -36,6 +38,25 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	[_sortColumn release];
 	[_rows release];
 	[super dealloc];
+}
+
+@end
+
+/// The grid: ⌫ / ⌦ (no ⌘, ⌥ or ⌃, no cell being edited) delete the selected rows, as the Delete button's tooltip says.
+@interface SPPostgresContentGrid : SPTableView
+@end
+
+@implementation SPPostgresContentGrid
+
+- (void)keyDown:(NSEvent *)event
+{
+	unsigned short keyCode = [event keyCode];
+	NSEventModifierFlags modifiers = [event modifierFlags] & (NSEventModifierFlagCommand | NSEventModifierFlagOption | NSEventModifierFlagControl);
+	if ((keyCode == 51 || keyCode == 117) && !modifiers && ![self currentEditor] && [self numberOfSelectedRows] > 0) {
+		[(SPPostgresContentController *)[self delegate] removeRows:self];
+		return;
+	}
+	[super keyDown:event];
 }
 
 @end
@@ -76,7 +97,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	NSInteger tableRowCount;        // rows in the table
 
 	NSView *view;
-	SPTableView *tableView;
+	SPPostgresContentGrid *tableView;
 	NSScrollView *scrollView;
 
 	NSPopUpButton *filterColumnPopup;
@@ -86,12 +107,18 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 
 	NSButton *addButton;
 	NSButton *removeButton;
+	NSButton *duplicateButton;
 	NSButton *refreshButton;
+	NSButton *editModeButton;
+	NSButton *filterToggleButton;
 	NSButton *previousPageButton;
+	NSButton *paginationButton;
 	NSButton *nextPageButton;
 	NSTextField *countField;
 	NSTextField *noticeField;
 
+	NSUserDefaults *defaults;
+	BOOL observingRunner;           // observing taskRunner's busy (the bar is disabled while it is)
 	BOOL invalidated;
 }
 
@@ -105,6 +132,17 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 @synthesize confirmationPresenter;
 @synthesize taskRunner;
 @synthesize stale;
+@synthesize addButton;
+@synthesize removeButton;
+@synthesize duplicateButton;
+@synthesize refreshButton;
+@synthesize editModeButton;
+@synthesize filterToggleButton;
+@synthesize previousPageButton;
+@synthesize paginationButton;
+@synthesize nextPageButton;
+@synthesize countField;
+@synthesize defaults;
 
 #pragma mark - Setup
 
@@ -112,7 +150,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 {
 	if ((self = [super init])) {
 		connection = [theConnection retain];
-		taskRunner = [[SPPostgresTaskRunner inlineRunnerWithConnection:theConnection] retain];
+		defaults = [[NSUserDefaults standardUserDefaults] retain];
 		rows = [[NSMutableArray alloc] init];
 		columns = [@[] retain];
 		currentPage = 1;
@@ -121,7 +159,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 		countText = [@"" copy];
 		noticeText = [@"" copy];
 		[self _buildView];
-		[self _updateBottomBar];
+		[self setTaskRunner:[SPPostgresTaskRunner inlineRunnerWithConnection:theConnection]]; // updates the bar
 	}
 
 	return self;
@@ -133,6 +171,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 
 	[connection release];
 	[taskRunner release];
+	[defaults release];
 	[tableData release];
 	[columns release];
 	[rows release];
@@ -152,8 +191,12 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	[filterButton release];
 	[addButton release];
 	[removeButton release];
+	[duplicateButton release];
 	[refreshButton release];
+	[editModeButton release];
+	[filterToggleButton release];
 	[previousPageButton release];
+	[paginationButton release];
 	[nextPageButton release];
 	[countField release];
 	[noticeField release];
@@ -166,6 +209,7 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	if (invalidated) return;
 	invalidated = YES;
 	loadGeneration++;
+	[self _stopObservingRunner];
 
 	// An edit in progress must not call back into a controller that is going away
 	if ([tableView currentEditor]) [tableView abortEditing];
@@ -173,7 +217,8 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	[tableView setDelegate:nil];
 
 	for (NSControl *control in @[filterColumnPopup, filterComparisonPopup, filterValueField, filterButton,
-								 addButton, removeButton, refreshButton, previousPageButton, nextPageButton]) {
+								 addButton, removeButton, duplicateButton, refreshButton, editModeButton, filterToggleButton,
+								 previousPageButton, paginationButton, nextPageButton]) {
 		[control setTarget:nil];
 	}
 
@@ -184,16 +229,70 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	confirmationPresenter = nil;
 }
 
-- (NSButton *)_newBarButtonWithImage:(NSString *)imageName toolTip:(NSString *)toolTip action:(SEL)action x:(CGFloat)x
+#pragma mark - The runner
+
+- (SPPostgresTaskRunner *)taskRunner
+{
+	return [[taskRunner retain] autorelease];
+}
+
+- (void)setTaskRunner:(SPPostgresTaskRunner *)runner
+{
+	if (runner == taskRunner) return;
+	[self _stopObservingRunner];
+	[taskRunner release];
+	taskRunner = [runner retain];
+	if (taskRunner && !invalidated) {
+		[taskRunner addObserver:self forKeyPath:@"busy" options:0 context:SPPostgresContentRunnerContext];
+		observingRunner = YES;
+	}
+	[self _updateBottomBar];
+}
+
+- (void)_stopObservingRunner
+{
+	if (!observingRunner) return;
+	[taskRunner removeObserver:self forKeyPath:@"busy" context:SPPostgresContentRunnerContext];
+	observingRunner = NO;
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context
+{
+	if (context != SPPostgresContentRunnerContext) {
+		[super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+		return;
+	}
+	if (invalidated) return;
+
+	// The runner changes busy on the main thread
+	[self _updateBottomBar];
+}
+
+#pragma mark - Building the view
+
+/// A 32 x 25 textured button of MySQL's bar. A nil action leaves it without a target (and disabled).
+- (NSButton *)_newBarButtonWithImage:(NSString *)imageName alternateImage:(NSString *)alternateImageName toolTip:(NSString *)toolTip action:(SEL)action x:(CGFloat)x
 {
 	NSButton *button = [[NSButton alloc] initWithFrame:NSMakeRect(x, -1, SPPostgresContentButtonWidth, 25)];
 	[button setBezelStyle:NSBezelStyleTexturedRounded];
 	[button setImage:[NSImage imageNamed:imageName]];
+	if (alternateImageName) [button setAlternateImage:[NSImage imageNamed:alternateImageName]];
 	[button setImagePosition:NSImageOnly];
 	[button setToolTip:toolTip];
-	[button setTarget:self];
-	[button setAction:action];
+	[button setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
+	if (action) {
+		[button setTarget:self];
+		[button setAction:action];
+	}
+	else {
+		[button setEnabled:NO];
+	}
 	return button;
+}
+
+- (NSButton *)_newBarButtonWithImage:(NSString *)imageName toolTip:(NSString *)toolTip action:(SEL)action x:(CGFloat)x
+{
+	return [self _newBarButtonWithImage:imageName alternateImage:nil toolTip:toolTip action:action x:x];
 }
 
 - (NSTextField *)_newLabelWithFrame:(NSRect)frame
@@ -269,40 +368,61 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	[scrollView setBorderType:NSNoBorder];
 	[scrollView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 
-	tableView = [[SPTableView alloc] initWithFrame:[[scrollView contentView] bounds]];
+	tableView = [[SPPostgresContentGrid alloc] initWithFrame:[[scrollView contentView] bounds]];
 	[tableView setUsesAlternatingRowBackgroundColors:YES];
 	[tableView setAllowsMultipleSelection:YES];
 	[tableView setAllowsColumnReordering:YES];
 	[tableView setColumnAutoresizingStyle:NSTableViewNoColumnAutoresizing];
 	[tableView setFocusRingType:NSFocusRingTypeNone];
-	[tableView setGridStyleMask:[[NSUserDefaults standardUserDefaults] boolForKey:SPDisplayTableViewVerticalGridlines] ? NSTableViewSolidVerticalGridLineMask : NSTableViewGridNone];
+	[tableView setGridStyleMask:[defaults boolForKey:SPDisplayTableViewVerticalGridlines] ? NSTableViewSolidVerticalGridLineMask : NSTableViewGridNone];
 	[tableView setDataSource:self];
 	[tableView setDelegate:self];
 	[scrollView setDocumentView:tableView];
 	[view addSubview:scrollView];
 
-	// Bottom bar: + − refresh | count, notice | previous, next
+	// Bottom bar, at DBView.xib's frames: + − duplicate refresh edit-mode filter | count, notice | previous, jump, next.
+	// Duplicate, edit mode, the filter toggle and Jump to page are not wired yet (disabled, no action).
 	SPButtonBar *bottomBar = [[[SPButtonBar alloc] initWithFrame:NSMakeRect(0, 0, width, SPPostgresContentBottomBarHeight)] autorelease];
 	[bottomBar setAutoresizingMask:NSViewWidthSizable | NSViewMaxYMargin];
 
-	addButton = [self _newBarButtonWithImage:@"button_add" toolTip:NSLocalizedString(@"Add row", @"Postgres content: add row tooltip") action:@selector(addRow:) x:-1];
-	removeButton = [self _newBarButtonWithImage:@"button_remove" toolTip:NSLocalizedString(@"Delete selected row(s)", @"Postgres content: delete rows tooltip") action:@selector(removeRows:) x:30];
-	refreshButton = [self _newBarButtonWithImage:@"button_refresh" toolTip:NSLocalizedString(@"Refresh table contents", @"Postgres content: refresh tooltip") action:@selector(refresh:) x:61];
-	nextPageButton = [self _newBarButtonWithImage:@"button_right" toolTip:NSLocalizedString(@"View next page of results", @"Postgres content: next page tooltip") action:@selector(nextPage:) x:width - 48];
-	previousPageButton = [self _newBarButtonWithImage:@"button_left" toolTip:NSLocalizedString(@"View previous page of results", @"Postgres content: previous page tooltip") action:@selector(previousPage:) x:width - 79];
-	[nextPageButton setAutoresizingMask:NSViewMinXMargin];
-	[previousPageButton setAutoresizingMask:NSViewMinXMargin];
+	addButton = [self _newBarButtonWithImage:@"button_add" alternateImage:@"button_add" toolTip:NSLocalizedString(@"Add row (⌥⌘A)", @"add row button tooltip") action:@selector(addRow:) x:-1];
+	[addButton setKeyEquivalent:@"a"];
+	[addButton setKeyEquivalentModifierMask:NSEventModifierFlagOption | NSEventModifierFlagCommand];
+	removeButton = [self _newBarButtonWithImage:@"button_remove" alternateImage:@"button_remove" toolTip:NSLocalizedString(@"Delete selected row(s) (⌫)", @"delete selected rows button tooltip") action:@selector(removeRows:) x:30];
+	[removeButton setKeyEquivalent:@""];
+	duplicateButton = [self _newBarButtonWithImage:@"button_duplicate" alternateImage:@"button_duplicate" toolTip:NSLocalizedString(@"Duplicate selected row (⌘D)", @"duplicate row button tooltip") action:NULL x:61];
+	[duplicateButton setKeyEquivalent:@"d"];
+	[duplicateButton setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+	refreshButton = [self _newBarButtonWithImage:@"button_refresh" alternateImage:@"button_refresh" toolTip:NSLocalizedString(@"Refresh table contents (⌘R)", @"refresh table contents button tooltip") action:@selector(refresh:) x:93];
+	[refreshButton setKeyEquivalent:@"r"];
+	[refreshButton setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+	editModeButton = [self _newBarButtonWithImage:@"button_edit_mode" alternateImage:@"button_edit_mode_selected" toolTip:NSLocalizedString(@"Toggle between editing simple text cells as a spreadsheet or in pop-up sheets", @"edit mode toggle button tooltip") action:NULL x:124];
+	[editModeButton setButtonType:NSButtonTypePushOnPushOff];
+	filterToggleButton = [self _newBarButtonWithImage:@"button_filter" alternateImage:@"button_filter_active" toolTip:NSLocalizedString(@"Show/Hide table content filters", @"show hide content filters button tooltip") action:NULL x:155];
+	[filterToggleButton setButtonType:NSButtonTypePushOnPushOff];
 
-	CGFloat textX = 100;
-	CGFloat textWidth = (width - 79 - 8) - textX;
-	countField = [self _newLabelWithFrame:NSMakeRect(textX, 4, floor(textWidth * 0.45), 14)];
+	previousPageButton = [self _newBarButtonWithImage:@"button_left" alternateImage:@"button_left" toolTip:NSLocalizedString(@"View previous page of results", @"Postgres content: previous page tooltip") action:@selector(previousPage:) x:width - 110];
+	paginationButton = [self _newBarButtonWithImage:@"button_pagination" toolTip:NSLocalizedString(@"Jump to page (⌘J) or view pagination options", @"jump to page button tooltip") action:NULL x:width - 79];
+	[paginationButton setKeyEquivalent:@"j"];
+	[paginationButton setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+	nextPageButton = [self _newBarButtonWithImage:@"button_right" alternateImage:@"button_right" toolTip:NSLocalizedString(@"View next page of results", @"Postgres content: next page tooltip") action:@selector(nextPage:) x:width - 48];
+	for (NSButton *button in @[previousPageButton, paginationButton, nextPageButton]) {
+		[button setAutoresizingMask:NSViewMinXMargin | NSViewMaxYMargin];
+	}
+
+	// The count (from MySQL's x 193) and the notice, up to 30 pt before Previous
+	CGFloat textX = 193;
+	CGFloat textWidth = (width - 140) - textX;
+	CGFloat countWidth = floor(textWidth * 0.45);
+	countField = [self _newLabelWithFrame:NSMakeRect(textX, 4, countWidth, 14)];
 	[countField setAutoresizingMask:NSViewWidthSizable];
-	noticeField = [self _newLabelWithFrame:NSMakeRect(textX + floor(textWidth * 0.45) + 8, 4, textWidth - floor(textWidth * 0.45) - 8, 14)];
+	noticeField = [self _newLabelWithFrame:NSMakeRect(textX + countWidth + 8, 4, textWidth - countWidth - 8, 14)];
 	[noticeField setTextColor:[NSColor secondaryLabelColor]];
 	[noticeField setAlignment:NSTextAlignmentRight];
 	[noticeField setAutoresizingMask:NSViewWidthSizable | NSViewMinXMargin];
 
-	for (NSView *subview in @[addButton, removeButton, refreshButton, countField, noticeField, previousPageButton, nextPageButton]) {
+	for (NSView *subview in @[addButton, removeButton, duplicateButton, refreshButton, editModeButton, filterToggleButton,
+							  countField, noticeField, previousPageButton, paginationButton, nextPageButton]) {
 		[bottomBar addSubview:subview];
 	}
 	[view addSubview:bottomBar];
@@ -325,21 +445,20 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 /// Rows per page, 0 for no limit (MySQL's "Limit results" preference).
 - (NSUInteger)_pageSize
 {
-	NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
-	if (![prefs boolForKey:SPLimitResults]) return 0;
-	NSInteger size = [prefs integerForKey:SPLimitResultsValue];
+	if (![defaults boolForKey:SPLimitResults]) return 0;
+	NSInteger size = [defaults integerForKey:SPLimitResultsValue];
 	return size > 0 ? (NSUInteger)size : 0;
 }
 
 - (NSString *)_nullPlaceholder
 {
-	return [[NSUserDefaults standardUserDefaults] stringForKey:SPNullValue] ?: @"NULL";
+	return [defaults stringForKey:SPNullValue] ?: @"NULL";
 }
 
 /// MySQL's result table font, or the small system font.
 - (NSFont *)_tableFont
 {
-	NSData *data = [[NSUserDefaults standardUserDefaults] dataForKey:SPGlobalResultTableFont];
+	NSData *data = [defaults dataForKey:SPGlobalResultTableFont];
 	NSFont *font = nil;
 	if (data) {
 		@try {
@@ -781,13 +900,15 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 	[countField setStringValue:text];
 	[countField setToolTip:(pageCount > 1) ? [NSString stringWithFormat:NSLocalizedString(@"Page %lu of %lu", @"Postgres content: page tooltip"), (unsigned long)currentPage, (unsigned long)pageCount] : nil];
 
-	// Before the table's rows have loaded only Refresh (to retry) is available
+	// Before the table's rows have loaded only Refresh (to retry) is available; while the runner is busy nothing is
+	// (MySQL: the bar follows the document's isWorking; the edit mode toggle, a preference, stays as it is)
+	BOOL idle = ![taskRunner isBusy];
 	BOOL hasTable = tableData && [columns count] && loaded;
-	[refreshButton setEnabled:(tableData && [columns count]) || needsShow];
-	[addButton setEnabled:hasTable && editable];
-	[removeButton setEnabled:hasTable && editable && [tableView numberOfSelectedRows] > 0];
-	[previousPageButton setEnabled:hasTable && currentPage > 1];
-	[nextPageButton setEnabled:hasTable && currentPage < pageCount];
+	[refreshButton setEnabled:idle && ((tableData && [columns count]) || needsShow)];
+	[addButton setEnabled:idle && hasTable && editable];
+	[removeButton setEnabled:idle && hasTable && editable && [tableView numberOfSelectedRows] > 0];
+	[previousPageButton setEnabled:idle && hasTable && currentPage > 1];
+	[nextPageButton setEnabled:idle && hasTable && currentPage < pageCount];
 }
 
 /**
@@ -905,12 +1026,13 @@ static const NSUInteger SPPostgresContentWidthSampleRows = 100;
 		return;
 	}
 
-	// MySQL's confirmation (-[SPTableContent removeRow:])
+	// MySQL's confirmation (-[SPTableContent removeRow:]): ⌘D deletes, Return cancels
 	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
 	[alert addButtonWithTitle:NSLocalizedString(@"Delete", @"delete button")];
 	[alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"cancel button")];
-	[[[alert buttons] objectAtIndex:0] setKeyEquivalent:@"\r"];
-	[[[alert buttons] objectAtIndex:1] setKeyEquivalent:@"\033"];
+	[[[alert buttons] objectAtIndex:0] setKeyEquivalent:@"d"];
+	[[[alert buttons] objectAtIndex:0] setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+	[[[alert buttons] objectAtIndex:1] setKeyEquivalent:@"\r"];
 	[alert setAlertStyle:NSAlertStyleCritical];
 	if ([selectedRows count] == 1) {
 		[alert setMessageText:NSLocalizedString(@"Delete selected row?", @"delete selected row message")];
