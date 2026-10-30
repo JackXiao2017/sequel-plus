@@ -15,9 +15,9 @@ static NSString * const SPQuotedOrders = @"\"Sales Data\".\"Orders \"\"x\"\" 202
 + (NSArray<NSString *> *)cleanupStatements
 {
 	return @[
+		@"DROP MATERIALIZED VIEW IF EXISTS public.sp9_matview",
 		@"DROP VIEW IF EXISTS public.sp9_dep",
 		@"DROP VIEW IF EXISTS public.sp9_view",
-		@"DROP MATERIALIZED VIEW IF EXISTS public.sp9_matview",
 		@"DROP TABLE IF EXISTS public.sp9_child",
 		@"DROP TABLE IF EXISTS public.sp9_a, public.sp9_b, public.sp9_base, public.sp9_other, public.sp9_made, public.sp9_txn",
 		@"DROP TABLE IF EXISTS public.\"orders \"\"x\"\" 2026\"",
@@ -156,6 +156,38 @@ static NSString * const SPQuotedOrders = @"\"Sales Data\".\"Orders \"\"x\"\" 202
 		XCTAssertTrue([self exists:@"public.sp9_other" on:connection]);
 		XCTAssertTrue([self exists:@"public.sp9_base" on:connection]);
 		XCTAssertTrue([self exists:@"public.sp9_dep" on:connection]);
+	}];
+}
+
+- (void)testDropForeignKeyParentAndChildTogether
+{
+	[self forEachServer:^(PGPostgresConnection *connection, NSNumber *port) {
+		[self run:@"CREATE TABLE public.sp9_a (id integer PRIMARY KEY)" on:connection];
+		[self run:@"CREATE TABLE public.sp9_b (a_id integer REFERENCES public.sp9_a (id))" on:connection];
+
+		// the parent first, as the list shows it: the child's FK is dropped with the child in the same command
+		NSError *error = nil;
+		BOOL done = [SPPostgresTableActions dropRelations:@[@"sp9_a", @"sp9_b"] inSchema:@"public" connection:connection error:&error];
+		XCTAssertTrue(done, @"%d: %@", port.intValue, error);
+		XCTAssertFalse([self exists:@"public.sp9_a" on:connection]);
+		XCTAssertFalse([self exists:@"public.sp9_b" on:connection]);
+	}];
+}
+
+- (void)testDropTableWithItsDependentViewTogether
+{
+	[self forEachServer:^(PGPostgresConnection *connection, NSNumber *port) {
+		[self run:@"CREATE TABLE public.sp9_base (id integer)" on:connection];
+		[self run:@"CREATE VIEW public.sp9_dep AS SELECT id FROM public.sp9_base" on:connection];
+		[self run:@"CREATE MATERIALIZED VIEW public.sp9_matview AS SELECT id FROM public.sp9_dep" on:connection];
+
+		// the table first: views go before tables, and the materialized view before the view it reads
+		NSError *error = nil;
+		BOOL done = [SPPostgresTableActions dropRelations:@[@"sp9_base", @"sp9_dep", @"sp9_matview"] inSchema:@"public" connection:connection error:&error];
+		XCTAssertTrue(done, @"%d: %@", port.intValue, error);
+		XCTAssertFalse([self exists:@"public.sp9_base" on:connection]);
+		XCTAssertFalse([self exists:@"public.sp9_dep" on:connection]);
+		XCTAssertFalse([self exists:@"public.sp9_matview" on:connection]);
 	}];
 }
 

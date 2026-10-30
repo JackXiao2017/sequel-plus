@@ -2250,7 +2250,7 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 #pragma mark - Truncate and Remove
 
 /// An admin connection that has run sql (throwaway sp9_* tables and views in public); they are dropped (views
-/// first, never CASCADE) when the test ends. The tab's lists are reloaded to show them.
+/// first, never CASCADE) when the test ends. The window is shown and the tab's lists are reloaded to show them.
 - (PGPostgresConnection *)sp9AdminRunning:(NSArray<NSString *> *)sql
 {
 	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPPostgresDocumentTestPort];
@@ -2262,6 +2262,8 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 		for (NSString *statement in cleanup) [admin execute:statement];
 		[admin disconnect];
 	}];
+	// Truncate and Remove ask only in the front tab of a shown window
+	[self.controller showWindow:nil];
 	[self.document.sidebar reloadKeepingSelection];
 	[self waitForTab];
 	return admin;
@@ -2443,10 +2445,11 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	XCTAssertEqualObjects(alerts[0].messageText, @"Error deleting table");
 	XCTAssertTrue([alerts[0].informativeText containsString:@"sp9_dep"], @"%@", alerts[0].informativeText);
 	XCTAssertFalse([alerts[0].informativeText containsString:@"CASCADE"], @"%@", alerts[0].informativeText);
-	// The server's message, a blank line, then the dependents one per line
+	// The server's message (the tables are dropped in one statement: its message for several objects), a blank line,
+	// then the dependents one per line
 	NSArray<NSString *> *lines = [alerts[0].informativeText componentsSeparatedByString:@"\n"];
 	XCTAssertEqual(lines.count, 3u, @"%@", lines);
-	XCTAssertEqualObjects(lines[0], @"cannot drop table sp9_base because other objects depend on it");
+	XCTAssertEqualObjects(lines[0], @"cannot drop desired object(s) because other objects depend on them");
 	XCTAssertEqualObjects(lines[1], @"");
 	XCTAssertTrue([lines[2] containsString:@"sp9_dep"], @"%@", lines[2]);
 
@@ -2639,6 +2642,50 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	XCTAssertEqualObjects(sidebar.selectedTableName, @"sp9_a");
 }
 
+/// A question that waits for the tab to be idle isn't asked over another tab brought to the front meanwhile: it is
+/// asked when this tab is in front again. The same for one asked while another tab is in front.
+- (void)testDeferredQuestionWaitsForItsTab
+{
+	PGPostgresConnection *admin = [self sp9AdminRunning:@[@"CREATE TABLE public.sp9_a (id integer)", @"CREATE TABLE public.sp9_b (id integer)"]];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	NSMutableArray<NSAlert *> *asked = [self answerConfirmationsWith:NO];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	SPPostgresStructureController *structure = self.document.structureController;
+
+	// Saving a Structure draft queues a reload: the question waits; another tab comes to the front meanwhile
+	XCTAssertTrue([sidebar selectTableNamed:@"sp9_a"]);
+	[self waitForTab];
+	[self.document viewStructure:nil];
+	[self waitForTab];
+	[structure addColumn:nil];
+	[self waitForTab];
+	[[structure.columnsView currentEditor] setString:@"added_col"];
+	[self.document sidebar:sidebar removeRelations:@[@"sp9_b"]];
+	XCTAssertTrue(self.document.isProcessing);
+	[self.controller addNewConnection];
+	XCTAssertNotEqual([self.controller selectedDocument], self.document);
+	[self waitForTabAndQuestions];
+	[self spinUntil:^BOOL{ return NO; } timeout:0.2];
+	XCTAssertEqual(asked.count, 0u, @"not asked over another tab");
+
+	[[self tabView] selectTabViewItem:self.document.parentTabViewItem];
+	XCTAssertTrue([self spinUntil:^BOOL{ return asked.count == 1; } timeout:5]);
+	XCTAssertEqualObjects(asked[0].messageText, @"Delete table 'sp9_b'?");
+
+	// Asked (idle) while another tab is in front: asked once this tab is
+	[self.controller addNewConnection];
+	XCTAssertNotEqual([self.controller selectedDocument], self.document);
+	[self.document sidebar:sidebar truncateTables:@[@"sp9_a"]];
+	[self spinUntil:^BOOL{ return NO; } timeout:0.2];
+	XCTAssertEqual(asked.count, 1u);
+	[[self tabView] selectTabViewItem:self.document.parentTabViewItem];
+	XCTAssertTrue([self spinUntil:^BOOL{ return asked.count == 2; } timeout:5]);
+	XCTAssertEqualObjects(asked[1].messageText, @"Truncate table 'sp9_a'?");
+
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM pg_class WHERE relname IN ('sp9_a', 'sp9_b')" on:admin], @"2");
+}
+
 #pragma mark - Add Table
 
 /// An admin connection; the throwaway sp9_added table (and sp9_a, which some tests use) is dropped before and after the test.
@@ -2802,6 +2849,54 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneContent);
 	XCTAssertEqualObjects(self.document.history.currentEntry, entry);
 	XCTAssertFalse(self.document.history.canGoForward);
+}
+
+/// The server's HINT isn't shown under the error (as for Truncate and Remove).
+- (void)testAddTableErrorOmitsHint
+{
+	PGPostgresConnection *admin = [self sp9AddAdmin];
+	XCTAssertNotNil([admin execute:@"DROP TYPE IF EXISTS public.sp9_added"]);
+	XCTAssertNotNil([admin execute:@"CREATE TYPE public.sp9_added AS ENUM ('a')"]);
+	[self addTeardownBlock:^{
+		[admin execute:@"DROP TYPE IF EXISTS public.sp9_added"];
+	}];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self.controller showWindow:nil];
+
+	// The type's name is taken: the server says so, with a HINT
+	NSWindow *sheet = [self openAddTableSheet];
+	[self typeName:@"sp9_added" inSheet:sheet];
+	[[self viewWithIdentifier:@"addTableButton" in:sheet.contentView] performClick:nil];
+	[self waitForTab];
+	XCTAssertTrue([self spinUntil:^BOOL{ return alerts.count == 1; } timeout:5]);
+	[self waitForTab];
+
+	XCTAssertEqualObjects(alerts[0].messageText, @"Error adding new table");
+	NSString *text = alerts[0].informativeText;
+	XCTAssertTrue([text hasPrefix:@"An error occurred while trying to add the new table 'sp9_added'.\n\nPostgreSQL said: "], @"%@", text);
+	XCTAssertTrue([text containsString:@"already exists"], @"%@", text);
+	XCTAssertFalse([text containsString:@"HINT:"], @"%@", text);
+	XCTAssertFalse([text containsString:@"associated type"], @"%@", text);
+}
+
+/// The New Table sheet asked for while another tab is in front comes up when this tab is in front again.
+- (void)testDeferredAddSheetWaitsForItsTab
+{
+	[self sp9AddAdmin];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self.controller showWindow:nil];
+	[self.controller addNewConnection];
+	XCTAssertNotEqual([self.controller selectedDocument], self.document);
+
+	[[self sidebarDelegate] sidebarAddTable:self.document.sidebar];
+	[self waitForTabAndQuestions];
+	XCTAssertNil([self window].attachedSheet, @"not over another tab");
+
+	[[self tabView] selectTabViewItem:self.document.parentTabViewItem];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [[self window].attachedSheet.title isEqualToString:@"New Table"]; } timeout:5]);
+	[self.document closeAddTableSheet:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
 }
 
 /// A load started while the sheet is up: Add is disabled (and Return refused) until the tab is idle, the sheet keeps
@@ -3077,6 +3172,70 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	NSEvent *escape = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:sheet.windowNumber context:nil characters:@"\e" charactersIgnoringModifiers:@"\e" isARepeat:NO keyCode:53];
 	XCTAssertTrue([sheet performKeyEquivalent:escape]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+}
+
+/// The read finished while another tab was in front: the sheet comes up when this tab is in front again.
+- (void)testDeferredCreateSyntaxWaitsForItsTab
+{
+	[self privateCreateSyntaxPasteboard];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self.controller showWindow:nil];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
+	[self waitForTab];
+
+	// The result arrives on the main thread after the other tab is in front
+	[[self sidebarDelegate] sidebar:sidebar showCreateSyntaxForRelations:@[@"customers"] copy:NO];
+	[self.controller addNewConnection];
+	XCTAssertNotEqual([self.controller selectedDocument], self.document);
+	[self waitForTab];
+	[self spinUntil:^BOOL{ return NO; } timeout:0.2];
+	XCTAssertNil([self window].attachedSheet, @"not over another tab");
+
+	[[self tabView] selectTabViewItem:self.document.parentTabViewItem];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [[self window].attachedSheet.title isEqualToString:@"Create syntax for TABLE 'customers'"]; } timeout:5]);
+	NSWindow *sheet = [self window].attachedSheet;
+	[(NSButton *)[self viewWithIdentifier:@"createSyntaxCloseButton" in:sheet.contentView] performClick:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+}
+
+/// The shown pane's edit is saved before the statements are read (they include it); one that can't be saved reads
+/// nothing.
+- (void)testCreateSyntaxCommitsEditFirst
+{
+	[self sp9AdminRunning:@[@"CREATE TABLE public.sp9_a (id integer)"]];
+	NSPasteboard *pasteboard = [self privateCreateSyntaxPasteboard];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	SPPostgresStructureController *structure = self.document.structureController;
+
+	XCTAssertTrue([sidebar selectTableNamed:@"sp9_a"]);
+	[self waitForTab];
+	[self.document viewStructure:nil];
+	[self waitForTab];
+	[structure addColumn:nil];
+	[self waitForTab];
+	[[structure.columnsView currentEditor] setString:@"added_col"];
+
+	[[self sidebarDelegate] sidebar:sidebar showCreateSyntaxForRelations:@[@"sp9_a"] copy:YES];
+	[self waitForTab];
+	XCTAssertFalse(structure.hasDraftColumn);
+	NSString *copied = [pasteboard stringForType:NSPasteboardTypeString];
+	XCTAssertTrue([copied containsString:@"added_col"], @"%@", copied);
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+
+	// A draft that can't be saved (the name is taken): its error, nothing read or copied
+	[pasteboard clearContents];
+	[structure addColumn:nil];
+	[self waitForTab];
+	[[structure.columnsView currentEditor] setString:@"id"];
+	[[self sidebarDelegate] sidebar:sidebar showCreateSyntaxForRelations:@[@"sp9_a"] copy:YES];
+	XCTAssertFalse(self.document.isProcessing, @"nothing queued");
+	[self waitForTab];
+	XCTAssertTrue(structure.hasDraftColumn);
+	XCTAssertNil([pasteboard stringForType:NSPasteboardTypeString]);
+	XCTAssertEqual(alerts.count, 1u);
 }
 
 #pragma mark - Open Table in New Tab / Window

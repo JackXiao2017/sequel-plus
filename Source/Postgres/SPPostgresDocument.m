@@ -117,6 +117,11 @@ NSString * const SPPostgresPaneExtension = @"extension";
 - (void)_updateDatabaseToolbarItemWidth;
 - (void)_tearDown;
 - (BOOL)_isSelectedTab;
+- (BOOL)_canPresentSheet;
+- (void)_presentPendingSheets;
+- (void)_presentPendingConfirmation;
+- (void)_presentPendingCreateSyntax;
+- (void)_dropPendingCreateSyntax;
 - (NSString *)_connectionName;
 - (void)_reportCatalogError:(NSError *)error;
 - (void)_presentAlert:(NSAlert *)alert;
@@ -260,7 +265,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 	/// An alert that came up while the tab couldn't show it (presented once the tab is active in a visible window)
 	NSAlert *pendingAlert;
-	/// A Truncate or Remove question, or the New Table sheet, waiting for the runner to be idle (see -_presentWhenIdle:)
+	/// A Truncate or Remove question, or the New Table sheet, waiting for the runner to be idle and the tab to be in
+	/// front (see -_presentWhenIdle:)
 	void (^pendingConfirmation)(void);
 
 	/// The Users sheet while it is shown (or connecting)
@@ -273,8 +279,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	NSPanel *createSyntaxSheet;
 	NSTextView *createSyntaxTextView;
 	NSPasteboard *createSyntaxPasteboard;
-	/// A Create Syntax sheet whose read completed while another sheet was attached: @[syntax, title], shown when that
-	/// sheet ends (see -_showCreateSyntax:title:)
+	/// A Create Syntax sheet whose read completed while another sheet was attached or another tab was in front:
+	/// @[syntax, title], shown when that sheet ends or this tab is in front again (see -_showCreateSyntax:title:)
 	NSArray *pendingCreateSyntax;
 
 	BOOL tornDown;
@@ -463,8 +469,9 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[taskDisplay invalidate];
 	[taskDisplay release];
 	taskDisplay = nil;
-	// A question waiting for the previous runner (another database's tables) is not asked
+	// A question waiting for the previous runner (another database's tables) is not asked, nor their Create Syntax shown
 	[self _dropPendingConfirmation];
+	[self _dropPendingCreateSyntax];
 	[taskRunner release];
 	taskRunner = [runner retain];
 
@@ -1434,6 +1441,22 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	return parentWindowController && (id)[parentWindowController selectedDocument] == self;
 }
 
+/// Whether this tab may attach a sheet (an alert, a question, the New Table or Create Syntax sheet) to the window
+/// now: it is the tab in front of a shown window. Otherwise the sheet waits (see -_presentPendingSheets).
+- (BOOL)_canPresentSheet
+{
+	return [self _isSelectedTab] && [parentWindow isVisible];
+}
+
+/// What waited for this tab to be in front: an alert, then a Truncate/Remove question or the New Table sheet, then the
+/// Create Syntax sheet (each re-checks that it can come up now).
+- (void)_presentPendingSheets
+{
+	[self _presentPendingAlert];
+	[self _presentPendingConfirmation];
+	[self _presentPendingCreateSyntax];
+}
+
 /**
  * Installs this tab's toolbar (keeping the window's toolbar visibility, as MySQL tabs do), the
  * compact chrome and the window title.
@@ -1462,7 +1485,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	// The task display is shown in this window while the tab is active (as MySQL's progress window)
 	[taskDisplay setParentWindow:parentWindow];
 
-	[self _presentPendingAlert];
+	[self _presentPendingSheets];
 }
 
 - (void)willResignActiveTabInWindow
@@ -1473,7 +1496,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 - (void)tabDidBecomeKey
 {
-	[self _presentPendingAlert];
+	[self _presentPendingSheets];
 }
 
 - (NSString *)tabToolTip
@@ -1580,7 +1603,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}
 
 	// Not shown yet, or another tab is in front: show it when this tab is active again
-	if (![self _isSelectedTab] || ![parentWindow isVisible]) {
+	if (![self _canPresentSheet]) {
 		if (!pendingAlert) pendingAlert = [alert retain];
 		return;
 	}
@@ -1591,7 +1614,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 - (void)_presentPendingAlert
 {
-	if (!pendingAlert || ![self _isSelectedTab] || ![parentWindow isVisible]) return;
+	if (!pendingAlert || ![self _canPresentSheet]) return;
 
 	NSAlert *alert = pendingAlert;
 	pendingAlert = nil;
@@ -1942,14 +1965,15 @@ NSString * const SPPostgresPaneExtension = @"extension";
 }
 
 /**
- * Runs present (a Truncate or Remove question, or the New Table sheet) once the tab's runner is idle: at once if it
- * is, else when processing ends (see -_updateIsProcessing). Saving an edit before the question may have queued a list
- * reload, and a write confirmed while it runs would be refused. One question waits at a time (a second is ignored);
- * it is dropped on teardown and when the runner is replaced.
+ * Runs present (a Truncate or Remove question, or the New Table sheet) once the tab's runner is idle and the tab is in
+ * front of a shown window: at once if both hold, else when processing ends (see -_updateIsProcessing) or the tab comes
+ * to the front (see -_presentPendingSheets). Saving an edit before the question may have queued a list reload, and a
+ * write confirmed while it runs would be refused; another tab in front shares the window. One question waits at a
+ * time (a second is ignored); it is dropped on teardown and when the runner is replaced.
  */
 - (void)_presentWhenIdle:(void (^)(void))present
 {
-	if (![taskRunner isBusy]) {
+	if (![taskRunner isBusy] && [self _canPresentSheet]) {
 		present();
 		return;
 	}
@@ -1957,10 +1981,11 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	pendingConfirmation = [present copy];
 }
 
-/// The waiting question, on the run loop turn after processing ended (not inside the runner's notification).
+/// The waiting question, on the run loop turn after processing ended (not inside the runner's notification), or when
+/// the tab comes to the front.
 - (void)_presentPendingConfirmation
 {
-	if (!pendingConfirmation || tornDown || isProcessing) return;
+	if (!pendingConfirmation || tornDown || isProcessing || ![self _canPresentSheet]) return;
 	void (^present)(void) = pendingConfirmation;
 	pendingConfirmation = nil;
 	present();
@@ -2019,7 +2044,11 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	NSAlert *alert = [self _tableActionAlert:NSLocalizedString(@"Truncate", @"truncate button") key:@"t" message:message informativeText:informativeText];
 
 	[self _presentWhenIdle:^{
-		if (![self _canAskAbout:names inSchema:schema sections:@[@"TABLES"]]) return;
+		// Something changed under it meanwhile: dropped, with a beep (as a refused action)
+		if (![self _canAskAbout:names inSchema:schema sections:@[@"TABLES"]]) {
+			NSBeep();
+			return;
+		}
 		// The document stays alive until the answer comes (a sheet's or a presenter's)
 		[self retain];
 		[self _confirm:alert completion:^(BOOL confirmed) {
@@ -2081,7 +2110,11 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	NSAlert *alert = [self _tableActionAlert:NSLocalizedString(@"Delete", @"delete button") key:@"d" message:message informativeText:informativeText];
 
 	[self _presentWhenIdle:^{
-		if (![self _canAskAbout:relations inSchema:schema sections:@[@"TABLES", @"VIEWS"]]) return;
+		// Something changed under it meanwhile: dropped, with a beep (as a refused action)
+		if (![self _canAskAbout:relations inSchema:schema sections:@[@"TABLES", @"VIEWS"]]) {
+			NSBeep();
+			return;
+		}
 		// The document stays alive until the answer comes (a sheet's or a presenter's)
 		[self retain];
 		[self _confirm:alert completion:^(BOOL confirmed) {
@@ -2129,19 +2162,26 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}]];
 }
 
+/// The lines of error's message before its HINT (the message's last part, see SPPostgresErrorDetailLines). The HINT
+/// is left out of the table actions' errors: it may suggest CASCADE, never offered here.
+- (NSArray<NSString *> *)_messageLinesWithoutHint:(NSError *)error
+{
+	NSString *hintLabel = NSLocalizedString(@"HINT:", @"Postgres query: error hint label");
+	NSMutableArray *lines = [NSMutableArray array];
+	for (NSString *line in [[error localizedDescription] ?: @"" componentsSeparatedByString:@"\n"]) {
+		if ([line hasPrefix:hintLabel]) break;
+		[lines addObject:line];
+	}
+	return lines;
+}
+
 /**
  * A Truncate or Remove error as MySQL's: its title, then the server's message without its HINT (which suggests
  * CASCADE, never offered here); objects that depend on a table are listed one per line after the message.
  */
 - (void)_presentTableActionError:(NSError *)error title:(NSString *)title
 {
-	NSString *hintLabel = NSLocalizedString(@"HINT:", @"Postgres query: error hint label");
-	NSMutableArray *lines = [NSMutableArray array];
-	for (NSString *line in [[error localizedDescription] ?: @"" componentsSeparatedByString:@"\n"]) {
-		// The HINT is the message's last part (SPPostgresErrorDetailLines)
-		if ([line hasPrefix:hintLabel]) break;
-		[lines addObject:line];
-	}
+	NSArray *lines = [self _messageLinesWithoutHint:error];
 	NSString *text = [lines componentsJoinedByString:@"\n"];
 
 	if ([[error domain] isEqualToString:SPPostgresErrorDomain] && [error code] == SPPostgresErrorHasDependents) {
@@ -2205,6 +2245,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 - (void)sidebar:(SPPostgresSidebarController *)theSidebar showCreateSyntaxForRelations:(NSArray<NSString *> *)names copy:(BOOL)copy
 {
 	if (tornDown || ![names count] || isProcessing) return;
+	// An edit in progress is saved first, so the statements include it (as the other table actions)
+	if (![self _endPaneEditing]) return;
 
 	NSString *schema = [[[sidebar selectedSchema] copy] autorelease];
 	NSArray *relations = [[names copy] autorelease];
@@ -2247,8 +2289,9 @@ NSString * const SPPostgresPaneExtension = @"extension";
 - (void)_showCreateSyntax:(NSString *)syntax title:(NSString *)title
 {
 	if (tornDown || !parentWindow) return;
-	// Another sheet is up: shown once it has ended (the latest result only)
-	if ([parentWindow attachedSheet]) {
+	// Another sheet is up, or another tab is in front: shown once that sheet has ended or this tab is in front again
+	// (the latest result only)
+	if ([parentWindow attachedSheet] || ![self _canPresentSheet]) {
 		BOOL observing = (pendingCreateSyntax != nil);
 		[pendingCreateSyntax release];
 		pendingCreateSyntax = [@[syntax, title] retain];
@@ -2331,7 +2374,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 - (void)_presentPendingCreateSyntax
 {
-	if (!pendingCreateSyntax || tornDown || [parentWindow attachedSheet]) return;
+	if (!pendingCreateSyntax || tornDown || [parentWindow attachedSheet] || ![self _canPresentSheet]) return;
 	NSArray *pending = [[pendingCreateSyntax retain] autorelease];
 	[self _dropPendingCreateSyntax];
 	[self _showCreateSyntax:[pending objectAtIndex:0] title:[pending objectAtIndex:1]];
@@ -3362,9 +3405,11 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	if (![self _endPaneEditing] || ![parentWindow makeFirstResponder:nil]) return;
 
 	[self _presentWhenIdle:^{
-		// Nothing changed under it meanwhile (the tab, a sheet, the schema)
-		if (tornDown || addTableSheet || !parentWindow || isProcessing || [parentWindow attachedSheet]) return;
-		if (![schema isEqualToString:[sidebar selectedSchema]]) return;
+		// Nothing changed under it meanwhile (the tab, a sheet, the schema); else dropped, with a beep
+		if (tornDown || addTableSheet || !parentWindow || isProcessing || [parentWindow attachedSheet] || ![schema isEqualToString:[sidebar selectedSchema]]) {
+			if (!tornDown) NSBeep();
+			return;
+		}
 		[self _showAddTableSheetInSchema:schema];
 	}];
 }
@@ -3467,7 +3512,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 		NSAlert *alert = [[[NSAlert alloc] init] autorelease];
 		[alert setAlertStyle:NSAlertStyleWarning];
 		[alert setMessageText:NSLocalizedString(@"Error adding new table", @"error adding new table message")];
-		[alert setInformativeText:[NSString stringWithFormat:NSLocalizedString(@"An error occurred while trying to add the new table '%@'.\n\nPostgreSQL said: %@", @"PostgreSQL error adding new table informative message"), name, [error localizedDescription] ?: @""]];
+		[alert setInformativeText:[NSString stringWithFormat:NSLocalizedString(@"An error occurred while trying to add the new table '%@'.\n\nPostgreSQL said: %@", @"PostgreSQL error adding new table informative message"), name, [[self _messageLinesWithoutHint:error] componentsJoinedByString:@"\n"]]];
 		[alert addButtonWithTitle:NSLocalizedString(@"OK", @"OK button")];
 		[self _presentAlert:alert];
 		return;

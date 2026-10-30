@@ -29,6 +29,9 @@ __attribute__((visibility("default")))
  * is a failure: error is the work's error, possibly nil (the pane then shows "An unknown error occurred.").
  */
 - (void)loadSwitching:(BOOL)switching work:(SPPostgresTaskWork)work apply:(void (^)(id result, NSError *error))apply;
+/// The same; cancelled (if given) runs on the main thread when this load is cancelled and is still the latest one
+/// (the loader not invalidated, no newer load or -loadNothing asked for).
+- (void)loadSwitching:(BOOL)switching work:(SPPostgresTaskWork)work apply:(void (^)(id result, NSError *error))apply cancelled:(void (^)(void))cancelled;
 
 /// No table: a load in progress is dropped and the pane isn't stale (the pane clears itself).
 - (void)loadNothing;
