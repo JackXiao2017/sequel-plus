@@ -80,6 +80,7 @@ static NSString * const SPQueryBarScratchSuite = @"SPPostgresStage11Tests";
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
 	self.query.defaults = self.scratch;
+	self.query.infoPaneAnimates = NO; // the info pane opens and closes at once
 	[self.document viewQuery:nil];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 }
@@ -472,6 +473,151 @@ static NSString * const SPQueryBarScratchSuite = @"SPPostgresStage11Tests";
 	[export cancel:nil];
 	XCTAssertTrue([self spinUntil:^BOOL{ return self.document.exportController == nil; } timeout:5]);
 	XCTAssertNil([self.controller window].attachedSheet);
+}
+
+#pragma mark - Status line and info pane (MySQL's SPCustomQuery.m:889–950, updateStatusInterfaceWithDetails:)
+
+/// Runs every statement of sql on the tab's runner and waits for it.
+- (void)runSQL:(NSString *)sql
+{
+	[self setSQL:sql];
+	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.query.taskRunner timeout:30]);
+}
+
+/// The whole of text matches pattern, taken literally except TIME (+[NSString stringForTimeInterval:]'s output).
+- (void)assertText:(NSString *)text matches:(NSString *)pattern
+{
+	NSString *escaped = [NSRegularExpression escapedPatternForString:pattern];
+	escaped = [escaped stringByReplacingOccurrencesOfString:@"TIME" withString:@"(< )?[0-9.,]+ (ms|s)"];
+	NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:[NSString stringWithFormat:@"^%@$", escaped] options:0 error:NULL];
+	XCTAssertNotNil(regex);
+	XCTAssertEqual([regex numberOfMatchesInString:text ?: @"" options:0 range:NSMakeRange(0, [text length])], 1u, @"\"%@\" doesn't match \"%@\"", text, pattern);
+}
+
+- (void)testStatusTextSingleQuery
+{
+	SPPostgresQueryController *query = self.query;
+	[self runSQL:@"SELECT * FROM content_test.items"];
+	XCTAssertEqual([query.resultsView numberOfRows], 30);
+	[self assertText:query.statusText matches:@"No errors; 30 rows affected, first row available after TIME"];
+	XCTAssertEqualObjects([query.statusField stringValue], query.statusText, @"the status line shows it");
+
+	[self runSQL:@"UPDATE content_test.items SET name = name WHERE false"];
+	[self assertText:query.statusText matches:@"No errors; 0 rows affected, taking TIME"];
+
+	[self runSQL:@"UPDATE content_test.items SET name = name WHERE id = 1"];
+	[self assertText:query.statusText matches:@"No errors; 1 row affected, taking TIME"];
+	XCTAssertEqualObjects(query.lastRunQueryText, @"UPDATE content_test.items SET name = name WHERE id = 1");
+
+	// A row set without rows: no first row
+	[self runSQL:@"SELECT id FROM content_test.items WHERE false"];
+	[self assertText:query.statusText matches:@"No errors; 0 rows affected, taking TIME"];
+	XCTAssertTrue([query.infoPaneSplitView isCollapsibleSubviewCollapsed]);
+	XCTAssertEqualObjects([query infoPaneString], @"There were no errors.");
+}
+
+- (void)testStatusTextMultipleQueries
+{
+	SPPostgresQueryController *query = self.query;
+	[self runSQL:@"UPDATE content_test.items SET name = name WHERE id IN (1, 2); UPDATE content_test.items SET name = name WHERE id = 3"];
+	[self assertText:query.statusText matches:@"No errors; 3 rows affected in total, by 2 queries taking TIME"];
+	XCTAssertEqualObjects(query.lastRunQueryText, @"UPDATE content_test.items SET name = name WHERE id IN (1, 2);\nUPDATE content_test.items SET name = name WHERE id = 3", @"MySQL's usedQuery");
+
+	[self runSQL:@"UPDATE content_test.items SET name = name WHERE id = 1; SELECT id FROM content_test.items WHERE false"];
+	[self assertText:query.statusText matches:@"No errors; 1 row affected in total, by 2 queries taking TIME"];
+}
+
+- (void)testErrorOpensInfoPane
+{
+	SPPostgresQueryController *query = self.query;
+	XCTAssertTrue([query.infoPaneSplitView isCollapsibleSubviewCollapsed]);
+	XCTAssertEqualObjects([query.infoPaneTitle stringValue], @"Query Status");
+
+	[self runSQL:@"SELECT 1; SELECT nope; SELECT 3"];
+	XCTAssertTrue([query.statusText hasPrefix:@"Errors; "], @"%@", query.statusText);
+	[self assertText:query.statusText matches:@"Errors; 1 row affected in total, by 2 queries taking TIME"];
+	XCTAssertFalse([query.infoPaneSplitView isCollapsibleSubviewCollapsed], @"an error opens the info pane");
+	XCTAssertEqualObjects([query.infoPaneTitle stringValue], @"Last Error Message");
+	XCTAssertEqualObjects([query infoPaneString], @"[ERROR in query 2] column \"nope\" does not exist\nExecution stopped!");
+	XCTAssertEqualObjects(query.lastRunQueryText, @"SELECT 1;\nSELECT nope", @"the statements run, the failing one too");
+
+	// The server's DETAIL and HINT lines follow its message
+	[self runSQL:@"SELECT 1; SELECT content_test.no_such_function(1); SELECT 3"];
+	NSArray *lines = [[query infoPaneString] componentsSeparatedByString:@"\n"];
+	XCTAssertEqual(lines.count, 3u, @"%@", [query infoPaneString]);
+	XCTAssertEqualObjects(lines[0], @"[ERROR in query 2] function content_test.no_such_function(integer) does not exist");
+	XCTAssertTrue([lines[1] hasPrefix:@"HINT: No function matches the given name and argument types."], @"%@", lines[1]);
+	XCTAssertEqualObjects(lines[2], @"Execution stopped!");
+
+	[self runSQL:@"INSERT INTO content_test.composite_pk (a, b, v) VALUES (1, 'a', 'dup')"];
+	XCTAssertEqualObjects([query infoPaneString], @"duplicate key value violates unique constraint \"composite_pk_pkey\"\nDETAIL: Key (a, b)=(1, a) already exists.", @"one statement: the message alone, as MySQL's");
+	[self assertText:query.statusText matches:@"Errors; 0 rows affected, taking TIME"];
+
+	// The last statement failing: nothing was stopped
+	[self runSQL:@"SELECT 1; SELECT nope"];
+	XCTAssertEqualObjects([query infoPaneString], @"[ERROR in query 2] column \"nope\" does not exist");
+	XCTAssertFalse([query.infoPaneSplitView isCollapsibleSubviewCollapsed]);
+
+	// The next clean run closes it
+	[self runSQL:@"SELECT 1"];
+	XCTAssertTrue([query.infoPaneSplitView isCollapsibleSubviewCollapsed]);
+	XCTAssertEqualObjects([query infoPaneString], @"There were no errors.");
+	XCTAssertEqualObjects([query.infoPaneTitle stringValue], @"Query Status", @"set when the run starts, as MySQL's");
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testCancelledStatus
+{
+	SPPostgresQueryController *query = self.query;
+	SPPostgresTaskRunner *runner = [self useBackgroundRunner];
+
+	[self setSQL:@"SELECT pg_sleep(30)"];
+	[query runAllQueries:nil];
+	XCTAssertTrue(runner.isBusy);
+	// While running, as MySQL's: the info pane says so, without opening
+	XCTAssertEqualObjects([query.infoPaneTitle stringValue], @"Query Status");
+	XCTAssertEqualObjects([query infoPaneString], @"Running query...");
+	XCTAssertTrue([query.infoPaneSplitView isCollapsibleSubviewCollapsed]);
+	[self spinUntil:^BOOL{ return NO; } timeout:0.3];
+	[runner cancelAll];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+	XCTAssertTrue([self spinUntil:^BOOL{ return [query.statusText length] > 0; } timeout:5]);
+	[self assertText:query.statusText matches:@"No errors; Cancelled after TIME"];
+	XCTAssertEqualObjects([query infoPaneString], @"Query cancelled.");
+
+	[self setSQL:@"SELECT pg_sleep(30); SELECT 2"];
+	[query runAllQueries:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [runner.currentDescription isEqualToString:@"Running query 1 of 2..."]; } timeout:10], @"%@", runner.currentDescription);
+	[self spinUntil:^BOOL{ return NO; } timeout:0.3];
+	[runner cancelAll];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+	XCTAssertTrue([self spinUntil:^BOOL{ return [query.statusText containsString:@"in query"]; } timeout:5], @"%@", query.statusText);
+	[self assertText:query.statusText matches:@"No errors; Cancelled in query 1, after TIME"];
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testPostgresNotesInInfoPane
+{
+	SPPostgresQueryController *query = self.query;
+
+	// An aborted transaction
+	[self runSQL:@"BEGIN; SELECT 1/0"];
+	XCTAssertEqualObjects([query infoPaneString], @"[ERROR in query 2] division by zero\nThe current transaction is aborted; ROLLBACK to continue.");
+	[self runSQL:@"ROLLBACK"];
+	XCTAssertEqualObjects([query infoPaneString], @"There were no errors.");
+
+	// The grid's rows are an earlier statement's
+	[self runSQL:@"SELECT 1 AS one; UPDATE content_test.composite_pk SET v = v"];
+	XCTAssertEqualObjects([query infoPaneString], @"There were no errors.\nNote: results shown from statement 1, the last one that returned rows.");
+	XCTAssertTrue([query.infoPaneSplitView isCollapsibleSubviewCollapsed], @"a note doesn't open the pane");
+
+	// COPY … TO STDOUT
+	[self runSQL:@"COPY (SELECT 1 UNION ALL SELECT 2) TO STDOUT"];
+	XCTAssertEqualObjects([query infoPaneString], @"There were no errors.\nCOPY 2 – output not shown");
+	[self runSQL:@"SELECT 1 AS one; COPY (SELECT 1) TO STDOUT"];
+	XCTAssertTrue([[query infoPaneString] containsString:@"[query 2] COPY 1 – output not shown"], @"%@", [query infoPaneString]);
+	XCTAssertTrue([[query infoPaneString] containsString:@"results shown from statement 1"], @"%@", [query infoPaneString]);
 }
 
 @end

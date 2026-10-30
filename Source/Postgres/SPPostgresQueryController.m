@@ -8,6 +8,7 @@
 #import "SPSplitView.h"
 #import "SPComboPopupButton.h"
 #import "SPConstants.h"
+#import "SPStringAdditions.h"
 #import <PostgresKit/PostgresKit.h>
 
 // MySQL's Query tab (DBView.xib): 23 pt bars, at the top of the results and at the bottom of the tab
@@ -75,47 +76,75 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 /**
  * What one run produced. The work fills it in on the runner's thread, statement by statement; the completion reads
  * it on the main thread once the work has returned (also after a cancel, so what ran before it is still shown).
+ * The counts and the errors are MySQL's (SPCustomQuery.m: totalQueriesRun, totalAffectedRows, executionTime, errors).
  */
 @interface SPPostgresQueryRun : NSObject
 /// The last row set returned (nil: none).
 @property (retain) PGPostgresResult *rowsResult;
-/// The status line for the last statement run (@"" before the first).
-@property (copy) NSString *status;
+/// The statement whose rows rowsResult holds (0: none).
+@property (assign) NSUInteger shownStatement;
 @property (assign) BOOL schemaChanged;
 @property (assign) BOOL dataChanged;
 /// The run stopped because the runner was cancelled (as MySQL's lastQueryWasCancelled: not when the cancel came after
 /// every statement had run).
 @property (assign) BOOL cancelled;
+/// The statement the cancel stopped (or kept from running), counted from 1.
+@property (assign) NSUInteger cancelledQuery;
 /// The work ran (NO: the runner skipped it, cancelled before it started).
 @property (assign) BOOL started;
 /// Raised during the run (e.g. by the test hook); the run stopped there.
 @property (retain) NSException *exception;
 /// The session's transaction status once the work had run (read on the runner's thread, where nothing else runs)
 @property (assign) PGPostgresTransactionStatus transactionStatus;
+/// How many statements the run has (MySQL's queryCount).
+@property (assign) NSUInteger total;
+/// The statements sent to the server, the failing or cancelled one too (MySQL's tempQueries).
+@property (readonly) NSMutableArray *ranStatements;
+/// The rows returned or affected, summed over the statements that succeeded.
+@property (assign) unsigned long long affectedRows;
+/// The time spent in the statements, in seconds.
+@property (assign) double executionTime;
+/// MySQL's errors text ("[ERROR in query K] …" when the run has more than one statement); @"" without errors.
+@property (readonly) NSMutableString *errors;
+/// The COPY … TO STDOUT statements' notes, in order.
+@property (readonly) NSMutableArray *discardedOutputNotes;
 @end
 
 @implementation SPPostgresQueryRun
 
 @synthesize rowsResult;
-@synthesize status;
+@synthesize shownStatement;
 @synthesize schemaChanged;
 @synthesize dataChanged;
 @synthesize cancelled;
+@synthesize cancelledQuery;
 @synthesize started;
 @synthesize exception;
 @synthesize transactionStatus;
+@synthesize total;
+@synthesize ranStatements;
+@synthesize affectedRows;
+@synthesize executionTime;
+@synthesize errors;
+@synthesize discardedOutputNotes;
 
 - (instancetype)init
 {
-	if ((self = [super init])) status = [@"" copy];
+	if ((self = [super init])) {
+		ranStatements = [[NSMutableArray alloc] init];
+		errors = [[NSMutableString alloc] init];
+		discardedOutputNotes = [[NSMutableArray alloc] init];
+	}
 	return self;
 }
 
 - (void)dealloc
 {
 	[rowsResult release];
-	[status release];
 	[exception release];
+	[ranStatements release];
+	[errors release];
+	[discardedOutputNotes release];
 	[super dealloc];
 }
 
@@ -126,6 +155,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 @interface SPPostgresQueryController () <NSSplitViewDelegate>
 
 @property (readwrite, copy) NSString *statusText;
+@property (readwrite, copy) NSString *lastRunQueryText;
 
 @end
 
@@ -144,7 +174,10 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	SPSplitView *editorSplitView;
 	NSTextView *editor;
 	SPTableView *resultsView;
+	NSTextField *infoPaneTitle;
 	NSTextView *infoPaneText;
+	BOOL infoPaneAnimates;
+	NSString *lastRunQueryText;
 
 	NSPopUpButton *gearButton;
 	NSPopUpButton *favoritesButton;
@@ -186,7 +219,10 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 @synthesize resultsGearButton;
 @synthesize editModeButton;
 @synthesize statusField;
+@synthesize infoPaneTitle;
 @synthesize infoPaneText;
+@synthesize infoPaneAnimates;
+@synthesize lastRunQueryText;
 @synthesize infoPaneSplitView;
 
 #pragma mark - Setup
@@ -197,6 +233,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 		connection = [theConnection retain];
 		defaults = [[NSUserDefaults standardUserDefaults] retain];
 		statusText = [@"" copy];
+		infoPaneAnimates = YES;
 		[self _buildView];
 		[self _bindEditModeButton];
 		[self setTaskRunner:[SPPostgresTaskRunner inlineRunnerWithConnection:theConnection]]; // updates the run controls
@@ -216,12 +253,14 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[defaults release];
 	[result release];
 	[statusText release];
+	[lastRunQueryText release];
 
 	[view release];
 	[infoPaneSplitView release];
 	[editorSplitView release];
 	[editor release];
 	[resultsView release];
+	[infoPaneTitle release];
 	[infoPaneText release];
 	[gearButton release];
 	[favoritesButton release];
@@ -617,16 +656,16 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	NSView *pane = [[NSView alloc] initWithFrame:frame];
 	[pane setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 
-	NSTextField *heading = [[[NSTextField alloc] initWithFrame:NSMakeRect(15, height - 26, 363, 14)] autorelease];
-	[heading setEditable:NO];
-	[heading setSelectable:NO];
-	[heading setBordered:NO];
-	[heading setDrawsBackground:NO];
-	[[heading cell] setControlSize:NSControlSizeSmall];
-	[heading setFont:[NSFont boldSystemFontOfSize:[NSFont smallSystemFontSize]]];
-	[heading setStringValue:NSLocalizedString(@"Query Status", @"Postgres query: information pane heading")];
-	[heading setAutoresizingMask:NSViewMaxXMargin | NSViewMinYMargin];
-	[pane addSubview:heading];
+	infoPaneTitle = [[NSTextField alloc] initWithFrame:NSMakeRect(15, height - 26, 363, 14)];
+	[infoPaneTitle setEditable:NO];
+	[infoPaneTitle setSelectable:NO];
+	[infoPaneTitle setBordered:NO];
+	[infoPaneTitle setDrawsBackground:NO];
+	[[infoPaneTitle cell] setControlSize:NSControlSizeSmall];
+	[infoPaneTitle setFont:[NSFont boldSystemFontOfSize:[NSFont smallSystemFontSize]]];
+	[infoPaneTitle setStringValue:NSLocalizedString(@"Query Status", @"Query Status")];
+	[infoPaneTitle setAutoresizingMask:NSViewMaxXMargin | NSViewMinYMargin];
+	[pane addSubview:infoPaneTitle];
 
 	NSScrollView *scrollView = [[[NSScrollView alloc] initWithFrame:NSMakeRect(12, 12, width - 24, height - 45)] autorelease];
 	[scrollView setBorderType:NSNoBorder];
@@ -795,6 +834,11 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[infoPaneSplitView setCollapsibleSubviewCollapsed:YES animate:NO];
 }
 
+- (NSString *)infoPaneString
+{
+	return [[[infoPaneText string] copy] autorelease];
+}
+
 - (NSView *)view
 {
 	return view;
@@ -952,38 +996,116 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	if (exportResultHandler) exportResultHandler();
 }
 
-/// "1 row" / "N rows", or with " affected".
-+ (NSString *)_rowCountText:(unsigned long long)count affected:(BOOL)affected
-{
-	if (affected) {
-		if (count == 1) return NSLocalizedString(@"1 row affected", @"Postgres query: one row affected");
-		return [NSString stringWithFormat:NSLocalizedString(@"%llu rows affected", @"Postgres query: rows affected"), count];
-	}
-	if (count == 1) return NSLocalizedString(@"1 row", @"Postgres query: one row");
-	return [NSString stringWithFormat:NSLocalizedString(@"%llu rows", @"Postgres query: rows"), count];
-}
+#pragma mark - Status line and info pane
 
 /**
- * The status line text for a failed statement: the server's message, then its DETAIL and HINT lines (as psql).
- * Notes an aborted transaction after the message. Called on the thread that ran the statement on connection.
+ * A failed statement's error text: the server's message, then its DETAIL and HINT lines (as psql). Called on the
+ * thread that ran the statement.
  */
-+ (NSString *)_errorTextForStatement:(NSUInteger)number error:(PGPostgresError *)error fallback:(NSString *)fallback connection:(PGPostgresConnection *)connection
++ (NSString *)_errorTextForError:(PGPostgresError *)error fallback:(NSString *)fallback
 {
 	NSCharacterSet *whitespace = [NSCharacterSet whitespaceAndNewlineCharacterSet];
 	NSString *message = [[error errorPrimaryMessage] stringByTrimmingCharactersInSet:whitespace];
 	if (![message length]) message = [fallback stringByTrimmingCharactersInSet:whitespace];
 	if (![message length]) message = NSLocalizedString(@"An unknown error occurred.", @"Postgres query: unknown error");
 
-	NSMutableString *text = [NSMutableString stringWithFormat:NSLocalizedString(@"Error in statement %lu: %@", @"Postgres query: error in statement (number, server message)"), (unsigned long)number, message];
+	return [message stringByAppendingString:SPPostgresErrorDetailLines(error)];
+}
 
-	// The user's own BEGIN … : nothing more runs in it until they roll back
-	if ([connection transactionStatus] == PGPostgresTransactionInError) {
-		[text appendString:NSLocalizedString(@" – the current transaction is aborted; ROLLBACK to continue", @"Postgres query: aborted transaction note")];
+/// The status line for run, in MySQL's words (SPCustomQuery.m, after the queries have run).
++ (NSString *)_statusTextForRun:(SPPostgresQueryRun *)run
+{
+	NSString *statusErrorString = [[run errors] length] ? NSLocalizedString(@"Errors", @"Errors title") : NSLocalizedString(@"No errors", @"No errors title");
+	NSString *time = [NSString stringForTimeInterval:[run executionTime]];
+	NSUInteger queriesRun = [[run ranStatements] count];
+	NSString *statusString;
+
+	if ([run cancelled]) {
+		if ([run total] > 1) {
+			statusString = [NSString stringWithFormat:NSLocalizedString(@"%@; Cancelled in query %ld, after %@", @"text showing multiple queries were cancelled"),
+							statusErrorString, (long)[run cancelledQuery], time];
+		}
+		else {
+			statusString = [NSString stringWithFormat:NSLocalizedString(@"%@; Cancelled after %@", @"text showing a query was cancelled"),
+							statusErrorString, time];
+		}
+	}
+	else if (queriesRun > 1) {
+		if ([run affectedRows] == 1) {
+			statusString = [NSString stringWithFormat:NSLocalizedString(@"%@; 1 row affected in total, by %ld queries taking %@", @"text showing one row has been affected by multiple queries"),
+							statusErrorString, (long)queriesRun, time];
+		}
+		else {
+			statusString = [NSString stringWithFormat:NSLocalizedString(@"%@; %ld rows affected in total, by %ld queries taking %@", @"text showing how many rows have been affected by multiple queries"),
+							statusErrorString, (long)[run affectedRows], (long)queriesRun, time];
+		}
+	}
+	else {
+		if ([run affectedRows] == 1) {
+			statusString = [NSString stringWithFormat:NSLocalizedString(@"%@; 1 row affected", @"text showing one row has been affected by a single query"),
+							statusErrorString];
+		}
+		else {
+			statusString = [NSString stringWithFormat:NSLocalizedString(@"%@; %ld rows affected", @"text showing how many rows have been affected by a single query"),
+							statusErrorString, (long)[run affectedRows]];
+		}
+		// As MySQL's: a row set with rows (the grid's) counts the time to its first row
+		if ([[run rowsResult] numberOfRows]) {
+			statusString = [statusString stringByAppendingFormat:NSLocalizedString(@", first row available after %1$@", @"Custom Query : text appended to the “x row(s) affected” messages. $1 is a time interval"), time];
+		}
+		else {
+			statusString = [statusString stringByAppendingFormat:NSLocalizedString(@", taking %1$@", @"Custom Query : text appended to the “x row(s) affected” messages (for update/delete queries). $1 is a time interval"), time];
+		}
 	}
 
-	[text appendString:SPPostgresErrorDetailLines(error)];
+	return statusString;
+}
 
+/// The Postgres-only notes on run, one per line: COPY output not shown, the grid's rows being an earlier statement's,
+/// an aborted transaction.
++ (NSArray *)_notesForRun:(SPPostgresQueryRun *)run
+{
+	NSMutableArray *notes = [NSMutableArray arrayWithArray:[run discardedOutputNotes]];
+
+	// After a row set, other statements ran: the rows are the earlier statement's (said of a run that completed; an
+	// error or a cancel is what the pane reports then)
+	NSUInteger shown = [run shownStatement];
+	if (shown && shown != [[run ranStatements] count] && ![[run errors] length] && ![run cancelled]) {
+		[notes addObject:[NSString stringWithFormat:NSLocalizedString(@"Note: results shown from statement %lu, the last one that returned rows.", @"Postgres query: the grid's rows are from an earlier statement (number)"), (unsigned long)shown]];
+	}
+
+	// The user's own BEGIN … : nothing more runs in it until they roll back
+	if ([run transactionStatus] == PGPostgresTransactionInError) {
+		[notes addObject:NSLocalizedString(@"The current transaction is aborted; ROLLBACK to continue.", @"Postgres query: aborted transaction note")];
+	}
+
+	return notes;
+}
+
+/// The info pane's text for run: as MySQL's updateStatusInterfaceWithDetails:, then the Postgres notes.
++ (NSString *)_infoPaneTextForRun:(SPPostgresQueryRun *)run
+{
+	NSString *text;
+	if ([[run errors] length]) text = [[run errors] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	else if ([run cancelled]) text = NSLocalizedString(@"Query cancelled.", @"Query cancelled error");
+	else text = NSLocalizedString(@"There were no errors.", @"text shown when query was successfull");
+
+	NSArray *notes = [self _notesForRun:run];
+	if ([notes count]) text = [text stringByAppendingFormat:@"\n%@", [notes componentsJoinedByString:@"\n"]];
 	return text;
+}
+
+/// As MySQL's -updateStatusInterfaceWithDetails:: the title and text of the info pane, which opens on an error and
+/// closes otherwise.
+- (void)_updateStatusInterfaceForRun:(SPPostgresQueryRun *)run
+{
+	BOOL hasErrors = [[run errors] length] > 0;
+	if (hasErrors) [infoPaneTitle setStringValue:NSLocalizedString(@"Last Error Message", @"Last Error Message")];
+	[infoPaneText setString:[SPPostgresQueryController _infoPaneTextForRun:run]];
+	if (hasErrors) [infoPaneText scrollRangeToVisible:NSMakeRange([[infoPaneText string] length], 0)];
+
+	BOOL collapsed = [infoPaneSplitView isCollapsibleSubviewCollapsed];
+	if (hasErrors == collapsed) [infoPaneSplitView setCollapsibleSubviewCollapsed:!hasErrors animate:infoPaneAnimates];
 }
 
 /**
@@ -996,9 +1118,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 {
 	NSUInteger total = [statements count];
 	NSUInteger number = 0;
-	NSUInteger shownStatement = 0; // the statement whose rows the grid will show (0: none)
 
 	[run setStarted:YES];
+	[run setTotal:total];
 
 	// The run's own statements, and only them, are logged as custom queries: the flag is set and restored here, on
 	// the thread that runs them (the logger reads it there, as each query is about to run), so the next task on the
@@ -1011,7 +1133,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	@try {
 		for (NSString *statement in statements) {
 			if ([runner isCancelled]) {
+				// Stopped before this statement could run
 				[run setCancelled:YES];
+				[run setCancelledQuery:number + 1];
 				break;
 			}
 			number++;
@@ -1028,6 +1152,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 			PGPostgresResult *statementResult = nil;
 			NSString *exceptionReason = nil;
 
+			// As MySQL's: the statement counts as run (and is timed) whether it succeeds or not
+			[[run ranStatements] addObject:statement];
+			CFAbsoluteTime startTime = CFAbsoluteTimeGetCurrent();
 			@try {
 				statementResult = [connection execute:statement];
 			}
@@ -1035,11 +1162,13 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 				statementResult = nil;
 				exceptionReason = [exception reason];
 			}
+			[run setExecutionTime:[run executionTime] + (CFAbsoluteTimeGetCurrent() - startTime)];
 
 			if (!statementResult) {
 				// Interrupted by a cancel: not an error to report
 				if ([runner isCancelled]) {
 					[run setCancelled:YES];
+					[run setCancelledQuery:number];
 					break;
 				}
 
@@ -1050,33 +1179,34 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 				if (![fallback length] && ![connection isConnected]) fallback = NSLocalizedString(@"The connection to the PostgreSQL server was lost.", @"Postgres query: connection lost");
 				if (![fallback length]) fallback = [connection libpqErrorMessage];
 
-				NSString *status = [self _errorTextForStatement:number error:error fallback:fallback connection:connection];
-				[run setStatus:status];
-				[logger logError:status];
+				// MySQL's errors text; a run still stops at its first error, so that is "Execution stopped!" when
+				// statements remain (MySQL's Stop)
+				NSString *errorText = [self _errorTextForError:error fallback:fallback];
+				if (total > 1) {
+					[[run errors] appendFormat:NSLocalizedString(@"[ERROR in query %ld] %@\n", @"error text when multiple custom query failed"), (long)number, errorText];
+					if (number < total) [[run errors] appendString:NSLocalizedString(@"Execution stopped!\n", @"execution stopped message")];
+				}
+				else {
+					[[run errors] setString:errorText];
+				}
+				[logger logError:errorText];
 				break;
 			}
 
 			if (![run schemaChanged]) [run setSchemaChanged:[self statementMayChangeSchema:statement]];
 			if (![run dataChanged]) [run setDataChanged:[self statementMayChangeData:statement]];
 
-			NSString *status;
+			// As MySQL's totalAffectedRows: a row set's rows, a command's affected rows
+			[run setAffectedRows:[run affectedRows] + [statementResult numberOfRows]];
 			if ([statementResult returnsRows]) {
 				[run setRowsResult:statementResult];
-				shownStatement = number;
-				status = [self _rowCountText:[statementResult numberOfRows] affected:NO];
+				[run setShownStatement:number];
 			}
 			else if ([statementResult copyOutputDiscarded]) {
-				status = [NSString stringWithFormat:NSLocalizedString(@"%@ – output not shown", @"Postgres query: COPY TO STDOUT status (command status)"), [statementResult commandStatus]];
+				NSString *note = [NSString stringWithFormat:NSLocalizedString(@"%@ – output not shown", @"Postgres query: COPY TO STDOUT status (command status)"), [statementResult commandStatus]];
+				if (total > 1) note = [NSString stringWithFormat:NSLocalizedString(@"[query %lu] %@", @"Postgres query: a statement's note (statement number, note)"), (unsigned long)number, note];
+				[[run discardedOutputNotes] addObject:note];
 			}
-			else {
-				status = [self _rowCountText:[statementResult numberOfRows] affected:YES];
-			}
-
-			// After a SELECT, a command: the rows are the earlier statement's
-			if (shownStatement && shownStatement != number) {
-				status = [status stringByAppendingFormat:NSLocalizedString(@" – results shown from statement %lu", @"Postgres query: rows are from an earlier statement (number)"), (unsigned long)shownStatement];
-			}
-			[run setStatus:status];
 		}
 	}
 	@catch (NSException *exception) {
@@ -1089,9 +1219,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 /**
  * Runs the statements in order through the task runner. The grid shows the last row set; the first error stops
- * the run. The status line describes the last statement run, and says which statement the grid's rows come from
- * when it isn't that one. Cancelled, the grid shows the last row set returned before the cancel and the status line
- * says "Query cancelled."; what ran before the cancel is still reported through runDidChangeDatabase.
+ * the run. The status line and the info pane then describe the run in MySQL's words (see the class comment).
+ * Cancelled, the grid shows the last row set returned before the cancel; what ran before the cancel is still
+ * reported through runDidChangeDatabase.
  */
 - (void)_runStatements:(NSArray *)statements
 {
@@ -1122,6 +1252,13 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 		: NSLocalizedString(@"Running query...", @"Running single query string");
 	NSString *cancelTitle = (total > 1) ? NSLocalizedString(@"Stop queries", @"Stop queries string") : NSLocalizedString(@"Stop query", @"Stop query string");
 
+	// As MySQL's: the info pane says the run has started (without opening), and the status line is cleared
+	[infoPaneTitle setStringValue:NSLocalizedString(@"Query Status", @"Query Status")];
+	[infoPaneText setString:description];
+	[self setStatusText:@""];
+	[statusField setStringValue:@""];
+	[statusField setToolTip:nil];
+
 	[runner runTaskWithDescription:description cancelTitle:cancelTitle work:^id(PGPostgresConnection *theConnection, NSError **error) {
 		[SPPostgresQueryController _runStatements:theStatements onConnection:theConnection runner:runner logger:logger hook:hook into:run];
 		[run setTransactionStatus:[theConnection transactionStatus]];
@@ -1135,15 +1272,21 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 		if (invalidated) return;
 
-		// "Query cancelled." only when the cancel stopped the run (as MySQL's lastQueryWasCancelled), or kept it from
-		// starting; a cancel after every statement had run keeps the run's own status
-		BOOL stopped = [run cancelled] || (cancelled && ![run started]);
-		NSString *status = stopped ? NSLocalizedString(@"Query cancelled.", @"Query cancelled error") : ([run status] ?: @"");
+		// Cancelled only when the cancel stopped the run (as MySQL's lastQueryWasCancelled), or kept it from starting;
+		// a cancel after every statement had run keeps the run's own status
+		if (cancelled && ![run started]) {
+			[run setTotal:total];
+			[run setCancelled:YES];
+			[run setCancelledQuery:1];
+		}
 		[self _showResult:[run rowsResult]];
 		lastRunTransactionStatus = [run transactionStatus];
+		[self setLastRunQueryText:[[run ranStatements] componentsJoinedByString:@";\n"]];
+		NSString *status = [SPPostgresQueryController _statusTextForRun:run];
 		[self setStatusText:status];
 		[statusField setStringValue:status];
 		[statusField setToolTip:status];
+		[self _updateStatusInterfaceForRun:run];
 
 		// As MySQL's Query tab: the tab reloads what the run may have changed (also what ran before a cancel)
 		if (([run schemaChanged] || [run dataChanged]) && runDidChangeDatabase) runDidChangeDatabase([run schemaChanged], [run dataChanged]);
