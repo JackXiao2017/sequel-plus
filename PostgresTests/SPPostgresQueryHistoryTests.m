@@ -29,6 +29,9 @@ static const NSUInteger SPHistoryTestPort = 55418;
 @property (strong) NSPasteboard *pasteboard;
 @property (copy) NSString *directory;
 @property (assign) NSUInteger beeps;
+/// The test's connection: disconnected in tearDown (a PGPostgresConnection is kept alive by its type handlers, so
+/// releasing it never closes it)
+@property (strong) PGPostgresConnection *connection;
 @end
 
 @implementation SPPostgresQueryHistoryTests
@@ -66,8 +69,8 @@ static const NSUInteger SPHistoryTestPort = 55418;
 	self.store = [[SPPostgresQueryStore alloc] initWithFileURL:[NSURL fileURLWithPath:[self.directory stringByAppendingPathComponent:@"PostgresQueryHistory.plist"]]];
 	self.pasteboard = [NSPasteboard pasteboardWithUniqueName];
 
-	PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:SPHistoryTestPort];
-	self.query = [[SPPostgresQueryController alloc] initWithConnection:connection];
+	self.connection = [SPPostgresTestServers connectedConnectionOnPort:SPHistoryTestPort];
+	self.query = [[SPPostgresQueryController alloc] initWithConnection:self.connection];
 	self.query.defaults = self.scratch;
 	self.query.historyStore = self.store;
 	self.query.pasteboard = self.pasteboard;
@@ -90,6 +93,8 @@ static const NSUInteger SPHistoryTestPort = 55418;
 	[self.window close];
 	self.window = nil;
 	self.query = nil;
+	[self.connection disconnect];
+	self.connection = nil;
 	[self.pasteboard releaseGlobally];
 	self.pasteboard = nil;
 	[[NSFileManager defaultManager] removeItemAtPath:self.directory error:NULL];

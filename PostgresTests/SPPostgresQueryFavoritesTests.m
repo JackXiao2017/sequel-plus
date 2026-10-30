@@ -463,6 +463,43 @@ static const NSUInteger SPFavoritesTestPort = 55418;
 	XCTAssertEqualObjects([self visibleFavoriteTitles], (@[@"Four (2)", @"Five"]));
 }
 
+/// A failed write (the store's folder can't be created) is reported, and the manager stays open with its edits.
+- (void)testFailedFavoritesWriteIsReported
+{
+	NSString *locked = [self.directory stringByAppendingPathComponent:@"Locked"];
+	XCTAssertTrue([[NSFileManager defaultManager] createDirectoryAtPath:locked withIntermediateDirectories:NO attributes:@{NSFilePosixPermissions: @0555} error:NULL]);
+	[self addTeardownBlock:^{
+		[[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions: @0755} ofItemAtPath:locked error:NULL];
+	}];
+	SPPostgresQueryStore *unwritable = [[SPPostgresQueryStore alloc] initWithFileURL:[NSURL fileURLWithPath:[locked stringByAppendingPathComponent:@"Data/PostgresQueryFavorites.plist"]]];
+	self.query.favoritesStore = unwritable;
+
+	// The manager's Save
+	[self chooseFavoriteItemAtIndex:3];
+	SPPostgresQueryFavoriteManager *manager = self.query.favoritesManager;
+	[manager.addButton performClick:nil];
+	[manager.nameField setStringValue:@"Unsaved"];
+	[manager.saveButton performClick:nil];
+	XCTAssertEqual([self.alerts count], 1u);
+	XCTAssertEqualObjects([self.alerts[0] messageText], @"The query favorites could not be saved.");
+	XCTAssertGreaterThan([[self.alerts[0] informativeText] length], 0u);
+	XCTAssertEqual(self.window.attachedSheet, manager.sheet, @"still open");
+	XCTAssertEqual(self.query.favoritesManager, manager);
+	XCTAssertEqualObjects([manager.favorites valueForKey:@"name"], @[@"Unsaved"], @"the edits are kept");
+	XCTAssertEqual([self.confirmations count], 0u, @"a readable (missing) file is not asked about");
+	[manager.cancelButton performClick:nil];
+	XCTAssertNil(self.window.attachedSheet);
+
+	// The name sheet's Save: reported too
+	[[self editor] setString:@"SELECT 1"];
+	[self chooseFavoriteItemAtIndex:2];
+	[self nameAndSave:@"Unsaved"];
+	XCTAssertEqual([self.alerts count], 2u);
+	XCTAssertEqualObjects([self.alerts[1] messageText], @"The query favorites could not be saved.");
+	XCTAssertEqualObjects(unwritable.items, @[]);
+	XCTAssertEqual([[self favoriteItems] count], 0u);
+}
+
 /// Ruling 8: a user-confirmed save over an unreadable favorites file warns first, and only on Continue moves the file
 /// aside (never deleted) and writes.
 - (void)testCorruptFavoritesStore
