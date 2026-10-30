@@ -80,6 +80,14 @@ static NSDictionary *SPPostgresSidebarRead(PGPostgresConnection *connection, SPP
 	return read;
 }
 
+/// Tags of the relation menus' separators that are hidden with the items next to them (see -_updateRelationItemsOfMenu:)
+typedef NS_ENUM(NSInteger, SPPostgresSidebarMenuSeparatorTag) {
+	/// After Rename… and Duplicate…
+	SPPostgresSidebarRenameSeparatorTag = 1,
+	/// Before the Open items
+	SPPostgresSidebarOpenSeparatorTag = 2
+};
+
 typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	SPPostgresSidebarSection,
 	SPPostgresSidebarTable,
@@ -156,6 +164,15 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 - (void)_endReload;
 - (SPPostgresSidebarItem *)_sectionNamed:(NSString *)title;
 - (SPPostgresSidebarItem *)_menuTargetItem;
+- (void)_addRelationItemsToMenu:(NSMenu *)menu;
+- (NSMenuItem *)_addSequenceItemsToMenu:(NSMenu *)menu;
+- (NSMenuItem *)_addExtensionItemsToMenu:(NSMenu *)menu;
+- (NSMenu *)_newGearMenu;
+- (void)_updateGearMenu;
+- (BOOL)_menuItemIsInGear:(NSMenuItem *)item;
+- (NSArray<NSString *> *)_relationTargetsForMenuItem:(id)sender;
+- (SPPostgresSidebarItem *)_itemTargetForMenuItem:(id)sender;
+- (void)_updateRelationItemsOfMenu:(NSMenu *)menu forTargets:(NSArray<NSString *> *)targets;
 
 @end
 
@@ -173,6 +190,11 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	NSMenuItem *deleteSequenceItem; // not retained; sequenceMenu's
 	NSMenu *extensionMenu;
 	NSMenuItem *dropExtensionItem; // not retained; extensionMenu's
+	/// The gear's menus (the hidden image item, then tableMenu's, sequenceMenu's or extensionMenu's items; see
+	/// -_updateGearMenu)
+	NSMenu *gearRelationMenu;
+	NSMenu *gearSequenceMenu;
+	NSMenu *gearExtensionMenu;
 
 	// The bottom bar and the information pane (see -_buildButtonBarInView:)
 	NSButton *addButton;
@@ -263,6 +285,9 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[tableMenu release];
 	[sequenceMenu release];
 	[extensionMenu release];
+	[gearRelationMenu release];
+	[gearSequenceMenu release];
+	[gearExtensionMenu release];
 	[addButton release];
 	[gearButton release];
 	[refreshButton release];
@@ -282,6 +307,15 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[super dealloc];
 }
 
+/// Clears the targets of a menu's items and of its submenus' items.
+static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
+{
+	for (NSMenuItem *item in [menu itemArray]) {
+		[item setTarget:nil];
+		if ([item submenu]) SPPostgresSidebarClearMenuTargets([item submenu]);
+	}
+}
+
 - (void)invalidate
 {
 	invalidated = YES;
@@ -290,12 +324,14 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[outlineView setDataSource:nil];
 	[outlineView setMenuSource:nil];
 	[schemaPopup setTarget:nil];
-	for (NSMenuItem *item in [tableMenu itemArray]) [item setTarget:nil];
-	for (NSMenuItem *item in [sequenceMenu itemArray]) [item setTarget:nil];
-	for (NSMenuItem *item in [extensionMenu itemArray]) [item setTarget:nil];
+	SPPostgresSidebarClearMenuTargets(tableMenu);
+	SPPostgresSidebarClearMenuTargets(sequenceMenu);
+	SPPostgresSidebarClearMenuTargets(extensionMenu);
+	SPPostgresSidebarClearMenuTargets(gearRelationMenu);
+	SPPostgresSidebarClearMenuTargets(gearSequenceMenu);
+	SPPostgresSidebarClearMenuTargets(gearExtensionMenu);
 	[addButton setTarget:nil];
 	[gearButton setTarget:nil];
-	for (NSMenuItem *item in [gearButton itemArray]) [item setTarget:nil];
 	[refreshButton setTarget:nil];
 	[infoToggleButton setTarget:nil];
 	[infoSplitView setDelegate:nil];
@@ -379,33 +415,18 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[scrollView setDocumentView:outlineView];
 	[outlineView sizeLastColumnToFit];
 
-	// Right-click menu, worded as MySQL's tables list menu (DBView.xib)
+	// Right-click menu: MySQL's tables list menu (DBView.xib)
 	tableMenu = [[NSMenu alloc] initWithTitle:@""];
-	NSMenuItem *duplicate = [tableMenu addItemWithTitle:NSLocalizedString(@"Duplicate Table…", @"PostgreSQL sidebar: duplicate table menu item") action:@selector(duplicateTable:) keyEquivalent:@""];
-	[duplicate setToolTip:NSLocalizedString(@"Duplicate the selected item", @"PostgreSQL sidebar: duplicate table menu item tooltip")];
-	[duplicate setTarget:self];
-	NSMenuItem *rename = [tableMenu addItemWithTitle:NSLocalizedString(@"Rename Table…", @"PostgreSQL sidebar: rename table menu item") action:@selector(renameTable:) keyEquivalent:@""];
-	[rename setToolTip:NSLocalizedString(@"Rename the selected item", @"PostgreSQL sidebar: rename table menu item tooltip")];
-	[rename setTarget:self];
+	[self _addRelationItemsToMenu:tableMenu];
 	[outlineView setMenu:tableMenu];
 
 	// On a sequence, the SEQUENCES header or empty space (see -menuForRow:)
 	sequenceMenu = [[NSMenu alloc] initWithTitle:@""];
-	NSMenuItem *addSequence = [sequenceMenu addItemWithTitle:NSLocalizedString(@"Add Sequence…", @"PostgreSQL sidebar: add sequence menu item") action:@selector(addSequence:) keyEquivalent:@""];
-	[addSequence setToolTip:NSLocalizedString(@"Add a sequence to the selected schema", @"PostgreSQL sidebar: add sequence menu item tooltip")];
-	[addSequence setTarget:self];
-	deleteSequenceItem = [sequenceMenu addItemWithTitle:NSLocalizedString(@"Delete Sequence…", @"PostgreSQL sidebar: delete sequence menu item") action:@selector(deleteSequence:) keyEquivalent:@""];
-	[deleteSequenceItem setToolTip:NSLocalizedString(@"Delete the selected sequence", @"PostgreSQL sidebar: delete sequence menu item tooltip")];
-	[deleteSequenceItem setTarget:self];
+	deleteSequenceItem = [self _addSequenceItemsToMenu:sequenceMenu];
 
 	// On an extension, the EXTENSIONS header or empty space below it (see -menuForRow:)
 	extensionMenu = [[NSMenu alloc] initWithTitle:@""];
-	NSMenuItem *installExtension = [extensionMenu addItemWithTitle:NSLocalizedString(@"Install Extension…", @"PostgreSQL sidebar: install extension menu item") action:@selector(installExtension:) keyEquivalent:@""];
-	[installExtension setToolTip:NSLocalizedString(@"Install an extension the server offers into this database", @"PostgreSQL sidebar: install extension menu item tooltip")];
-	[installExtension setTarget:self];
-	dropExtensionItem = [extensionMenu addItemWithTitle:NSLocalizedString(@"Drop Extension…", @"PostgreSQL sidebar: drop extension menu item") action:@selector(dropExtension:) keyEquivalent:@""];
-	[dropExtensionItem setToolTip:NSLocalizedString(@"Drop the selected extension", @"PostgreSQL sidebar: drop extension menu item tooltip")];
-	[dropExtensionItem setTarget:self];
+	dropExtensionItem = [self _addExtensionItemsToMenu:extensionMenu];
 
 	[infoSplitView addSubview:scrollView];
 
@@ -468,11 +489,14 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[gearCell setAlignment:NSTextAlignmentCenter];
 	[gearCell setUsesItemFromMenu:YES];
 	[gearButton setFont:[NSFont menuFontOfSize:0]];
-	[gearButton removeAllItems];
-	[gearButton addItemWithTitle:@""];
-	NSMenuItem *gearImageItem = [gearButton itemAtIndex:0];
-	[gearImageItem setImage:[NSImage imageNamed:@"button_action"]];
-	[gearImageItem setHidden:YES];
+	// The right-click menus' items, each after the gear's own image item
+	gearRelationMenu = [self _newGearMenu];
+	[self _addRelationItemsToMenu:gearRelationMenu];
+	gearSequenceMenu = [self _newGearMenu];
+	[self _addSequenceItemsToMenu:gearSequenceMenu];
+	gearExtensionMenu = [self _newGearMenu];
+	[self _addExtensionItemsToMenu:gearExtensionMenu];
+	[self _updateGearMenu];
 	[gearButton setAutoresizingMask:NSViewMaxXMargin];
 	[container addSubview:gearButton];
 
@@ -706,6 +730,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 		// Nor does a selected extension (another database's)
 		[selectedExtensionName release], selectedExtensionName = nil;
+		[self _updateGearMenu];
 
 		// The default schema of this database (the previous database's schema doesn't carry over); for another
 		// database, lists that can't be read are shown empty, with no schema
@@ -903,6 +928,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 			[self _selectItemNamed:keptExtension inSection:SPPostgresSidebarExtensions];
 			holdingSelectionChanges = wasHolding;
 		}
+		[self _updateGearMenu];
 
 		if (!holdingSelectionChanges) [delegate sidebarSelectionDidChange:self];
 	}
@@ -1142,6 +1168,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	selectedSequenceName = [sequence copy];
 	[selectedExtensionName release];
 	selectedExtensionName = [extension copy];
+	[self _updateGearMenu];
 
 	if (!holdingSelectionChanges) [delegate sidebarSelectionDidChange:self];
 }
@@ -1178,6 +1205,179 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	return (row >= 0) ? [outlineView itemAtRow:row] : nil;
 }
 
+/// Adds an item for target, with a tooltip (none if nil).
+static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, SEL action, NSString *toolTip, id target)
+{
+	NSMenuItem *item = [menu addItemWithTitle:title action:action keyEquivalent:@""];
+	if (toolTip) [item setToolTip:toolTip];
+	[item setTarget:target];
+	return item;
+}
+
+/// MySQL's table list gear and right-click items, in its order (DBView.xib), titled for one table (see
+/// -_updateRelationItemsOfMenu:forTargets:).
+- (void)_addRelationItemsToMenu:(NSMenu *)menu
+{
+	SPPostgresSidebarAddMenuItem(menu, NSLocalizedString(@"Rename Table…", @"PostgreSQL sidebar: rename table menu item"), @selector(renameTable:), NSLocalizedString(@"Rename the selected item", @"PostgreSQL sidebar: rename table menu item tooltip"), self);
+	SPPostgresSidebarAddMenuItem(menu, NSLocalizedString(@"Duplicate Table…", @"PostgreSQL sidebar: duplicate table menu item"), @selector(duplicateTable:), NSLocalizedString(@"Duplicate the selected item", @"PostgreSQL sidebar: duplicate table menu item tooltip"), self);
+	NSMenuItem *separator = [NSMenuItem separatorItem];
+	[separator setTag:SPPostgresSidebarRenameSeparatorTag];
+	[menu addItem:separator];
+
+	SPPostgresSidebarAddMenuItem(menu, NSLocalizedString(@"Truncate Table", @"PostgreSQL sidebar: truncate table menu item"), @selector(truncateTables:), NSLocalizedString(@"Delete all records of selected table(s)", @"PostgreSQL sidebar: truncate table menu item tooltip"), self);
+	SPPostgresSidebarAddMenuItem(menu, NSLocalizedString(@"Delete Table", @"PostgreSQL sidebar: delete table menu item"), @selector(removeRelations:), NSLocalizedString(@"Remove the selected item(s)", @"PostgreSQL sidebar: delete table menu item tooltip"), self);
+	separator = [NSMenuItem separatorItem];
+	[separator setTag:SPPostgresSidebarOpenSeparatorTag];
+	[menu addItem:separator];
+
+	SPPostgresSidebarAddMenuItem(menu, NSLocalizedString(@"Open Table in New Tab", @"PostgreSQL sidebar: open table in new tab menu item"), @selector(openRelationInNewTab:), nil, self);
+	NSMenuItem *newWindow = SPPostgresSidebarAddMenuItem(menu, NSLocalizedString(@"Open Table in New Window", @"PostgreSQL sidebar: open table in new window menu item"), @selector(openRelationInNewWindow:), nil, self);
+	[newWindow setKeyEquivalentModifierMask:NSEventModifierFlagOption];
+	[newWindow setAlternate:YES];
+	[menu addItem:[NSMenuItem separatorItem]];
+
+	NSMenuItem *export = [menu addItemWithTitle:NSLocalizedString(@"Export", @"PostgreSQL sidebar: export menu item") action:NULL keyEquivalent:@""];
+	NSMenu *exportMenu = [[[NSMenu alloc] initWithTitle:NSLocalizedString(@"Export", @"PostgreSQL sidebar: export menu item")] autorelease];
+	NSMenuItem *sqlDump = SPPostgresSidebarAddMenuItem(exportMenu, NSLocalizedString(@"As SQL dump…", @"PostgreSQL sidebar: export as SQL dump menu item"), @selector(exportRelations:), nil, self);
+	[sqlDump setTag:0];
+	NSMenuItem *csv = SPPostgresSidebarAddMenuItem(exportMenu, NSLocalizedString(@"As CSV file…", @"PostgreSQL sidebar: export as CSV menu item"), @selector(exportRelations:), nil, self);
+	[csv setTag:1];
+	[menu setSubmenu:exportMenu forItem:export];
+	[menu addItem:[NSMenuItem separatorItem]];
+
+	SPPostgresSidebarAddMenuItem(menu, NSLocalizedString(@"Show Create Table Syntax…", @"PostgreSQL sidebar: show create table syntax menu item"), @selector(showCreateSyntax:), nil, self);
+	SPPostgresSidebarAddMenuItem(menu, NSLocalizedString(@"Copy Create Table Syntax", @"PostgreSQL sidebar: copy create table syntax menu item"), @selector(copyCreateSyntax:), nil, self);
+}
+
+/// "Add Sequence…" and "Delete Sequence…" (returned).
+- (NSMenuItem *)_addSequenceItemsToMenu:(NSMenu *)menu
+{
+	SPPostgresSidebarAddMenuItem(menu, NSLocalizedString(@"Add Sequence…", @"PostgreSQL sidebar: add sequence menu item"), @selector(addSequence:), NSLocalizedString(@"Add a sequence to the selected schema", @"PostgreSQL sidebar: add sequence menu item tooltip"), self);
+	return SPPostgresSidebarAddMenuItem(menu, NSLocalizedString(@"Delete Sequence…", @"PostgreSQL sidebar: delete sequence menu item"), @selector(deleteSequence:), NSLocalizedString(@"Delete the selected sequence", @"PostgreSQL sidebar: delete sequence menu item tooltip"), self);
+}
+
+/// "Install Extension…" and "Drop Extension…" (returned).
+- (NSMenuItem *)_addExtensionItemsToMenu:(NSMenu *)menu
+{
+	SPPostgresSidebarAddMenuItem(menu, NSLocalizedString(@"Install Extension…", @"PostgreSQL sidebar: install extension menu item"), @selector(installExtension:), NSLocalizedString(@"Install an extension the server offers into this database", @"PostgreSQL sidebar: install extension menu item tooltip"), self);
+	return SPPostgresSidebarAddMenuItem(menu, NSLocalizedString(@"Drop Extension…", @"PostgreSQL sidebar: drop extension menu item"), @selector(dropExtension:), NSLocalizedString(@"Drop the selected extension", @"PostgreSQL sidebar: drop extension menu item tooltip"), self);
+}
+
+/// A menu for the gear (retained): its item 0, the hidden button_action image item the pull-down shows (DBView.xib).
+- (NSMenu *)_newGearMenu
+{
+	NSMenu *menu = [[NSMenu alloc] initWithTitle:@""];
+	NSMenuItem *imageItem = [menu addItemWithTitle:@"" action:NULL keyEquivalent:@""];
+	[imageItem setImage:[NSImage imageNamed:@"button_action"]];
+	[imageItem setState:NSControlStateValueOn];
+	[imageItem setHidden:YES];
+	return menu;
+}
+
+/// The gear has the menu -menuForRow: gives the selection: the sequence items for a sequence, the extension items for
+/// an extension, else the table items.
+- (void)_updateGearMenu
+{
+	NSMenu *menu = gearRelationMenu;
+	if (selectedSequenceName) menu = gearSequenceMenu;
+	else if (selectedExtensionName) menu = gearExtensionMenu;
+	if (menu && [gearButton menu] != menu) [gearButton setMenu:menu];
+}
+
+/// Whether item is one of the gear's (or of its Export submenu).
+- (BOOL)_menuItemIsInGear:(NSMenuItem *)item
+{
+	if (![item isKindOfClass:[NSMenuItem class]]) return NO;
+	NSMenu *menu = [item menu];
+	while ([menu supermenu]) menu = [menu supermenu];
+	return menu && (menu == gearRelationMenu || menu == gearSequenceMenu || menu == gearExtensionMenu);
+}
+
+/// The tables and views a relation item acts on: the gear's, the selection (a row clicked earlier doesn't count); the
+/// right-click menu's, actionTargetRelationNames.
+- (NSArray<NSString *> *)_relationTargetsForMenuItem:(id)sender
+{
+	return [self _menuItemIsInGear:sender] ? [self selectedRelationNames] : [self actionTargetRelationNames];
+}
+
+/// The sequence or extension an item acts on: the gear's, the selected row's; the right-click menu's, -_menuTargetItem.
+- (SPPostgresSidebarItem *)_itemTargetForMenuItem:(id)sender
+{
+	if (![self _menuItemIsInGear:sender]) return [self _menuTargetItem];
+	NSIndexSet *rows = [outlineView selectedRowIndexes];
+	return ([rows count] == 1) ? [outlineView itemAtRow:(NSInteger)[rows firstIndex]] : nil;
+}
+
+/**
+ * Titles and shows the relation items of menu for targets, as -[SPTablesList setSelectionState:]: one table or view
+ * names its kind; several hide Rename, Duplicate and the Open items (and the separators that go with them) and use
+ * the plural titles. Truncate is hidden unless every target is a table.
+ */
+- (void)_updateRelationItemsOfMenu:(NSMenu *)menu forTargets:(NSArray<NSString *> *)targets
+{
+	NSUInteger count = [targets count];
+	NSUInteger views = 0;
+	for (NSString *name in targets) {
+		if ([self relationIsView:name]) views++;
+	}
+	BOOL one = (count == 1);
+	BOOL several = (count > 1);
+	BOOL oneView = one && views == 1;
+
+	for (NSMenuItem *item in [menu itemArray]) {
+		SEL action = [item action];
+		if ([item isSeparatorItem]) {
+			if ([item tag] == SPPostgresSidebarRenameSeparatorTag || [item tag] == SPPostgresSidebarOpenSeparatorTag) [item setHidden:!one];
+		}
+		else if (action == @selector(renameTable:)) {
+			[item setTitle:oneView ? NSLocalizedString(@"Rename View…", @"PostgreSQL sidebar: rename view menu item") : NSLocalizedString(@"Rename Table…", @"PostgreSQL sidebar: rename table menu item")];
+			[item setHidden:!one];
+		}
+		else if (action == @selector(duplicateTable:)) {
+			[item setTitle:oneView ? NSLocalizedString(@"Duplicate View…", @"PostgreSQL sidebar: duplicate view menu item") : NSLocalizedString(@"Duplicate Table…", @"PostgreSQL sidebar: duplicate table menu item")];
+			[item setHidden:!one];
+		}
+		else if (action == @selector(truncateTables:)) {
+			[item setTitle:several ? NSLocalizedString(@"Truncate Tables", @"PostgreSQL sidebar: truncate tables menu item") : NSLocalizedString(@"Truncate Table", @"PostgreSQL sidebar: truncate table menu item")];
+			[item setHidden:(views > 0)];
+		}
+		else if (action == @selector(removeRelations:)) {
+			NSString *title;
+			if (several) {
+				if (!views) title = NSLocalizedString(@"Delete Tables", @"PostgreSQL sidebar: delete tables menu item");
+				else if (views == count) title = NSLocalizedString(@"Delete Views", @"PostgreSQL sidebar: delete views menu item");
+				else title = NSLocalizedString(@"Delete Items", @"PostgreSQL sidebar: delete items menu item");
+			}
+			else {
+				title = oneView ? NSLocalizedString(@"Delete View", @"PostgreSQL sidebar: delete view menu item") : NSLocalizedString(@"Delete Table", @"PostgreSQL sidebar: delete table menu item");
+			}
+			[item setTitle:title];
+		}
+		else if (action == @selector(openRelationInNewTab:)) {
+			[item setTitle:oneView ? NSLocalizedString(@"Open View in New Tab", @"PostgreSQL sidebar: open view in new tab menu item") : NSLocalizedString(@"Open Table in New Tab", @"PostgreSQL sidebar: open table in new tab menu item")];
+			[item setHidden:!one];
+		}
+		else if (action == @selector(openRelationInNewWindow:)) {
+			[item setTitle:oneView ? NSLocalizedString(@"Open View in New Window", @"PostgreSQL sidebar: open view in new window menu item") : NSLocalizedString(@"Open Table in New Window", @"PostgreSQL sidebar: open table in new window menu item")];
+			[item setHidden:!one];
+		}
+		else if (action == @selector(showCreateSyntax:)) {
+			NSString *title;
+			if (several) title = NSLocalizedString(@"Show Create Syntaxes…", @"PostgreSQL sidebar: show create syntaxes menu item");
+			else if (oneView) title = NSLocalizedString(@"Show Create View Syntax…", @"PostgreSQL sidebar: show create view syntax menu item");
+			else title = NSLocalizedString(@"Show Create Table Syntax…", @"PostgreSQL sidebar: show create table syntax menu item");
+			[item setTitle:title];
+		}
+		else if (action == @selector(copyCreateSyntax:)) {
+			NSString *title;
+			if (several) title = NSLocalizedString(@"Copy Create Syntaxes", @"PostgreSQL sidebar: copy create syntaxes menu item");
+			else if (oneView) title = NSLocalizedString(@"Copy Create View Syntax", @"PostgreSQL sidebar: copy create view syntax menu item");
+			else title = NSLocalizedString(@"Copy Create Table Syntax", @"PostgreSQL sidebar: copy create table syntax menu item");
+			[item setTitle:title];
+		}
+	}
+}
+
 - (NSMenu *)menuForRow:(NSInteger)row
 {
 	SPPostgresSidebarItem *item = (row >= 0 && row < [outlineView numberOfRows]) ? [outlineView itemAtRow:row] : nil;
@@ -1204,32 +1404,117 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 - (BOOL)validateMenuItem:(NSMenuItem *)item
 {
-	if ([item action] == @selector(addSequence:)) {
+	SEL action = [item action];
+	if (!actionsEnabled || invalidated) return NO;
+
+	if (action == @selector(addSequence:)) {
 		return [selectedSchema length] && [delegate respondsToSelector:@selector(sidebar:addSequenceInSchema:)];
 	}
-	if ([item action] == @selector(deleteSequence:)) {
-		return [[self _menuTargetItem] kind] == SPPostgresSidebarSequence && [delegate respondsToSelector:@selector(sidebar:deleteSequenceNamed:)];
+	if (action == @selector(deleteSequence:)) {
+		return [[self _itemTargetForMenuItem:item] kind] == SPPostgresSidebarSequence && [delegate respondsToSelector:@selector(sidebar:deleteSequenceNamed:)];
 	}
-	if ([item action] == @selector(installExtension:)) {
+	if (action == @selector(installExtension:)) {
 		return [delegate respondsToSelector:@selector(sidebarInstallExtension:)];
 	}
-	if ([item action] == @selector(dropExtension:)) {
-		return [[self _menuTargetItem] kind] == SPPostgresSidebarExtension && [delegate respondsToSelector:@selector(sidebar:dropExtensionNamed:)];
+	if (action == @selector(dropExtension:)) {
+		return [[self _itemTargetForMenuItem:item] kind] == SPPostgresSidebarExtension && [delegate respondsToSelector:@selector(sidebar:dropExtensionNamed:)];
 	}
-	if ([item action] == @selector(duplicateTable:)) {
-		return [[self _menuTargetItem] kind] == SPPostgresSidebarTable && [delegate respondsToSelector:@selector(sidebar:duplicateTableNamed:)];
+
+	BOOL relationAction = (action == @selector(renameTable:) || action == @selector(duplicateTable:) || action == @selector(truncateTables:) || action == @selector(removeRelations:) || action == @selector(openRelationInNewTab:) || action == @selector(openRelationInNewWindow:) || action == @selector(exportRelations:) || action == @selector(showCreateSyntax:) || action == @selector(copyCreateSyntax:));
+	if (!relationAction) return YES;
+
+	NSArray<NSString *> *targets = [self _relationTargetsForMenuItem:item];
+	// The titles follow the targets each time the menu is validated (not the Export submenu's)
+	if (![[item menu] supermenu]) [self _updateRelationItemsOfMenu:[item menu] forTargets:targets];
+
+	NSUInteger count = [targets count];
+	BOOL oneTable = (count == 1 && ![self relationIsView:[targets firstObject]]);
+	BOOL allTables = (count > 0);
+	for (NSString *name in targets) {
+		if ([self relationIsView:name]) allTables = NO;
 	}
-	if ([item action] == @selector(renameTable:)) {
-		return [[self _menuTargetItem] kind] == SPPostgresSidebarTable && [delegate respondsToSelector:@selector(sidebar:renameTableNamed:)];
-	}
-	return YES;
+
+	if (action == @selector(renameTable:)) return oneTable && [delegate respondsToSelector:@selector(sidebar:renameTableNamed:)];
+	if (action == @selector(duplicateTable:)) return oneTable && [delegate respondsToSelector:@selector(sidebar:duplicateTableNamed:)];
+	if (action == @selector(truncateTables:)) return allTables && [delegate respondsToSelector:@selector(sidebar:truncateTables:)];
+	if (action == @selector(removeRelations:)) return count && [delegate respondsToSelector:@selector(sidebar:removeRelations:)];
+	if (action == @selector(openRelationInNewTab:) || action == @selector(openRelationInNewWindow:)) return count == 1 && [delegate respondsToSelector:@selector(sidebar:openRelation:inNewWindow:)];
+	if (action == @selector(exportRelations:)) return count && [delegate respondsToSelector:@selector(sidebar:exportRelations:format:)];
+	return count && [delegate respondsToSelector:@selector(sidebar:showCreateSyntaxForRelations:copy:)];
+}
+
+/// The one table a Rename or Duplicate acts on, or nil (not exactly one target, a view, or actions disabled).
+- (NSString *)_singleTableTargetForMenuItem:(id)sender
+{
+	if (!actionsEnabled) return nil;
+	NSArray<NSString *> *targets = [self _relationTargetsForMenuItem:sender];
+	if ([targets count] != 1 || [self relationIsView:[targets firstObject]]) return nil;
+	return [targets firstObject];
+}
+
+/// The tables and views an action acts on (empty while actions are disabled).
+- (NSArray<NSString *> *)_enabledRelationTargetsForMenuItem:(id)sender
+{
+	return actionsEnabled ? [self _relationTargetsForMenuItem:sender] : @[];
 }
 
 - (void)renameTable:(id)sender
 {
-	SPPostgresSidebarItem *item = [self _menuTargetItem];
-	if ([item kind] != SPPostgresSidebarTable) return;
-	if ([delegate respondsToSelector:@selector(sidebar:renameTableNamed:)]) [delegate sidebar:self renameTableNamed:[item title]];
+	NSString *table = [self _singleTableTargetForMenuItem:sender];
+	if (table && [delegate respondsToSelector:@selector(sidebar:renameTableNamed:)]) [delegate sidebar:self renameTableNamed:table];
+}
+
+- (void)duplicateTable:(id)sender
+{
+	NSString *table = [self _singleTableTargetForMenuItem:sender];
+	if (table && [delegate respondsToSelector:@selector(sidebar:duplicateTableNamed:)]) [delegate sidebar:self duplicateTableNamed:table];
+}
+
+- (void)truncateTables:(id)sender
+{
+	NSArray<NSString *> *targets = [self _enabledRelationTargetsForMenuItem:sender];
+	if (![targets count]) return;
+	for (NSString *name in targets) {
+		if ([self relationIsView:name]) return;
+	}
+	if ([delegate respondsToSelector:@selector(sidebar:truncateTables:)]) [delegate sidebar:self truncateTables:targets];
+}
+
+- (void)removeRelations:(id)sender
+{
+	NSArray<NSString *> *targets = [self _enabledRelationTargetsForMenuItem:sender];
+	if ([targets count] && [delegate respondsToSelector:@selector(sidebar:removeRelations:)]) [delegate sidebar:self removeRelations:targets];
+}
+
+- (void)openRelationInNewTab:(id)sender
+{
+	NSArray<NSString *> *targets = [self _enabledRelationTargetsForMenuItem:sender];
+	if ([targets count] == 1 && [delegate respondsToSelector:@selector(sidebar:openRelation:inNewWindow:)]) [delegate sidebar:self openRelation:[targets firstObject] inNewWindow:NO];
+}
+
+- (void)openRelationInNewWindow:(id)sender
+{
+	NSArray<NSString *> *targets = [self _enabledRelationTargetsForMenuItem:sender];
+	if ([targets count] == 1 && [delegate respondsToSelector:@selector(sidebar:openRelation:inNewWindow:)]) [delegate sidebar:self openRelation:[targets firstObject] inNewWindow:YES];
+}
+
+/// Export ▸ As SQL dump… (tag 0) or As CSV file… (tag 1).
+- (void)exportRelations:(id)sender
+{
+	NSArray<NSString *> *targets = [self _enabledRelationTargetsForMenuItem:sender];
+	if ([targets count] && [delegate respondsToSelector:@selector(sidebar:exportRelations:format:)]) [delegate sidebar:self exportRelations:targets format:[sender tag]];
+}
+
+- (void)showCreateSyntax:(id)sender
+{
+	NSArray<NSString *> *targets = [self _enabledRelationTargetsForMenuItem:sender];
+	if ([targets count] && [delegate respondsToSelector:@selector(sidebar:showCreateSyntaxForRelations:copy:)]) [delegate sidebar:self showCreateSyntaxForRelations:targets copy:NO];
+}
+
+- (void)copyCreateSyntax:(id)sender
+{
+	NSArray<NSString *> *targets = [self _enabledRelationTargetsForMenuItem:sender];
+	if ([targets count] && [delegate respondsToSelector:@selector(sidebar:showCreateSyntaxForRelations:copy:)]) [delegate sidebar:self showCreateSyntaxForRelations:targets copy:YES];
 }
 
 - (void)addSequence:(id)sender
@@ -1240,7 +1525,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 - (void)deleteSequence:(id)sender
 {
-	SPPostgresSidebarItem *item = [self _menuTargetItem];
+	SPPostgresSidebarItem *item = [self _itemTargetForMenuItem:sender];
 	if ([item kind] != SPPostgresSidebarSequence) return;
 	if ([delegate respondsToSelector:@selector(sidebar:deleteSequenceNamed:)]) [delegate sidebar:self deleteSequenceNamed:[item title]];
 }
@@ -1252,16 +1537,9 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 - (void)dropExtension:(id)sender
 {
-	SPPostgresSidebarItem *item = [self _menuTargetItem];
+	SPPostgresSidebarItem *item = [self _itemTargetForMenuItem:sender];
 	if ([item kind] != SPPostgresSidebarExtension) return;
 	if ([delegate respondsToSelector:@selector(sidebar:dropExtensionNamed:)]) [delegate sidebar:self dropExtensionNamed:[item title]];
-}
-
-- (void)duplicateTable:(id)sender
-{
-	SPPostgresSidebarItem *item = [self _menuTargetItem];
-	if ([item kind] != SPPostgresSidebarTable) return;
-	if ([delegate respondsToSelector:@selector(sidebar:duplicateTableNamed:)]) [delegate sidebar:self duplicateTableNamed:[item title]];
 }
 
 #pragma mark - NSOutlineViewDataSource

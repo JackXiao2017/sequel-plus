@@ -15,10 +15,25 @@
 /// The user is about to select another table or schema (click, keys or the schema pop-up): NO keeps the
 /// current selection (e.g. an edit that can't be saved). Not asked for changes made through the API.
 - (BOOL)sidebarShouldChangeSelection:(SPPostgresSidebarController *)sidebar;
-/// "Duplicate Table…" was chosen in the outline's menu for `table`, a table of the selected schema.
+/// "Duplicate Table…" was chosen in the gear or right-click menu for `table`, a table of the selected schema (the
+/// action's only target).
 - (void)sidebar:(SPPostgresSidebarController *)sidebar duplicateTableNamed:(NSString *)table;
-/// "Rename Table…" was chosen in the outline's menu for `table`, a table of the selected schema.
+/// "Rename Table…" was chosen in the gear or right-click menu for `table`, a table of the selected schema (the
+/// action's only target).
 - (void)sidebar:(SPPostgresSidebarController *)sidebar renameTableNamed:(NSString *)table;
+/// "Truncate Table(s)" was chosen for `tables`, tables (no view) of the selected schema.
+- (void)sidebar:(SPPostgresSidebarController *)sidebar truncateTables:(NSArray<NSString *> *)tables;
+/// "Delete Table/View/Tables/Views/Items" was chosen for `names`, tables and views of the selected schema.
+- (void)sidebar:(SPPostgresSidebarController *)sidebar removeRelations:(NSArray<NSString *> *)names;
+/// "Open Table/View in New Tab" (newWindow NO) or "… in New Window" (the Option alternate, YES) was chosen for `name`,
+/// a table or view of the selected schema.
+- (void)sidebar:(SPPostgresSidebarController *)sidebar openRelation:(NSString *)name inNewWindow:(BOOL)newWindow;
+/// Export ▸ "As SQL dump…" (format 0) or "As CSV file…" (format 1), MySQL's tags, was chosen for `names`, tables and
+/// views of the selected schema.
+- (void)sidebar:(SPPostgresSidebarController *)sidebar exportRelations:(NSArray<NSString *> *)names format:(NSInteger)format;
+/// "Show Create … Syntax…" (copy NO) or "Copy Create … Syntax" (copy YES) was chosen for `names`, tables and views of
+/// the selected schema.
+- (void)sidebar:(SPPostgresSidebarController *)sidebar showCreateSyntaxForRelations:(NSArray<NSString *> *)names copy:(BOOL)copy;
 /// "Add Sequence…" was chosen in the outline's menu: a sequence for `schema`, the selected schema.
 - (void)sidebar:(SPPostgresSidebarController *)sidebar addSequenceInSchema:(NSString *)schema;
 /// "Delete Sequence…" was chosen in the outline's menu for `sequence`, a sequence of the selected schema.
@@ -118,8 +133,9 @@ __attribute__((visibility("default")))
 - (BOOL)relationIsView:(NSString *)name;
 
 /**
- * What a relation action acts on: the right-clicked row's table or view when the click is outside the selection
- * (nothing if that row isn't a table or view), else selectedRelationNames.
+ * What a right-click menu's relation action acts on: the right-clicked row's table or view when the click is outside
+ * the selection (nothing if that row isn't a table or view), else selectedRelationNames. The gear's actions act on
+ * selectedRelationNames, whatever row was clicked last.
  */
 - (NSArray<NSString *> *)actionTargetRelationNames;
 
@@ -130,8 +146,14 @@ __attribute__((visibility("default")))
 - (BOOL)selectExtensionNamed:(NSString *)name;
 
 /**
- * The outline's right-click menu: "Duplicate Table…" and "Rename Table…", enabled on a table (not a view or
- * extension). They act on the row that was right-clicked, or else on the selected one, through the delegate.
+ * The outline's right-click menu on a table, view or the TABLES and VIEWS headers, with MySQL's table list items in
+ * its order (DBView.xib): Rename…, Duplicate…, —, Truncate, Remove, —, Open in New Tab, Open in New Window (Option
+ * alternate), —, Export ▸ (As SQL dump…, As CSV file…), —, Show Create Syntax…, Copy Create Syntax. The gear's menu,
+ * after its image item, has the same items. Each validation titles them for the targets (actionTargetRelationNames
+ * here, selectedRelationNames in the gear) as MySQL's -setSelectionState: does, hiding Truncate unless every target is
+ * a table, and Rename, Duplicate and the Open items unless there is exactly one. Rename and Duplicate are enabled on
+ * one table, Open on one table or view, the others on at least one; every item needs the delegate's method and
+ * actionsEnabled. They call the delegate.
  */
 @property (readonly) NSMenu *tableMenu;
 
@@ -192,7 +214,8 @@ __attribute__((visibility("default")))
 
 /// "Add new table" (button_add): -addTable:, enabled while actionsEnabled and the delegate implements -sidebarAddTable:.
 @property (readonly) NSButton *addButton;
-/// The gear: a pull-down whose item 0 is the hidden button_action image item.
+/// The gear: a pull-down whose item 0 is the hidden button_action image item, then tableMenu's items, or with a sequence
+/// or extension selected sequenceMenu's or extensionMenu's (its own copies, acting on the selection).
 @property (readonly) NSPopUpButton *gearButton;
 /// "Refresh table list" (button_refresh): -refreshTables:.
 @property (readonly) NSButton *refreshButton;
@@ -210,8 +233,8 @@ __attribute__((visibility("default")))
 /// standardUserDefaults). Setting it applies the state it stores (as a view built with it would start).
 @property (nonatomic, retain) NSUserDefaults *defaults;
 
-/// Whether Add, the gear and Refresh are enabled (NO while the owner is processing; default YES). The info toggle
-/// stays enabled.
+/// Whether Add, the gear and Refresh, and every item of the gear and right-click menus, are enabled (NO while the owner
+/// is processing; default YES). The info toggle stays enabled.
 @property (nonatomic) BOOL actionsEnabled;
 
 /// Refresh: the delegate's -sidebarRefresh: (else -reloadKeepingSelection).

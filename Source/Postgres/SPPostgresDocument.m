@@ -2682,18 +2682,21 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	// isn't a place of its own)
 	[history renameTable:table to:newName inDatabase:currentDatabase schema:schema];
 
-	// The renamed table stays selected (another selection is kept); the reload on the way is not a place the user went to
+	// The renamed table stays selected (another selection, including several tables and views, is kept); the reload on
+	// the way is not a place the user went to
 	if (![schema isEqualToString:[sidebar selectedSchema]]) return;
-	NSString *selected = [[[sidebar selectedTableName] copy] autorelease];
+	NSMutableArray *reselect = [NSMutableArray array];
+	for (NSString *selected in [sidebar selectedRelationNames]) {
+		[reselect addObject:[selected isEqualToString:table] ? newName : selected];
+	}
 	NSString *selectedSequence = [[[sidebar selectedSequenceName] copy] autorelease];
-	NSString *reselect = [selected isEqualToString:table] ? newName : selected;
-	if (!reselect && selectedSequence) {
+	if (![reselect count] && selectedSequence) {
 		// Straight back to the sequence (no empty selection, so no other pane, on the way), not recorded
 		[sidebar reloadSchema:schema selectingSequence:selectedSequence completion:[self _quietSidebarCompletion:nil]];
 		return;
 	}
 	[sidebar reloadSchema:schema completion:[self _quietSidebarCompletion:^(BOOL loaded) {
-		if (reselect) [sidebar selectTableNamed:reselect];
+		if ([reselect count]) [sidebar selectRelationsNamed:reselect];
 	}]];
 }
 
