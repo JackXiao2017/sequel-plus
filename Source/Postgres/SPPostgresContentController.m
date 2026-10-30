@@ -381,7 +381,7 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 	[view addSubview:scrollView];
 
 	// Bottom bar, at DBView.xib's frames: + − duplicate refresh edit-mode filter | count, notice | previous, jump, next.
-	// Duplicate, edit mode, the filter toggle and Jump to page are not wired yet (disabled, no action).
+	// Edit mode, the filter toggle and Jump to page are not wired yet (disabled, no action).
 	SPButtonBar *bottomBar = [[[SPButtonBar alloc] initWithFrame:NSMakeRect(0, 0, width, SPPostgresContentBottomBarHeight)] autorelease];
 	[bottomBar setAutoresizingMask:NSViewWidthSizable | NSViewMaxYMargin];
 
@@ -390,7 +390,7 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 	[addButton setKeyEquivalentModifierMask:NSEventModifierFlagOption | NSEventModifierFlagCommand];
 	removeButton = [self _newBarButtonWithImage:@"button_remove" alternateImage:@"button_remove" toolTip:NSLocalizedString(@"Delete selected row(s) (⌫)", @"delete selected rows button tooltip") action:@selector(removeRows:) x:30];
 	[removeButton setKeyEquivalent:@""];
-	duplicateButton = [self _newBarButtonWithImage:@"button_duplicate" alternateImage:@"button_duplicate" toolTip:NSLocalizedString(@"Duplicate selected row (⌘D)", @"duplicate row button tooltip") action:NULL x:61];
+	duplicateButton = [self _newBarButtonWithImage:@"button_duplicate" alternateImage:@"button_duplicate" toolTip:NSLocalizedString(@"Duplicate selected row (⌘D)", @"duplicate row button tooltip") action:@selector(duplicateRow:) x:61];
 	[duplicateButton setKeyEquivalent:@"d"];
 	[duplicateButton setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
 	refreshButton = [self _newBarButtonWithImage:@"button_refresh" alternateImage:@"button_refresh" toolTip:NSLocalizedString(@"Refresh table contents (⌘R)", @"refresh table contents button tooltip") action:@selector(refresh:) x:93];
@@ -907,6 +907,7 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 	[refreshButton setEnabled:idle && ((tableData && [columns count]) || needsShow)];
 	[addButton setEnabled:idle && hasTable && editable];
 	[removeButton setEnabled:idle && hasTable && editable && [tableView numberOfSelectedRows] > 0];
+	[duplicateButton setEnabled:idle && hasTable && editable && [tableView numberOfSelectedRows] == 1];
 	[previousPageButton setEnabled:idle && hasTable && currentPage > 1];
 	[nextPageButton setEnabled:idle && hasTable && currentPage < pageCount];
 }
@@ -951,7 +952,7 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 
 #pragma mark - Rows
 
-/// The short writes (add, delete, a cell edit) run on the main thread, so never while a load is using the connection.
+/// The short writes (add, duplicate, delete, a cell edit) run on the main thread, so never while a load is using the connection.
 - (BOOL)_refuseWriteWhileBusy
 {
 	// Also once the runner is invalidated (a database switch dropped it with its connection)
@@ -982,18 +983,8 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 		return;
 	}
 
-	// Shown at the end of this page (to be edited in place), and counted: the pages to come are recomputed
-	[rows addObject:row];
-	matchingRowCount++;
-	tableRowCount++;
-	NSUInteger pageSize = [self _pageSize];
-	if (pageSize) pageCount = MAX(currentPage, ((NSUInteger)matchingRowCount + pageSize - 1) / pageSize);
-	[tableView reloadData];
-
-	NSInteger newRow = (NSInteger)[rows count] - 1;
-	[tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)newRow] byExtendingSelection:NO];
-	[tableView scrollRowToVisible:newRow];
-	[self _updateBottomBar];
+	// Shown at the end of this page, to be edited in place
+	NSInteger newRow = [self _showInsertedRow:row];
 
 	// Start editing the first column that can be edited
 	if ([tableView window]) {
@@ -1008,6 +999,60 @@ static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 
 	// No edit started: the saved cell's reload runs now
 	[self _reloadIfPending];
+}
+
+/// Copies the selected row (MySQL's -duplicateRow:): a new row with its values, except generated and auto-numbered
+/// columns, which get their defaults (a new serial or identity value). Shown as addRow:'s, without starting an edit.
+- (IBAction)duplicateRow:(id)sender
+{
+	if (invalidated || !tableData || !editable || !loaded) return;
+	if ([self _refuseWriteWhileBusy]) return;
+
+	// A cell being edited is saved first (the copy then has its new value) and the rows reloaded, as in -addRow:
+	if ([self _endEditing]) {
+		if ([taskRunner isInline]) [self reload];
+		else reloadPending = YES;
+	}
+
+	NSInteger selected = [tableView numberOfSelectedRows];
+	NSInteger selectedRow = [tableView selectedRow];
+	if (selected != 1 || selectedRow < 0 || (NSUInteger)selectedRow >= [rows count]) {
+		if (selected > 1) {
+			// MySQL's message (-[SPTableContent duplicateRow:])
+			NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+			[alert setAlertStyle:NSAlertStyleWarning];
+			[alert setMessageText:NSLocalizedString(@"Error", @"error")];
+			[alert setInformativeText:NSLocalizedString(@"You can only copy single rows.", @"message of panel when trying to copy multiple rows")];
+			[self _presentAlert:alert];
+		}
+		[self _reloadIfPending];
+		return;
+	}
+
+	NSError *error = nil;
+	NSArray *row = [tableData insertCopyOfRow:[rows objectAtIndex:(NSUInteger)selectedRow] error:&error];
+	if (row) [self _showInsertedRow:row];
+	else [self _presentError:error title:NSLocalizedString(@"Could not duplicate the row", @"Postgres content: duplicate failed")];
+
+	[self _reloadIfPending];
+}
+
+/// An inserted row, shown at the end of this page, selected and scrolled to, and counted: the pages to come are
+/// recomputed. Returns its index in the grid.
+- (NSInteger)_showInsertedRow:(NSArray *)row
+{
+	[rows addObject:row];
+	matchingRowCount++;
+	tableRowCount++;
+	NSUInteger pageSize = [self _pageSize];
+	if (pageSize) pageCount = MAX(currentPage, ((NSUInteger)matchingRowCount + pageSize - 1) / pageSize);
+	[tableView reloadData];
+
+	NSInteger newRow = (NSInteger)[rows count] - 1;
+	[tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)newRow] byExtendingSelection:NO];
+	[tableView scrollRowToVisible:newRow];
+	[self _updateBottomBar];
+	return newRow;
 }
 
 - (IBAction)removeRows:(id)sender

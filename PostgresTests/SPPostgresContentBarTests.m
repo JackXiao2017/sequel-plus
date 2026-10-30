@@ -298,6 +298,112 @@ static NSString * const SPLimitResultsValue = @"LimitResultsValue";
 	XCTAssertEqualObjects([buttons[1] keyEquivalent], @"\r");
 }
 
+#pragma mark - Duplicate
+
+- (id)serverValue:(NSString *)sql
+{
+	return [[[self.other execute:sql] rowAsArray] firstObject];
+}
+
+- (void)testDuplicateRowAppendsCopyAndSelectsIt
+{
+	[self selectTable:@"items"];
+	SPPostgresContentController *content = self.content;
+	NSTableView *grid = [self grid];
+	XCTAssertEqual([grid numberOfRows], 30);
+	XCTAssertEqualObjects(content.countText, @"30 rows in table");
+	XCTAssertEqual([content.duplicateButton target], content);
+	XCTAssertEqual([content.duplicateButton action], @selector(duplicateRow:));
+
+	[grid selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+	[content duplicateRow:nil];
+
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
+	XCTAssertEqual([grid numberOfRows], 31);
+	XCTAssertEqualObjects([grid selectedRowIndexes], [NSIndexSet indexSetWithIndex:30], @"the copy, last, is selected");
+	XCTAssertTrue([content.countText hasPrefix:@"31 rows in table"], @"%@", content.countText);
+	XCTAssertNil([grid currentEditor], @"no cell editor is opened");
+
+	// The copy: a new id, the other values as row 1's
+	NSTableColumn *idColumn = [grid tableColumns][0];
+	NSTableColumn *nameColumn = [grid tableColumns][1];
+	XCTAssertEqualObjects([[content tableView:grid objectValueForTableColumn:idColumn row:30] description], @"31");
+	XCTAssertEqualObjects([[content tableView:grid objectValueForTableColumn:nameColumn row:30] description], @"item 1");
+	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.items WHERE name = 'item 1'"], @2);
+}
+
+- (void)testDuplicateEnabledOnlyForOneSelectedRow
+{
+	[self selectTable:@"items"];
+	SPPostgresContentController *content = self.content;
+	NSTableView *grid = [self grid];
+
+	[grid deselectAll:nil];
+	XCTAssertFalse([content.duplicateButton isEnabled], @"no row selected");
+	[grid selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+	XCTAssertTrue([content.duplicateButton isEnabled], @"one row selected");
+	[grid selectRowIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, 2)] byExtendingSelection:NO];
+	XCTAssertFalse([content.duplicateButton isEnabled], @"two rows selected");
+
+	for (NSString *table in @[@"items_view", @"no_pk"]) {
+		[self selectTable:table];
+		[grid selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+		XCTAssertEqual([grid numberOfSelectedRows], 1, @"%@", table);
+		XCTAssertFalse([content.duplicateButton isEnabled], @"%@ can't be edited", table);
+	}
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testDuplicateWithSeveralRowsShowsMySQLError
+{
+	[self selectTable:@"items"];
+	[[self grid] selectRowIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, 2)] byExtendingSelection:NO];
+	[self.content duplicateRow:nil];
+
+	XCTAssertEqual(self.alerts.count, 1u);
+	XCTAssertEqualObjects([self.alerts.firstObject messageText], @"Error");
+	XCTAssertEqualObjects([self.alerts.firstObject informativeText], @"You can only copy single rows.");
+	XCTAssertEqual([[self grid] numberOfRows], 30);
+	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.items"], @30);
+}
+
+- (void)testDuplicateWithPlainKeyShowsServerErrorAndAddsNothing
+{
+	[self selectTable:@"text_key"];
+	SPPostgresContentController *content = self.content;
+	[[self grid] selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+	NSString *countBefore = content.countText;
+	XCTAssertTrue([content.duplicateButton isEnabled]);
+
+	[content duplicateRow:nil];
+
+	XCTAssertEqual(self.alerts.count, 1u);
+	XCTAssertEqualObjects([self.alerts.firstObject messageText], @"Could not duplicate the row");
+	XCTAssertTrue([[self.alerts.firstObject informativeText] containsString:@"duplicate key"], @"%@", [self.alerts.firstObject informativeText]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:content.taskRunner timeout:30]);
+	XCTAssertEqual([[self grid] numberOfRows], 2);
+	XCTAssertEqualObjects(content.countText, countBefore);
+	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.text_key"], @2);
+}
+
+- (void)testDuplicateRefusedWhileBusy
+{
+	[self selectTable:@"items"];
+	SPPostgresContentController *content = self.content;
+	[[self grid] selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+
+	[SPPostgresTestServers queueSleep:1 onRunner:content.taskRunner];
+	XCTAssertTrue(content.taskRunner.isBusy);
+	XCTAssertFalse([content.duplicateButton isEnabled]);
+	[content duplicateRow:nil];
+
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:content.taskRunner timeout:30]);
+	XCTAssertEqual([[self grid] numberOfRows], 30);
+	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.items"], @30);
+	XCTAssertTrue([content.duplicateButton isEnabled], @"enabled again once idle");
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
 #pragma mark - Busy
 
 - (void)testBarDisabledWhileBusy
