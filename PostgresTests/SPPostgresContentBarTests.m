@@ -14,6 +14,7 @@ static const NSUInteger SPContentBarTestPort = 55418;
 static NSString * const SPLimitResults = @"LimitResults";
 static NSString * const SPLimitResultsValue = @"LimitResultsValue";
 static NSString * const SPEditInSheetEnabled = @"EditInSheetEnabled";
+static NSString * const SPRuleFilterEditorLastVisibilityChoice = @"RuleFilterEditorLastVisibilityChoice";
 static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 
 /// Records the statements a connection is about to send (PostgresKit reports willExecute only to a delegate passed at init).
@@ -776,5 +777,197 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 	XCTAssertEqual(calls.count, 0u);
 }
 
+#pragma mark - Filter bar show/hide
+
+/// Scratch preferences (never the saved ones) with the filter bar visibility unset; removed in tearDown.
+- (NSUserDefaults *)scratchDefaultsWithFilterBarChoiceUnset
+{
+	NSUserDefaults *scratch = [self scratchDefaultsInSheetMode:NO];
+	[scratch removeObjectForKey:SPRuleFilterEditorLastVisibilityChoice];
+	return scratch;
+}
+
+/// A Content view of its own with scratch preferences (filter bar visibility unset), showing content_test.<table>.
+- (SPPostgresContentController *)scratchContentShowing:(NSString *)table
+{
+	SPPostgresContentController *content = [self standaloneContent];
+	content.defaults = [self scratchDefaultsWithFilterBarChoiceUnset];
+	NSMutableArray *alerts = self.alerts;
+	content.alertPresenter = ^(NSAlert *alert) { [alerts addObject:alert]; };
+	[content showTable:table inSchema:@"content_test"];
+	return content;
+}
+
+- (NSView *)filterBarOf:(SPPostgresContentController *)content
+{
+	return [(NSView *)[content valueForKey:@"filterValueField"] superview];
+}
+
+/// The grid's scroll view's top, in the Content view.
+- (CGFloat)gridTopOf:(SPPostgresContentController *)content
+{
+	return NSMaxY([content.tableView.enclosingScrollView frame]);
+}
+
+- (void)testFilterBarHiddenByDefault
+{
+	SPPostgresContentController *content = [self scratchContentShowing:@"items"];
+	XCTAssertNil([self.scratch objectForKey:SPRuleFilterEditorLastVisibilityChoice]);
+	XCTAssertEqual([content.tableView numberOfRows], 30);
+
+	XCTAssertTrue([[self filterBarOf:content] isHidden]);
+	XCTAssertFalse(content.filterBarVisible);
+	XCTAssertEqual([content.filterToggleButton state], NSControlStateValueOff);
+	XCTAssertEqual([self gridTopOf:content], NSHeight([[content view] frame]), @"the grid takes the filter bar's 30 pt");
+	XCTAssertEqual(NSMinY([content.tableView.enclosingScrollView frame]), 23, @"above the bottom bar");
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testToggleShowsBarAndStoresChoice
+{
+	SPPostgresContentController *content = [self scratchContentShowing:@"items"];
+	NSView *view = [content view];
+	NSView *filterBar = [self filterBarOf:content];
+	XCTAssertEqual([content.filterToggleButton target], content);
+	XCTAssertEqual([content.filterToggleButton action], @selector(toggleFilterBar:));
+
+	[content toggleFilterBar:nil];
+	XCTAssertTrue(content.filterBarVisible);
+	XCTAssertFalse([filterBar isHidden]);
+	XCTAssertEqual([content.filterToggleButton state], NSControlStateValueOn);
+	XCTAssertEqual([self gridTopOf:content], NSHeight([view frame]) - 30);
+	XCTAssertEqual(NSMaxY([filterBar frame]), NSHeight([view frame]));
+	XCTAssertTrue([self.scratch objectForKey:SPRuleFilterEditorLastVisibilityChoice] != nil);
+	XCTAssertTrue([self.scratch boolForKey:SPRuleFilterEditorLastVisibilityChoice]);
+
+	// Shown, the grid keeps below the bar as the view resizes
+	[view setFrameSize:NSMakeSize(900, 650)];
+	XCTAssertEqual([self gridTopOf:content], 650 - 30);
+	XCTAssertEqual(NSMinY([filterBar frame]), 650 - 30);
+
+	[content toggleFilterBar:nil];
+	XCTAssertFalse(content.filterBarVisible);
+	XCTAssertTrue([filterBar isHidden]);
+	XCTAssertEqual([content.filterToggleButton state], NSControlStateValueOff);
+	XCTAssertEqual([self gridTopOf:content], 650);
+	XCTAssertTrue([self.scratch objectForKey:SPRuleFilterEditorLastVisibilityChoice] != nil);
+	XCTAssertFalse([self.scratch boolForKey:SPRuleFilterEditorLastVisibilityChoice]);
+
+	// Hidden, the grid keeps to the top as the view resizes
+	[view setFrameSize:NSMakeSize(700, 500)];
+	XCTAssertEqual([self gridTopOf:content], 500);
+	XCTAssertEqual(NSMinY([content.tableView.enclosingScrollView frame]), 23);
+
+	// A click (which turns the toggle on before its action) shows it too
+	[content.filterToggleButton performClick:nil];
+	XCTAssertTrue(content.filterBarVisible);
+	XCTAssertEqual([content.filterToggleButton state], NSControlStateValueOn);
+	XCTAssertEqual([self gridTopOf:content], 500 - 30);
+	XCTAssertTrue([self.scratch boolForKey:SPRuleFilterEditorLastVisibilityChoice]);
+	[content.filterToggleButton performClick:nil];
+	XCTAssertFalse(content.filterBarVisible);
+	XCTAssertEqual([content.filterToggleButton state], NSControlStateValueOff);
+	XCTAssertFalse([self.scratch boolForKey:SPRuleFilterEditorLastVisibilityChoice]);
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testVisibilityReadAtEachTableLoad
+{
+	SPPostgresContentController *content = [self scratchContentShowing:@"items"];
+	XCTAssertFalse(content.filterBarVisible);
+
+	[self.scratch setBool:YES forKey:SPRuleFilterEditorLastVisibilityChoice];
+	XCTAssertFalse(content.filterBarVisible, @"read at a table load");
+	[content showTable:@"composite_pk" inSchema:@"content_test"];
+	XCTAssertTrue(content.filterBarVisible);
+	XCTAssertFalse([[self filterBarOf:content] isHidden]);
+	XCTAssertEqual([content.filterToggleButton state], NSControlStateValueOn);
+	XCTAssertEqual([self gridTopOf:content], NSHeight([[content view] frame]) - 30);
+
+	[self.scratch setBool:NO forKey:SPRuleFilterEditorLastVisibilityChoice];
+	[content showTable:@"items" inSchema:@"content_test"];
+	XCTAssertFalse(content.filterBarVisible);
+	XCTAssertTrue([[self filterBarOf:content] isHidden]);
+	XCTAssertEqual([content.filterToggleButton state], NSControlStateValueOff);
+	XCTAssertEqual([self gridTopOf:content], NSHeight([[content view] frame]));
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testHidingBarWithFilterAppliedReloadsUnfiltered
+{
+	[self selectTable:@"items"];
+	SPPostgresContentController *content = self.content;
+	content.defaults = [self scratchDefaultsWithFilterBarChoiceUnset];
+	SPPostgresTaskRunner *runner = content.taskRunner;
+	NSWindow *window = [[content view] window];
+	XCTAssertNotNil(window);
+	NSTextField *valueField = [content valueForKey:@"filterValueField"];
+	if (content.filterBarVisible) [content toggleFilterBar:nil]; // shown as the saved preferences say (read at the table load)
+	XCTAssertFalse(content.filterBarVisible);
+	XCTAssertFalse(runner.isBusy);
+
+	// Shown by a click: the value field takes the focus
+	[content.filterToggleButton performClick:nil];
+	XCTAssertTrue(content.filterBarVisible);
+	id responder = [window firstResponder];
+	XCTAssertTrue(responder == valueField || ([responder respondsToSelector:@selector(isFieldEditor)] && [responder isFieldEditor] && [responder delegate] == valueField), @"%@", responder);
+
+	// Hidden with no filter applied: nothing is loaded; the focus leaves the bar for the grid
+	[content toggleFilterBar:nil];
+	XCTAssertFalse(content.filterBarVisible);
+	XCTAssertFalse(runner.isBusy);
+	XCTAssertEqual([window firstResponder], [self grid]);
+
+	// Sorted by price, descending (id 4 first), and filtered to one row
+	NSTableColumn *price = [self columnNamed:@"price" of:content];
+	[[[self grid] delegate] tableView:[self grid] didClickTableColumn:price];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	[[[self grid] delegate] tableView:[self grid] didClickTableColumn:price];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	XCTAssertEqualObjects([content tableView:[self grid] objectValueForTableColumn:[self columnNamed:@"id" of:content] row:0], @"4");
+
+	[content toggleFilterBar:nil];
+	[(NSPopUpButton *)[content valueForKey:@"filterColumnPopup"] selectItemWithTitle:@"name"];
+	[(NSPopUpButton *)[content valueForKey:@"filterComparisonPopup"] selectItemWithTitle:@"="];
+	[valueField setStringValue:@"item 1"];
+	[content applyFilter:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	XCTAssertEqual([[self grid] numberOfRows], 1);
+	XCTAssertEqualObjects(content.countText, @"1 row of 30 matches filter");
+
+	[content toggleFilterBar:nil];
+	XCTAssertFalse(content.filterBarVisible);
+	XCTAssertEqualObjects(runner.currentDescription, @"Filtering table...");
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	XCTAssertEqual([[self grid] numberOfRows], 30);
+	XCTAssertEqualObjects(content.countText, @"30 rows in table");
+	XCTAssertEqual(content.currentPage, 1u);
+	XCTAssertNotNil([[self grid] indicatorImageInTableColumn:price], @"the sort column is kept");
+	XCTAssertEqualObjects([content tableView:[self grid] objectValueForTableColumn:[self columnNamed:@"id" of:content] row:0], @"4", @"still descending by price");
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testFilterToggleDisabledWithoutTable
+{
+	SPPostgresContentController *content = [self standaloneContent];
+	content.defaults = [self scratchDefaultsWithFilterBarChoiceUnset];
+	XCTAssertFalse([content.filterToggleButton isEnabled], @"no table");
+	[content showTable:nil inSchema:nil];
+	XCTAssertFalse([content.filterToggleButton isEnabled], @"no table");
+	[content showTable:@"items" inSchema:@"content_test"];
+	XCTAssertTrue([content.filterToggleButton isEnabled]);
+	[content showTable:nil inSchema:nil];
+	XCTAssertFalse([content.filterToggleButton isEnabled], @"no table");
+
+	// While the runner is busy
+	[self selectTable:@"items"];
+	XCTAssertTrue([self.content.filterToggleButton isEnabled]);
+	[SPPostgresTestServers queueSleep:1 onRunner:self.content.taskRunner];
+	XCTAssertTrue(self.content.taskRunner.isBusy);
+	XCTAssertFalse([self.content.filterToggleButton isEnabled]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.content.taskRunner timeout:30]);
+	XCTAssertTrue([self.content.filterToggleButton isEnabled]);
+	XCTAssertEqual(self.alerts.count, 0u);
+}
 
 @end
