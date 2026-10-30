@@ -6,6 +6,7 @@
 #import "SPPostgresTextView.h"
 #import "SPPostgresSQLTokenizer.h"
 #import "SPPostgresQueryStore.h"
+#import "SPPostgresQueryFavoriteManager.h"
 #import "SPTextViewAdditions.h"
 #import "SPTableView.h"
 #import "SPButtonBar.h"
@@ -54,6 +55,12 @@ static const NSInteger SPPostgresHistoryFirstEntryIndex = 7;
 // The entries' titles and tooltips are cut to these lengths (SPQueryController's -historyMenuItemsForFileURL:)
 static const NSUInteger SPPostgresHistoryTitleLength = 64;
 static const NSUInteger SPPostgresHistoryToolTipLength = 256;
+// The Query Favorites pop-up's items (DBView.xib, SPCustomQuery.h): their tags, and the "Global" header's index (after
+// the hidden title, Save Query, Save All, Edit, a separator, the filter and a separator); the favorites follow it
+static const NSInteger SPPostgresFavoriteSaveQueryTag = 100000;
+static const NSInteger SPPostgresFavoriteSaveAllTag = 100001;
+static const NSInteger SPPostgresFavoriteHeaderTag = 200000;
+static const NSInteger SPPostgresFavoritesHeaderIndex = 7;
 // The words after the caret's that the help looks at ("create text search configuration")
 static const NSUInteger SPPostgresHelpFollowingWords = 3;
 
@@ -210,7 +217,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 #pragma mark - Controller
 
-@interface SPPostgresQueryController () <NSSplitViewDelegate, NSWindowDelegate, NSMenuDelegate>
+@interface SPPostgresQueryController () <NSSplitViewDelegate, NSWindowDelegate, NSMenuDelegate, NSTextFieldDelegate>
 
 @property (readwrite, copy) NSString *statusText;
 @property (readwrite, copy) NSString *lastRunQueryText;
@@ -284,6 +291,20 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	/// Test seam: called instead of NSBeep() by Previous / Next (see the tests' SPPostgresQueryController (HistoryTesting))
 	void (^beepHook)(void);
 
+	// Query Favorites
+	SPPostgresQueryStore *favoritesStore;
+	NSArray<NSDictionary *> *favoriteEntries; // the favorites the menu shows
+	NSSearchField *favoritesSearchField;
+	NSMenuItem *saveQueryFavoriteMenuItem;    // tag 100000
+	NSMenuItem *saveAllFavoriteMenuItem;      // tag 100001, its alternate
+	NSMenuItem *editFavoritesMenuItem;
+	NSPanel *favoriteNameSheet;               // MySQL's "Query Favorite Sheet", while it is shown
+	NSTextField *favoriteNameField;
+	NSButton *favoriteNameSaveButton;
+	NSButton *favoriteNameCancelButton;
+	BOOL favoriteNameSavesAll;                // the sheet is Save All's (else Save Query's)
+	SPPostgresQueryFavoriteManager *favoritesManager; // while it is shown
+
 	BOOL running;                   // YES from a run's enqueue until its completion
 	BOOL observingRunner;           // observing taskRunner's busy (the run controls are disabled while it is)
 	BOOL invalidated;
@@ -318,6 +339,12 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 @synthesize savePathProvider;
 @synthesize alertPresenter;
 @synthesize confirmationPresenter;
+@synthesize favoritesStore;
+@synthesize favoriteNameSheet;
+@synthesize favoriteNameField;
+@synthesize favoriteNameSaveButton;
+@synthesize favoriteNameCancelButton;
+@synthesize favoritesManager;
 
 #pragma mark - Setup
 
@@ -332,7 +359,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 		currentHistoryOffsetIndex = -1;
 		historyEntries = [@[] retain];
 		[self _buildView];
+		favoriteEntries = [@[] retain];
 		[self setHistoryStore:[SPPostgresQueryStore sharedHistoryStore]];
+		[self setFavoritesStore:[SPPostgresQueryStore sharedFavoritesStore]];
 		[self _bindEditModeButton];
 		[self _updateToggles];
 		[self _updateGearItems];
@@ -398,6 +427,17 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[saveHistoryMenuItem release];
 	[clearHistoryMenuItem release];
 	[beepHook release];
+	[favoritesStore release];
+	[favoriteEntries release];
+	[favoritesSearchField release];
+	[saveQueryFavoriteMenuItem release];
+	[saveAllFavoriteMenuItem release];
+	[editFavoritesMenuItem release];
+	[favoriteNameSheet release];
+	[favoriteNameField release];
+	[favoriteNameSaveButton release];
+	[favoriteNameCancelButton release];
+	[favoritesManager release];
 
 	[super dealloc];
 }
@@ -430,6 +470,13 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[[historyButton menu] setDelegate:nil];
 	for (NSMenuItem *item in [[historyButton menu] itemArray]) [item setTarget:nil];
 	[historySearchField setTarget:nil];
+	// The favorites' menu, filter, name sheet and manager (ending them drops their references to this controller)
+	[favoritesButton setTarget:nil];
+	[[favoritesButton menu] setDelegate:nil];
+	for (NSMenuItem *item in [[favoritesButton menu] itemArray]) [item setTarget:nil];
+	[favoritesSearchField setTarget:nil];
+	[self _endFavoriteNameSheet];
+	[favoritesManager cancel:nil];
 	[savePathProvider release];
 	savePathProvider = nil;
 	[alertPresenter release];
@@ -766,6 +813,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 												   key:@"f"
 											   toolTip:NSLocalizedString(@"Choose a favorite from the menu or save queries to the favorites (⌥⌘F)", @"query favorites popup button tooltip")];
 	[favoritesButton setAutoresizingMask:NSViewMinYMargin];
+	[self _buildFavoritesMenu];
 	[topBar addSubview:favoritesButton];
 
 	historyButton = [self _newRecessedPopUpWithFrame:NSMakeRect(177, 0, 145, 22)
@@ -1154,6 +1202,331 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[self _updateGearItems];
 }
 
+#pragma mark - Query Favorites
+
+/// MySQL's Query Favorites menu (DBView.xib), after its hidden title item: Save Query to Favorites, Save All to
+/// Favorites (its ⌥ alternate), Edit Favorites..., a separator, the filter, a separator. The "Global" header and the
+/// favorites follow (see -_reloadFavoritesMenu).
+- (void)_buildFavoritesMenu
+{
+	NSMenu *menu = [favoritesButton menu];
+	[menu setAutoenablesItems:NO];
+	[menu setDelegate:self];
+
+	saveQueryFavoriteMenuItem = [[menu addItemWithTitle:NSLocalizedString(@"Save Query to Favorites", @"Postgres query favorites: save query menu item") action:@selector(chooseQueryFavorite:) keyEquivalent:@""] retain];
+	[saveQueryFavoriteMenuItem setTag:SPPostgresFavoriteSaveQueryTag];
+	[saveQueryFavoriteMenuItem setKeyEquivalentModifierMask:NSEventModifierFlagOption];
+	[saveQueryFavoriteMenuItem setToolTip:NSLocalizedString(@"Save current query, selection, or - if no selection or current query could be found - the entire content to Favorite.", @"Postgres query favorites: save query tooltip")];
+	[saveQueryFavoriteMenuItem setTarget:self];
+
+	saveAllFavoriteMenuItem = [[menu addItemWithTitle:NSLocalizedString(@"Save All to Favorites", @"Save All to Favorites") action:@selector(chooseQueryFavorite:) keyEquivalent:@""] retain];
+	[saveAllFavoriteMenuItem setTag:SPPostgresFavoriteSaveAllTag];
+	[saveAllFavoriteMenuItem setKeyEquivalentModifierMask:0];
+	[saveAllFavoriteMenuItem setAlternate:YES];
+	[saveAllFavoriteMenuItem setToolTip:NSLocalizedString(@"Save editor content to Favorite. Press ⌥ to restrict for current query or selection.", @"Postgres query favorites: save all tooltip")];
+	[saveAllFavoriteMenuItem setTarget:self];
+
+	editFavoritesMenuItem = [[menu addItemWithTitle:NSLocalizedString(@"Edit Favorites...", @"Postgres query favorites: edit favorites menu item") action:@selector(chooseQueryFavorite:) keyEquivalent:@""] retain];
+	[editFavoritesMenuItem setTarget:self];
+
+	[menu addItem:[NSMenuItem separatorItem]];
+
+	// The filter (DBView.xib's "Query Favorite Search" view), as the item's view. No recents autosave name: that would
+	// write the standard preferences
+	NSView *searchView = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, 217, 20)] autorelease];
+	favoritesSearchField = [[NSSearchField alloc] initWithFrame:NSMakeRect(20, 1, 176, 19)];
+	[[favoritesSearchField cell] setControlSize:NSControlSizeSmall];
+	[favoritesSearchField setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+	[[favoritesSearchField cell] setPlaceholderString:NSLocalizedString(@"Filter", @"filter label")];
+	[[favoritesSearchField cell] setScrollable:YES];
+	[[favoritesSearchField cell] setUsesSingleLineMode:YES];
+	[[favoritesSearchField cell] setSendsSearchStringImmediately:YES];
+	[favoritesSearchField setFocusRingType:NSFocusRingTypeNone];
+	[favoritesSearchField setTarget:self];
+	[favoritesSearchField setAction:@selector(filterQueryFavorites:)];
+	[searchView addSubview:favoritesSearchField];
+	NSMenuItem *searchItem = [menu addItemWithTitle:@"" action:NULL keyEquivalent:@""];
+	[searchItem setView:searchView];
+
+	[menu addItem:[NSMenuItem separatorItem]];
+
+	[favoritesButton setTarget:self];
+	[favoritesButton setAction:@selector(chooseQueryFavorite:)];
+	[self _reloadFavoritesMenu];
+}
+
+- (void)setFavoritesStore:(SPPostgresQueryStore *)store
+{
+	if (store == favoritesStore) return;
+	NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+	if (favoritesStore) [center removeObserver:self name:SPPostgresQueryStoreDidChangeNotification object:favoritesStore];
+	[favoritesStore release];
+	favoritesStore = [store retain];
+	if (invalidated) return;
+	if (favoritesStore) [center addObserver:self selector:@selector(_favoritesStoreDidChange:) name:SPPostgresQueryStoreDidChangeNotification object:favoritesStore];
+	[self _reloadFavoritesMenu];
+}
+
+/// The store's favorites, as MySQL's menu takes them: dictionaries with a name.
+- (NSArray<NSDictionary *> *)_storedFavorites
+{
+	NSMutableArray *entries = [NSMutableArray array];
+	for (id item in [favoritesStore items] ?: @[]) {
+		if ([item isKindOfClass:[NSDictionary class]] && [[item objectForKey:@"name"] isKindOfClass:[NSString class]]) [entries addObject:item];
+	}
+	return entries;
+}
+
+- (void)_favoritesStoreDidChange:(NSNotification *)notification
+{
+	if (invalidated) return;
+	[self _reloadFavoritesMenu];
+}
+
+/// As MySQL's -queryFavoritesHaveBeenUpdated: (its global list; Postgres tabs have no documents), then the filter is
+/// applied again.
+- (void)_reloadFavoritesMenu
+{
+	if (invalidated) return;
+	NSArray *entries = [self _storedFavorites];
+	[favoriteEntries release];
+	favoriteEntries = [entries copy];
+
+	NSMenu *menu = [favoritesButton menu];
+	while ([menu numberOfItems] > SPPostgresFavoritesHeaderIndex) [menu removeItemAtIndex:[menu numberOfItems] - 1];
+
+	NSMenuItem *header = [[[NSMenuItem alloc] initWithTitle:NSLocalizedString(@"Global", @"Query Favorites : List : Section Heading : global query favorites") action:NULL keyEquivalent:@""] autorelease];
+	[header setTag:SPPostgresFavoriteHeaderTag];
+	[header setToolTip:NSLocalizedString(@"Globally stored favorites", @"Query Favorites : List : Section Heading : global : tooltip")];
+	[header setIndentationLevel:0];
+	[header setEnabled:NO];
+	[menu addItem:header];
+
+	NSMutableParagraphStyle *paraStyle = [[[NSMutableParagraphStyle alloc] init] autorelease];
+	[paraStyle setTabStops:@[]];
+	[paraStyle addTabStop:[[[NSTextTab alloc] initWithType:NSRightTabStopType location:190.0f] autorelease]];
+	NSDictionary *attributes = @{NSParagraphStyleAttributeName: paraStyle, NSFontAttributeName: [NSFont systemFontOfSize:11]};
+	for (NSDictionary *favorite in favoriteEntries) {
+		id query = [favorite objectForKey:@"query"];
+		NSMenuItem *item = [[[NSMenuItem alloc] initWithTitle:@"" action:@selector(chooseQueryFavorite:) keyEquivalent:@""] autorelease];
+		[item setAttributedTitle:[[[NSAttributedString alloc] initWithString:[favorite objectForKey:@"name"] attributes:attributes] autorelease]];
+		if ([query isKindOfClass:[NSString class]]) {
+			[item setToolTip:query];
+			[item setRepresentedObject:query];
+		}
+		[item setIndentationLevel:1];
+		[item setTarget:self];
+		[menu addItem:item];
+	}
+	[self filterQueryFavorites:nil];
+}
+
+/// As opening the menu: its favorites from the store when it changed (another copy of the app may have written it),
+/// and MySQL's -validateMenuItem: for the Save items (enabled with text in the editor, Save Query retitled).
+- (void)_updateFavoritesMenu
+{
+	if (![[self _storedFavorites] isEqualToArray:favoriteEntries]) [self _reloadFavoritesMenu];
+
+	NSString *text = [editor string];
+	BOOL hasText = [text length] > 0;
+	[saveQueryFavoriteMenuItem setEnabled:hasText];
+	[saveAllFavoriteMenuItem setEnabled:hasText];
+	if (!hasText) return;
+	NSRange current = [self currentQueryRange];
+	if ([editor selectedRange].length) [saveQueryFavoriteMenuItem setTitle:NSLocalizedString(@"Save Selection to Favorites", @"Save Selection to Favorites")];
+	else if (current.location != NSNotFound && current.length) [saveQueryFavoriteMenuItem setTitle:NSLocalizedString(@"Save Current Query to Favorites", @"Save Current Query to Favorites")];
+	else [saveQueryFavoriteMenuItem setTitle:NSLocalizedString(@"Save All to Favorites", @"Save All to Favorites")];
+}
+
+- (IBAction)chooseQueryFavorite:(id)sender
+{
+	if (invalidated) return;
+	NSMenuItem *item = [sender isKindOfClass:[NSMenuItem class]] ? (NSMenuItem *)sender : [favoritesButton selectedItem];
+
+	if (item == saveQueryFavoriteMenuItem || item == saveAllFavoriteMenuItem) {
+		[self _beginFavoriteNameSheetSavingAll:(item == saveAllFavoriteMenuItem)];
+		return;
+	}
+	if (item == editFavoritesMenuItem) {
+		[self _beginFavoritesManager];
+		return;
+	}
+
+	// A favorite (the header has no query)
+	NSString *query = [item representedObject];
+	if ([item tag] == SPPostgresFavoriteHeaderTag || ![query isKindOfClass:[NSString class]]) return;
+
+	// As MySQL's: Favorite Replaces Editor Content, inverted while a modifier key is held; otherwise inserted at the
+	// caret (the selection stays after it)
+	BOOL replaceContent = [defaults boolForKey:SPQueryFavoriteReplacesContent];
+	if ([[NSApp currentEvent] modifierFlags] & (NSEventModifierFlagShift | NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand)) {
+		replaceContent = !replaceContent;
+	}
+	NSRange range = replaceContent ? NSMakeRange(0, [[editor string] length]) : NSMakeRange([editor selectedRange].location, 0);
+	[self _insertEditorText:query inRange:range];
+	[self _editorChangedByGear];
+}
+
+/// As MySQL's -filterQueryFavorites:: the favorites whose name doesn't contain the filter's text (case-insensitive, as
+/// text, not a pattern) are hidden, and stay in the menu; the header stays.
+- (IBAction)filterQueryFavorites:(id)sender
+{
+	if (invalidated) return;
+	NSString *filter = [favoritesSearchField stringValue] ?: @"";
+	NSMenu *menu = [favoritesButton menu];
+	for (NSInteger i = SPPostgresFavoritesHeaderIndex; i < [menu numberOfItems]; i++) {
+		NSMenuItem *item = [menu itemAtIndex:i];
+		BOOL matches = [item tag] == SPPostgresFavoriteHeaderTag || ![filter length] || [[item title] rangeOfString:filter options:NSCaseInsensitiveSearch].location != NSNotFound;
+		[item setHidden:!matches];
+	}
+}
+
+/// As MySQL's: an empty editor shows "Empty query"; otherwise the name sheet (MySQL's "Query Favorite Sheet", without
+/// its "Save globally" box: every Postgres favorite is global) asks for the name.
+- (void)_beginFavoriteNameSheetSavingAll:(BOOL)saveAll
+{
+	if (![[editor string] length]) {
+		NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+		[alert setMessageText:NSLocalizedString(@"Empty query", @"empty query message")];
+		[alert setInformativeText:NSLocalizedString(@"Cannot save an empty query.", @"empty query informative message")];
+		[self _presentAlert:alert];
+		return;
+	}
+	NSWindow *window = [view window];
+	if (favoriteNameSheet || !window || [window attachedSheet]) {
+		NSBeep();
+		return;
+	}
+	favoriteNameSavesAll = saveAll;
+
+	// DBView.xib's sheet: 260 × 127, resizable in width to 600
+	favoriteNameSheet = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, 260, 127) styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskResizable
+													 backing:NSBackingStoreBuffered defer:YES];
+	[favoriteNameSheet setReleasedWhenClosed:NO];
+	[favoriteNameSheet setContentMinSize:NSMakeSize(260, 127)];
+	[favoriteNameSheet setContentMaxSize:NSMakeSize(600, 127)];
+	NSView *content = [favoriteNameSheet contentView];
+
+	NSTextField *label = [NSTextField labelWithString:NSLocalizedString(@"Query Name:", @"Postgres query favorites: name sheet label")];
+	[label setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+	[label setFrame:NSMakeRect(17, 93, 225, 14)];
+	[label setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+	[content addSubview:label];
+
+	favoriteNameField = [[NSTextField alloc] initWithFrame:NSMakeRect(19, 67, 220, 18)];
+	[[favoriteNameField cell] setControlSize:NSControlSizeSmall];
+	[favoriteNameField setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+	[[favoriteNameField cell] setScrollable:YES];
+	[[favoriteNameField cell] setUsesSingleLineMode:YES];
+	[favoriteNameField setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+	[favoriteNameField setDelegate:self];
+	[content addSubview:favoriteNameField];
+
+	favoriteNameSaveButton = [[NSButton alloc] initWithFrame:NSMakeRect(150, 13, 94, 28)];
+	favoriteNameCancelButton = [[NSButton alloc] initWithFrame:NSMakeRect(14, 13, 99, 28)];
+	NSArray *buttons = @[favoriteNameSaveButton, favoriteNameCancelButton];
+	NSArray *titles = @[NSLocalizedString(@"Save", @"save button"), NSLocalizedString(@"Cancel", @"cancel button")];
+	for (NSUInteger i = 0; i < 2; i++) {
+		NSButton *button = [buttons objectAtIndex:i];
+		[button setBezelStyle:NSBezelStyleRounded];
+		[[button cell] setControlSize:NSControlSizeSmall];
+		[button setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+		[button setTitle:[titles objectAtIndex:i]];
+		[button setTarget:self];
+		[content addSubview:button];
+	}
+	[favoriteNameSaveButton setKeyEquivalent:@"\r"];
+	[favoriteNameSaveButton setAction:@selector(_saveNamedFavorite:)];
+	[favoriteNameSaveButton setAutoresizingMask:NSViewMinXMargin | NSViewMaxYMargin];
+	// As MySQL's: Save is enabled once there is a name (-controlTextDidChange:)
+	[favoriteNameSaveButton setEnabled:NO];
+	[favoriteNameCancelButton setKeyEquivalent:@"\e"];
+	[favoriteNameCancelButton setAction:@selector(_cancelNamedFavorite:)];
+	[favoriteNameCancelButton setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
+	[favoriteNameSheet setInitialFirstResponder:favoriteNameField];
+
+	[window beginSheet:favoriteNameSheet completionHandler:nil];
+}
+
+- (void)controlTextDidChange:(NSNotification *)notification
+{
+	if ([notification object] == favoriteNameField) [favoriteNameSaveButton setEnabled:[[favoriteNameField stringValue] length] > 0];
+}
+
+- (void)_endFavoriteNameSheet
+{
+	if (!favoriteNameSheet) return;
+	if ([favoriteNameSheet sheetParent]) [[favoriteNameSheet sheetParent] endSheet:favoriteNameSheet];
+	[favoriteNameSheet orderOut:nil];
+	[favoriteNameField setDelegate:nil];
+	[favoriteNameSaveButton setTarget:nil];
+	[favoriteNameCancelButton setTarget:nil];
+	[favoriteNameSheet autorelease];
+	favoriteNameSheet = nil;
+	[favoriteNameField autorelease];
+	favoriteNameField = nil;
+	[favoriteNameSaveButton autorelease];
+	favoriteNameSaveButton = nil;
+	[favoriteNameCancelButton autorelease];
+	favoriteNameCancelButton = nil;
+}
+
+- (void)_cancelNamedFavorite:(id)sender
+{
+	[self _endFavoriteNameSheet];
+}
+
+/// As MySQL's -sheetDidEnd:… ("addSelectionToNewQueryFavorite" / "addAllToNewQueryFavorite"): Save Query saves the
+/// selection, else the current query, else the whole text; Save All the whole text. Appended to the favorites, as an
+/// explicit save (see +[SPPostgresQueryFavoriteManager writeFavorites:…]).
+- (void)_saveNamedFavorite:(id)sender
+{
+	if (invalidated || !favoriteNameSheet) return;
+	NSString *name = [[[favoriteNameField stringValue] copy] autorelease];
+	if (![name length]) {
+		NSBeep();
+		return;
+	}
+	NSString *text = [editor string];
+	NSString *query = text;
+	if (!favoriteNameSavesAll) {
+		NSRange selection = [editor selectedRange];
+		NSRange current = [self currentQueryRange];
+		if (selection.length) query = [text substringWithRange:selection];
+		else if (current.location != NSNotFound && current.length) query = [text substringWithRange:current];
+	}
+	// A copy: the text view's string is its live, mutable storage
+	query = [NSString stringWithString:query];
+	[self _endFavoriteNameSheet];
+
+	NSMutableArray *favorites = [NSMutableArray arrayWithArray:[favoritesStore items] ?: @[]];
+	[favorites addObject:@{@"name": name, @"query": query}];
+	[SPPostgresQueryFavoriteManager writeFavorites:favorites
+										   toStore:favoritesStore
+										   confirm:^(NSAlert *alert, void (^completion)(BOOL confirmed)) { [self _confirm:alert completion:completion]; }
+											report:^(NSAlert *alert) { [self _presentAlert:alert]; }
+										completion:nil];
+}
+
+/// Edit Favorites...: the favorites manager, as a sheet on the view's window (its alerts through this controller's
+/// presenters when they are set).
+- (void)_beginFavoritesManager
+{
+	NSWindow *window = [view window];
+	if (favoritesManager || !window || [window attachedSheet]) {
+		NSBeep();
+		return;
+	}
+	favoritesManager = [[SPPostgresQueryFavoriteManager alloc] initWithStore:favoritesStore];
+	[favoritesManager setAlertPresenter:alertPresenter];
+	[favoritesManager setConfirmationPresenter:confirmationPresenter];
+	[favoritesManager beginSheetForWindow:window completion:^(BOOL saved) {
+		// The store's notification has rebuilt the menu after a save
+		[favoritesManager autorelease];
+		favoritesManager = nil;
+	}];
+}
+
 #pragma mark - Query History
 
 /// MySQL's Query History menu (DBView.xib), after its hidden title item: Copy History, Save History… (its alternate),
@@ -1280,8 +1653,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 - (void)menuNeedsUpdate:(NSMenu *)menu
 {
-	if (invalidated || menu != [historyButton menu]) return;
-	[self _reloadHistoryMenuIfChanged];
+	if (invalidated) return;
+	if (menu == [historyButton menu]) [self _reloadHistoryMenuIfChanged];
+	if (menu == [favoritesButton menu]) [self _updateFavoritesMenu];
 }
 
 /// As MySQL's -addHistory:forFileURL: (SPQueryController): first, without duplicates, capped at the history size.

@@ -6,6 +6,7 @@
 @class SPComboPopupButton;
 @class SPSplitView;
 @class SPPostgresQueryStore;
+@class SPPostgresQueryFavoriteManager;
 
 /**
  * The Query view of a PostgreSQL tab, laid out as MySQL's Query tab (DBView.xib): an outer SPSplitView holding
@@ -97,8 +98,8 @@ __attribute__((visibility("default")))
 
 #pragma mark - MySQL's bars (DBView.xib)
 
-/// The top bar: the gear (see -gearMenuItemSelected:), Query Favorites (its hidden title item only, for now), Query
-/// History (see below) and the run button.
+/// The top bar: the gear (see -gearMenuItemSelected:), Query Favorites and Query History (see below) and the run
+/// button.
 @property (readonly) NSPopUpButton *gearButton;
 @property (readonly) NSPopUpButton *favoritesButton;
 @property (readonly) NSPopUpButton *historyButton;
@@ -146,6 +147,37 @@ __attribute__((visibility("default")))
 - (IBAction)clearQueryHistory:(id)sender;
 /// Hides the entries that don't contain the filter's text (case-insensitive); they stay in the menu, as MySQL's.
 - (IBAction)filterQueryHistory:(id)sender;
+
+#pragma mark - Query Favorites (DBView.xib)
+
+/**
+ * The query favorites (each @{@"name": …, @"query": …}), stored apart from MySQL's (never its queryFavorites
+ * preference). Postgres tabs have no documents, so the favorites are global. Default:
+ * +[SPPostgresQueryStore sharedFavoritesStore]. The menu follows the store (a change made by another tab too).
+ *
+ * The Query Favorites pop-up's menu, as MySQL's: its hidden title, Save Query to Favorites (tag 100000, retitled as
+ * MySQL's -validateMenuItem:: "Save Selection to Favorites" / "Save Current Query to Favorites" / "Save All to
+ * Favorites"), Save All to Favorites (tag 100001, its ⌥ alternate), Edit Favorites..., a separator, the filter (an
+ * NSSearchField), a separator, the "Global" header (disabled) and the favorites (indented, the query as tooltip).
+ * Saving asks for a name in MySQL's "Query Favorite Sheet"; an empty editor shows MySQL's "Empty query" alert.
+ * Writes the user confirms are explicit saves (see +[SPPostgresQueryFavoriteManager writeFavorites:…]).
+ */
+@property (nonatomic, retain) SPPostgresQueryStore *favoritesStore;
+
+/// As MySQL's: Save Query / Save All open the name sheet, Edit Favorites... the favorites manager; a favorite is
+/// inserted at the caret (undoably), or replaces the editor's text when "QueryFavoriteReplacesContent" is set (a
+/// modifier key held inverts it).
+- (IBAction)chooseQueryFavorite:(id)sender;
+/// Hides the favorites whose name doesn't contain the filter's text (case-insensitive); the header stays.
+- (IBAction)filterQueryFavorites:(id)sender;
+
+/// The name sheet (MySQL's "Query Favorite Sheet") while it is shown, its name field and buttons (for tests).
+@property (readonly) NSPanel *favoriteNameSheet;
+@property (readonly) NSTextField *favoriteNameField;
+@property (readonly) NSButton *favoriteNameSaveButton;
+@property (readonly) NSButton *favoriteNameCancelButton;
+/// The favorites manager while it is shown (for tests).
+@property (readonly) SPPostgresQueryFavoriteManager *favoritesManager;
 
 #pragma mark - The gear menu (DBView.xib)
 
