@@ -15,10 +15,13 @@ __attribute__((visibility("default")))
 + (BOOL)truncateTables:(NSArray<NSString *> *)tables inSchema:(NSString *)schema connection:(PGPostgresConnection *)connection error:(NSError **)error;
 
 /**
- * Drops tables, views and materialized views (and foreign tables), each with the DROP matching its relkind, all
- * in one structure change: either all are dropped or none. A name that isn't found fails the call. When objects
- * depend on one of them the error is SPPostgresErrorHasDependents: the server's message (with its DETAIL) and the
- * dependents under SPPostgresDependentsErrorKey.
+ * Drops tables, views and materialized views (and foreign tables) with one DROP per relkind that names every object
+ * of that kind (materialized views, then views, foreign tables, tables), all in one structure change: either all are
+ * dropped or none. An object goes with what depends on it when that is named too (an FK child with its parent, a
+ * view with its table), except a view over a materialized view named with it (the materialized view goes first). A
+ * name that isn't found fails the call. When an object that isn't named depends on one of them the error is
+ * SPPostgresErrorHasDependents: the server's message (with its DETAIL) and the dependents under
+ * SPPostgresDependentsErrorKey.
  */
 + (BOOL)dropRelations:(NSArray<NSString *> *)names inSchema:(NSString *)schema connection:(PGPostgresConnection *)connection error:(NSError **)error;
 

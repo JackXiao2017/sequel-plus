@@ -30,7 +30,8 @@ __attribute__((visibility("default")))
 /// Runs the reads. Until one is set, an inline runner on the connection of the last -showRelation:… call.
 @property (nonatomic, retain) SPPostgresTaskRunner *taskRunner;
 
-/// Reads and shows a table or view of schema ("INFORMATION" until the read has completed, and if it is cancelled).
+/// Reads and shows a table or view of schema. The lines shown stay until the read has completed (for the same relation
+/// and for another); "INFORMATION" if it is cancelled.
 - (void)showRelation:(NSString *)name inSchema:(NSString *)schema connection:(PGPostgresConnection *)connection;
 /// The same, isView giving the header shown if the read fails.
 - (void)showRelation:(NSString *)name inSchema:(NSString *)schema view:(BOOL)isView connection:(PGPostgresConnection *)connection;

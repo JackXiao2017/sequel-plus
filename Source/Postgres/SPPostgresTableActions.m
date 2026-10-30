@@ -31,8 +31,13 @@ static NSString *SPPostgresQualifiedName(NSString *schema, NSString *name)
 {
 	if (![names count]) return YES;
 
+	// One DROP per kind naming every selected object of that kind: the server resolves dependencies among objects
+	// named in the same command (an FK child with its parent). Views go before the tables they read, materialized
+	// views first as they may read views. A dependent that is not selected still fails the whole change.
+	NSArray *keywordOrder = @[@"MATERIALIZED VIEW", @"VIEW", @"FOREIGN TABLE", @"TABLE"];
+
 	return SPPostgresRunStructureChange(connection, SPPostgresTableActionsLockTimeout, ^BOOL(NSError **bodyError) {
-		NSMutableArray *statements = [NSMutableArray arrayWithCapacity:[names count]];
+		NSMutableDictionary<NSString *, NSMutableArray *> *namesByKeyword = [NSMutableDictionary dictionary];
 
 		for (NSString *name in names) {
 			PGPostgresResult *result = SPPostgresExecute(connection,
@@ -54,10 +59,16 @@ static NSString *SPPostgresQualifiedName(NSString *schema, NSString *name)
 				}
 				return NO;
 			}
-			[statements addObject:[NSString stringWithFormat:@"DROP %@ %@", keyword, SPPostgresQualifiedName(schema, name)]];
+			NSMutableArray *qualified = namesByKeyword[keyword];
+			if (!qualified) namesByKeyword[keyword] = qualified = [NSMutableArray array];
+			[qualified addObject:SPPostgresQualifiedName(schema, name)];
 		}
 
-		for (NSString *sql in statements) {
+		for (NSString *keyword in keywordOrder) {
+			NSArray *qualified = namesByKeyword[keyword];
+			if (![qualified count]) continue;
+
+			NSString *sql = [NSString stringWithFormat:@"DROP %@ %@", keyword, [qualified componentsJoinedByString:@", "]];
 			NSError *dropError = nil;
 			if (SPPostgresExecuteWithDetails(connection, sql, nil, &dropError)) continue;
 

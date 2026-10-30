@@ -16,7 +16,7 @@ static NSString * const SPPostgresSidebarInfoColumn = @"info";
 	BOOL ownsTaskRunner;
 	BOOL invalidated;
 	NSArray *lines;
-	/// The relation shown (or being read), nil for none
+	/// The relation whose facts the lines show (not one still being read), nil for none
 	NSString *shownName;
 	NSString *shownSchema;
 }
@@ -170,10 +170,11 @@ static NSString *SPPostgresInfoHeader(BOOL isView)
 		[loader setTaskRunner:[SPPostgresTaskRunner inlineRunnerWithConnection:connection]];
 	}
 
-	// "INFORMATION" while the facts are read (and if the read is cancelled, as when Stop cancels the tab's loads)
+	// The lines shown stay until the read applies, for the same relation (a reload) and for another one: the read
+	// runs in the tab's queue right after the panes' load, so the pane changes with them rather than blanking first
+	// (as MySQL's, which never shows an empty state between two tables). "INFORMATION" if the read is cancelled (as
+	// when Stop cancels the tab's loads): no facts, rather than another relation's.
 	NSString *header = SPPostgresInfoHeader(isView);
-	[self _setShownName:name schema:schema];
-	[self _showLines:@[NSLocalizedString(@"INFORMATION", @"header for blank info pane")]];
 
 	// On the runner's thread: a structure object of its own over the runner's connection, and copies of the names
 	NSString *theName = [[name copy] autorelease];
@@ -182,14 +183,19 @@ static NSString *SPPostgresInfoHeader(BOOL isView)
 		SPPostgresTableStructure *structure = [[[SPPostgresTableStructure alloc] initWithConnection:theConnection schema:theSchema table:theName] autorelease];
 		return [structure tableInfo:error];
 	} apply:^(id result, NSError *error) {
+		// The lines are now this relation's (see -setComment:forRelation:inSchema:)
+		[self _setShownName:theName schema:theSchema];
 		[self _showLines:result ? [self _linesForInfo:result] : @[header, NSLocalizedString(@"error occurred", @"error occurred")]];
+	} cancelled:^{
+		[self _setShownName:nil schema:nil];
+		[self _showLines:@[NSLocalizedString(@"INFORMATION", @"header for blank info pane")]];
 	}];
 }
 
 - (void)setComment:(NSString *)comment forRelation:(NSString *)name inSchema:(NSString *)schema
 {
 	if (invalidated || ![name isEqualToString:shownName] || ![schema isEqualToString:shownSchema]) return;
-	// Only over facts read (not while they are read, nor after a failed read)
+	// Only over facts read (the relation's own, nor after a failed read)
 	if ([lines count] < 2 || [[lines objectAtIndex:1] isEqualToString:NSLocalizedString(@"error occurred", @"error occurred")]) return;
 
 	NSString *prefix = [NSString stringWithFormat:NSLocalizedString(@"comment: %@", @"Postgres table info pane: comment"), @""];

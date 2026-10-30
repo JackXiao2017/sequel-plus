@@ -771,6 +771,9 @@ static NSArray *SPOneViewTitles(void)
 		NSMenuItem *newTab = [self itemWithAction:@selector(openRelationInNewTab:) inMenu:menu];
 		XCTAssertTrue(newWindow.isAlternate);
 		XCTAssertEqual(newWindow.keyEquivalentModifierMask, NSEventModifierFlagOption);
+		// As DBView.xib's "Open Table in New Tab": no modifiers (AppKit's default would be ⌘)
+		XCTAssertEqual(newTab.keyEquivalentModifierMask, (NSEventModifierFlags)0);
+		XCTAssertFalse(newTab.isAlternate);
 		XCTAssertEqualObjects(newWindow.keyEquivalent, newTab.keyEquivalent);
 		XCTAssertEqual([menu indexOfItem:newWindow], [menu indexOfItem:newTab] + 1);
 
@@ -1294,6 +1297,44 @@ static NSArray *SPOneViewTitles(void)
 	[sidebar reloadKeepingSelection];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
 	XCTAssertEqualObjects(sidebar.infoPane.lines[0], @"TABLE INFORMATION");
+}
+
+
+/// A reload of the relation shown keeps its facts until the new read applies (no flash of "INFORMATION"); another
+/// relation keeps the previous facts until its own are read.
+- (void)testInfoPaneKeepsFactsWhileSameRelationReloads
+{
+	SPPostgresSidebarController *sidebar = [self expandedSidebar];
+	SPPostgresTaskRunner *runner = self.document.taskRunner;
+	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	NSArray<NSString *> *facts = sidebar.infoPane.lines;
+	XCTAssertEqualObjects(facts[0], @"TABLE INFORMATION");
+	XCTAssertTrue([facts containsObject:@"type: table"], @"%@", facts);
+
+	// The same relation reloads behind a running task: the facts stay while the read waits
+	[SPPostgresTestServers queueSleep:1 onRunner:runner];
+	[sidebar reloadKeepingSelection];
+	XCTAssertTrue(runner.isBusy);
+	XCTAssertEqualObjects(sidebar.infoPane.lines, facts, @"while it is read again");
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	XCTAssertEqualObjects(sidebar.infoPane.lines, facts);
+
+	// Another relation: the previous facts until the view's are read
+	[SPPostgresTestServers queueSleep:1 onRunner:runner];
+	XCTAssertTrue([sidebar selectTableNamed:@"v_customers"]);
+	XCTAssertEqualObjects(sidebar.infoPane.lines, facts, @"while the view is read");
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	XCTAssertEqualObjects(sidebar.infoPane.lines[0], @"VIEW INFORMATION");
+	XCTAssertTrue([sidebar.infoPane.lines containsObject:@"type: view"], @"%@", sidebar.infoPane.lines);
+
+	// A cancelled read: "INFORMATION" (not the view's facts under the table)
+	[SPPostgresTestServers queueSleep:1 onRunner:runner];
+	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
+	XCTAssertEqualObjects(sidebar.infoPane.lines[0], @"VIEW INFORMATION", @"while the table is read");
+	[runner cancelAll];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	XCTAssertEqualObjects(sidebar.infoPane.lines, (@[@"INFORMATION"]));
 }
 
 @end

@@ -29,16 +29,23 @@
 
 - (void)loadSwitching:(BOOL)switching work:(SPPostgresTaskWork)work apply:(void (^)(id result, NSError *error))apply
 {
+	[self loadSwitching:switching work:work apply:apply cancelled:nil];
+}
+
+- (void)loadSwitching:(BOOL)switching work:(SPPostgresTaskWork)work apply:(void (^)(id result, NSError *error))apply cancelled:(void (^)(void))cancelled
+{
 	if (invalidated) return;
 	NSUInteger generation = ++loadGeneration;
 	stale = NO;
 	if (switching) switchPending = YES;
 
 	void (^applyResult)(id, NSError *) = [[apply copy] autorelease];
-	[taskRunner runTaskWithDescription:NSLocalizedString(@"Reloading...", @"Reloading table task string") cancelTitle:NSLocalizedString(@"Cancel", @"cancel button") work:work completion:^(id result, NSError *error, BOOL cancelled) {
+	void (^applyCancel)(void) = [[cancelled copy] autorelease];
+	[taskRunner runTaskWithDescription:NSLocalizedString(@"Reloading...", @"Reloading table task string") cancelTitle:NSLocalizedString(@"Cancel", @"cancel button") work:work completion:^(id result, NSError *error, BOOL wasCancelled) {
 		if (invalidated || generation != loadGeneration) return;
-		if (cancelled) {
+		if (wasCancelled) {
 			if (switchPending) stale = YES;
+			if (applyCancel) applyCancel();
 			return;
 		}
 		switchPending = NO;

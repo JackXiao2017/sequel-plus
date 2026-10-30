@@ -1278,7 +1278,9 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 	[separator setTag:SPPostgresSidebarOpenSeparatorTag];
 	[menu addItem:separator];
 
-	SPPostgresSidebarAddMenuItem(menu, NSLocalizedString(@"Open Table in New Tab", @"PostgreSQL sidebar: open table in new tab menu item"), @selector(openRelationInNewTab:), nil, self);
+	NSMenuItem *newTab = SPPostgresSidebarAddMenuItem(menu, NSLocalizedString(@"Open Table in New Tab", @"PostgreSQL sidebar: open table in new tab menu item"), @selector(openRelationInNewTab:), nil, self);
+	// No modifiers, as DBView.xib's (AppKit's default is ⌘); Option shows the alternate
+	[newTab setKeyEquivalentModifierMask:0];
 	NSMenuItem *newWindow = SPPostgresSidebarAddMenuItem(menu, NSLocalizedString(@"Open Table in New Window", @"PostgreSQL sidebar: open table in new window menu item"), @selector(openRelationInNewWindow:), nil, self);
 	[newWindow setKeyEquivalentModifierMask:NSEventModifierFlagOption];
 	[newWindow setAlternate:YES];
