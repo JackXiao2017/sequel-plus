@@ -2,6 +2,7 @@
 
 @class PGPostgresConnection;
 @class SPPostgresTaskRunner;
+@class SPPostgresPaginationView;
 
 /**
  * The Content view of a PostgreSQL tab, laid out as MySQL's Content tab: a filter bar on top (column,
@@ -23,7 +24,7 @@
  * edit, add, duplicate, delete) run on the main thread and are refused (NSBeep) while the runner is busy.
  */
 __attribute__((visibility("default")))
-@interface SPPostgresContentController : NSObject <NSTableViewDataSource, NSTableViewDelegate>
+@interface SPPostgresContentController : NSObject <NSTableViewDataSource, NSTableViewDelegate, NSPopoverDelegate>
 
 - (instancetype)initWithConnection:(PGPostgresConnection *)connection;
 
@@ -59,6 +60,18 @@ __attribute__((visibility("default")))
 /// (SPRuleFilterEditorLastVisibilityChoice) in defaults. Hiding it while a filter is applied loads the first page
 /// unfiltered, keeping the sort.
 - (IBAction)toggleFilterBar:(id)sender;
+/// Shows or closes MySQL's "Jump to page" popover (paginationPopover, transient) under paginationButton, which is on,
+/// with MySQL's button_action image, while it is shown. Showing it puts the current page and the page count in
+/// paginationView and the focus in its page field. Needs the view in a window.
+- (IBAction)togglePagination:(id)sender;
+/// Closes the popover and loads that page with the current filter and sort ("Loading page %lu..."). 0 is page 1;
+/// a page past the end shows the last one.
+- (void)goToPage:(NSUInteger)page;
+
+/// The popover's content, on defaults (made again when defaults change).
+@property (readonly) SPPostgresPaginationView *paginationView;
+/// nil until the popover is first shown.
+@property (readonly) NSPopover *paginationPopover;
 
 /// Whether the filter bar is shown (the grid takes its place when it isn't). Read from defaults' "filter bar visible"
 /// preference (SPRuleFilterEditorLastVisibilityChoice, hidden when unset) at each -showTable:inSchema:.
@@ -72,7 +85,7 @@ __attribute__((visibility("default")))
 @property (readonly) NSTextField *countField;
 
 /// Where the preferences the view reads (page size, NULL placeholder, table font, gridlines, edit mode, filter bar
-/// visibility) come from, and the edit mode and filter toggles write to. Default: standardUserDefaults.
+/// visibility) come from, and the edit mode and filter toggles and the Jump to page popover's settings write to. Default: standardUserDefaults.
 /// The gridlines are read when the view is built.
 @property (nonatomic, retain) NSUserDefaults *defaults;
 @property (readonly, copy) NSString *schema;

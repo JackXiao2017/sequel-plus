@@ -6,6 +6,7 @@
 #import "SPButtonBar.h"
 #import "SPConstants.h"
 #import "SPFieldEditorController.h"
+#import "SPPostgresPaginationView.h"
 
 // MySQL's Content tab (DBView.xib): 23 pt button bar, 32 x 25 textured buttons
 static const CGFloat SPPostgresContentBottomBarHeight = 23;
@@ -27,6 +28,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 @property BOOL ascending;
 @property NSUInteger page;
 @property NSUInteger pageCount;
+@property NSUInteger pageSize;          // the rows per page the load used (0: no limit)
 @property NSInteger matchingRowCount;
 @property NSInteger tableRowCount;
 @property (retain) NSArray *rows;
@@ -95,6 +97,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	BOOL sortAscending;
 	NSUInteger currentPage;
 	NSUInteger pageCount;
+	NSUInteger shownPageSize;       // the rows per page the shown rows were loaded with (0: no limit)
 	NSInteger matchingRowCount;     // rows matching the filter
 	NSInteger tableRowCount;        // rows in the table
 
@@ -120,6 +123,8 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	NSButton *nextPageButton;
 	NSTextField *countField;
 	NSTextField *noticeField;
+	SPPostgresPaginationView *paginationView;   // made on defaults when first asked for
+	NSPopover *paginationPopover;               // made when first shown
 
 	NSUserDefaults *defaults;
 	BOOL observingRunner;           // observing taskRunner's busy (the bar is disabled while it is)
@@ -152,6 +157,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 @synthesize previousPageButton;
 @synthesize paginationButton;
 @synthesize nextPageButton;
+@synthesize paginationPopover;
 @synthesize countField;
 @synthesize defaults;
 
@@ -214,6 +220,8 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	[nextPageButton release];
 	[countField release];
 	[noticeField release];
+	[paginationView release];
+	[paginationPopover release];
 
 	[super dealloc];
 }
@@ -236,6 +244,11 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 								 previousPageButton, paginationButton, nextPageButton]) {
 		[control setTarget:nil];
 	}
+
+	// The popover and its content must not call back
+	[paginationView setTarget:nil];
+	[paginationPopover setDelegate:nil];
+	[paginationPopover close];
 
 	// The presenters may capture the tab
 	[alertPresenter release];
@@ -281,6 +294,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	[self _stopObservingDefaults];
 	[defaults release];
 	defaults = [newDefaults retain];
+	[self _dropPaginationView];
 	[self _startObservingDefaults];
 	[self _updateEditModeButton];
 }
@@ -457,7 +471,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	[filterToggleButton setButtonType:NSButtonTypeToggle];
 
 	previousPageButton = [self _newBarButtonWithImage:@"button_left" alternateImage:@"button_left" toolTip:NSLocalizedString(@"View previous page of results", @"Postgres content: previous page tooltip") action:@selector(previousPage:) x:width - 110];
-	paginationButton = [self _newBarButtonWithImage:@"button_pagination" toolTip:NSLocalizedString(@"Jump to page (⌘J) or view pagination options", @"jump to page button tooltip") action:NULL x:width - 79];
+	paginationButton = [self _newBarButtonWithImage:@"button_pagination" toolTip:NSLocalizedString(@"Jump to page (⌘J) or view pagination options", @"jump to page button tooltip") action:@selector(togglePagination:) x:width - 79];
 	[paginationButton setKeyEquivalent:@"j"];
 	[paginationButton setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
 	nextPageButton = [self _newBarButtonWithImage:@"button_right" alternateImage:@"button_right" toolTip:NSLocalizedString(@"View next page of results", @"Postgres content: next page tooltip") action:@selector(nextPage:) x:width - 48];
@@ -751,6 +765,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 		result.ascending = ascending;
 		result.page = shownPage;
 		result.pageCount = pages;
+		result.pageSize = pageSize;
 		result.matchingRowCount = matching;
 		result.tableRowCount = total;
 		result.rows = pageRows;
@@ -784,6 +799,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	sortAscending = [page ascending];
 	currentPage = [page page];
 	pageCount = [page pageCount];
+	shownPageSize = [page pageSize];
 	matchingRowCount = [page matchingRowCount];
 	tableRowCount = [page tableRowCount];
 	loaded = YES;
@@ -974,7 +990,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 		[text appendString:NSLocalizedString(@"Loading table data...", @"Loading table data string")];
 	}
 	else if (tableData && [columns count] && loaded) {
-		NSUInteger pageSize = [self _pageSize];
+		NSUInteger pageSize = shownPageSize;
 		NSInteger shown = (NSInteger)[rows count];
 		BOOL isLimited = pageSize && (NSUInteger)matchingRowCount > pageSize;
 		NSInteger first = (NSInteger)((currentPage - 1) * pageSize) + 1;
@@ -1015,6 +1031,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	[filterToggleButton setEnabled:idle && hasTable];
 	[previousPageButton setEnabled:idle && hasTable && currentPage > 1];
 	[nextPageButton setEnabled:idle && hasTable && currentPage < pageCount];
+	[paginationButton setEnabled:idle && hasTable];
 }
 
 /**
@@ -1053,6 +1070,80 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 {
 	if (invalidated || currentPage <= 1) return;
 	[self _loadPage:currentPage - 1];
+}
+
+#pragma mark - Jump to page
+
+- (SPPostgresPaginationView *)paginationView
+{
+	if (!paginationView && !invalidated) {
+		paginationView = [[SPPostgresPaginationView alloc] initWithDefaults:defaults];
+		[paginationView setTarget:self];
+		[paginationView setAction:@selector(_paginationGo:)];
+	}
+	return paginationView;
+}
+
+/// The defaults changed: the popover's content is made again, on the new ones, when next shown.
+- (void)_dropPaginationView
+{
+	if ([paginationPopover isShown]) [self _setPaginationShown:NO];
+	[paginationPopover setDelegate:nil];
+	[paginationPopover release];
+	paginationPopover = nil;
+	[paginationView setTarget:nil];
+	[paginationView release];
+	paginationView = nil;
+}
+
+- (IBAction)togglePagination:(id)sender
+{
+	if (invalidated) return;
+	// The popover needs the button on screen
+	[self _setPaginationShown:![paginationPopover isShown] && [paginationButton window]];
+}
+
+/// MySQL's -setPaginationViewVisibility:.
+- (void)_setPaginationShown:(BOOL)shown
+{
+	[paginationButton setState:shown ? NSControlStateValueOn : NSControlStateValueOff];
+	[paginationButton setImage:[NSImage imageNamed:shown ? @"button_action" : @"button_pagination"]];
+
+	if (!shown) {
+		if ([paginationPopover isShown]) [paginationPopover close];
+		return;
+	}
+
+	SPPostgresPaginationView *content = [self paginationView];
+	if (!paginationPopover) {
+		paginationPopover = [[NSPopover alloc] init];
+		[paginationPopover setBehavior:NSPopoverBehaviorTransient];
+		[paginationPopover setDelegate:self];
+		[paginationPopover setContentViewController:content];
+		[paginationPopover setContentSize:[[content view] frame].size];
+	}
+	[content setMaxPage:pageCount];
+	[content setPage:currentPage];
+	[paginationPopover showRelativeToRect:[paginationButton bounds] ofView:paginationButton preferredEdge:NSMinYEdge];
+	[content makeInputFirstResponder];
+}
+
+- (void)popoverDidClose:(NSNotification *)notification
+{
+	if (invalidated || [notification object] != paginationPopover) return;
+	[self _setPaginationShown:NO];
+}
+
+- (void)_paginationGo:(SPPostgresPaginationView *)sender
+{
+	[self goToPage:[sender page]];
+}
+
+- (void)goToPage:(NSUInteger)page
+{
+	if (invalidated) return;
+	if ([paginationPopover isShown]) [self _setPaginationShown:NO];
+	[self _loadPage:MAX(page, 1u)];
 }
 
 - (void)_loadPage:(NSUInteger)page
@@ -1160,7 +1251,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	[rows addObject:row];
 	matchingRowCount++;
 	tableRowCount++;
-	NSUInteger pageSize = [self _pageSize];
+	NSUInteger pageSize = shownPageSize;
 	if (pageSize) pageCount = MAX(currentPage, ((NSUInteger)matchingRowCount + pageSize - 1) / pageSize);
 	[tableView reloadData];
 
