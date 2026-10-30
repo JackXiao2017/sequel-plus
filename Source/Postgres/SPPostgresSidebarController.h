@@ -91,7 +91,7 @@ __attribute__((visibility("default")))
 
 /**
  * Reloads the schemas, the extensions and the shown schema's tables, views and sequences (after the Query view
- * changed them), keeping the selected table, sequence or extension if it is still listed. A schema that is gone gives way to the default one.
+ * changed them), keeping the selected tables and views (those still listed), sequence or extension. A schema that is gone gives way to the default one.
  * The delegate hears of a selection change only if the selection ends up different.
  */
 - (void)reloadKeepingSelection;
@@ -107,6 +107,21 @@ __attribute__((visibility("default")))
 
 /// Selects a table or view of the selected schema in the outline; NO if it is not listed. nil clears the selection.
 - (BOOL)selectTableNamed:(NSString *)name;
+
+/**
+ * Selects tables and views of the selected schema (one or more rows under TABLES and VIEWS; an empty array clears the
+ * selection). The ones listed are selected, YES if all of them are; NO with the selection unchanged if none is.
+ */
+- (BOOL)selectRelationsNamed:(NSArray<NSString *> *)names;
+
+/// Whether name is listed under VIEWS (a view or materialized view) of the selected schema.
+- (BOOL)relationIsView:(NSString *)name;
+
+/**
+ * What a relation action acts on: the right-clicked row's table or view when the click is outside the selection
+ * (nothing if that row isn't a table or view), else selectedRelationNames.
+ */
+- (NSArray<NSString *> *)actionTargetRelationNames;
 
 /// Selects a sequence of the selected schema in the outline; NO if it is not listed. nil clears the selection.
 - (BOOL)selectSequenceNamed:(NSString *)name;
@@ -144,8 +159,16 @@ __attribute__((visibility("default")))
 /// schema about to be shown.
 @property (readonly, copy) NSString *pendingSchema;
 
-/// The selected table or view of the selected schema, or nil (also while a sequence or extension is selected).
+/// The selected table or view of the selected schema, or nil (also while a sequence or extension is selected, or more
+/// than one table or view).
 @property (readonly) NSString *selectedTableName;
+
+/**
+ * The selected tables and views of the selected schema, in display order (TABLES, then VIEWS): one name for a single
+ * selection, empty while a sequence, an extension or nothing is selected. The outline lets several rows be selected
+ * only when all of them are tables or views.
+ */
+@property (readonly) NSArray<NSString *> *selectedRelationNames;
 
 /// The selected sequence of the selected schema, or nil (also while a table, view or extension is selected).
 @property (readonly) NSString *selectedSequenceName;

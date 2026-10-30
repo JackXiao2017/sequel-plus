@@ -149,6 +149,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 - (void)_reloadOutline;
 - (void)_updateSelectionFromOutline;
 - (BOOL)_selectItemNamed:(NSString *)name inSection:(NSString *)sectionTitle;
+- (NSInteger)_rowOfRelationNamed:(NSString *)name;
 - (BOOL)_delegateAllowsSelectionChange;
 - (void)_rememberError:(NSError *)error;
 - (void)_beginReload;
@@ -201,10 +202,14 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	/// The schema the latest schema reload asked for, until it completes (nil: none queued); see -pendingSchema
 	NSString *pendingSchema;
 	NSUInteger pendingSchemaToken;
+
+	/// The selected tables and views, in display order (see -selectedRelationNames)
+	NSArray *selectedRelationNames;
 }
 
 @synthesize selectedSchema;
 @synthesize selectedTableName;
+@synthesize selectedRelationNames;
 @synthesize selectedSequenceName;
 @synthesize sequenceMenu;
 @synthesize selectedExtensionName;
@@ -231,6 +236,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 		              [SPPostgresSidebarItem itemWithTitle:SPPostgresSidebarSequences detail:nil kind:SPPostgresSidebarSection],
 		              [SPPostgresSidebarItem itemWithTitle:SPPostgresSidebarExtensions detail:nil kind:SPPostgresSidebarSection]] retain];
 		schemas = [@[] retain];
+		selectedRelationNames = [@[] retain];
 		defaults = [[NSUserDefaults standardUserDefaults] retain];
 		actionsEnabled = YES;
 
@@ -268,6 +274,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[selectedSchema release];
 	[pendingSchema release];
 	[selectedTableName release];
+	[selectedRelationNames release];
 	[selectedSequenceName release];
 	[selectedExtensionName release];
 	[lastError release];
@@ -361,7 +368,8 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[outlineView setRowSizeStyle:NSTableViewRowSizeStyleSmall];
 	[outlineView setFloatsGroupRows:NO];
 	[outlineView setIndentationPerLevel:0];
-	[outlineView setAllowsMultipleSelection:NO];
+	// Several tables and views at once (see -outlineView:selectionIndexesForProposedSelection:)
+	[outlineView setAllowsMultipleSelection:YES];
 	[outlineView setAllowsEmptySelection:YES];
 	[outlineView setColumnAutoresizingStyle:NSTableViewUniformColumnAutoresizingStyle];
 	[outlineView setFocusRingType:NSFocusRingTypeNone];
@@ -730,7 +738,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[self _runReload:SPPostgresSidebarReloadKeeping schema:selectedSchema cancelTitle:NSLocalizedString(@"Cancel", @"cancel button") apply:^BOOL(NSDictionary *read) {
 		if (queuedSchema != selectedSchema && ![queuedSchema isEqualToString:selectedSchema]) return YES;
 		NSString *previousSchema = [[selectedSchema copy] autorelease];
-		NSString *table = [[selectedTableName copy] autorelease];
+		NSArray *relations = [[selectedRelationNames copy] autorelease];
 		NSString *sequence = [[selectedSequenceName copy] autorelease];
 		NSString *extension = [[selectedExtensionName copy] autorelease];
 
@@ -747,18 +755,19 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 		holdingSelectionChanges = YES;
 		[self _applySchemaRead:read];
-		// The same schema (not the default one standing in for a schema that is gone): its table or sequence again
-		if (table && [previousSchema isEqualToString:selectedSchema]) [self selectTableNamed:table];
+		// The same schema (not the default one standing in for a schema that is gone): its tables and views (those
+		// still listed) or sequence again
+		if ([relations count] && [previousSchema isEqualToString:selectedSchema]) [self selectRelationsNamed:relations];
 		if (sequence && [previousSchema isEqualToString:selectedSchema]) [self selectSequenceNamed:sequence];
 		// An extension is the database's, whatever the schema
 		if (extension) [self selectExtensionNamed:extension];
 		holdingSelectionChanges = NO;
 
 		BOOL sameSchema = (previousSchema == selectedSchema) || [previousSchema isEqualToString:selectedSchema];
-		BOOL sameTable = (table == selectedTableName) || [table isEqualToString:selectedTableName];
+		BOOL sameRelations = [relations isEqualToArray:selectedRelationNames];
 		BOOL sameSequence = (sequence == selectedSequenceName) || [sequence isEqualToString:selectedSequenceName];
 		BOOL sameExtension = (extension == selectedExtensionName) || [extension isEqualToString:selectedExtensionName];
-		if (!sameSchema || !sameTable || !sameSequence || !sameExtension) [delegate sidebarSelectionDidChange:self];
+		if (!sameSchema || !sameRelations || !sameSequence || !sameExtension) [delegate sidebarSelectionDidChange:self];
 
 		BOOL loaded = ![[read objectForKey:@"failures"] count];
 		[self _endReload];
@@ -806,7 +815,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[self _runReload:SPPostgresSidebarReloadSchema schema:schema cancelTitle:NSLocalizedString(@"Cancel", @"cancel button") apply:^BOOL(NSDictionary *read) {
 		if (reloadingShownSchema && queuedSchema != selectedSchema && ![queuedSchema isEqualToString:selectedSchema]) return YES;
 		NSString *previousSchema = [[selectedSchema copy] autorelease];
-		NSString *previousTable = [[selectedTableName copy] autorelease];
+		NSArray *previousRelations = [[selectedRelationNames copy] autorelease];
 		NSString *previousSequence = [[selectedSequenceName copy] autorelease];
 		NSString *previousExtension = [[selectedExtensionName copy] autorelease];
 
@@ -825,10 +834,10 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 		if (wasHolding) return loaded;
 
 		BOOL sameSchema = (previousSchema == selectedSchema) || [previousSchema isEqualToString:selectedSchema];
-		BOOL sameTable = (previousTable == selectedTableName) || [previousTable isEqualToString:selectedTableName];
+		BOOL sameRelations = [previousRelations isEqualToArray:selectedRelationNames];
 		BOOL sameSequence = (previousSequence == selectedSequenceName) || [previousSequence isEqualToString:selectedSequenceName];
 		BOOL sameExtension = (previousExtension == selectedExtensionName) || [previousExtension isEqualToString:selectedExtensionName];
-		if (!sameSchema || !sameTable || !sameSequence || !sameExtension) [delegate sidebarSelectionDidChange:self];
+		if (!sameSchema || !sameRelations || !sameSequence || !sameExtension) [delegate sidebarSelectionDidChange:self];
 		return loaded;
 	} completion:^(BOOL loaded) {
 		if (token == pendingSchemaToken) {
@@ -863,6 +872,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 			selectedSchema = [schema copy];
 		}
 		[selectedTableName release], selectedTableName = nil;
+		[selectedRelationNames release], selectedRelationNames = [@[] retain];
 		[selectedSequenceName release], selectedSequenceName = nil;
 		// An extension is the database's, not the schema's: it stays selected (if still listed) below
 		NSString *keptExtension = [[selectedExtensionName copy] autorelease];
@@ -1026,6 +1036,55 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	return NO;
 }
 
+- (BOOL)selectRelationsNamed:(NSArray<NSString *> *)names
+{
+	if (![names count]) return [self selectTableNamed:nil];
+
+	NSMutableIndexSet *rows = [NSMutableIndexSet indexSet];
+	for (NSString *name in names) {
+		NSInteger row = [self _rowOfRelationNamed:name];
+		if (row >= 0) [rows addIndex:(NSUInteger)row];
+	}
+	if (![rows count]) return NO;
+
+	[outlineView selectRowIndexes:rows byExtendingSelection:NO];
+	[outlineView scrollRowToVisible:(NSInteger)[rows firstIndex]];
+	[self _updateSelectionFromOutline];
+	return [rows count] == [names count];
+}
+
+/// The outline row of a table or view of the selected schema, or -1.
+- (NSInteger)_rowOfRelationNamed:(NSString *)name
+{
+	for (NSString *sectionTitle in @[SPPostgresSidebarTables, SPPostgresSidebarViews]) {
+		for (SPPostgresSidebarItem *item in [[self _sectionNamed:sectionTitle] children]) {
+			if ([[item title] isEqualToString:name]) return [outlineView rowForItem:item];
+		}
+	}
+	return -1;
+}
+
+- (BOOL)relationIsView:(NSString *)name
+{
+	return [[self itemTitlesInSection:SPPostgresSidebarViews] containsObject:name];
+}
+
+- (NSArray<NSString *> *)actionTargetRelationNames
+{
+	NSInteger row = [outlineView clickedRow];
+	if (row >= 0 && ![[outlineView selectedRowIndexes] containsIndex:(NSUInteger)row]) {
+		SPPostgresSidebarItem *item = [outlineView itemAtRow:row];
+		BOOL isRelation = ([item kind] == SPPostgresSidebarTable || [item kind] == SPPostgresSidebarView);
+		return isRelation ? @[[item title]] : @[];
+	}
+	return [self selectedRelationNames];
+}
+
+- (NSArray<NSString *> *)selectedRelationNames
+{
+	return [[selectedRelationNames retain] autorelease];
+}
+
 - (BOOL)selectSequenceNamed:(NSString *)name
 {
 	if (!name) return [self selectTableNamed:nil];
@@ -1054,20 +1113,31 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	return NO;
 }
 
+/// Several rows are tables and views (see -outlineView:selectionIndexesForProposedSelection:): selectedTableName is nil
+/// for them, as for no selection.
 - (void)_updateSelectionFromOutline
 {
-	SPPostgresSidebarItem *item = [outlineView selectedRow] >= 0 ? [outlineView itemAtRow:[outlineView selectedRow]] : nil;
+	NSIndexSet *rows = [outlineView selectedRowIndexes];
+	NSMutableArray *relations = [NSMutableArray arrayWithCapacity:[rows count]];
+	[rows enumerateIndexesUsingBlock:^(NSUInteger row, BOOL *stop) {
+		SPPostgresSidebarItem *selected = [outlineView itemAtRow:(NSInteger)row];
+		if ([selected kind] == SPPostgresSidebarTable || [selected kind] == SPPostgresSidebarView) [relations addObject:[selected title]];
+	}];
+
+	SPPostgresSidebarItem *item = ([rows count] == 1) ? [outlineView itemAtRow:(NSInteger)[rows firstIndex]] : nil;
 	NSString *name = ([item kind] == SPPostgresSidebarTable || [item kind] == SPPostgresSidebarView) ? [item title] : nil;
 	NSString *sequence = ([item kind] == SPPostgresSidebarSequence) ? [item title] : nil;
 	NSString *extension = ([item kind] == SPPostgresSidebarExtension) ? [item title] : nil;
 
-	BOOL sameTable = (name == selectedTableName || [name isEqualToString:selectedTableName]);
+	BOOL sameRelations = [relations isEqualToArray:selectedRelationNames];
 	BOOL sameSequence = (sequence == selectedSequenceName || [sequence isEqualToString:selectedSequenceName]);
 	BOOL sameExtension = (extension == selectedExtensionName || [extension isEqualToString:selectedExtensionName]);
-	if (sameTable && sameSequence && sameExtension) return;
+	if (sameRelations && sameSequence && sameExtension) return;
 
 	[selectedTableName release];
 	selectedTableName = [name copy];
+	[selectedRelationNames release];
+	selectedRelationNames = [relations copy];
 	[selectedSequenceName release];
 	selectedSequenceName = [sequence copy];
 	[selectedExtensionName release];
@@ -1312,6 +1382,33 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	}
 
 	return cell;
+}
+
+/**
+ * Section headers are never selected; several rows only when every one is a table or view. Otherwise (a sequence or
+ * extension among them) just the row the user clicked, or else the one the change adds, is kept.
+ */
+- (NSIndexSet *)outlineView:(NSOutlineView *)theOutlineView selectionIndexesForProposedSelection:(NSIndexSet *)proposed
+{
+	NSMutableIndexSet *rows = [[proposed mutableCopy] autorelease];
+	__block BOOL allRelations = YES;
+	[proposed enumerateIndexesUsingBlock:^(NSUInteger row, BOOL *stop) {
+		SPPostgresSidebarItem *item = [theOutlineView itemAtRow:(NSInteger)row];
+		if ([item kind] == SPPostgresSidebarSection) [rows removeIndex:row];
+		else if ([item kind] != SPPostgresSidebarTable && [item kind] != SPPostgresSidebarView) allRelations = NO;
+	}];
+
+	// Only headers: the selection stays
+	if (![rows count] && [proposed count]) return [theOutlineView selectedRowIndexes];
+	if ([rows count] <= 1 || allRelations) return rows;
+
+	NSInteger keep = [theOutlineView clickedRow];
+	if (keep < 0 || ![rows containsIndex:(NSUInteger)keep]) {
+		NSMutableIndexSet *added = [[rows mutableCopy] autorelease];
+		[added removeIndexes:[theOutlineView selectedRowIndexes]];
+		keep = (NSInteger)([added count] ? [added lastIndex] : [rows lastIndex]);
+	}
+	return [NSIndexSet indexSetWithIndex:(NSUInteger)keep];
 }
 
 /// The user's selection change (not the API's) asks the delegate first.
