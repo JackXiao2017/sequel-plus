@@ -8,6 +8,7 @@
 #import "../Source/Postgres/SPPostgresFavorite.h"
 #import "../Source/Postgres/SPPostgresContentController.h"
 #import "../Source/Postgres/SPPostgresTaskRunner.h"
+#import "../Source/Postgres/SPPostgresPaginationView.h"
 
 static const NSUInteger SPContentBarTestPort = 55418;
 // MySQL's preference keys (Source/SPConstants.m; the header is not ARC-clean)
@@ -968,6 +969,238 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.content.taskRunner timeout:30]);
 	XCTAssertTrue([self.content.filterToggleButton isEnabled]);
 	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+#pragma mark - Jump to page popover
+
+/// Removes preference keys from the volatile argument domain for this test (it shadows every defaults instance's own values).
+- (void)unpinPrefs:(NSArray<NSString *> *)keys
+{
+	NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+	NSDictionary *original = [prefs volatileDomainForName:NSArgumentDomain] ?: @{};
+	NSMutableDictionary *domain = [original mutableCopy];
+	[domain removeObjectsForKeys:keys];
+	[prefs removeVolatileDomainForName:NSArgumentDomain];
+	[prefs setVolatileDomain:domain forName:NSArgumentDomain];
+	[self addTeardownBlock:^{
+		[prefs removeVolatileDomainForName:NSArgumentDomain];
+		[prefs setVolatileDomain:original forName:NSArgumentDomain];
+	}];
+}
+
+/// A Content view of its own with scratch preferences (7 rows per page), showing content_test.items (30 rows) on page 1.
+- (SPPostgresContentController *)pagedContentLimited:(BOOL)limited
+{
+	[self unpinPrefs:@[SPLimitResults, SPLimitResultsValue]];
+	NSUserDefaults *scratch = [self scratchDefaultsWithFilterBarChoiceUnset];
+	[scratch setBool:limited forKey:SPLimitResults];
+	[scratch setInteger:7 forKey:SPLimitResultsValue];
+	SPPostgresContentController *content = [self scratchContentShowing:@"items"];
+	XCTAssertEqualObjects(content.countText, limited ? @"Rows 1 - 7 of 30 from table" : @"30 rows in table");
+	return content;
+}
+
+/// A window holding the content's view (for the popover and the field editor).
+- (NSWindow *)windowHolding:(NSView *)view
+{
+	NSWindow *window = [[NSWindow alloc] initWithContentRect:[view frame] styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+	[window setReleasedWhenClosed:NO];
+	[[window contentView] addSubview:view];
+	[window orderFront:nil];
+	[self addTeardownBlock:^{ [window orderOut:nil]; }];
+	return window;
+}
+
+- (NSArray<NSView *> *)subviewsOf:(NSView *)view
+{
+	NSMutableArray *all = [NSMutableArray array];
+	for (NSView *subview in [view subviews]) {
+		[all addObject:subview];
+		[all addObjectsFromArray:[self subviewsOf:subview]];
+	}
+	return all;
+}
+
+- (void)testPaginationViewLayout
+{
+	SPPostgresContentController *content = [self pagedContentLimited:YES];
+	SPPostgresPaginationView *pagination = content.paginationView;
+	NSView *view = [pagination view];
+	XCTAssertTrue(NSEqualSizes([view frame].size, NSMakeSize(330, 64)), @"%@", NSStringFromRect([view frame]));
+
+	NSMutableArray *labels = [NSMutableArray array], *titles = [NSMutableArray array];
+	for (NSView *subview in [self subviewsOf:view]) {
+		if ([subview isKindOfClass:[NSButton class]]) [titles addObject:[(NSButton *)subview title]];
+		else if ([subview isKindOfClass:[NSTextField class]] && ![(NSTextField *)subview isEditable]) [labels addObject:[(NSTextField *)subview stringValue]];
+	}
+	XCTAssertTrue([labels containsObject:@"Jump to page:"], @"%@", labels);
+	XCTAssertTrue([labels containsObject:@"rows"], @"%@", labels);
+	XCTAssertEqualObjects([pagination.goButton title], @"Go");
+	XCTAssertEqualObjects([pagination.limitCheckbox title], @"Limit result to:");
+	XCTAssertTrue([titles containsObject:@"Go"]);
+	XCTAssertTrue([titles containsObject:@"Limit result to:"]);
+	XCTAssertFalse([titles containsObject:@"Defer loading of blobs and texts"], @"%@", titles);
+
+	// MySQL's frames, the "Defer loading" row dropped (everything 25 pt lower)
+	XCTAssertTrue(NSEqualRects([pagination.goButton frame], NSMakeRect(225, 37, 91, 17)), @"%@", NSStringFromRect([pagination.goButton frame]));
+	XCTAssertTrue(NSEqualRects([pagination.pageField frame], NSMakeRect(150, 36, 52, 19)));
+	XCTAssertTrue(NSEqualRects([pagination.limitCheckbox frame], NSMakeRect(15, 6, 166, 18)));
+	XCTAssertTrue(NSEqualRects([pagination.limitField frame], NSMakeRect(187, 6, 52, 19)));
+}
+
+- (void)testGoLoadsTypedPage
+{
+	SPPostgresContentController *content = [self pagedContentLimited:YES];
+	SPPostgresPaginationView *pagination = content.paginationView;
+	XCTAssertEqual([pagination.goButton target], pagination);
+	XCTAssertTrue([pagination.goButton isEnabled]);
+
+	[pagination.pageField setStringValue:@"3"];
+	[pagination.goButton performClick:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:content.taskRunner timeout:30]);
+	XCTAssertEqual(content.currentPage, 3u);
+	XCTAssertEqualObjects(content.countText, @"Rows 15 - 21 of 30 from table");
+	XCTAssertEqual([content.tableView numberOfRows], 7);
+
+	// An empty field goes to page 1
+	[pagination.pageField setStringValue:@""];
+	[pagination.goButton performClick:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:content.taskRunner timeout:30]);
+	XCTAssertEqual(content.currentPage, 1u);
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testGoToPageClampsOutOfRangePages
+{
+	SPPostgresContentController *content = [self pagedContentLimited:YES];
+	[content goToPage:3];
+	XCTAssertEqual(content.currentPage, 3u);
+
+	[content goToPage:0];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:content.taskRunner timeout:30]);
+	XCTAssertEqual(content.currentPage, 1u);
+	XCTAssertEqualObjects(content.countText, @"Rows 1 - 7 of 30 from table");
+
+	[content goToPage:99];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:content.taskRunner timeout:30]);
+	XCTAssertEqual(content.currentPage, 5u);
+	XCTAssertEqual(content.pageCount, 5u);
+	XCTAssertEqualObjects(content.countText, @"Rows 29 - 30 of 30 from table");
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testLimitControlsWriteSharedKeysInInjectedDefaults
+{
+	SPPostgresContentController *content = [self pagedContentLimited:YES];
+	NSUserDefaults *standard = [NSUserDefaults standardUserDefaults];
+	id savedLimit = [standard objectForKey:SPLimitResults], savedValue = [standard objectForKey:SPLimitResultsValue];
+	SPPostgresPaginationView *pagination = content.paginationView;
+	NSWindow *window = [self windowHolding:[pagination view]];
+
+	XCTAssertEqual([pagination.limitCheckbox state], NSControlStateValueOn);
+	XCTAssertEqualObjects([pagination.limitField stringValue], @"7");
+	XCTAssertTrue([pagination.pageField isEnabled]);
+	XCTAssertTrue([pagination.limitField isEnabled]);
+
+	// Typing a page size and ending the edit writes it
+	XCTAssertTrue([window makeFirstResponder:pagination.limitField]);
+	NSText *editor = [pagination.limitField currentEditor];
+	[editor selectAll:nil];
+	[editor insertText:@"3"];
+	XCTAssertTrue([window makeFirstResponder:nil]);
+	XCTAssertEqual([self.scratch integerForKey:SPLimitResultsValue], 3);
+
+	// Unchecking writes NO and disables the page and limit controls
+	[pagination.limitCheckbox performClick:nil];
+	XCTAssertNotNil([self.scratch objectForKey:SPLimitResults]);
+	XCTAssertFalse([self.scratch boolForKey:SPLimitResults]);
+	XCTAssertFalse([pagination.pageField isEnabled]);
+	XCTAssertFalse([pagination.goButton isEnabled]);
+	XCTAssertFalse([pagination.limitField isEnabled]);
+
+	[pagination.limitCheckbox performClick:nil];
+	XCTAssertTrue([self.scratch boolForKey:SPLimitResults]);
+	XCTAssertTrue([pagination.goButton isEnabled]);
+
+	XCTAssertEqualObjects([standard objectForKey:SPLimitResults], savedLimit);
+	XCTAssertEqualObjects([standard objectForKey:SPLimitResultsValue], savedValue);
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testCountTextUsesLoadedPageSize
+{
+	SPPostgresContentController *content = [self pagedContentLimited:YES];
+	[self.scratch setInteger:3 forKey:SPLimitResultsValue];
+	[[content.tableView delegate] tableViewSelectionDidChange:[NSNotification notificationWithName:NSTableViewSelectionDidChangeNotification object:content.tableView]];
+	XCTAssertEqualObjects(content.countText, @"Rows 1 - 7 of 30 from table", @"the page size the rows were loaded with");
+
+	// Past the first page the first row number shows it too
+	[self.scratch setInteger:7 forKey:SPLimitResultsValue];
+	[content goToPage:2];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:content.taskRunner timeout:30]);
+	XCTAssertEqualObjects(content.countText, @"Rows 8 - 14 of 30 from table");
+	[self.scratch setInteger:3 forKey:SPLimitResultsValue];
+	[[content.tableView delegate] tableViewSelectionDidChange:[NSNotification notificationWithName:NSTableViewSelectionDidChangeNotification object:content.tableView]];
+	XCTAssertEqualObjects(content.countText, @"Rows 8 - 14 of 30 from table");
+
+	[content goToPage:1];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:content.taskRunner timeout:30]);
+	XCTAssertEqualObjects(content.countText, @"Rows 1 - 3 of 30 from table");
+	XCTAssertEqual(content.pageCount, 10u);
+}
+
+- (void)testPaginationButtonStateFollowsPopover
+{
+	SPPostgresContentController *content = [self pagedContentLimited:YES];
+	[self windowHolding:[content view]];
+	[content goToPage:2];
+	XCTAssertTrue([content.paginationButton isEnabled]);
+	XCTAssertEqual([content.paginationButton target], content);
+	XCTAssertEqual([content.paginationButton action], @selector(togglePagination:));
+	XCTAssertEqual([content.paginationButton state], NSControlStateValueOff);
+
+	[content togglePagination:content.paginationButton];
+	NSPopover *popover = content.paginationPopover;
+	XCTAssertNotNil(popover);
+	XCTAssertTrue([popover isShown]);
+	XCTAssertEqual([popover behavior], NSPopoverBehaviorTransient);
+	XCTAssertEqual([popover delegate], (id)content);
+	XCTAssertEqual([popover contentViewController], content.paginationView);
+	XCTAssertEqual([content.paginationButton state], NSControlStateValueOn);
+	XCTAssertEqual([content.paginationButton image], [NSImage imageNamed:@"button_action"]);
+	XCTAssertEqual(content.paginationView.page, 2u);
+	XCTAssertEqual(content.paginationView.maxPage, 5u);
+	XCTAssertEqualObjects([content.paginationView.pageField stringValue], @"2");
+
+	[content togglePagination:content.paginationButton];
+	XCTAssertTrue([self spinUntil:^BOOL{ return ![popover isShown]; } timeout:5]);
+	XCTAssertEqual([content.paginationButton state], NSControlStateValueOff);
+	XCTAssertEqual([content.paginationButton image], [NSImage imageNamed:@"button_pagination"]);
+
+	// Go closes it
+	[content togglePagination:content.paginationButton];
+	XCTAssertTrue([popover isShown]);
+	[content.paginationView.pageField setStringValue:@"4"];
+	[content.paginationView.goButton performClick:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:content.taskRunner timeout:30]);
+	XCTAssertTrue([self spinUntil:^BOOL{ return ![popover isShown]; } timeout:5]);
+	XCTAssertEqual(content.currentPage, 4u);
+	XCTAssertEqual([content.paginationButton state], NSControlStateValueOff);
+	XCTAssertEqual([content.paginationButton image], [NSImage imageNamed:@"button_pagination"]);
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testPaginationButtonEnabledWithLimitOff
+{
+	SPPostgresContentController *content = [self pagedContentLimited:NO];
+	XCTAssertEqual(content.pageCount, 1u);
+	XCTAssertFalse([content.previousPageButton isEnabled]);
+	XCTAssertFalse([content.nextPageButton isEnabled]);
+	XCTAssertTrue([content.paginationButton isEnabled]);
+
+	// Not without a table
+	[content showTable:nil inSchema:nil];
+	XCTAssertFalse([content.paginationButton isEnabled]);
 }
 
 @end
