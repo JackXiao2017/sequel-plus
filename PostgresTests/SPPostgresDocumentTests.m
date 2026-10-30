@@ -140,6 +140,11 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 		[tabView removeTabViewItem:item];
 	}
 	[window orderOut:nil];
+
+	// Windows a test opened (Open Table in New Window): closing one closes its tabs and lets go of its controller
+	for (NSWindow *other in [NSApp windows]) {
+		if (other != window && [other.windowController isKindOfClass:[SPWindowController class]]) [other close];
+	}
 	self.document = nil;
 	self.controller = nil;
 	self.connection = nil;
@@ -3072,6 +3077,183 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	NSEvent *escape = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:sheet.windowNumber context:nil characters:@"\e" charactersIgnoringModifiers:@"\e" isARepeat:NO keyCode:53];
 	XCTAssertTrue([sheet performKeyEquivalent:escape]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+}
+
+#pragma mark - Open Table in New Tab / Window
+
+/// "Sales Data"."Orders 2026" selected in the tab.
+- (void)selectOrders2026
+{
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	[sidebar reloadSchema:@"Sales Data"];
+	[self waitForTab];
+	XCTAssertTrue([sidebar selectTableNamed:@"Orders 2026"]);
+	[self waitForTab];
+}
+
+/// The tab view items' documents, in tab order.
+- (NSArray *)tabDocumentsIn:(SPWindowController *)controller
+{
+	NSMutableArray *documents = [NSMutableArray array];
+	for (NSTabViewItem *item in [[controller valueForKey:@"tabView"] tabViewItems]) [documents addObject:item.identifier];
+	return documents;
+}
+
+/// Waits until `document` has selected `table` of `schema` once its first loads and the selection's loads are done.
+- (void)waitForDocument:(SPPostgresDocument *)document toSelect:(NSString *)table inSchema:(NSString *)schema
+{
+	XCTAssertTrue([self spinUntil:^BOOL{
+		return [document.sidebar.selectedSchema isEqualToString:schema] && [document.sidebar.selectedTableName isEqualToString:table];
+	} timeout:30], @"%@ %@", document.sidebar.selectedSchema, document.sidebar.selectedTableName);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:document.taskRunner timeout:30]);
+}
+
+- (void)testOpenInNewTabSelectsSameTable
+{
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	// Another tab after the source: the new one goes between them
+	PGPostgresConnection *otherConnection = nil;
+	SPPostgresConnector *otherConnector = [self connectorForFavorite:self.favorite sshPassword:nil connection:&otherConnection];
+	SPPostgresDocument *other = [[SPPostgresDocument alloc] initWithConnection:otherConnection connector:otherConnector favorite:self.favorite];
+	[self.controller addTabDocument:other atIndex:1 select:NO];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:other.taskRunner timeout:30]);
+	[self selectOrders2026];
+
+	[self.document openRelation:@"Orders 2026" inSchema:@"Sales Data" inNewWindow:NO];
+	XCTAssertTrue(self.document.isProcessing, @"the source tab shows it is connecting");
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self tabView].numberOfTabViewItems == 3; } timeout:20]);
+	XCTAssertFalse(self.document.isProcessing);
+
+	NSArray *documents = [self tabDocumentsIn:self.controller];
+	XCTAssertEqual(documents[0], self.document);
+	XCTAssertEqual(documents[2], other);
+	SPPostgresDocument *opened = documents[1];
+	XCTAssertTrue([opened isKindOfClass:[SPPostgresDocument class]]);
+	XCTAssertEqual([self.controller selectedDocument], opened, @"the new tab is selected");
+	[self waitForDocument:opened toSelect:@"Orders 2026" inSchema:@"Sales Data"];
+
+	XCTAssertEqualObjects(opened.favorite.name, self.favorite.name);
+	XCTAssertEqualObjects(opened.currentDatabase, self.document.currentDatabase);
+	XCTAssertEqualObjects(opened.sidebar.selectedSchema, @"Sales Data");
+	XCTAssertEqualObjects(opened.sidebar.selectedTableName, @"Orders 2026");
+	XCTAssertNotNil(opened.connection);
+	XCTAssertNotEqual(opened.connection, self.document.connection, @"a session of its own");
+	XCTAssertTrue(opened.connection.isConnected);
+	XCTAssertTrue([[opened windowTitleString] hasSuffix:@"/pgkit_test/Sales Data.Orders 2026"], @"%@", [opened windowTitleString]);
+	// The source tab is as it was
+	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"Orders 2026");
+	XCTAssertTrue(self.connection.isConnected);
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+}
+
+/// A view opens as a table does (from the sidebar's delegate method, in the schema shown).
+- (void)testOpenViewInNewTabFromSidebar
+{
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	XCTAssertTrue([sidebar selectTableNamed:@"v_customers"]);
+	[self waitForTab];
+
+	[[self sidebarDelegate] sidebar:sidebar openRelation:@"v_customers" inNewWindow:NO];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self tabView].numberOfTabViewItems == 2; } timeout:20]);
+	SPPostgresDocument *opened = [self tabDocumentsIn:self.controller][1];
+	[self waitForDocument:opened toSelect:@"v_customers" inSchema:@"public"];
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+}
+
+- (void)testOpenInNewWindowOpensWindow
+{
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self selectOrders2026];
+	NSArray *windowsBefore = [NSApp windows];
+
+	[self.document openRelation:@"Orders 2026" inSchema:@"Sales Data" inNewWindow:YES];
+	XCTAssertTrue(self.document.isProcessing);
+	__block NSWindow *newWindow = nil;
+	XCTAssertTrue([self spinUntil:^BOOL{
+		for (NSWindow *window in [NSApp windows]) {
+			if (![windowsBefore containsObject:window] && [window.windowController isKindOfClass:[SPWindowController class]]) newWindow = window;
+		}
+		return newWindow != nil;
+	} timeout:20]);
+	XCTAssertFalse(self.document.isProcessing);
+
+	SPWindowController *newController = newWindow.windowController;
+	XCTAssertNotEqual(newController, self.controller);
+	XCTAssertTrue(newWindow.isVisible);
+	XCTAssertEqual([self tabView].numberOfTabViewItems, 1, @"no tab added to the source window");
+	NSArray *documents = [self tabDocumentsIn:newController];
+	XCTAssertEqual(documents.count, 1u);
+	SPPostgresDocument *opened = (SPPostgresDocument *)[newController selectedDocument];
+	XCTAssertEqual(opened, documents.firstObject);
+	XCTAssertEqual(opened.parentWindowController, newController);
+	[self waitForDocument:opened toSelect:@"Orders 2026" inSchema:@"Sales Data"];
+	XCTAssertEqualObjects(opened.favorite.name, self.favorite.name);
+	XCTAssertEqualObjects(opened.currentDatabase, self.document.currentDatabase);
+	XCTAssertNotEqual(opened.connection, self.document.connection);
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+
+	[newWindow close];
+	XCTAssertTrue([self spinUntil:^BOOL{ return ![[NSApp windows] containsObject:newWindow] || !newWindow.isVisible; } timeout:5]);
+}
+
+- (void)testOpenFailureOpensNothing
+{
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self selectOrders2026];
+	NSArray *windowsBefore = [NSApp windows];
+	__block NSUInteger made = 0;
+	self.document.openRelationConnectorFactory = ^SPPostgresConnector *(SPPostgresFavorite *favorite, NSString *password, NSString *sshPassword, NSWindow *parentWindow) {
+		made++;
+		XCTAssertEqualObjects(password, @"pgkit", @"the tab's password");
+		XCTAssertEqualObjects(favorite.database, @"pgkit_test");
+		SPPostgresFavorite *broken = [favorite copy];
+		broken.port = 1; // nothing listens there
+		return [[SPPostgresConnector alloc] initWithFavorite:broken password:password sshPassword:sshPassword parentWindow:parentWindow];
+	};
+
+	[self.document openRelation:@"Orders 2026" inSchema:@"Sales Data" inNewWindow:NO];
+	XCTAssertTrue(self.document.isProcessing);
+	XCTAssertTrue([self spinUntil:^BOOL{ return alerts.count > 0; } timeout:20]);
+	[self spinUntil:^BOOL{ return NO; } timeout:0.3];
+	XCTAssertEqual(made, 1u);
+	XCTAssertEqual(alerts.count, 1u);
+	XCTAssertTrue([alerts.firstObject.messageText containsString:@"Orders 2026"], @"%@", alerts.firstObject.messageText);
+	XCTAssertGreaterThan(alerts.firstObject.informativeText.length, 0u);
+	XCTAssertFalse(self.document.isProcessing);
+	XCTAssertEqual([self tabView].numberOfTabViewItems, 1, @"no tab opened");
+	XCTAssertEqual([self.controller selectedDocument], self.document);
+
+	// Nor a window
+	[self.document openRelation:@"Orders 2026" inSchema:@"Sales Data" inNewWindow:YES];
+	XCTAssertTrue([self spinUntil:^BOOL{ return alerts.count > 1; } timeout:20]);
+	[self spinUntil:^BOOL{ return NO; } timeout:0.3];
+	XCTAssertEqual(alerts.count, 2u);
+	for (NSWindow *window in [NSApp windows]) {
+		XCTAssertFalse(![windowsBefore containsObject:window] && [window.windowController isKindOfClass:[SPWindowController class]], @"no window opened");
+	}
+	XCTAssertTrue(self.connection.isConnected);
+	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"Orders 2026");
+}
+
+/// Closing the tab while the new session connects cancels it: nothing is opened.
+- (void)testCloseTabWhileOpeningOpensNothing
+{
+	[self selectOrders2026];
+	NSArray *windowsBefore = [NSApp windows];
+	[self.document openRelation:@"Orders 2026" inSchema:@"Sales Data" inNewWindow:NO];
+	XCTAssertTrue(self.document.isProcessing);
+	// Refused while the first one connects
+	[self.document openRelation:@"Orders 2026" inSchema:@"Sales Data" inNewWindow:YES];
+	XCTAssertEqual([[self.document valueForKey:@"pendingOpenConnector"] parentWindow], [self window]);
+
+	[[self tabView] removeTabViewItem:self.document.parentTabViewItem];
+	XCTAssertFalse(self.document.isProcessing);
+	[self spinUntil:^BOOL{ return NO; } timeout:1.5];
+	XCTAssertEqual([self tabView].numberOfTabViewItems, 0);
+	for (NSWindow *window in [NSApp windows]) {
+		XCTAssertFalse(![windowsBefore containsObject:window] && [window.windowController isKindOfClass:[SPWindowController class]], @"no window opened");
+	}
 }
 
 @end

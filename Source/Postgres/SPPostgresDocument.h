@@ -78,6 +78,29 @@ __attribute__((visibility("default")))
  */
 - (void)switchToDatabase:(NSString *)database;
 
+/**
+ * Open Table in New Tab (newWindow NO) and in New Window (the sidebar's table menus; the sidebar delegate method
+ * forwards here with the schema shown): connects a new session for the favorite, on this tab's database, with the
+ * passwords this session was opened with (nothing is written to the Keychain or the favorites; an SSH favorite opens
+ * a tunnel of its own, its sheets on this window). Meanwhile this tab shows it is connecting (isProcessing). On
+ * success a new tab, on the new session, is added right after this one and selected, or is the only tab of a new
+ * window; it then selects `schema` and `name` (a table or view, see -selectRelationAfterLoad:inSchema:). On failure
+ * this tab shows the error (see alertPresenter) and nothing is opened. Refused (beep) while this tab is processing.
+ */
+- (void)openRelation:(NSString *)name inSchema:(NSString *)schema inNewWindow:(BOOL)newWindow;
+
+/**
+ * Selects `schema`, then its table or view `name`, once the loads the tab has asked for so far are done (queued on its
+ * runner, not polled). A schema that can't be loaded, or a name that isn't listed, leaves the tab as it is.
+ */
+- (void)selectRelationAfterLoad:(NSString *)name inSchema:(NSString *)schema;
+
+/**
+ * Makes the connector -openRelation:inSchema:inNewWindow: connects (it may return a connector of another favorite).
+ * nil (the default): a new SPPostgresConnector with these arguments. Replaceable, e.g. by tests.
+ */
+@property (copy) SPPostgresConnector *(^openRelationConnectorFactory)(SPPostgresFavorite *favorite, NSString *password, NSString *sshPassword, NSWindow *parentWindow);
+
 /// The favorite name, plus @"/<database>" while another Postgres tab of the same window has the same name.
 - (NSString *)tabLabel;
 
@@ -233,8 +256,8 @@ __attribute__((visibility("default")))
 @property (readonly) PGPostgresConnection *connection;
 @property (readonly) SPPostgresFavorite *favorite;
 
-/// YES while the tab's runner is busy (a load runs) or a database switch is connecting. KVO-compliant, changes posted on
-/// the main thread (drives the tab's progress indicator).
+/// YES while the tab's runner is busy (a load runs), or a database switch or an Open Table in New Tab/Window is
+/// connecting. KVO-compliant, changes posted on the main thread (drives the tab's progress indicator).
 @property (readonly) BOOL isProcessing;
 
 /**
