@@ -11,8 +11,9 @@
  *
  * Rows come from SPPostgresTableData as PostgreSQL text. The page size is MySQL's "Limit results"
  * preference (unlimited when it is off); NULL is shown as MySQL's NULL placeholder preference, in grey.
- * Header clicks sort ascending, then descending, from the first page. Cells are edited as text: ending an edit updates the row
- * on the server. Tables without a primary key, views and generated columns are never edited.
+ * Header clicks sort ascending, then descending, from the first page. Cells are edited as text, in place or, in edit
+ * mode (see toggleEditMode:), in the field editor sheet: ending an edit updates the row on the server. Tables without a
+ * primary key, views and generated columns are never edited.
  *
  * A data-layer error is shown as an alert (see alertPresenter); the grid keeps the rows it showed.
  *
@@ -46,6 +47,10 @@ __attribute__((visibility("default")))
 /// new serial and identity values, at the end of this page, and selects it.
 - (IBAction)duplicateRow:(id)sender;
 - (IBAction)refresh:(id)sender;
+/// Writes editModeButton's state to MySQL's "edit in sheet" preference (SPEditInSheetEnabled) in defaults. The button
+/// follows that preference, wherever it is changed. While it is on, a cell is edited in the field editor sheet
+/// (see fieldEditorPresenter) instead of in place.
+- (IBAction)toggleEditMode:(id)sender;
 - (IBAction)nextPage:(id)sender;
 - (IBAction)previousPage:(id)sender;
 /// Applies the filter bar (an empty value, except for IS NULL / IS NOT NULL, removes the filter).
@@ -58,7 +63,8 @@ __attribute__((visibility("default")))
 @property (readonly) NSButton *addButton, *removeButton, *duplicateButton, *refreshButton, *editModeButton, *filterToggleButton, *previousPageButton, *paginationButton, *nextPageButton;
 @property (readonly) NSTextField *countField;
 
-/// Where the preferences the view reads (page size, NULL placeholder, table font, gridlines) come from. Default: standardUserDefaults.
+/// Where the preferences the view reads (page size, NULL placeholder, table font, gridlines, edit mode) come from, and the
+/// edit mode toggle writes to. Default: standardUserDefaults.
 /// The gridlines are read when the view is built.
 @property (nonatomic, retain) NSUserDefaults *defaults;
 @property (readonly, copy) NSString *schema;
@@ -88,5 +94,12 @@ __attribute__((visibility("default")))
 /// block that stays valid until it is called, so a presenter may store it (copying or retaining it is not needed).
 /// nil (the default) shows a sheet on the view's window.
 @property (copy) void (^confirmationPresenter)(NSAlert *alert, void (^completion)(BOOL confirmed));
+
+/// Edits a cell in a sheet (edit mode on): value is the cell's text (NULL as the NULL placeholder); editable is NO for
+/// cells that can't be edited (the sheet then only shows the value). Call completion once with the new value (an
+/// NSString or NSNull; the NULL placeholder means NULL where the column allows it), or nil when cancelled; a
+/// completion after a table switch or -invalidate, or for a row that is gone, changes nothing. One sheet at a time.
+/// nil (the default) shows MySQL's field editor (SPFieldEditorController) as a sheet on the view's window.
+@property (copy) void (^fieldEditorPresenter)(NSString *value, NSString *columnName, NSString *typeName, BOOL editable, BOOL allowNull, void (^completion)(id newValue));
 
 @end
