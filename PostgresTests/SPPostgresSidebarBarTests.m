@@ -13,6 +13,8 @@
 #import "../Source/Postgres/SPPostgresCatalog.h"
 #import "../Source/Postgres/SPPostgresContentController.h"
 #import "../Source/Postgres/SPPostgresHistory.h"
+#import "../Source/Postgres/SPPostgresSidebarInfoPane.h"
+#import "../Source/Postgres/SPPostgresExportController.h"
 
 static const NSUInteger SPPostgresSidebarBarTestPort = 55418;
 
@@ -164,6 +166,7 @@ static NSInteger SPTestClickedRow(id self, SEL _cmd)
 	[admin execute:@"DROP VIEW IF EXISTS public.sp9_v"];
 	[admin execute:@"DROP TABLE IF EXISTS public.sp9_a2"];
 	[admin execute:@"DROP TABLE IF EXISTS public.sp9_b2"];
+	[admin execute:@"COMMENT ON VIEW public.v_customers IS NULL"];
 
 	self.scratchDefaults = nil;
 	[[NSUserDefaults standardUserDefaults] removePersistentDomainForName:SPTestDefaultsSuite];
@@ -843,6 +846,8 @@ static NSArray *SPOneViewTitles(void)
 	// On a table outside the selection: Rename and Duplicate act on it
 	[recorder.calls removeAllObjects];
 	XCTAssertTrue([sidebar selectTableNamed:@"v_customers"]);
+	// The information pane reads the new selection on the tab's runner
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self setClickedRow:[self rowNamed:@"customers" inSidebar:sidebar] ofOutline:outline];
 	XCTAssertTrue([self choose:@selector(renameTable:) inMenu:sidebar.tableMenu]);
 	XCTAssertTrue([self choose:@selector(duplicateTable:) inMenu:sidebar.tableMenu]);
@@ -878,6 +883,8 @@ static NSArray *SPOneViewTitles(void)
 	// One table selected: the gear's Rename acts on it, not on the clicked view
 	[recorder.calls removeAllObjects];
 	XCTAssertTrue([sidebar selectTableNamed:@"sp9_a"]);
+	// The information pane reads the new selection on the tab's runner
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self visibleTitlesOfMenu:gear from:1], SPOneTableTitles());
 	XCTAssertTrue([self choose:@selector(renameTable:) inMenu:gear]);
 	XCTAssertTrue([self choose:@selector(openRelationInNewTab:) inMenu:gear]);
@@ -1043,6 +1050,209 @@ static NSArray *SPOneViewTitles(void)
 	XCTAssertTrue([self spinUntil:^BOOL{ return [[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"sp9_a2"]; } timeout:5]);
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(sidebar.selectedRelationNames, (@[@"customers", @"sp9_a2"]));
+}
+
+#pragma mark - Information pane
+
+/// The tab's sidebar with its information pane expanded (the scratch defaults hold nothing, whatever the real ones do).
+- (SPPostgresSidebarController *)expandedSidebar
+{
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	sidebar.defaults = self.scratchDefaults;
+	XCTAssertFalse([sidebar.infoSplitView isCollapsibleSubviewCollapsed]);
+	return sidebar;
+}
+
+- (BOOL)lines:(NSArray<NSString *> *)lines haveLineWithPrefix:(NSString *)prefix
+{
+	for (NSString *line in lines) if ([line hasPrefix:prefix]) return YES;
+	return NO;
+}
+
+/// A background runner of its own (another connection): what the pane queues shows on it alone.
+- (SPPostgresTaskRunner *)probeRunnerForPaneOf:(SPPostgresSidebarController *)sidebar
+{
+	SPPostgresTaskRunner *probe = [[SPPostgresTaskRunner alloc] initWithConnection:[SPPostgresTestServers connectedConnectionOnPort:SPPostgresSidebarBarTestPort]];
+	sidebar.infoPane.taskRunner = probe;
+	return probe;
+}
+
+- (void)testInfoPaneShowsTableFacts
+{
+	SPPostgresSidebarController *sidebar = [self expandedSidebar];
+	SPPostgresSidebarInfoPane *pane = sidebar.infoPane;
+	XCTAssertNotNil(pane);
+	XCTAssertEqual(pane.taskRunner, self.document.taskRunner, @"the pane reads on the tab's runner");
+
+	// MySQL's info table: in the 166 pt container, a borderless scroll view, a single-column source list
+	XCTAssertEqual(pane.view.superview, sidebar.infoPaneContainer);
+	XCTAssertTrue([pane.view isKindOfClass:[NSScrollView class]]);
+	XCTAssertEqual([(NSScrollView *)pane.view borderType], NSNoBorder);
+	XCTAssertEqual(pane.tableView.numberOfColumns, 1);
+	XCTAssertEqual(pane.tableView.style, NSTableViewStyleSourceList);
+
+	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	NSArray<NSString *> *lines = pane.lines;
+	XCTAssertEqualObjects(lines[0], @"TABLE INFORMATION");
+	XCTAssertTrue([lines containsObject:@"type: table"], @"%@", lines);
+	XCTAssertTrue([lines containsObject:@"owner: pgkit_test"], @"%@", lines);
+	XCTAssertTrue([self lines:lines haveLineWithPrefix:@"rows: "], @"%@", lines);
+	XCTAssertTrue([self lines:lines haveLineWithPrefix:@"size: "], @"%@", lines);
+	XCTAssertTrue([self lines:lines haveLineWithPrefix:@"index size: "], @"%@", lines);
+	XCTAssertTrue([self lines:lines haveLineWithPrefix:@"total size: "], @"%@", lines);
+	XCTAssertFalse([self lines:lines haveLineWithPrefix:@"comment: "], @"%@", lines);
+
+	// The rows shown: a 25 pt group header, the facts not selectable
+	NSTableView *table = pane.tableView;
+	XCTAssertEqual(table.numberOfRows, (NSInteger)lines.count);
+	XCTAssertEqualObjects([table.dataSource tableView:table objectValueForTableColumn:table.tableColumns[0] row:0], @"TABLE INFORMATION");
+	XCTAssertEqual([table.delegate tableView:table heightOfRow:0], 25);
+	XCTAssertTrue([table.delegate tableView:table isGroupRow:0]);
+	XCTAssertFalse([table.delegate tableView:table isGroupRow:1]);
+	XCTAssertFalse([table.delegate tableView:table shouldSelectRow:1]);
+}
+
+- (void)testInfoPaneShowsViewAndComment
+{
+	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPPostgresSidebarBarTestPort];
+	XCTAssertNotNil([admin execute:@"COMMENT ON VIEW public.v_customers IS 'hello'"]);
+
+	SPPostgresSidebarController *sidebar = [self expandedSidebar];
+	XCTAssertTrue([sidebar selectTableNamed:@"v_customers"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	NSArray<NSString *> *lines = sidebar.infoPane.lines;
+	XCTAssertEqualObjects(lines[0], @"VIEW INFORMATION");
+	XCTAssertTrue([lines containsObject:@"type: view"], @"%@", lines);
+	XCTAssertTrue([lines containsObject:@"owner: pgkit_test"], @"%@", lines);
+	XCTAssertEqualObjects(lines.lastObject, @"comment: hello");
+	XCTAssertFalse([self lines:lines haveLineWithPrefix:@"rows: "], @"%@", lines);
+	XCTAssertFalse([self lines:lines haveLineWithPrefix:@"size: "], @"%@", lines);
+	XCTAssertFalse([self lines:lines haveLineWithPrefix:@"index size: "], @"%@", lines);
+	XCTAssertFalse([self lines:lines haveLineWithPrefix:@"total size: "], @"%@", lines);
+}
+
+- (void)testInfoPaneMultipleAndNothing
+{
+	SPPostgresSidebarController *sidebar = [self expandedSidebar];
+	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertEqualObjects(sidebar.infoPane.lines[0], @"TABLE INFORMATION");
+
+	// From here the pane reads on a runner of its own: these states queue nothing
+	SPPostgresTaskRunner *probe = [self probeRunnerForPaneOf:sidebar];
+
+	XCTAssertTrue(([sidebar selectRelationsNamed:@[@"customers", @"v_customers"]]));
+	XCTAssertFalse(probe.isBusy);
+	XCTAssertEqualObjects(sidebar.infoPane.lines, (@[@"INFORMATION", @"multiple selection"]));
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertEqualObjects(sidebar.infoPane.lines, (@[@"INFORMATION", @"multiple selection"]));
+
+	XCTAssertTrue([sidebar selectExtensionNamed:@"pg_trgm"]);
+	XCTAssertFalse(probe.isBusy);
+	XCTAssertEqualObjects(sidebar.infoPane.lines, (@[@"INFORMATION"]));
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+
+	[sidebar selectTableNamed:nil];
+	XCTAssertFalse(probe.isBusy);
+	XCTAssertEqualObjects(sidebar.infoPane.lines, (@[@"INFORMATION"]));
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+
+	// One table again: read (on the pane's runner)
+	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
+	XCTAssertTrue(probe.isBusy);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:probe timeout:30]);
+	XCTAssertEqualObjects(sidebar.infoPane.lines[0], @"TABLE INFORMATION");
+	XCTAssertTrue([sidebar.infoPane.lines containsObject:@"type: table"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	[probe invalidateWithCompletion:nil];
+}
+
+- (void)testInfoPaneReadsNothingWhileCollapsed
+{
+	SPPostgresSidebarController *sidebar = [self expandedSidebar];
+	SPPostgresTaskRunner *probe = [self probeRunnerForPaneOf:sidebar];
+
+	// Collapsed (in the scratch defaults): selecting a table queues nothing for the pane
+	[sidebar.infoToggleButton performClick:nil];
+	XCTAssertTrue([sidebar.infoSplitView isCollapsibleSubviewCollapsed]);
+	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
+	XCTAssertFalse(probe.isBusy);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	[self spinUntil:^BOOL{ return NO; } timeout:0.2];
+	XCTAssertFalse(probe.isBusy);
+	XCTAssertEqualObjects(sidebar.infoPane.lines, (@[@"INFORMATION"]));
+
+	// A reload while collapsed: nothing either
+	[sidebar reloadKeepingSelection];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertFalse(probe.isBusy);
+	XCTAssertEqualObjects(sidebar.infoPane.lines, (@[@"INFORMATION"]));
+
+	// Expanded: the selection is read
+	[sidebar.infoToggleButton performClick:nil];
+	XCTAssertFalse([sidebar.infoSplitView isCollapsibleSubviewCollapsed]);
+	XCTAssertTrue(probe.isBusy);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:probe timeout:30]);
+	XCTAssertEqualObjects(sidebar.infoPane.lines[0], @"TABLE INFORMATION");
+	XCTAssertTrue([sidebar.infoPane.lines containsObject:@"type: table"]);
+	[probe invalidateWithCompletion:nil];
+}
+
+#pragma mark - Export from the table list
+
+/// The Export sheet the document opened, after checking it shows (nil with a failure).
+- (SPPostgresExportController *)openedExportController
+{
+	SPPostgresExportController *controller = self.document.exportController;
+	XCTAssertNotNil(controller);
+	XCTAssertNotNil(self.controller.window.attachedSheet);
+	XCTAssertEqual(self.controller.window.attachedSheet, controller.sheet);
+	return controller;
+}
+
+- (void)cancelExport:(SPPostgresExportController *)controller
+{
+	[controller cancel:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return self.document.exportController == nil && self.controller.window.attachedSheet == nil; } timeout:5]);
+}
+
+- (void)testExportPreselectsRelationsAndFormat
+{
+	[self reloadSidebarCreating:@[@"DROP TABLE IF EXISTS public.sp9_a", @"CREATE TABLE public.sp9_a (id int)"]];
+	[self.controller showWindow:nil];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+
+	// Gear ▸ Export ▸ As CSV file… on customers
+	XCTAssertTrue([self choose:@selector(exportRelations:) tag:1 inMenu:sidebar.gearButton.menu]);
+	SPPostgresExportController *controller = [self openedExportController];
+	XCTAssertEqualObjects(controller.checkedTables, (@[@[@"public", @"customers"]]));
+	XCTAssertEqual(controller.formatControl.selectedSegment, 1);
+	XCTAssertEqualObjects(controller.sourcePopup.titleOfSelectedItem, [controller.sourcePopup itemAtIndex:2].title);
+	XCTAssertFalse(controller.tablesTable.enclosingScrollView.isHidden);
+	XCTAssertTrue(controller.exportButton.isEnabled);
+	[self cancelExport:controller];
+
+	// Right-click ▸ Export ▸ As SQL dump… on sp9_a, outside the selection: the sheet's preset (customers) is cleared
+	NSOutlineView *outline = [self outlineOfSidebar:sidebar];
+	[self setClickedRow:[self rowNamed:@"sp9_a" inSidebar:sidebar] ofOutline:outline];
+	XCTAssertTrue([self choose:@selector(exportRelations:) tag:0 inMenu:sidebar.tableMenu]);
+	[self setClickedRow:-1 ofOutline:outline];
+	controller = [self openedExportController];
+	XCTAssertEqualObjects(controller.checkedTables, (@[@[@"public", @"sp9_a"]]));
+	XCTAssertEqual(controller.formatControl.selectedSegment, 0);
+	[self cancelExport:controller];
+
+	// A table and a view: the view can't be exported as a table and stays unchecked
+	XCTAssertTrue(([sidebar selectRelationsNamed:@[@"customers", @"sp9_a", @"v_customers"]]));
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertTrue([self choose:@selector(exportRelations:) tag:1 inMenu:sidebar.gearButton.menu]);
+	controller = [self openedExportController];
+	XCTAssertEqualObjects(controller.checkedTables, (@[@[@"public", @"customers"], @[@"public", @"sp9_a"]]));
+	XCTAssertEqual(controller.formatControl.selectedSegment, 1);
+	[self cancelExport:controller];
 }
 
 @end

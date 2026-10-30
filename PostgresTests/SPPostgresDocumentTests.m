@@ -20,6 +20,7 @@
 #import "../Source/Postgres/SPPostgresTaskDisplay.h"
 #import "../Source/Postgres/SPPostgresSequenceController.h"
 #import "../Source/Postgres/SPPostgresCatalog.h"
+#import "../Source/Postgres/SPPostgresSidebarInfoPane.h"
 
 static const NSUInteger SPPostgresDocumentTestPort = 55418;
 
@@ -2860,6 +2861,141 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	XCTAssertEqualObjects(sheet.title, @"New Table");
 	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.messageText);
 	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM pg_attribute WHERE attrelid = 'public.sp9_a'::regclass AND attname = 'added_col'" on:admin], @"1");
+}
+
+#pragma mark - Create Syntax and the information pane from the table list
+
+/// A private pasteboard as the tab's createSyntaxPasteboard (the user's clipboard is never touched), released after.
+- (NSPasteboard *)privateCreateSyntaxPasteboard
+{
+	NSPasteboard *pasteboard = [NSPasteboard pasteboardWithName:[NSString stringWithFormat:@"SPPostgresStage9Tests-%@", [NSUUID UUID].UUIDString]];
+	[pasteboard clearContents];
+	self.document.createSyntaxPasteboard = pasteboard;
+	[self addTeardownBlock:^{
+		[pasteboard releaseGlobally];
+	}];
+	return pasteboard;
+}
+
+- (id<SPPostgresSidebarControllerDelegate>)sidebarDelegate
+{
+	return (id<SPPostgresSidebarControllerDelegate>)self.document;
+}
+
+- (void)testCopyCreateSyntaxPutsStatementOnPasteboard
+{
+	XCTAssertEqual(self.document.createSyntaxPasteboard, [NSPasteboard generalPasteboard], @"the general pasteboard by default (only read)");
+	NSPasteboard *pasteboard = [self privateCreateSyntaxPasteboard];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
+	[self waitForTab];
+
+	[[self sidebarDelegate] sidebar:sidebar showCreateSyntaxForRelations:@[@"customers"] copy:YES];
+	XCTAssertTrue(self.document.isProcessing, @"read in a task of the tab's runner");
+	[self waitForTab];
+
+	NSString *copied = [pasteboard stringForType:NSPasteboardTypeString];
+	XCTAssertTrue([copied hasPrefix:@"CREATE TABLE \"public\".\"customers\""], @"%@", copied);
+	XCTAssertFalse([copied containsString:@"-- Create syntax for"], @"one item: no header");
+	XCTAssertNil([self window].attachedSheet);
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+}
+
+- (void)testShowCreateSyntaxSheetForTwo
+{
+	NSPasteboard *pasteboard = [self privateCreateSyntaxPasteboard];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self.controller showWindow:nil];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	XCTAssertTrue(([sidebar selectRelationsNamed:@[@"customers", @"v_customers"]]));
+	[self waitForTab];
+
+	[[self sidebarDelegate] sidebar:sidebar showCreateSyntaxForRelations:sidebar.selectedRelationNames copy:NO];
+	[self waitForTab];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet != nil; } timeout:5]);
+	NSWindow *sheet = [self window].attachedSheet;
+	XCTAssertEqualObjects(sheet.title, @"Create syntaxes for selected items");
+	XCTAssertEqualObjects([(NSTextField *)[self viewWithIdentifier:@"createSyntaxLabel" in:sheet.contentView] stringValue], @"Create syntaxes for selected items");
+
+	NSTextView *text = [self viewWithIdentifier:@"createSyntaxText" in:sheet.contentView];
+	XCTAssertTrue([text isKindOfClass:[NSTextView class]]);
+	XCTAssertFalse(text.isEditable);
+	XCTAssertTrue(text.font.fixedPitch, @"%@", text.font);
+	XCTAssertTrue([text.string hasPrefix:@"-- Create syntax for TABLE 'customers'\nCREATE TABLE \"public\".\"customers\""], @"%@", text.string);
+	XCTAssertTrue([text.string containsString:@"\n-- Create syntax for VIEW 'v_customers'\nCREATE VIEW \"public\".\"v_customers\""], @"%@", text.string);
+	XCTAssertNil([pasteboard stringForType:NSPasteboardTypeString], @"shown, not copied");
+
+	// Copy, then Close
+	[(NSButton *)[self viewWithIdentifier:@"createSyntaxCopyButton" in:sheet.contentView] performClick:nil];
+	XCTAssertEqualObjects([pasteboard stringForType:NSPasteboardTypeString], text.string);
+	[(NSButton *)[self viewWithIdentifier:@"createSyntaxCloseButton" in:sheet.contentView] performClick:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+
+	// One view: MySQL's label, no header
+	[[self sidebarDelegate] sidebar:sidebar showCreateSyntaxForRelations:@[@"v_customers"] copy:NO];
+	[self waitForTab];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet != nil; } timeout:5]);
+	sheet = [self window].attachedSheet;
+	XCTAssertEqualObjects(sheet.title, @"Create syntax for VIEW 'v_customers'");
+	text = [self viewWithIdentifier:@"createSyntaxText" in:sheet.contentView];
+	XCTAssertTrue([text.string hasPrefix:@"CREATE VIEW \"public\".\"v_customers\""], @"%@", text.string);
+	[(NSButton *)[self viewWithIdentifier:@"createSyntaxCloseButton" in:sheet.contentView] performClick:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+}
+
+/// A table dropped behind the tab's back: MySQL's error with the server's message, nothing copied.
+- (void)testCreateSyntaxErrorShowsServerMessage
+{
+	PGPostgresConnection *admin = [self sp9AdminRunning:@[@"CREATE TABLE public.sp9_a (id integer)"]];
+	NSPasteboard *pasteboard = [self privateCreateSyntaxPasteboard];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	XCTAssertTrue([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"sp9_a"]);
+	XCTAssertNotNil([admin execute:@"DROP TABLE public.sp9_a"]);
+
+	[[self sidebarDelegate] sidebar:sidebar showCreateSyntaxForRelations:@[@"customers", @"sp9_a"] copy:YES];
+	[self waitForTab];
+	XCTAssertTrue([self spinUntil:^BOOL{ return alerts.count == 1; } timeout:5]);
+	XCTAssertEqualObjects(alerts[0].messageText, @"An error occured while creating table syntax.");
+	XCTAssertGreaterThan(alerts[0].informativeText.length, 0u);
+	XCTAssertFalse([alerts[0].informativeText containsString:@"HINT:"], @"%@", alerts[0].informativeText);
+	XCTAssertNil([pasteboard stringForType:NSPasteboardTypeString]);
+	XCTAssertNil([self window].attachedSheet);
+}
+
+/// A comment saved in Table Info shows in the information pane under the table list.
+- (void)testInfoPaneFollowsCommentSave
+{
+	[self sp9AdminRunning:@[@"CREATE TABLE public.sp9_a (id integer)"]];
+	// Expanded whatever the real preferences hold (a scratch suite, only read)
+	NSUserDefaults *scratch = [[NSUserDefaults alloc] initWithSuiteName:@"SPPostgresStage9Tests"];
+	[self addTeardownBlock:^{
+		[[NSUserDefaults standardUserDefaults] removePersistentDomainForName:@"SPPostgresStage9Tests"];
+	}];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	sidebar.defaults = scratch;
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self.controller showWindow:nil];
+
+	XCTAssertTrue([sidebar selectTableNamed:@"sp9_a"]);
+	[self waitForTab];
+	XCTAssertEqualObjects(sidebar.infoPane.lines[0], @"TABLE INFORMATION");
+	XCTAssertFalse([[sidebar.infoPane.lines lastObject] hasPrefix:@"comment: "]);
+
+	[self.document viewStatus:nil];
+	[self waitForTab];
+	SPPostgresTableInfoController *info = self.document.infoController;
+	NSTextView *box = info.commentView;
+	XCTAssertTrue([[box window] makeFirstResponder:box]);
+	NSRange all = NSMakeRange(0, box.string.length);
+	[box setSelectedRange:all];
+	[box insertText:@"pane note" replacementRange:all];
+	XCTAssertTrue([info commitPendingEdits]);
+	[self waitForTab];
+	XCTAssertEqualObjects([sidebar.infoPane.lines lastObject], @"comment: pane note");
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
 }
 
 @end
