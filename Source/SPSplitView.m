@@ -111,6 +111,25 @@ static BOOL isOSAtLeast10_7;
 	[collapseToggleButton setState:(collapsibleSubviewCollapsed?NSOnState:NSOffState)];
 }
 
+/**
+ * Sizes set while the view is being built or attached are relative to the nib size and get
+ * scaled as the view grows into the window, so only save sizes once the saved ones have been
+ * re-applied after the window's initial layout.
+ */
+- (void)viewDidMoveToWindow
+{
+	[super viewDidMoveToWindow];
+
+	autoSaveSizesRestoredInWindow = NO;
+	if (![self window]) return;
+
+	dispatch_async(dispatch_get_main_queue(), ^{
+		if (![self window] || autoSaveSizesRestoredInWindow) return;
+		[self _restoreAutoSaveSizes];
+		autoSaveSizesRestoredInWindow = YES;
+	});
+}
+
 - (void)dealloc
 {
 	SPClear(viewMinimumSizes);
@@ -795,7 +814,7 @@ static BOOL isOSAtLeast10_7;
  */
 - (void)_saveAutoSaveSizes
 {
-	if (![self autosaveName]) {
+	if (![self autosaveName] || !autoSaveSizesRestoredInWindow) {
 		return;
 	}
 

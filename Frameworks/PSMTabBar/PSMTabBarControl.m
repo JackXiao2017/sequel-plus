@@ -1286,6 +1286,17 @@
 #pragma mark -
 #pragma mark Mouse Tracking
 
+/**
+ * Cells start out with a tracking tag of 0, which AppKit no longer accepts
+ * here (it raises an exception), so skip removing tags that were never set.
+ */
+- (void)removeTrackingRect:(NSTrackingRectTag)tag
+{
+	if (tag == 0) return;
+
+	[super removeTrackingRect:tag];
+}
+
 - (BOOL)mouseDownCanMoveWindow
 {
     return NO;

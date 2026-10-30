@@ -3932,7 +3932,8 @@
 				GCC_WARN_UNUSED_VALUE = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IBC_WARNINGS = YES;
-				MACOSX_DEPLOYMENT_TARGET = 10.6;
+				ARCHS = arm64;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				SDKROOT = macosx;
 				WARNING_CFLAGS = "-Wmost";
 			};
@@ -3950,8 +3951,10 @@
 				INFOPLIST_FILE = Resources/Plists/Info.plist;
 				INSTALL_PATH = "$(HOME)/Applications";
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Frameworks/zlib";
-				MACOSX_DEPLOYMENT_TARGET = 10.6;
-				OTHER_LDFLAGS = "$(SRCROOT)/Frameworks/zlib/libz.a";
+				ARCHS = arm64;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
+				OTHER_LDFLAGS = "-lz";
 				PRODUCT_NAME = "Sequel Pro";
 				SEPARATE_STRIP = NO;
 			};
@@ -4136,8 +4139,10 @@
 				INFOPLIST_FILE = Resources/Plists/Info.plist;
 				INSTALL_PATH = "$(HOME)/Applications";
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Frameworks/zlib";
-				MACOSX_DEPLOYMENT_TARGET = 10.6;
-				OTHER_LDFLAGS = "$(SRCROOT)/Frameworks/zlib/libz.a";
+				ARCHS = arm64;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
+				OTHER_LDFLAGS = "-lz";
 				PRODUCT_NAME = "Sequel Pro";
 				SEPARATE_STRIP = NO;
 			};
@@ -4156,8 +4161,10 @@
 				INFOPLIST_FILE = Resources/Plists/Info.plist;
 				INSTALL_PATH = "$(HOME)/Applications";
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Frameworks/zlib";
-				MACOSX_DEPLOYMENT_TARGET = 10.6;
-				OTHER_LDFLAGS = "$(SRCROOT)/Frameworks/zlib/libz.a";
+				ARCHS = arm64;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
+				OTHER_LDFLAGS = "-lz";
 				PRODUCT_NAME = "Sequel Pro";
 				SEPARATE_STRIP = NO;
 			};
@@ -4213,7 +4220,8 @@
 				IBC_WARNINGS = YES;
 				LEX_INSERT_LINE_DIRECTIVES = YES;
 				LEX_SUPPRESS_DEFAULT_RULE = NO;
-				MACOSX_DEPLOYMENT_TARGET = 10.6;
+				ARCHS = arm64;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = macosx;
 				STRIP_INSTALLED_PRODUCT = NO;
@@ -4266,7 +4274,8 @@
 				GCC_WARN_UNUSED_VALUE = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IBC_WARNINGS = YES;
-				MACOSX_DEPLOYMENT_TARGET = 10.6;
+				ARCHS = arm64;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				SDKROOT = macosx;
 				WARNING_CFLAGS = "-Wmost";
 			};

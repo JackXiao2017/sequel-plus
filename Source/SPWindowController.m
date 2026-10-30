@@ -461,8 +461,8 @@
 	[tabBar setShowAddTabButton:YES];
 	[tabBar setSizeCellsToFit:NO];
 	[tabBar setCellMinWidth:100];
-	[tabBar setCellMaxWidth:25000];
-	[tabBar setCellOptimumWidth:25000];
+	[tabBar setCellMaxWidth:250];
+	[tabBar setCellOptimumWidth:250];
 	[tabBar setSelectsTabsOnMouseDown:YES];
 	[tabBar setCreatesTabOnDoubleClick:YES];
 	[tabBar setTearOffStyle:PSMTabBarTearOffAlphaWindow];

@@ -7,5 +7,14 @@
 #endif
 
 #import "mysql.h"
+
+// MariaDB Connector/C renamed the network I/O handle from vio to pvio
+#ifdef LIBMARIADB
+	#define SPMySQLNetVio(connection) ((connection)->net.pvio)
+	#define SERVER_MORE_RESULTS_EXISTS SERVER_MORE_RESULTS_EXIST
+#else
+	#define SPMySQLNetVio(connection) ((connection)->net.vio)
+#endif
+
 #import "SPMySQL.h"
 #import "SPMySQLUtilities.h"

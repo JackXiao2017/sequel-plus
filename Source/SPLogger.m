@@ -43,7 +43,7 @@ static SPLogger *logger = nil;
 - (void)_initLogFile;
 - (void)_outputTimeString;
 
-int _isSPLeaksLog(const struct direct *entry);
+int _isSPLeaksLog(const struct dirent *entry);
 
 @end
 
@@ -145,7 +145,7 @@ int _isSPLeaksLog(const struct direct *entry);
 		if ([self removeOldLeakDumpsOnTermination]) {
 			
 			int cnt, cnt2, i;
-			struct direct **files;
+			struct dirent **files;
 			
 			cnt  = scandir("/tmp", &files, _isSPLeaksLog, NULL);
 			
@@ -251,7 +251,7 @@ int _isSPLeaksLog(const struct direct *entry);
 	[logFileHandle writeData:[[NSString stringWithFormat:@"Launched at %@\n\n", [[NSDate date] description]] dataUsingEncoding:NSUTF8StringEncoding]];
 }
 
-int _isSPLeaksLog(const struct direct *entry)
+int _isSPLeaksLog(const struct dirent *entry)
 {
 	return (strstr(entry->d_name, "sp.leaks") != NULL);
 }

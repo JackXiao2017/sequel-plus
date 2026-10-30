@@ -2,3 +2,7 @@
 xcuserdata
 project.xcworkspace
 *.pbxuser
+build/
+.superpowers/
+*.xcuserstate
+img.png

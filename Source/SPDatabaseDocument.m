@@ -3945,6 +3945,7 @@ static BOOL isOSAtLeast10_14;
 	
 	if ([parentWindowController selectedTableDocument] == self) {
 		[parentWindow setTitle:windowTitle];
+		[self _applyCompactWindowTitleFont];
 	}
 
 	// If the sender wasn't the window controller, update other tabs in this window
@@ -4038,6 +4039,54 @@ static BOOL isOSAtLeast10_14;
 #pragma mark Toolbar Methods
 
 #ifndef SP_CODA
+
+/**
+ * Return a copy of a toolbar image drawn at a smaller size, as NSToolbar's size mode is ignored on modern macOS.
+ */
+static NSImage *SPCompactToolbarImage(NSImage *image)
+{
+	NSImage *compactImage = [[image copy] autorelease];
+	[compactImage setSize:NSMakeSize(24, 24)];
+	return compactImage;
+}
+
+/**
+ * Show the window title in a smaller font, centered above the toolbar. AppKit has no public API
+ * for the title font and re-lays out its own title field, so hide it and show our own label in the
+ * titlebar instead; if the titlebar can't be found the default title is left as is.
+ */
+- (void)_applyCompactWindowTitleFont
+{
+	NSButton *closeButton = [parentWindow standardWindowButton:NSWindowCloseButton];
+	NSView *titlebarView = [closeButton superview];
+	if (!titlebarView) return;
+
+	NSTextField *titleLabel = nil;
+	for (NSView *subview in [titlebarView subviews]) {
+		if ([[subview identifier] isEqualToString:@"SPCompactWindowTitle"]) {
+			titleLabel = (NSTextField *)subview;
+			break;
+		}
+	}
+
+	if (!titleLabel) {
+		titleLabel = [NSTextField labelWithString:@""];
+		[titleLabel setIdentifier:@"SPCompactWindowTitle"];
+		[titleLabel setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize] weight:NSFontWeightMedium]];
+		[titleLabel setAlignment:NSTextAlignmentCenter];
+		[titleLabel setLineBreakMode:NSLineBreakByTruncatingMiddle];
+		[titleLabel setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+		[titlebarView addSubview:titleLabel];
+		[parentWindow setTitleVisibility:NSWindowTitleHidden];
+	}
+
+	[titleLabel setStringValue:[parentWindow title]];
+
+	// Span the titlebar clear of the window buttons, vertically aligned with them
+	CGFloat inset = NSMaxX([[parentWindow standardWindowButton:NSWindowZoomButton] frame]) + 20;
+	CGFloat labelHeight = [titleLabel fittingSize].height;
+	[titleLabel setFrame:NSMakeRect(inset, round(NSMidY([closeButton frame]) - labelHeight / 2), [titlebarView bounds].size.width - inset * 2, labelHeight)];
+}
 
 /**
  * set up the standard toolbar
@@ -4187,9 +4236,11 @@ static BOOL isOSAtLeast10_14;
 		[toolbarItem setAction:@selector(showUserManager:)];
 		
 	} else {
-		//itemIdentifier refered to a toolbar item that is not provided or supported by us or cocoa 
+		//itemIdentifier refered to a toolbar item that is not provided or supported by us or cocoa
 		toolbarItem = nil;
 	}
+
+	if ([toolbarItem image]) [toolbarItem setImage:SPCompactToolbarImage([toolbarItem image])];
 
 	return toolbarItem;
 }
@@ -4286,9 +4337,9 @@ static BOOL isOSAtLeast10_14;
 	if ([identifier isEqualToString:SPMainToolbarShowConsole]) {
 		NSWindow *queryWindow = [[SPQueryController sharedQueryController] window];
 		if ([queryWindow isVisible]) {
-			[toolbarItem setImage:[NSImage imageNamed:@"showconsole"]];
+			[toolbarItem setImage:SPCompactToolbarImage([NSImage imageNamed:@"showconsole"])];
 		} else {
-			[toolbarItem setImage:[NSImage imageNamed:@"hideconsole"]];
+			[toolbarItem setImage:SPCompactToolbarImage([NSImage imageNamed:@"hideconsole"])];
 		}
 		if ([queryWindow isKeyWindow]) {
 			return NO;
@@ -4423,6 +4474,7 @@ static BOOL isOSAtLeast10_14;
 - (void)willResignActiveTabInWindow
 {
 	[self updateTitlebarStatusVisibilityForcingHide:YES];
+	[[NSNotificationCenter defaultCenter] removeObserver:self name:NSWindowDidResizeNotification object:parentWindow];
 
 	// Remove the task progress window
 	[parentWindow removeChildWindow:taskProgressWindow];
@@ -4439,6 +4491,13 @@ static BOOL isOSAtLeast10_14;
 	BOOL toolbarVisible = ![parentWindow toolbar] || [[parentWindow toolbar] isVisible];
 	[parentWindow setToolbar:mainToolbar];
 	[[parentWindow toolbar] setVisible:toolbarVisible];
+
+	// Keep the classic layout: title on its own row above a compact toolbar
+	if (@available(macOS 11.0, *)) [parentWindow setToolbarStyle:NSWindowToolbarStyleExpanded];
+
+	// Keep the compact title centered as the window resizes
+	[[NSNotificationCenter defaultCenter] removeObserver:self name:NSWindowDidResizeNotification object:parentWindow];
+	[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_applyCompactWindowTitleFont) name:NSWindowDidResizeNotification object:parentWindow];
 
 	// Update the window's title and represented document
 	[self updateWindowTitle:self];

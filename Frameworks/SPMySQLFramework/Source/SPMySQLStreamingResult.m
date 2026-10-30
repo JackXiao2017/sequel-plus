@@ -79,7 +79,7 @@
 
 		// Cache the isConnected selector and pointer for fast connection checks
 		isConnectedSelector = @selector(isConnected);
-		isConnectedPtr = [parentConnection methodForSelector:isConnectedSelector];
+		isConnectedPtr = (BOOL (*)(id, SEL))[parentConnection methodForSelector:isConnectedSelector];
 
 		// Default to returning rows as arrays
 		defaultRowReturnType = SPMySQLResultRowAsArray;

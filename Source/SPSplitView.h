@@ -49,6 +49,8 @@
 
 	NSMutableArray *viewMinimumSizes;
 	NSMutableArray *viewMaximumSizes;
+
+	BOOL autoSaveSizesRestoredInWindow;
 }
 
 // Collapsing/expanding

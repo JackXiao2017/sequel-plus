@@ -2972,6 +2972,18 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 	NSRect scrollDocumentFrame = [[connectionDetailsScrollView documentView] frame];
 	NSRect connectionDetailsFrame = [connectionResizeContainer frame];
 
+	// Keep the document view as wide as the visible area, with the details centered horizontally
+	CGFloat visibleWidth = [connectionDetailsScrollView contentSize].width;
+	if (scrollDocumentFrame.size.width != visibleWidth) {
+		scrollDocumentFrame.size.width = visibleWidth;
+		[[connectionDetailsScrollView documentView] setFrame:scrollDocumentFrame];
+	}
+	CGFloat centeredX = round(MAX(0, (visibleWidth - connectionDetailsFrame.size.width) / 2));
+	if (connectionDetailsFrame.origin.x != centeredX) {
+		connectionDetailsFrame.origin.x = centeredX;
+		[connectionResizeContainer setFrame:connectionDetailsFrame];
+	}
+
 	// Scroll view is smaller than contents - keep positioned at top.
 	if (scrollViewFrame.size.height < connectionDetailsFrame.size.height + 10) {
 		if (connectionDetailsFrame.origin.y != 0) {

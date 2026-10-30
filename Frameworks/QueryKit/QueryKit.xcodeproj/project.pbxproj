@@ -468,7 +468,8 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				INFOPLIST_FILE = Resources/Info.plist;
 				INFOPLIST_PREFIX_HEADER = "";
-				MACOSX_DEPLOYMENT_TARGET = 10.6;
+				ARCHS = arm64;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
 			};
 			name = Distribution;
 		};
@@ -714,7 +715,8 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				INFOPLIST_FILE = Resources/Info.plist;
 				INFOPLIST_PREFIX_HEADER = "";
-				MACOSX_DEPLOYMENT_TARGET = 10.6;
+				ARCHS = arm64;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				ONLY_ACTIVE_ARCH = YES;
 			};
 			name = Debug;
@@ -754,7 +756,8 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				INFOPLIST_FILE = Resources/Info.plist;
 				INFOPLIST_PREFIX_HEADER = "";
-				MACOSX_DEPLOYMENT_TARGET = 10.6;
+				ARCHS = arm64;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
 			};
 			name = Release;
 		};
