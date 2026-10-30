@@ -1373,9 +1373,27 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 					 isEditable:canEdit withWindow:window sender:self contextInfo:nil];
 }
 
-/// The field editor's result: the new value, or nil when cancelled or not editable.
+/// Asked by the field editor (as of MySQL's content and query views) for the caret to restore from an in-cell edit; a
+/// sheet here never follows one, so the caret starts at the beginning.
+- (NSRange)fieldEditorSelectedRange
+{
+	return NSMakeRange(0, 0);
+}
+
+- (void)setFieldEditorSelectedRange:(NSRange)range
+{
+}
+
+/// The field editor's result: the new value, or nil when cancelled or not editable. A file loaded into the sheet comes
+/// as NSData: sent as UTF-8 text, or refused (NSBeep, nothing sent) when it isn't UTF-8.
 - (void)processFieldEditorResult:(id)data contextInfo:(NSDictionary *)contextInfo
 {
+	if ([data isKindOfClass:[NSData class]]) {
+		NSString *text = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
+		if (!text) NSBeep();
+		data = text;
+	}
+
 	// Called by the field editor: released once it has returned (as MySQL's)
 	[fieldEditor autorelease];
 	fieldEditor = nil;

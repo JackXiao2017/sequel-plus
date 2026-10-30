@@ -55,6 +55,11 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 @implementation SPContentBarSheetCall
 @end
 
+/// The field editor's callback (SPFieldEditorControllerDelegate, adopted privately).
+@interface SPPostgresContentController (SPContentBarFieldEditorResult)
+- (void)processFieldEditorResult:(id)data contextInfo:(NSDictionary *)contextInfo;
+@end
+
 /// The Content tab's bottom bar (Stage 10): MySQL's layout, images, tooltips and keys, ⌫ in the grid, the busy state.
 @interface SPPostgresContentBarTests : XCTestCase
 @property (strong) SPWindowController *controller;
@@ -718,6 +723,47 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 	XCTAssertNil([[self grid] currentEditor], @"no inline editor");
 	calls[0].completion(nil);
 	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.items"], @31);
+}
+
+/// Opens MySQL's field editor sheet (no presenter) on a cell, then ends it as its OK button would, before its result.
+- (void)openAndEndDefaultSheetOn:(SPPostgresContentController *)content row:(NSInteger)row column:(NSString *)name
+{
+	NSWindow *window = [content.tableView window];
+	[window orderFront:nil]; // sheets attach to a window on screen (tearDown orders it out)
+	XCTAssertNil(window.attachedSheet);
+	XCTAssertFalse([self content:content shouldEditRow:row column:name]);
+	XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet != nil; } timeout:5], @"the field editor sheet is shown");
+	NSWindow *sheet = window.attachedSheet;
+	[NSApp endSheet:sheet];
+	[sheet orderOut:nil];
+}
+
+- (void)testSheetFileDataIsSentAsUTF8TextOrRefused
+{
+	[self selectTable:@"items"];
+	SPPostgresContentController *content = self.content;
+	content.defaults = [self scratchDefaultsInSheetMode:YES];
+	XCTAssertNil(content.fieldEditorPresenter);
+
+	// A file loaded into the sheet (NSData) that is UTF-8: its text is sent
+	[self openAndEndDefaultSheetOn:content row:1 column:@"name"];
+	[content processFieldEditorResult:[@"from a file ✓" dataUsingEncoding:NSUTF8StringEncoding] contextInfo:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:content.taskRunner timeout:30]);
+	XCTAssertEqualObjects([self serverValue:@"SELECT name FROM content_test.items WHERE id = 2"], @"from a file ✓");
+	XCTAssertEqualObjects([content tableView:content.tableView objectValueForTableColumn:[self columnNamed:@"name" of:content] row:1], @"from a file ✓");
+
+	// Not UTF-8: refused, nothing sent (not NULL)
+	[self openAndEndDefaultSheetOn:content row:2 column:@"name"];
+	const unsigned char bytes[] = {0xff, 0xfe, 0x00, 0x80};
+	[content processFieldEditorResult:[NSData dataWithBytes:bytes length:sizeof(bytes)] contextInfo:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:content.taskRunner timeout:30]);
+	XCTAssertEqualObjects([self serverValue:@"SELECT name FROM content_test.items WHERE id = 3"], [@"" stringByPaddingToLength:10000 withString:@"x" startingAtIndex:0]);
+
+	// The sheet is no longer pending: another opens
+	[self openAndEndDefaultSheetOn:content row:0 column:@"name"];
+	[content processFieldEditorResult:nil contextInfo:nil];
+	XCTAssertEqualObjects([self serverValue:@"SELECT name FROM content_test.items WHERE id = 1"], @"item 1");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
 }
 
 - (void)testInlineEditUnchangedWhenSheetModeOff
