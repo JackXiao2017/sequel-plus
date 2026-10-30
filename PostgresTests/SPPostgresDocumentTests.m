@@ -2273,8 +2273,18 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	XCTAssertEqualObjects([alert.buttons valueForKey:@"title"], (@[action, @"Cancel"]));
 	XCTAssertEqual(alert.alertStyle, NSAlertStyleCritical);
 	XCTAssertTrue(alert.buttons.firstObject.hasDestructiveAction);
-	XCTAssertEqualObjects(alert.buttons[0].keyEquivalent, @"\r");
-	XCTAssertEqualObjects(alert.buttons[1].keyEquivalent, @"\033");
+	// MySQL's keys: ⌘T / ⌘D for the action, Return for Cancel
+	XCTAssertEqualObjects(alert.buttons[0].keyEquivalent, [action isEqualToString:@"Truncate"] ? @"t" : @"d");
+	XCTAssertEqual(alert.buttons[0].keyEquivalentModifierMask, NSEventModifierFlagCommand);
+	XCTAssertEqualObjects(alert.buttons[1].keyEquivalent, @"\r");
+}
+
+/// The tab idle, and a question that waited for it (asked on the run loop turn after) asked.
+- (void)waitForTabAndQuestions
+{
+	[self waitForTab];
+	[self spinUntil:^BOOL{ return NO; } timeout:0.1];
+	[self waitForTab];
 }
 
 - (void)testTruncateConfirmedEmptiesTable
@@ -2426,6 +2436,12 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	XCTAssertEqualObjects(alerts[0].messageText, @"Error deleting table");
 	XCTAssertTrue([alerts[0].informativeText containsString:@"sp9_dep"], @"%@", alerts[0].informativeText);
 	XCTAssertFalse([alerts[0].informativeText containsString:@"CASCADE"], @"%@", alerts[0].informativeText);
+	// The server's message, a blank line, then the dependents one per line
+	NSArray<NSString *> *lines = [alerts[0].informativeText componentsSeparatedByString:@"\n"];
+	XCTAssertEqual(lines.count, 3u, @"%@", lines);
+	XCTAssertEqualObjects(lines[0], @"cannot drop table sp9_base because other objects depend on it");
+	XCTAssertEqualObjects(lines[1], @"");
+	XCTAssertTrue([lines[2] containsString:@"sp9_dep"], @"%@", lines[2]);
 
 	XCTAssertEqualObjects([sidebar itemTitlesInSection:@"TABLES"], tables);
 	XCTAssertEqualObjects([sidebar itemTitlesInSection:@"VIEWS"], views);
@@ -2462,11 +2478,57 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	[self.document sidebar:sidebar removeRelations:@[@"sp9_a"]];
 	[self.document sidebar:sidebar truncateTables:@[@"sp9_a"]];
 	XCTAssertEqual(asked.count, 1u, @"the second is refused while the first's sleep runs");
-	[self waitForTab];
+	[self waitForTabAndQuestions];
+	XCTAssertEqual(asked.count, 1u);
 
 	XCTAssertTrue([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"sp9_a"]);
 	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_a" on:admin], @"1");
-	XCTAssertEqual(alerts.count, 0u);
+	XCTAssertEqual(alerts.count, 1u);
+	XCTAssertEqualObjects(alerts[0].messageText, @"The tab is busy, so nothing was deleted.");
+}
+
+/// Truncate confirmed after a load was queued meanwhile: nothing truncated, and the user is told.
+- (void)testTruncateRefusedWhenBusyAtConfirm
+{
+	PGPostgresConnection *admin = [self sp9AdminRunning:@[@"CREATE TABLE public.sp9_a (id integer)", @"INSERT INTO public.sp9_a VALUES (1), (2)"]];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	NSMutableArray<NSAlert *> *asked = [NSMutableArray array];
+	SPPostgresTaskRunner *runner = self.document.taskRunner;
+	self.document.confirmationPresenter = ^(NSAlert *alert, void (^completion)(BOOL)) {
+		[asked addObject:alert];
+		[SPPostgresTestServers queueSleep:1 onRunner:runner];
+		completion(YES);
+	};
+
+	[self.document sidebar:self.document.sidebar truncateTables:@[@"sp9_a"]];
+	XCTAssertEqual(asked.count, 1u);
+	[self waitForTabAndQuestions];
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_a" on:admin], @"2");
+	XCTAssertEqual(alerts.count, 1u);
+	XCTAssertEqualObjects(alerts[0].messageText, @"The tab is busy, so nothing was truncated.");
+}
+
+/// A table other tables reference isn't truncated (never CASCADE): the server's message and DETAIL, without its HINT
+/// (which suggests CASCADE).
+- (void)testTruncateReferencedTableShowsMessageWithoutHint
+{
+	PGPostgresConnection *admin = [self sp9AdminRunning:@[@"CREATE TABLE public.sp9_base (id integer PRIMARY KEY)", @"INSERT INTO public.sp9_base VALUES (1)",
+														  @"CREATE TABLE public.sp9_other (base_id integer REFERENCES public.sp9_base (id))", @"INSERT INTO public.sp9_other VALUES (1)"]];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	NSMutableArray<NSAlert *> *asked = [self answerConfirmationsWith:YES];
+
+	[self.document sidebar:self.document.sidebar truncateTables:@[@"sp9_base"]];
+	[self waitForTabAndQuestions];
+	XCTAssertEqual(asked.count, 1u);
+	XCTAssertEqual(alerts.count, 1u);
+	XCTAssertEqualObjects(alerts[0].messageText, @"Error truncating table");
+	NSString *text = alerts[0].informativeText;
+	XCTAssertTrue([text hasPrefix:@"cannot truncate a table referenced in a foreign key constraint"], @"%@", text);
+	XCTAssertTrue([text containsString:@"sp9_other"], @"%@", text);
+	XCTAssertFalse([text containsString:@"HINT"], @"%@", text);
+	XCTAssertFalse([text containsString:@"CASCADE"], @"%@", text);
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_base" on:admin], @"1");
+	XCTAssertEqual(self.document.connection.transactionStatus, PGPostgresTransactionIdle);
 }
 
 /// Review Focus 3: a Structure draft on the shown table is saved before the confirmation is asked; one that can't be
@@ -2479,16 +2541,15 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	SPPostgresStructureController *structure = self.document.structureController;
 	NSString *addedColumn = @"SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'sp9_a' AND column_name = 'added_col'";
 
-	// What was saved when the question came; answered once the tab is idle
+	// What was saved when the question came; answered at once (as a quick ⌘D would)
 	NSMutableArray<NSAlert *> *asked = [NSMutableArray array];
 	__block NSString *savedWhenAsked = nil;
 	__block BOOL draftWhenAsked = YES;
-	__block void (^answer)(BOOL) = nil;
 	self.document.confirmationPresenter = ^(NSAlert *alert, void (^completion)(BOOL)) {
 		[asked addObject:alert];
 		savedWhenAsked = [self value:addedColumn on:admin];
 		draftWhenAsked = structure.hasDraftColumn;
-		answer = completion;
+		completion(YES);
 	};
 
 	XCTAssertTrue([sidebar selectTableNamed:@"sp9_a"]);
@@ -2500,13 +2561,11 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	[[structure.columnsView currentEditor] setString:@"added_col"];
 
 	[self.document sidebar:sidebar removeRelations:@[@"sp9_a"]];
+	[self waitForTabAndQuestions];
 	XCTAssertEqual(asked.count, 1u);
 	XCTAssertEqualObjects(savedWhenAsked, @"1");
 	XCTAssertFalse(draftWhenAsked);
 	XCTAssertEqualObjects(asked[0].messageText, @"Delete table 'sp9_a'?");
-	[self waitForTab];
-	answer(YES);
-	[self waitForTab];
 	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
 	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM pg_class WHERE relname = 'sp9_a'" on:admin], @"0");
 	XCTAssertFalse([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"sp9_a"]);
@@ -2524,13 +2583,53 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	[self waitForTab];
 	[[structure.columnsView currentEditor] setString:@"id"];
 	[self.document sidebar:sidebar removeRelations:@[@"sp9_b"]];
-	[self waitForTab];
+	[self waitForTabAndQuestions];
 	XCTAssertEqual(asked.count, 1u);
 	XCTAssertEqual(alerts.count, 1u);
 	XCTAssertTrue(structure.hasDraftColumn);
 	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM pg_class WHERE relname = 'sp9_b'" on:admin], @"1");
 	XCTAssertTrue([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"sp9_b"]);
 	XCTAssertEqualObjects(sidebar.selectedTableName, @"sp9_b");
+}
+
+/// Saving an edit before the question queues a list reload: the question waits until the tab is idle (so a quick
+/// answer isn't refused as busy), and a second request meanwhile is ignored.
+- (void)testConfirmationWaitsForIdleAfterCommit
+{
+	PGPostgresConnection *admin = [self sp9AdminRunning:@[@"CREATE TABLE public.sp9_a (id integer)", @"CREATE TABLE public.sp9_b (id integer)"]];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	SPPostgresStructureController *structure = self.document.structureController;
+	NSMutableArray<NSAlert *> *asked = [NSMutableArray array];
+	__block BOOL busyWhenAsked = YES;
+	self.document.confirmationPresenter = ^(NSAlert *alert, void (^completion)(BOOL)) {
+		[asked addObject:alert];
+		busyWhenAsked = self.document.taskRunner.isBusy;
+		completion(YES);
+	};
+
+	XCTAssertTrue([sidebar selectTableNamed:@"sp9_a"]);
+	[self waitForTab];
+	[self.document viewStructure:nil];
+	[self waitForTab];
+	[structure addColumn:nil];
+	[self waitForTab];
+	[[structure.columnsView currentEditor] setString:@"added_col"];
+
+	[self.document sidebar:sidebar removeRelations:@[@"sp9_b"]];
+	XCTAssertFalse(structure.hasDraftColumn);
+	XCTAssertTrue(self.document.isProcessing, @"saving the column queued a list reload");
+	XCTAssertEqual(asked.count, 0u, @"not asked while busy");
+	[self.document sidebar:sidebar truncateTables:@[@"sp9_a"]];
+
+	[self waitForTabAndQuestions];
+	XCTAssertEqual(asked.count, 1u, @"asked once idle; the second request was ignored");
+	XCTAssertFalse(busyWhenAsked);
+	XCTAssertEqualObjects(asked[0].messageText, @"Delete table 'sp9_b'?");
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.messageText);
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM pg_class WHERE relname = 'sp9_b'" on:admin], @"0");
+	XCTAssertFalse([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"sp9_b"]);
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"sp9_a");
 }
 
 @end

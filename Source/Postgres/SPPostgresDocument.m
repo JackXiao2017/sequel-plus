@@ -247,6 +247,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 	/// An alert that came up while the tab couldn't show it (presented once the tab is active in a visible window)
 	NSAlert *pendingAlert;
+	/// A Truncate or Remove question waiting for the runner to be idle (see -_presentWhenIdle:)
+	void (^pendingConfirmation)(void);
 
 	/// The Users sheet while it is shown (or connecting)
 	SPPostgresUsersController *usersController;
@@ -361,6 +363,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[databasePopup release];
 	[historyControl release];
 	[pendingAlert release];
+	[pendingConfirmation release];
 	[alertPresenter release];
 	[confirmationPresenter release];
 	[connectionProvider release];
@@ -427,6 +430,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[taskDisplay invalidate];
 	[taskDisplay release];
 	taskDisplay = nil;
+	// A question waiting for the previous runner (another database's tables) is not asked
+	[self _dropPendingConfirmation];
 	[taskRunner release];
 	taskRunner = [runner retain];
 
@@ -457,6 +462,9 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	// What isProcessing disables (as MySQL's task start and end revalidate the toolbar)
 	[self _updateHistoryControl];
 	if (!tornDown && [parentWindow toolbar] == toolbar) [toolbar validateVisibleItems];
+
+	// A Truncate or Remove question waiting for the tab to be idle (see -_presentWhenIdle:)
+	if (!processing && pendingConfirmation) [self performSelector:@selector(_presentPendingConfirmation) withObject:nil afterDelay:0];
 }
 
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context
@@ -1693,6 +1701,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	confirmationPresenter = nil;
 	[pendingAlert release];
 	pendingAlert = nil;
+	// A question waiting for the tab to be idle (it retains self)
+	[self _dropPendingConfirmation];
 
 	// The window, its controller and the tab item may go away before this document does
 	parentWindowController = nil;
@@ -1863,23 +1873,80 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 #pragma mark - Truncate and Remove
 
-/// A Truncate or Remove confirmation as MySQL's (critical, the action first, then Cancel).
-- (NSAlert *)_tableActionAlert:(NSString *)action message:(NSString *)message informativeText:(NSString *)informativeText
+/// A Truncate or Remove confirmation as MySQL's (critical; the action first, ⌘ + key, then Cancel, Return).
+- (NSAlert *)_tableActionAlert:(NSString *)action key:(NSString *)key message:(NSString *)message informativeText:(NSString *)informativeText
 {
 	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
 	[alert addButtonWithTitle:action];
 	[alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"cancel button")];
-	[[[alert buttons] objectAtIndex:0] setHasDestructiveAction:YES];
-	[[[alert buttons] objectAtIndex:0] setKeyEquivalent:@"\r"];
-	[[[alert buttons] objectAtIndex:1] setKeyEquivalent:@"\033"];
+	NSButton *actionButton = [[alert buttons] objectAtIndex:0];
+	[actionButton setHasDestructiveAction:YES];
+	[actionButton setKeyEquivalent:key];
+	[actionButton setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+	[[[alert buttons] objectAtIndex:1] setKeyEquivalent:@"\r"];
 	[alert setAlertStyle:NSAlertStyleCritical];
 	[alert setMessageText:message];
 	[alert setInformativeText:informativeText];
 	return alert;
 }
 
-/// "Truncate Table(s)": MySQL's question (after the shown pane's edits are applied), then every row of the tables is
-/// deleted in one TRUNCATE (never CASCADE): all of them or, on an error, none.
+/**
+ * Runs present (a Truncate or Remove question) once the tab's runner is idle: at once if it is, else when processing
+ * ends (see -_updateIsProcessing). Saving an edit before the question may have queued a list reload, and a write
+ * confirmed while it runs would be refused. One question waits at a time (a second is ignored); it is dropped on
+ * teardown and when the runner is replaced.
+ */
+- (void)_presentWhenIdle:(void (^)(void))present
+{
+	if (![taskRunner isBusy]) {
+		present();
+		return;
+	}
+	if (pendingConfirmation) return;
+	pendingConfirmation = [present copy];
+}
+
+/// The waiting question, on the run loop turn after processing ended (not inside the runner's notification).
+- (void)_presentPendingConfirmation
+{
+	if (!pendingConfirmation || tornDown || isProcessing) return;
+	void (^present)(void) = pendingConfirmation;
+	pendingConfirmation = nil;
+	present();
+	[present release];
+}
+
+- (void)_dropPendingConfirmation
+{
+	[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(_presentPendingConfirmation) object:nil];
+	[pendingConfirmation release];
+	pendingConfirmation = nil;
+}
+
+/// Whether a waiting question can still be asked: nothing changed under it (the tab, a sheet, the schema, the names listed).
+- (BOOL)_canAskAbout:(NSArray *)names inSchema:(NSString *)schema sections:(NSArray *)sections
+{
+	if (tornDown || !parentWindow || [parentWindow attachedSheet] || isProcessing) return NO;
+	if (![schema isEqualToString:[sidebar selectedSchema]]) return NO;
+	NSMutableArray *listed = [NSMutableArray array];
+	for (NSString *section in sections) [listed addObjectsFromArray:[sidebar itemTitlesInSection:section] ?: @[]];
+	for (NSString *name in names) {
+		if (![listed containsObject:name]) return NO;
+	}
+	return YES;
+}
+
+/// The change was confirmed while a load had started meanwhile: nothing was done, and the user is told.
+- (void)_presentBusyRefusal:(NSString *)message
+{
+	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+	[alert setAlertStyle:NSAlertStyleWarning];
+	[alert setMessageText:message];
+	[self _presentAlert:alert];
+}
+
+/// "Truncate Table(s)": MySQL's question (after the shown pane's edits are applied, once the tab is idle), then every
+/// row of the tables is deleted in one TRUNCATE (never CASCADE): all of them or, on an error, none.
 - (void)sidebar:(SPPostgresSidebarController *)theSidebar truncateTables:(NSArray<NSString *> *)tables
 {
 	if (tornDown || ![tables count] || isProcessing || !parentWindow || [parentWindow attachedSheet]) return;
@@ -1898,33 +1965,40 @@ NSString * const SPPostgresPaneExtension = @"extension";
 		message = NSLocalizedString(@"Truncate selected tables?", @"truncate tables message");
 		informativeText = NSLocalizedString(@"Are you sure you want to delete ALL records in the selected tables? This operation cannot be undone.", @"truncate tables informative message");
 	}
-	NSAlert *alert = [self _tableActionAlert:NSLocalizedString(@"Truncate", @"truncate button") message:message informativeText:informativeText];
+	NSAlert *alert = [self _tableActionAlert:NSLocalizedString(@"Truncate", @"truncate button") key:@"t" message:message informativeText:informativeText];
 
-	// The document stays alive until the answer comes (a sheet's or a presenter's)
-	[self retain];
-	[self _confirm:alert completion:^(BOOL confirmed) {
-		if (confirmed && !tornDown) [self _truncateTables:names inSchema:schema];
-		[self release];
+	[self _presentWhenIdle:^{
+		if (![self _canAskAbout:names inSchema:schema sections:@[@"TABLES"]]) return;
+		// The document stays alive until the answer comes (a sheet's or a presenter's)
+		[self retain];
+		[self _confirm:alert completion:^(BOOL confirmed) {
+			if (confirmed && !tornDown) [self _truncateTables:names inSchema:schema];
+			[self release];
+		}];
 	}];
 }
 
 - (void)_truncateTables:(NSArray *)tables inSchema:(NSString *)schema
 {
-	if ([self _refuseWriteWhileBusy]) return;
+	if ([self _refuseWriteWhileBusy]) {
+		[self _presentBusyRefusal:NSLocalizedString(@"The tab is busy, so nothing was truncated.", @"PostgreSQL truncate refused while the tab is busy")];
+		return;
+	}
 	NSError *error = nil;
 	if (![SPPostgresTableActions truncateTables:tables inSchema:schema connection:connection error:&error]) {
 		[self _presentTableActionError:error title:NSLocalizedString(@"Error truncating table", @"error truncating table message")];
 		return;
 	}
 
-	// The rows (and the sizes and row estimate) are gone
-	contentNeedsReset = YES;
-	infoNeedsReset = YES;
+	// The rows (and the sizes and row estimate) are gone from Content and Table Info if they show one of the tables
+	if ([schema isEqualToString:[contentController schema]] && [tables containsObject:[contentController table] ?: @""]) contentNeedsReset = YES;
+	if ([schema isEqualToString:[infoController schema]] && [tables containsObject:[infoController table] ?: @""]) infoNeedsReset = YES;
 	[self _relationsDidChangeInSchema:schema];
 }
 
-/// "Delete Table/View/Tables/Views/Items": MySQL's question (after the shown pane's edits are applied), then the
-/// tables and views are dropped in one structure change (never CASCADE): all of them or, on an error, none.
+/// "Delete Table/View/Tables/Views/Items": MySQL's question (after the shown pane's edits are applied, once the tab
+/// is idle), then the tables and views are dropped in one structure change (never CASCADE): all of them or, on an
+/// error, none.
 - (void)sidebar:(SPPostgresSidebarController *)theSidebar removeRelations:(NSArray<NSString *> *)names
 {
 	if (tornDown || ![names count] || isProcessing || !parentWindow || [parentWindow attachedSheet]) return;
@@ -1953,13 +2027,16 @@ NSString * const SPPostgresPaneExtension = @"extension";
 		message = [NSString stringWithFormat:NSLocalizedString(@"Delete selected %@?", @"delete tables/views message"), kinds];
 		informativeText = [NSString stringWithFormat:NSLocalizedString(@"Are you sure you want to delete the selected %@? This operation cannot be undone.", @"delete tables/views informative message"), kinds];
 	}
-	NSAlert *alert = [self _tableActionAlert:NSLocalizedString(@"Delete", @"delete button") message:message informativeText:informativeText];
+	NSAlert *alert = [self _tableActionAlert:NSLocalizedString(@"Delete", @"delete button") key:@"d" message:message informativeText:informativeText];
 
-	// The document stays alive until the answer comes (a sheet's or a presenter's)
-	[self retain];
-	[self _confirm:alert completion:^(BOOL confirmed) {
-		if (confirmed && !tornDown) [self _removeRelations:relations inSchema:schema];
-		[self release];
+	[self _presentWhenIdle:^{
+		if (![self _canAskAbout:relations inSchema:schema sections:@[@"TABLES", @"VIEWS"]]) return;
+		// The document stays alive until the answer comes (a sheet's or a presenter's)
+		[self retain];
+		[self _confirm:alert completion:^(BOOL confirmed) {
+			if (confirmed && !tornDown) [self _removeRelations:relations inSchema:schema];
+			[self release];
+		}];
 	}];
 }
 
@@ -1970,7 +2047,10 @@ NSString * const SPPostgresPaneExtension = @"extension";
  */
 - (void)_removeRelations:(NSArray *)names inSchema:(NSString *)schema
 {
-	if ([self _refuseWriteWhileBusy]) return;
+	if ([self _refuseWriteWhileBusy]) {
+		[self _presentBusyRefusal:NSLocalizedString(@"The tab is busy, so nothing was deleted.", @"PostgreSQL delete tables refused while the tab is busy")];
+		return;
+	}
 	NSError *error = nil;
 	if (![SPPostgresTableActions dropRelations:names inSchema:schema connection:connection error:&error]) {
 		[self _presentTableActionError:error title:NSLocalizedString(@"Error deleting table", @"error deleting table message")];
@@ -1998,13 +2078,23 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	}]];
 }
 
-/// A Truncate or Remove error as MySQL's: its title, then the server's message; objects that depend on a table are
-/// listed one per line (the server's hint, CASCADE, is not offered).
+/**
+ * A Truncate or Remove error as MySQL's: its title, then the server's message without its HINT (which suggests
+ * CASCADE, never offered here); objects that depend on a table are listed one per line after the message.
+ */
 - (void)_presentTableActionError:(NSError *)error title:(NSString *)title
 {
-	NSString *text = [error localizedDescription] ?: @"";
+	NSString *hintLabel = NSLocalizedString(@"HINT:", @"Postgres query: error hint label");
+	NSMutableArray *lines = [NSMutableArray array];
+	for (NSString *line in [[error localizedDescription] ?: @"" componentsSeparatedByString:@"\n"]) {
+		// The HINT is the message's last part (SPPostgresErrorDetailLines)
+		if ([line hasPrefix:hintLabel]) break;
+		[lines addObject:line];
+	}
+	NSString *text = [lines componentsJoinedByString:@"\n"];
+
 	if ([[error domain] isEqualToString:SPPostgresErrorDomain] && [error code] == SPPostgresErrorHasDependents) {
-		NSString *serverMessage = [[text componentsSeparatedByString:@"\n"] firstObject];
+		NSString *serverMessage = [lines firstObject] ?: @"";
 		NSString *dependents = [[[error userInfo] objectForKey:SPPostgresDependentsErrorKey] componentsJoinedByString:@"\n"];
 		text = [dependents length] ? [NSString stringWithFormat:@"%@\n\n%@", serverMessage, dependents] : serverMessage;
 	}
