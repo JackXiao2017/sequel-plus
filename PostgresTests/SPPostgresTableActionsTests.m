@@ -22,6 +22,8 @@ static NSString * const SPQuotedOrders = @"\"Sales Data\".\"Orders \"\"x\"\" 202
 		@"DROP TABLE IF EXISTS public.sp9_a, public.sp9_b, public.sp9_base, public.sp9_other, public.sp9_made, public.sp9_txn",
 		@"DROP TABLE IF EXISTS public.\"orders \"\"x\"\" 2026\"",
 		@"DROP TABLE IF EXISTS \"Sales Data\".\"Orders \"\"x\"\" 2026\"",
+		@"DROP TABLE IF EXISTS public.\"Orders \"\"x\"\" 2026\"",
+		@"DROP SCHEMA IF EXISTS \"sp9_a\"\"b\"",
 	];
 }
 
@@ -196,7 +198,9 @@ static NSString * const SPQuotedOrders = @"\"Sales Data\".\"Orders \"\"x\"\" 202
 	[self forEachServer:^(PGPostgresConnection *connection, NSNumber *port) {
 		NSString *name = @"Orders \"x\" 2026";
 		NSError *error = nil;
-		// the decoy: the same name in lower case, in public, with a row
+		// decoys in public: the same name in lower case and with its exact case, each with a row
+		[self run:@"CREATE TABLE public.\"Orders \"\"x\"\" 2026\" (id integer)" on:connection];
+		[self run:@"INSERT INTO public.\"Orders \"\"x\"\" 2026\" VALUES (1)" on:connection];
 		[self run:@"CREATE TABLE public.\"orders \"\"x\"\" 2026\" (id integer)" on:connection];
 		[self run:@"INSERT INTO public.\"orders \"\"x\"\" 2026\" VALUES (1)" on:connection];
 
@@ -213,6 +217,8 @@ static NSString * const SPQuotedOrders = @"\"Sales Data\".\"Orders \"\"x\"\" 202
 		XCTAssertTrue(dropped, @"%@", error);
 		XCTAssertFalse([self exists:SPQuotedOrders on:connection]);
 		XCTAssertTrue([self exists:@"public.\"orders \"\"x\"\" 2026\"" on:connection]);
+		XCTAssertTrue([self exists:@"public.\"Orders \"\"x\"\" 2026\"" on:connection]);
+		XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.\"Orders \"\"x\"\" 2026\"" on:connection], @"1");
 		XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.\"orders \"\"x\"\" 2026\"" on:connection], @"1");
 	}];
 }
@@ -242,6 +248,45 @@ static NSString * const SPQuotedOrders = @"\"Sales Data\".\"Orders \"\"x\"\" 202
 		[self run:@"ROLLBACK" on:connection];
 		XCTAssertTrue([self exists:@"public.sp9_other" on:connection]);
 		XCTAssertFalse([self exists:@"public.sp9_made" on:connection]);
+	}];
+}
+
+- (void)testActionsQuoteSchemaWithQuote
+{
+	[self forEachServer:^(PGPostgresConnection *connection, NSNumber *port) {
+		[self run:@"CREATE SCHEMA \"sp9_a\"\"b\"" on:connection];
+		NSError *error = nil;
+		BOOL created = [SPPostgresTableActions createTableNamed:@"t1" inSchema:@"sp9_a\"b" connection:connection error:&error];
+		XCTAssertTrue(created, @"%d: %@", port.intValue, error);
+		[self run:@"INSERT INTO \"sp9_a\"\"b\".t1 VALUES (1), (2)" on:connection];
+		BOOL truncated = [SPPostgresTableActions truncateTables:@[@"t1"] inSchema:@"sp9_a\"b" connection:connection error:&error];
+		XCTAssertTrue(truncated, @"%@", error);
+		XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM \"sp9_a\"\"b\".t1" on:connection], @"0");
+		BOOL dropped = [SPPostgresTableActions dropRelations:@[@"t1"] inSchema:@"sp9_a\"b" connection:connection error:&error];
+		XCTAssertTrue(dropped, @"%@", error);
+		XCTAssertFalse([self exists:@"\"sp9_a\"\"b\".t1" on:connection]);
+		[self run:@"DROP SCHEMA \"sp9_a\"\"b\"" on:connection];
+	}];
+}
+
+- (void)testFailedDropInOpenTransactionKeepsTransactionUsable
+{
+	[self forEachServer:^(PGPostgresConnection *connection, NSNumber *port) {
+		[self run:@"CREATE TABLE public.sp9_base (id integer)" on:connection];
+		[self run:@"CREATE VIEW public.sp9_dep AS SELECT id FROM public.sp9_base" on:connection];
+
+		[self run:@"BEGIN" on:connection];
+		NSError *error = nil;
+		BOOL done = [SPPostgresTableActions dropRelations:@[@"sp9_base"] inSchema:@"public" connection:connection error:&error];
+		XCTAssertFalse(done);
+		XCTAssertEqual(error.code, SPPostgresErrorHasDependents);
+		// the transaction is open and not aborted
+		XCTAssertEqualObjects([self value:@"SELECT 1::text" on:connection], @"1");
+		[self run:@"CREATE TABLE public.sp9_txn (id integer)" on:connection];
+		[self run:@"ROLLBACK" on:connection];
+		XCTAssertTrue([self exists:@"public.sp9_base" on:connection]);
+		// the table made inside the transaction went with the rollback: it had been open all along
+		XCTAssertFalse([self exists:@"public.sp9_txn" on:connection]);
 	}];
 }
 

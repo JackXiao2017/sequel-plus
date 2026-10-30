@@ -286,16 +286,9 @@ static void SPTransferRollBack(PGPostgresConnection *connection)
 		dropped = SPPostgresExecuteWithDetails(target, sql, nil, &failure) != nil;
 	}
 	if (!dropped && [[failure userInfo][SPPostgresSQLStateErrorKey] isEqualToString:@"2BP01"]) {
-		// Read the DETAIL before the ROLLBACK
-		NSString *detail = [[[target lastError] errorDetailMessage] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-		NSMutableArray *dependents = [NSMutableArray array];
-		for (NSString *line in [detail ?: @"" componentsSeparatedByString:@"\n"]) {
-			NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-			if ([trimmed length]) [dependents addObject:trimmed];
-		}
-		failure = SPPostgresMakeError(SPPostgresErrorHasDependents,
-									  NSLocalizedString(@"Objects on the target that the transfer doesn't replace depend on objects it would replace.", @"Postgres transfer: overwrite blocked by dependents"),
-									  @{SPPostgresDependentsErrorKey: dependents, SPPostgresSQLStateErrorKey: @"2BP01"});
+		// Reads the DETAIL before the ROLLBACK
+		failure = SPPostgresDependentsError(target, failure,
+			NSLocalizedString(@"Objects on the target that the transfer doesn't replace depend on objects it would replace.", @"Postgres transfer: overwrite blocked by dependents"));
 	}
 	SPTransferRollBack(target);
 	if (!dropped && ![self _report:SPPostgresTransferChecking fraction:0 detail:nil]) failure = [self _cancelledError];

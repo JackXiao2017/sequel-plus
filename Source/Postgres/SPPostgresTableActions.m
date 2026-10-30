@@ -49,7 +49,7 @@ static NSString *SPPostgresQualifiedName(NSString *schema, NSString *name)
 
 			if (!keyword) {
 				if (bodyError) {
-					NSString *message = [NSString stringWithFormat:NSLocalizedString(@"\"%@\" can't be removed: it is not a table or view in schema \"%@\".", @"Postgres table actions: name not found or not removable"), name, schema];
+					NSString *message = [NSString stringWithFormat:NSLocalizedString(@"\"%@\" can't be removed: it is not a table or view in schema \"%@\".", @"Postgres table actions: name not found or not removable"), name, schema ?: @""];
 					*bodyError = SPPostgresMakeError(SPPostgresErrorQueryFailed, message, nil);
 				}
 				return NO;
@@ -61,17 +61,8 @@ static NSString *SPPostgresQualifiedName(NSString *schema, NSString *name)
 			NSError *dropError = nil;
 			if (SPPostgresExecuteWithDetails(connection, sql, nil, &dropError)) continue;
 
-			if ([[dropError userInfo][SPPostgresSQLStateErrorKey] isEqualToString:@"2BP01"]) {
-				// The DETAIL lists the dependents; it is read now, before the savepoint or transaction is rolled back
-				NSString *detail = [[[connection lastError] errorDetailMessage] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-				NSMutableArray *dependents = [NSMutableArray array];
-				for (NSString *line in [detail ?: @"" componentsSeparatedByString:@"\n"]) {
-					NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-					if ([trimmed length]) [dependents addObject:trimmed];
-				}
-				dropError = SPPostgresMakeError(SPPostgresErrorHasDependents, [dropError localizedDescription],
-												@{SPPostgresDependentsErrorKey: dependents, SPPostgresSQLStateErrorKey: @"2BP01"});
-			}
+			// The DETAIL lists the dependents; it is read now, before the savepoint or transaction is rolled back
+			dropError = SPPostgresDependentsError(connection, dropError, nil);
 			if (bodyError) *bodyError = dropError;
 			return NO;
 		}

@@ -404,17 +404,8 @@ static NSArray *SPPostgresExtensionSortedVersions(NSArray *versions)
 		NSError *dropError = nil;
 		if (SPPostgresExecuteWithDetails(_connection, sql, nil, &dropError)) return YES;
 
-		if ([[dropError userInfo][SPPostgresSQLStateErrorKey] isEqualToString:@"2BP01"]) {
-			// Read the DETAIL now, before the savepoint or transaction is rolled back
-			NSString *detail = [[[_connection lastError] errorDetailMessage] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-			NSMutableArray *dependents = [NSMutableArray array];
-			for (NSString *line in [detail ?: @"" componentsSeparatedByString:@"\n"]) {
-				NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-				if ([trimmed length]) [dependents addObject:trimmed];
-			}
-			NSString *message = [NSString stringWithFormat:NSLocalizedString(@"\"%@\" can't be dropped because other objects depend on it.", @"Postgres extensions: extension has dependents"), name];
-			dropError = SPPostgresMakeError(SPPostgresErrorHasDependents, message, @{SPPostgresDependentsErrorKey: dependents, SPPostgresSQLStateErrorKey: @"2BP01"});
-		}
+		NSString *message = [NSString stringWithFormat:NSLocalizedString(@"\"%@\" can't be dropped because other objects depend on it.", @"Postgres extensions: extension has dependents"), name];
+		dropError = SPPostgresDependentsError(_connection, dropError, message);
 		if (bodyError) *bodyError = dropError;
 		return NO;
 	}, error);
