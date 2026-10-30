@@ -3,6 +3,7 @@
 #import "SPPostgresConsoleLogger.h"
 #import "SPPostgresTableData.h"
 #import "SPPostgresTaskRunner.h"
+#import "SPPostgresTextView.h"
 #import "SPTableView.h"
 #import "SPButtonBar.h"
 #import "SPSplitView.h"
@@ -777,7 +778,13 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[editorScrollView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 
 	NSSize contentSize = [editorScrollView contentSize];
-	editor = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, contentSize.width, contentSize.height)];
+	// MySQL's editor (SPTextView) with Postgres colouring; it reads SPTextView's preferences as it is set up
+	SPPostgresTextView *textView = [[SPPostgresTextView alloc] initWithFrame:NSMakeRect(0, 0, contentSize.width, contentSize.height) scrollView:editorScrollView];
+	editor = textView;
+	[textView setAutoindent:[defaults boolForKey:SPCustomQueryAutoIndent]];
+	[textView setAutopair:[defaults boolForKey:SPCustomQueryAutoPairCharacters]];
+	[textView setAutouppercaseKeywords:[defaults boolForKey:SPCustomQueryAutoUppercaseKeywords]];
+	[textView setAutohelp:[defaults boolForKey:SPCustomQueryUpdateAutoHelp]];
 	[editor setMinSize:NSMakeSize(0, contentSize.height)];
 	[editor setMaxSize:NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX)];
 	[editor setVerticallyResizable:YES];
@@ -801,10 +808,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[editor setTextContainerInset:NSMakeSize(2, 4)];
 	NSFont *editorFont = [self _editorFont];
 	[editor setFont:editorFont];
-	[editor setTypingAttributes:@{NSFontAttributeName: editorFont, NSForegroundColorAttributeName: [NSColor textColor]}];
+	[editor setTypingAttributes:@{NSFontAttributeName: editorFont, NSForegroundColorAttributeName: [textView otherTextColor] ?: [NSColor textColor]}];
 	// The run button's title follows the caret (see -textViewDidChangeSelection:)
 	[editor setDelegate:self];
-	[editorScrollView setDocumentView:editor];
 	[editorSplitView addSubview:editorScrollView];
 
 	// Top bar and results
