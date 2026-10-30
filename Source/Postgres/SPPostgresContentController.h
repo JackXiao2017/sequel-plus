@@ -65,7 +65,7 @@ __attribute__((visibility("default")))
 /// paginationView and the focus in its page field. Needs the view in a window.
 - (IBAction)togglePagination:(id)sender;
 /// Closes the popover and loads that page with the current filter and sort ("Loading page %lu..."). 0 is page 1;
-/// a page past the end shows the last one.
+/// a page past the end shows the last one. Does nothing while the runner is busy.
 - (void)goToPage:(NSUInteger)page;
 
 /// The popover's content, on defaults (made again when defaults change).

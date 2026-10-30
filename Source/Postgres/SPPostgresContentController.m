@@ -335,6 +335,9 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 
 	// The runner changes busy on the main thread
 	[self _updateBottomBar];
+
+	// A load started while Jump to page is open: it closes (its Go would queue another load)
+	if ([taskRunner isBusy] && [paginationPopover isShown]) [self _setPaginationShown:NO];
 }
 
 #pragma mark - Building the view
@@ -1099,8 +1102,8 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 - (IBAction)togglePagination:(id)sender
 {
 	if (invalidated) return;
-	// The popover needs the button on screen
-	[self _setPaginationShown:![paginationPopover isShown] && [paginationButton window]];
+	// The popover needs the button on screen, and doesn't open while the runner is busy (its button is disabled)
+	[self _setPaginationShown:![paginationPopover isShown] && [paginationButton window] && ![taskRunner isBusy]];
 }
 
 /// MySQL's -setPaginationViewVisibility:.
@@ -1141,7 +1144,8 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 
 - (void)goToPage:(NSUInteger)page
 {
-	if (invalidated) return;
+	// Nothing is loaded while the runner is busy (the popover closes when it turns busy)
+	if (invalidated || [taskRunner isBusy]) return;
 	if ([paginationPopover isShown]) [self _setPaginationShown:NO];
 	[self _loadPage:MAX(page, 1u)];
 }
@@ -1428,10 +1432,11 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 
 #pragma mark - Table view delegate
 
-/// In edit mode every cell opens the field editor sheet (read-only where the cell can't be edited) instead.
+/// In edit mode every cell opens the field editor sheet (read-only where the cell can't be edited) instead. While the
+/// runner is busy nothing is edited and no sheet opens (MySQL: NO while the document is working).
 - (BOOL)tableView:(NSTableView *)theTableView shouldEditTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
 {
-	if (invalidated) return NO;
+	if (invalidated || [taskRunner isBusy]) return NO;
 	if ([self _editsInSheet]) {
 		[self _editInSheetTableColumn:tableColumn row:rowIndex];
 		return NO;
@@ -1458,7 +1463,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
  */
 - (void)_editInSheetTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
 {
-	if (invalidated || fieldEditorPending) return;
+	if (invalidated || fieldEditorPending || [taskRunner isBusy]) return;
 	if (rowIndex < 0 || (NSUInteger)rowIndex >= [rows count]) return;
 	SPPostgresColumn *column = [self _columnForTableColumn:tableColumn];
 	if (!column) return;

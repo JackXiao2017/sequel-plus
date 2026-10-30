@@ -69,6 +69,7 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 @property (strong) PGPostgresConnection *other;
 @property (strong) NSMutableArray<NSAlert *> *alerts;
 @property (strong) NSUserDefaults *scratch;
+@property BOOL fieldEditorPrefsGuarded;
 @end
 
 @implementation SPPostgresContentBarTests
@@ -101,7 +102,8 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 {
 	self.continueAfterFailure = NO;
 	[SPPostgresTestServers loadFixtureNamed:@"content" onPort:SPContentBarTestPort];
-	[self overridePrefs:@{SPLimitResults: @YES, SPLimitResultsValue: @1000}];
+	// Edit mode off (in place), whatever the saved preference; the sheet mode tests unpin it for their scratch suite
+	[self overridePrefs:@{SPLimitResults: @YES, SPLimitResultsValue: @1000, SPEditInSheetEnabled: @NO}];
 
 	SPPostgresFavorite *favorite = [[SPPostgresFavorite alloc] init];
 	favorite.name = @"pg18 content bar";
@@ -488,9 +490,11 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 
 #pragma mark - Edit mode (field editor sheet)
 
-/// Scratch preferences (never the saved ones), with the edit mode preference set; removed in tearDown.
+/// Scratch preferences (never the saved ones), with the edit mode preference set; removed in tearDown. The edit mode
+/// pinned in the argument domain by setUp (which shadows every defaults instance) is unpinned for this test.
 - (NSUserDefaults *)scratchDefaultsInSheetMode:(BOOL)sheetMode
 {
+	[self unpinPrefs:@[SPEditInSheetEnabled]];
 	if (!self.scratch) {
 		self.scratch = [[NSUserDefaults alloc] initWithSuiteName:SPContentBarScratchSuite];
 		[self.scratch removePersistentDomainForName:SPContentBarScratchSuite];
@@ -548,6 +552,7 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 
 - (void)testEditModeButtonReflectsAndWritesSharedPreference
 {
+	[self unpinPrefs:@[SPEditInSheetEnabled]]; // the saved value is read below, not setUp's pin
 	NSUserDefaults *standard = [NSUserDefaults standardUserDefaults];
 	id standardBefore = [standard objectForKey:SPEditInSheetEnabled];
 
@@ -727,9 +732,36 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.items"], @31);
 }
 
+/**
+ * MySQL's field editor uses the saved preferences: its sheet saves its frame ("NSWindow Frame SPFieldEditorTextSheet",
+ * or ...BlobSheet) and its end saves the spell checking choice. Their saved values (or their absence) are put back
+ * after this test, once, whatever the sheets wrote.
+ */
+- (void)guardFieldEditorPrefs
+{
+	if (self.fieldEditorPrefsGuarded) return;
+	self.fieldEditorPrefsGuarded = YES;
+
+	NSUserDefaults *standard = [NSUserDefaults standardUserDefaults];
+	NSString *domainName = [[NSBundle mainBundle] bundleIdentifier];
+	NSArray<NSString *> *keys = @[@"NSWindow Frame SPFieldEditorTextSheet", @"NSWindow Frame SPFieldEditorBlobSheet", @"BlobTextEditorSpellCheckingEnabled"];
+	NSDictionary *saved = [standard persistentDomainForName:domainName] ?: @{};
+	NSDictionary *before = [saved dictionaryWithValuesForKeys:keys]; // NSNull where absent
+	[self addTeardownBlock:^{
+		for (NSString *key in keys) {
+			id value = [before objectForKey:key];
+			if (value == [NSNull null]) [standard removeObjectForKey:key];
+			else [standard setObject:value forKey:key];
+		}
+		NSDictionary *after = [[standard persistentDomainForName:domainName] ?: @{} dictionaryWithValuesForKeys:keys];
+		XCTAssertEqualObjects(after, before, @"the saved preferences are as they were");
+	}];
+}
+
 /// Opens MySQL's field editor sheet (no presenter) on a cell, then ends it as its OK button would, before its result.
 - (void)openAndEndDefaultSheetOn:(SPPostgresContentController *)content row:(NSInteger)row column:(NSString *)name
 {
+	[self guardFieldEditorPrefs];
 	NSWindow *window = [content.tableView window];
 	[window orderFront:nil]; // sheets attach to a window on screen (tearDown orders it out)
 	XCTAssertNil(window.attachedSheet);
@@ -766,6 +798,35 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 	[content processFieldEditorResult:nil contextInfo:nil];
 	XCTAssertEqualObjects([self serverValue:@"SELECT name FROM content_test.items WHERE id = 1"], @"item 1");
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
+}
+
+- (void)testSheetModeOpensNothingWhileBusy
+{
+	[self selectTable:@"items"];
+	SPPostgresContentController *content = self.content;
+	content.defaults = [self scratchDefaultsInSheetMode:YES];
+	NSMutableArray<SPContentBarSheetCall *> *calls = [self recordSheetsOf:content];
+	SPPostgresTaskRunner *runner = content.taskRunner;
+	XCTAssertFalse(runner.isInline);
+
+	// MySQL edits nothing (and opens no sheet) while the document is working: not even a read-only sheet here
+	[SPPostgresTestServers queueSleep:2 onRunner:runner];
+	XCTAssertTrue(runner.isBusy);
+	XCTAssertFalse([self content:content shouldEditRow:0 column:@"name"]);
+	XCTAssertFalse([self content:content shouldEditRow:1 column:@"id"]);
+	XCTAssertTrue(runner.isBusy);
+	XCTAssertEqual(calls.count, 0u, @"no sheet while busy");
+	XCTAssertNil([[[content view] window] attachedSheet]);
+
+	// Once idle the sheet opens
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	XCTAssertFalse([self content:content shouldEditRow:0 column:@"name"]);
+	XCTAssertEqual(calls.count, 1u);
+	XCTAssertEqualObjects(calls[0].value, @"item 1");
+	XCTAssertTrue(calls[0].editable);
+	calls[0].completion(nil);
+	XCTAssertFalse(runner.isBusy);
+	XCTAssertEqual(self.alerts.count, 0u);
 }
 
 - (void)testInlineEditUnchangedWhenSheetModeOff
@@ -1201,6 +1262,53 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 	// Not without a table
 	[content showTable:nil inSchema:nil];
 	XCTAssertFalse([content.paginationButton isEnabled]);
+}
+
+- (void)testPaginationClosesAndLoadsNothingWhileBusy
+{
+	[self unpinPrefs:@[SPLimitResults, SPLimitResultsValue]];
+	NSUserDefaults *scratch = [self scratchDefaultsWithFilterBarChoiceUnset];
+	[scratch setBool:YES forKey:SPLimitResults];
+	[scratch setInteger:7 forKey:SPLimitResultsValue];
+	[self selectTable:@"items"];
+	SPPostgresContentController *content = self.content;
+	SPPostgresTaskRunner *runner = content.taskRunner;
+	XCTAssertFalse(runner.isInline, @"the tab's runner");
+	content.defaults = scratch;
+	[content refresh:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	XCTAssertEqual(content.pageCount, 5u);
+	XCTAssertEqual(content.currentPage, 1u);
+	[[[content view] window] orderFront:nil]; // the popover shows on a window on screen (tearDown orders it out)
+
+	[content togglePagination:content.paginationButton];
+	NSPopover *popover = content.paginationPopover;
+	XCTAssertTrue([popover isShown]);
+	XCTAssertTrue([content.paginationView.goButton isEnabled]);
+
+	// A task starts on the tab's runner while it is open: it closes
+	[SPPostgresTestServers queueSleep:3 onRunner:runner];
+	XCTAssertTrue(runner.isBusy);
+	XCTAssertTrue([self spinUntil:^BOOL{ return ![popover isShown]; } timeout:2]);
+	XCTAssertEqual([content.paginationButton state], NSControlStateValueOff);
+	XCTAssertEqual([content.paginationButton image], [NSImage imageNamed:@"button_pagination"]);
+
+	// Still busy: it doesn't open again, and Go's page (goToPage:) queues no load
+	XCTAssertTrue(runner.isBusy);
+	[content togglePagination:content.paginationButton];
+	XCTAssertFalse([popover isShown]);
+	[content.paginationView setPage:3];
+	[content goToPage:3];
+	XCTAssertTrue(runner.isBusy);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	XCTAssertEqual(content.currentPage, 1u, @"no page loaded after the task");
+	XCTAssertEqualObjects(content.countText, @"Rows 1 - 7 of 30 from table");
+
+	// Idle: Go works again
+	[content goToPage:3];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
+	XCTAssertEqual(content.currentPage, 3u);
+	XCTAssertEqual(self.alerts.count, 0u);
 }
 
 @end
