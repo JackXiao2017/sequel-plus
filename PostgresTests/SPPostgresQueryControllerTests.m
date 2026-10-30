@@ -768,7 +768,8 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	NSMutableArray *views = [NSMutableArray arrayWithObject:[self.document.sidebar view]];
 	while (views.count && !schemaPopup) {
 		NSView *view = views.lastObject; [views removeLastObject];
-		if ([view isKindOfClass:[NSPopUpButton class]]) schemaPopup = (NSPopUpButton *)view;
+		// Not the table list bar's gear pop-up
+		if ([view isKindOfClass:[NSPopUpButton class]] && view != (NSView *)self.document.sidebar.gearButton) schemaPopup = (NSPopUpButton *)view;
 		[views addObjectsFromArray:view.subviews];
 	}
 	XCTAssertTrue([[schemaPopup itemTitles] containsObject:@"content_test_made"], @"%@", [schemaPopup itemTitles]);
