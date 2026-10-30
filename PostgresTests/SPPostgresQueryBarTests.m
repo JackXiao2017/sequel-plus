@@ -195,6 +195,7 @@ static NSString * const SPQueryBarScratchSuite = @"SPPostgresStage11Tests";
 	XCTAssertEqual([query.runButton superview], topBar);
 	XCTAssertTrue([query.runButton isKindOfClass:NSClassFromString(@"SPComboPopupButton")]);
 	XCTAssertTrue([query.runButton pullsDown]);
+	XCTAssertEqual([query.runButton lineOffset], 15u, @"SPComboPopupButton's small-control offset");
 
 	// The menus: the hidden first item only (later tasks fill them)
 	NSMenuItem *gearItem = [[query.gearButton menu] itemAtIndex:0];
@@ -239,6 +240,7 @@ static NSString * const SPQueryBarScratchSuite = @"SPPostgresStage11Tests";
 	XCTAssertFalse([outer isVertical]);
 	XCTAssertEqual([outer dividerStyle], NSSplitViewDividerStyleThin);
 	XCTAssertEqual([[outer subviews] count], 2u);
+	XCTAssertTrue(NSIsEmptyRect([[outer delegate] splitView:outer effectiveRect:NSMakeRect(0, 100, rootWidth, 1) forDrawnRect:NSMakeRect(0, 100, rootWidth, 1) ofDividerAtIndex:0]), @"the info pane's divider can't be dragged");
 
 	// Images, tooltips and keys (as MySQL's)
 	XCTAssertEqualObjects([[query.infoPaneButton image] name], @"button_pane_hide");
@@ -277,6 +279,7 @@ static NSString * const SPQueryBarScratchSuite = @"SPPostgresStage11Tests";
 - (void)testRunMenuItemsAndSwitchDefault
 {
 	SPPostgresQueryController *query = self.query;
+	id standardBefore = [[NSUserDefaults standardUserDefaults] objectForKey:SPQueryBarPrimaryRunsAllKey];
 	NSMenu *menu = [query.runButton menu];
 	XCTAssertEqualObjects([self titlesOfMenu:menu], (@[@"Run Current", @"Run Current Query", @"<separator>", @"Run All Queries", @"Switch Default"]));
 	XCTAssertTrue([[menu itemAtIndex:0] isHidden]);
@@ -306,6 +309,16 @@ static NSString * const SPQueryBarScratchSuite = @"SPPostgresStage11Tests";
 	[query.runButton performClick:nil];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:query.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self columnTitles], @[@"two"]);
+
+	// The keys follow the same defaults: ⌘R runs All, ⌥⌘R runs Current (the saved preference is untouched)
+	XCTAssertEqualObjects([[NSUserDefaults standardUserDefaults] objectForKey:SPQueryBarPrimaryRunsAllKey], standardBefore);
+	[self setSQL:@"SELECT 1 AS one; SELECT 2 AS two"];
+	XCTAssertTrue([self pressKey:@"r" flags:NSEventModifierFlagCommand | NSEventModifierFlagOption]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:query.taskRunner timeout:30]);
+	XCTAssertEqualObjects([self columnTitles], @[@"one"], @"⌥⌘R: Run Current");
+	XCTAssertTrue([self pressKey:@"r" flags:NSEventModifierFlagCommand]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:query.taskRunner timeout:30]);
+	XCTAssertEqualObjects([self columnTitles], @[@"two"], @"⌘R: Run All");
 
 	// And back
 	[query switchDefaultQueryAction:nil];

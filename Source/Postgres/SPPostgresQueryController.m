@@ -20,6 +20,9 @@ static const CGFloat SPPostgresQueryMinPaneHeight = 100;
 static const NSInteger SPPostgresQueryPrimaryRunTag = 2;
 static const NSInteger SPPostgresQuerySecondaryRunTag = 1;
 
+// SPComboPopupButton's divider offset for a small control (kSPComboPopupButtonLineOffsetSmall, SPComboPopupButton.m:34)
+static const NSUInteger SPPostgresQueryRunButtonSmallLineOffset = 15;
+
 static void *SPPostgresQueryRunnerContext = &SPPostgresQueryRunnerContext;
 
 // Column widths fitted to the header and the first rows, as the Content view's
@@ -52,10 +55,10 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 			BOOL primary = (flags == NSEventModifierFlagCommand);
 			BOOL secondary = (flags == (NSEventModifierFlagCommand | NSEventModifierFlagOption));
 			if (primary || secondary) {
-				BOOL primaryRunsAll = [[NSUserDefaults standardUserDefaults] boolForKey:SPQueryPrimaryControlRunsAll];
+				// The controller's actions read MySQL's run preference from its defaults, as the run button does
 				if (![event isARepeat]) {
-					if (primary == primaryRunsAll) [controller runAllQueries:self];
-					else [controller runCurrentQuery:self];
+					if (primary) [controller runPrimaryQueryAction:self];
+					else [controller runSecondaryQueryAction:self];
 				}
 				return YES;
 			}
@@ -63,20 +66,6 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	}
 
 	return [super performKeyEquivalent:event];
-}
-
-@end
-
-/// The outer split view: as MySQL's (SPCustomQuery's -splitView:effectiveRect:…), its divider can't be dragged; the
-/// info pane is shown and hidden by its toggle only.
-@interface SPPostgresQueryInfoPaneSplitView : SPSplitView
-@end
-
-@implementation SPPostgresQueryInfoPaneSplitView
-
-- (NSRect)splitView:(NSSplitView *)theSplitView effectiveRect:(NSRect)proposedEffectiveRect forDrawnRect:(NSRect)drawnRect ofDividerAtIndex:(NSInteger)dividerIndex
-{
-	return NSZeroRect;
 }
 
 @end
@@ -134,7 +123,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 #pragma mark - Controller
 
-@interface SPPostgresQueryController ()
+@interface SPPostgresQueryController () <NSSplitViewDelegate>
 
 @property (readwrite, copy) NSString *statusText;
 
@@ -266,7 +255,11 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[resultsView setDelegate:nil];
 	[editor setDelegate:nil];
 	[runButton setTarget:nil];
-	for (NSMenuItem *item in @[runPrimaryActionMenuItem, runSecondaryActionMenuItem, switchDefaultMenuItem, exportCSVMenuItem]) [item setTarget:nil];
+	[runPrimaryActionMenuItem setTarget:nil];
+	[runSecondaryActionMenuItem setTarget:nil];
+	[switchDefaultMenuItem setTarget:nil];
+	[exportCSVMenuItem setTarget:nil];
+	[infoPaneSplitView setDelegate:nil];
 
 	// The blocks may capture the tab
 	[runDidChangeDatabase release];
@@ -590,8 +583,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[runButton setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
 	[[runButton cell] setLineBreakMode:NSLineBreakByTruncatingTail];
 	[runButton setAutoresizingMask:NSViewMinXMargin | NSViewMinYMargin];
-	// SPComboPopupButton reads its line offset from the control size at init: made small, it is set again here
-	[runButton setValue:@15 forKey:@"lineOffset"];
+	// SPComboPopupButton reads its line offset from the control size at init (regular here): made small, it gets the
+	// small offset (readonly, so set through KVC; SPPostgresQueryBarTests checks it)
+	[runButton setValue:@(SPPostgresQueryRunButtonSmallLineOffset) forKey:@"lineOffset"];
 
 	// Built in the button's own menu, whose delegate the button already is (it tracks the menu being open)
 	NSMenu *runMenu = [runButton menu];
@@ -724,7 +718,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[view setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 
 	CGFloat splitHeight = NSHeight(frame) - SPPostgresQueryBarHeight;
-	infoPaneSplitView = [[SPPostgresQueryInfoPaneSplitView alloc] initWithFrame:NSMakeRect(0, SPPostgresQueryBarHeight, width, splitHeight)];
+	infoPaneSplitView = [[SPSplitView alloc] initWithFrame:NSMakeRect(0, SPPostgresQueryBarHeight, width, splitHeight)];
 	[infoPaneSplitView setVertical:NO];
 	[infoPaneSplitView setDividerStyle:NSSplitViewDividerStyleThin];
 	[infoPaneSplitView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
@@ -797,12 +791,21 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	// As -[SPCustomQuery awakeFromNib]: the info pane collapses with its toggle, collapsed at start
 	[infoPaneSplitView setCollapsibleSubviewIndex:1];
 	[infoPaneSplitView setToggleCollapseButton:infoPaneButton];
+	[infoPaneSplitView setDelegate:self]; // its divider can't be dragged (see -splitView:effectiveRect:…)
 	[infoPaneSplitView setCollapsibleSubviewCollapsed:YES animate:NO];
 }
 
 - (NSView *)view
 {
 	return view;
+}
+
+#pragma mark - Split view delegate
+
+/// As SPCustomQuery's: the info pane's divider can't be dragged; the pane is shown and hidden by its toggle only.
+- (NSRect)splitView:(NSSplitView *)theSplitView effectiveRect:(NSRect)proposedEffectiveRect forDrawnRect:(NSRect)drawnRect ofDividerAtIndex:(NSInteger)dividerIndex
+{
+	return (theSplitView == infoPaneSplitView) ? NSZeroRect : proposedEffectiveRect;
 }
 
 #pragma mark - Running
