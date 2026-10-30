@@ -188,6 +188,10 @@ __attribute__((visibility("default")))
  */
 - (IBAction)export:(id)sender;
 
+/// The Query view's Export Result ▸ As CSV file…: the Export sheet (when it can open, as -export:) with its Query
+/// result source chosen and the format on CSV.
+- (IBAction)exportQueryResult:(id)sender;
+
 /// The Export sheet's controller while it is shown or its export runs, else nil.
 @property (readonly) SPPostgresExportController *exportController;
 

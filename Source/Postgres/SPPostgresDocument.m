@@ -879,6 +879,9 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[queryController setRunDidChangeDatabase:^(BOOL schemaChanged, BOOL dataChanged) {
 		[document _queryRunChangedSchema:schemaChanged data:dataChanged];
 	}];
+	[queryController setExportResultHandler:^{
+		[document exportQueryResult:nil];
+	}];
 
 	NSView *queryView = [queryController view];
 	[queryView setFrame:[pane bounds]];
@@ -3924,6 +3927,16 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 - (IBAction)export:(id)sender
 {
+	[self _beginExportChoosingQueryResult:NO];
+}
+
+- (IBAction)exportQueryResult:(id)sender
+{
+	[self _beginExportChoosingQueryResult:YES];
+}
+
+- (void)_beginExportChoosingQueryResult:(BOOL)queryResult
+{
 	if (![self _canRunSheetJob] || ![currentDatabase length]) return;
 
 	SPPostgresExportController *controller = [[SPPostgresExportController alloc] initWithDocument:self];
@@ -3934,7 +3947,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 			[controller autorelease];
 		}
 	}];
-	[controller beginSheet];
+	if (queryResult) [controller beginSheetWithQueryResultSource];
+	else [controller beginSheet];
 }
 
 #pragma mark - Transfer

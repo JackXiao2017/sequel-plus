@@ -5,12 +5,22 @@
 #import "SPPostgresTaskRunner.h"
 #import "SPTableView.h"
 #import "SPButtonBar.h"
+#import "SPSplitView.h"
+#import "SPComboPopupButton.h"
 #import "SPConstants.h"
 #import <PostgresKit/PostgresKit.h>
 
-// MySQL's Query tab (DBView.xib): the run bar above the results, 23 pt status bar below them
-static const CGFloat SPPostgresQueryRunBarHeight = 30;
-static const CGFloat SPPostgresQueryStatusBarHeight = 23;
+// MySQL's Query tab (DBView.xib): 23 pt bars, at the top of the results and at the bottom of the tab
+static const CGFloat SPPostgresQueryBarHeight = 23;
+// The query information pane's height (DBView.xib), and the editor's and results' minimum heights
+static const CGFloat SPPostgresQueryInfoPaneHeight = 119;
+static const CGFloat SPPostgresQueryMinPaneHeight = 100;
+
+// The run pop-up button's items (DBView.xib): the primary run item, the secondary one
+static const NSInteger SPPostgresQueryPrimaryRunTag = 2;
+static const NSInteger SPPostgresQuerySecondaryRunTag = 1;
+
+static void *SPPostgresQueryRunnerContext = &SPPostgresQueryRunnerContext;
 
 // Column widths fitted to the header and the first rows, as the Content view's
 static const CGFloat SPPostgresQueryMinColumnWidth = 40;
@@ -21,9 +31,10 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 /**
  * The Query view's root: handles MySQL's run keys while it is in a window, before the editor or anything else
- * sees them: ⌘R runs the primary action and ⌥⌘R the secondary one (as DBView.xib's run popup). By default
- * the primary action is Run Current; MySQL's "QueryPrimaryControlRunsAll" preference makes it Run All
- * (read at each key press, so a change applies at once). Other keys (e.g. ⇧⌘R, Refresh Databases) pass on.
+ * sees them (the run pop-up button's items show the same keys, but never get them, so a key press runs once): ⌘R
+ * runs the primary action and ⌥⌘R the secondary one (as DBView.xib's run popup). By default the primary action is
+ * Run Current; MySQL's "QueryPrimaryControlRunsAll" preference makes it Run All (read at each key press, so a change
+ * applies at once). Other keys (e.g. ⇧⌘R, Refresh Databases) pass on.
  */
 @interface SPPostgresQueryView : NSView
 @property (assign) SPPostgresQueryController *controller;
@@ -52,6 +63,20 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	}
 
 	return [super performKeyEquivalent:event];
+}
+
+@end
+
+/// The outer split view: as MySQL's (SPCustomQuery's -splitView:effectiveRect:…), its divider can't be dragged; the
+/// info pane is shown and hidden by its toggle only.
+@interface SPPostgresQueryInfoPaneSplitView : SPSplitView
+@end
+
+@implementation SPPostgresQueryInfoPaneSplitView
+
+- (NSRect)splitView:(NSSplitView *)theSplitView effectiveRect:(NSRect)proposedEffectiveRect forDrawnRect:(NSRect)drawnRect ofDividerAtIndex:(NSInteger)dividerIndex
+{
+	return NSZeroRect;
 }
 
 @end
@@ -119,20 +144,38 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 {
 	PGPostgresTransactionStatus lastRunTransactionStatus;
 	PGPostgresConnection *connection;
+	SPPostgresTaskRunner *taskRunner;
 
 	/// The row set the grid shows (nil: none). Values are read from it as the grid draws.
 	PGPostgresResult *result;
 	NSUInteger resultRowCount;
 
 	SPPostgresQueryView *view;
-	NSSplitView *splitView;
+	SPSplitView *infoPaneSplitView;
+	SPSplitView *editorSplitView;
 	NSTextView *editor;
 	SPTableView *resultsView;
-	NSButton *runAllButton;
-	NSButton *runCurrentButton;
+	NSTextView *infoPaneText;
+
+	NSPopUpButton *gearButton;
+	NSPopUpButton *favoritesButton;
+	NSPopUpButton *historyButton;
+	SPComboPopupButton *runButton;
+	NSMenuItem *runPrimaryActionMenuItem;   // tag 2, ⌘R
+	NSMenuItem *runSecondaryActionMenuItem; // tag 1, ⌥⌘R
+	NSMenuItem *switchDefaultMenuItem;
+
+	NSButton *infoPaneButton;
+	NSPopUpButton *resultsGearButton;
+	NSMenuItem *exportCSVMenuItem;
+	NSButton *editModeButton;
 	NSTextField *statusField;
 
+	NSUserDefaults *defaults;
+	NSUserDefaultsController *defaultsController; // the edit mode toggle's binding, on defaults
+
 	BOOL running;                   // YES from a run's enqueue until its completion
+	BOOL observingRunner;           // observing taskRunner's busy (the run controls are disabled while it is)
 	BOOL invalidated;
 
 	/// Test seam: called on the runner's thread before each statement runs (see the tests' SPPostgresQueryController (Testing))
@@ -144,7 +187,18 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 @synthesize statusText;
 @synthesize runDidChangeDatabase;
 @synthesize lastRunTransactionStatus;
-@synthesize taskRunner;
+@synthesize exportResultHandler;
+@synthesize defaults;
+@synthesize gearButton;
+@synthesize favoritesButton;
+@synthesize historyButton;
+@synthesize runButton;
+@synthesize infoPaneButton;
+@synthesize resultsGearButton;
+@synthesize editModeButton;
+@synthesize statusField;
+@synthesize infoPaneText;
+@synthesize infoPaneSplitView;
 
 #pragma mark - Setup
 
@@ -152,9 +206,13 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 {
 	if ((self = [super init])) {
 		connection = [theConnection retain];
-		taskRunner = [[SPPostgresTaskRunner inlineRunnerWithConnection:theConnection] retain];
+		defaults = [[NSUserDefaults standardUserDefaults] retain];
 		statusText = [@"" copy];
 		[self _buildView];
+		[self _bindEditModeButton];
+		[self setTaskRunner:[SPPostgresTaskRunner inlineRunnerWithConnection:theConnection]]; // updates the run controls
+		[self _updateQueryInteractionInterface];
+		[self _updateExportItem];
 	}
 
 	return self;
@@ -166,18 +224,31 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 	[connection release];
 	[taskRunner release];
+	[defaults release];
 	[result release];
 	[statusText release];
 
 	[view release];
-	[splitView release];
+	[infoPaneSplitView release];
+	[editorSplitView release];
 	[editor release];
 	[resultsView release];
-	[runAllButton release];
-	[runCurrentButton release];
+	[infoPaneText release];
+	[gearButton release];
+	[favoritesButton release];
+	[historyButton release];
+	[runButton release];
+	[runPrimaryActionMenuItem release];
+	[runSecondaryActionMenuItem release];
+	[switchDefaultMenuItem release];
+	[infoPaneButton release];
+	[resultsGearButton release];
+	[exportCSVMenuItem release];
+	[editModeButton release];
 	[statusField release];
 	[statementWillRunHook release];
 	[runDidChangeDatabase release];
+	[exportResultHandler release];
 
 	[super dealloc];
 }
@@ -187,18 +258,107 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	if (invalidated) return;
 	invalidated = YES;
 
+	[self _stopObservingRunner];
+	[self _unbindEditModeButton];
+
 	[view setController:nil];
 	[resultsView setDataSource:nil];
 	[resultsView setDelegate:nil];
-	[runAllButton setTarget:nil];
-	[runCurrentButton setTarget:nil];
-	// Tooltip owners aren't retained
-	[runAllButton removeAllToolTips];
-	[runCurrentButton removeAllToolTips];
+	[editor setDelegate:nil];
+	[runButton setTarget:nil];
+	for (NSMenuItem *item in @[runPrimaryActionMenuItem, runSecondaryActionMenuItem, switchDefaultMenuItem, exportCSVMenuItem]) [item setTarget:nil];
 
-	// The block may capture the tab
+	// The blocks may capture the tab
 	[runDidChangeDatabase release];
 	runDidChangeDatabase = nil;
+	[exportResultHandler release];
+	exportResultHandler = nil;
+}
+
+#pragma mark - The runner
+
+- (SPPostgresTaskRunner *)taskRunner
+{
+	return [[taskRunner retain] autorelease];
+}
+
+- (void)setTaskRunner:(SPPostgresTaskRunner *)runner
+{
+	if (runner == taskRunner) return;
+	[self _stopObservingRunner];
+	[taskRunner release];
+	taskRunner = [runner retain];
+	if (taskRunner && !invalidated) {
+		[taskRunner addObserver:self forKeyPath:@"busy" options:0 context:SPPostgresQueryRunnerContext];
+		observingRunner = YES;
+	}
+	[self _updateRunControls];
+}
+
+- (void)_stopObservingRunner
+{
+	if (!observingRunner) return;
+	[taskRunner removeObserver:self forKeyPath:@"busy" context:SPPostgresQueryRunnerContext];
+	observingRunner = NO;
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context
+{
+	if (context != SPPostgresQueryRunnerContext) {
+		[super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+		return;
+	}
+	if (invalidated) return;
+
+	// The runner changes busy on the main thread
+	[self _updateRunControls];
+}
+
+/// The run button and its run items are disabled while the runner is busy (as is the results gear's export).
+- (void)_updateRunControls
+{
+	if (invalidated) return;
+	BOOL idle = ![taskRunner isBusy];
+	[runButton setEnabled:idle];
+	[runPrimaryActionMenuItem setEnabled:idle];
+	[runSecondaryActionMenuItem setEnabled:idle];
+	[self _updateExportItem];
+}
+
+/// Export Result ▸ As CSV file…: while the grid shows a row set and the runner is idle.
+- (void)_updateExportItem
+{
+	if (invalidated) return;
+	[exportCSVMenuItem setEnabled:(result != nil) && ![taskRunner isBusy]];
+}
+
+#pragma mark - Preferences
+
+- (void)setDefaults:(NSUserDefaults *)newDefaults
+{
+	if (newDefaults == defaults) return;
+	[self _unbindEditModeButton];
+	[defaults release];
+	defaults = [newDefaults retain];
+	[self _bindEditModeButton];
+	[self _updateQueryInteractionInterface];
+}
+
+/// The edit mode toggle is bound to MySQL's shared preference, on defaults (as DBView.xib's, on the shared controller).
+- (void)_bindEditModeButton
+{
+	if (invalidated || !defaults || defaultsController) return;
+	defaultsController = [[NSUserDefaultsController alloc] initWithDefaults:defaults initialValues:nil];
+	[defaultsController setAppliesImmediately:YES];
+	[editModeButton bind:NSValueBinding toObject:defaultsController withKeyPath:[@"values." stringByAppendingString:SPEditInSheetEnabled] options:nil];
+}
+
+- (void)_unbindEditModeButton
+{
+	if (!defaultsController) return;
+	[editModeButton unbind:NSValueBinding];
+	[defaultsController release];
+	defaultsController = nil;
 }
 
 #pragma mark - Statement kinds
@@ -269,22 +429,6 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	statementWillRunHook = [hook copy];
 }
 
-#pragma mark - Tooltips
-
-/// The run buttons' tooltips, with the key that runs each as MySQL's run preference has it.
-- (NSString *)view:(NSView *)theView stringForToolTip:(NSToolTipTag)tag point:(NSPoint)point userData:(void *)data
-{
-	BOOL primaryRunsAll = [[NSUserDefaults standardUserDefaults] boolForKey:SPQueryPrimaryControlRunsAll];
-
-	if (theView == runAllButton) {
-		return [NSString stringWithFormat:NSLocalizedString(@"Run all queries (%@)", @"Postgres query: run all tooltip (key)"), primaryRunsAll ? @"⌘R" : @"⌥⌘R"];
-	}
-	if (theView == runCurrentButton) {
-		return [NSString stringWithFormat:NSLocalizedString(@"Run the query at the cursor, or the selected queries (%@)", @"Postgres query: run current tooltip (key)"), primaryRunsAll ? @"⌥⌘R" : @"⌘R"];
-	}
-	return @"";
-}
-
 + (NSFont *)editorFontFromPreferenceData:(NSData *)data
 {
 	// As MySQL's SPTextView reads it
@@ -335,38 +479,266 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	return [[NSUserDefaults standardUserDefaults] stringForKey:SPNullValue] ?: @"NULL";
 }
 
-- (NSButton *)_newRunButtonWithTitle:(NSString *)title action:(SEL)action frame:(NSRect)frame
+/// A 32 x 25 textured toggle of MySQL's results bar (DBView.xib), at x in the bar.
+- (NSButton *)_newBarToggleWithImage:(NSString *)imageName alternateImage:(NSString *)alternateImageName toolTip:(NSString *)toolTip x:(CGFloat)x
 {
-	NSButton *button = [[NSButton alloc] initWithFrame:frame];
-	[button setBezelStyle:NSBezelStyleRounded];
-	[[button cell] setControlSize:NSControlSizeSmall];
-	[button setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
-	[button setTitle:title];
-	[button setAutoresizingMask:NSViewMinXMargin];
-	// Asked when shown (see -view:stringForToolTip:point:userData:): the keys follow MySQL's run preference
-	[button addToolTipRect:[button bounds] owner:self userData:NULL];
-	[button setTarget:self];
-	[button setAction:action];
+	NSButton *button = [[NSButton alloc] initWithFrame:NSMakeRect(x, -1, 32, 25)];
+	[button setButtonType:NSButtonTypeToggle];
+	[button setBezelStyle:NSBezelStyleTexturedRounded];
+	[button setImage:[NSImage imageNamed:imageName]];
+	[button setAlternateImage:[NSImage imageNamed:alternateImageName]];
+	[button setTitle:@""];
+	[button setImagePosition:NSImageOnly];
+	[button setToolTip:toolTip];
+	[button setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
 	return button;
 }
 
-/// Editor | (run bar, results, status bar), split as MySQL's Query tab.
+/// A gear of MySQL's bars (DBView.xib): a pull-down without arrow, showing its hidden first item's image.
+- (NSPopUpButton *)_newGearButtonWithFrame:(NSRect)frame
+{
+	NSPopUpButton *button = [[NSPopUpButton alloc] initWithFrame:frame pullsDown:YES];
+	NSPopUpButtonCell *cell = [button cell];
+	[button setBezelStyle:NSBezelStyleRegularSquare];
+	[cell setArrowPosition:NSPopUpNoArrow];
+	[cell setImagePosition:NSImageRight];
+	[cell setAlignment:NSTextAlignmentCenter];
+	[cell setUsesItemFromMenu:YES];
+	[button setFont:[NSFont menuFontOfSize:0]];
+
+	NSMenu *menu = [[[NSMenu alloc] initWithTitle:@""] autorelease];
+	NSMenuItem *imageItem = [menu addItemWithTitle:@"" action:NULL keyEquivalent:@""];
+	[imageItem setImage:[NSImage imageNamed:@"button_action"]];
+	[imageItem setState:NSControlStateValueOn];
+	[imageItem setHidden:YES];
+	[button setMenu:menu];
+	return button;
+}
+
+/// Query Favorites / Query History (DBView.xib): recessed, small pull-downs titled by their hidden first item, with
+/// MySQL's ⌥⌘ key.
+- (NSPopUpButton *)_newRecessedPopUpWithFrame:(NSRect)frame title:(NSString *)title key:(NSString *)key toolTip:(NSString *)toolTip
+{
+	NSPopUpButton *button = [[NSPopUpButton alloc] initWithFrame:frame pullsDown:YES];
+	[button setBezelStyle:NSBezelStyleRecessed];
+	[[button cell] setControlSize:NSControlSizeSmall];
+	[button setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+	[[button cell] setLineBreakMode:NSLineBreakByClipping];
+	[(NSPopUpButtonCell *)[button cell] setPreferredEdge:NSRectEdgeMaxY];
+	[[button cell] setKeyEquivalent:key];
+	[[button cell] setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
+	[button setToolTip:toolTip];
+
+	NSMenu *menu = [[[NSMenu alloc] initWithTitle:@""] autorelease];
+	[[menu addItemWithTitle:title action:NULL keyEquivalent:@""] setHidden:YES];
+	[button setMenu:menu];
+	return button;
+}
+
+/// The results pane: MySQL's top bar (the gear, Query Favorites, Query History, the run button) over the grid.
+- (NSView *)_newResultsPaneWithFrame:(NSRect)frame
+{
+	CGFloat width = NSWidth(frame), height = NSHeight(frame);
+	NSView *pane = [[NSView alloc] initWithFrame:frame];
+	[pane setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+
+	NSScrollView *resultsScrollView = [[[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, width, height - SPPostgresQueryBarHeight)] autorelease];
+	[resultsScrollView setHasVerticalScroller:YES];
+	[resultsScrollView setHasHorizontalScroller:YES];
+	[resultsScrollView setAutohidesScrollers:YES];
+	[resultsScrollView setBorderType:NSNoBorder];
+	[resultsScrollView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+
+	resultsView = [[SPTableView alloc] initWithFrame:[[resultsScrollView contentView] bounds]];
+	[resultsView setUsesAlternatingRowBackgroundColors:YES];
+	[resultsView setAllowsMultipleSelection:YES];
+	[resultsView setAllowsColumnReordering:YES];
+	[resultsView setColumnAutoresizingStyle:NSTableViewNoColumnAutoresizing];
+	[resultsView setFocusRingType:NSFocusRingTypeNone];
+	[resultsView setGridStyleMask:[[NSUserDefaults standardUserDefaults] boolForKey:SPDisplayTableViewVerticalGridlines] ? NSTableViewSolidVerticalGridLineMask : NSTableViewGridNone];
+	[resultsView setDataSource:self];
+	[resultsView setDelegate:self];
+	[resultsScrollView setDocumentView:resultsView];
+	[pane addSubview:resultsScrollView];
+
+	SPButtonBar *topBar = [[[SPButtonBar alloc] initWithFrame:NSMakeRect(0, height - SPPostgresQueryBarHeight, width, SPPostgresQueryBarHeight)] autorelease];
+	[topBar setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+
+	gearButton = [self _newGearButtonWithFrame:NSMakeRect(0, 0, 35, 23)];
+	[gearButton setAutoresizingMask:NSViewMaxXMargin | NSViewMinYMargin];
+	[topBar addSubview:gearButton];
+
+	favoritesButton = [self _newRecessedPopUpWithFrame:NSMakeRect(38, 0, 129, 22)
+												 title:NSLocalizedString(@"Query Favorites", @"Query Favorites popup button title")
+												   key:@"f"
+											   toolTip:NSLocalizedString(@"Choose a favorite from the menu or save queries to the favorites (⌥⌘F)", @"query favorites popup button tooltip")];
+	[favoritesButton setAutoresizingMask:NSViewMinYMargin];
+	[topBar addSubview:favoritesButton];
+
+	historyButton = [self _newRecessedPopUpWithFrame:NSMakeRect(177, 0, 145, 22)
+											   title:NSLocalizedString(@"Query History", @"Query History popup button title")
+												 key:@"y"
+											 toolTip:NSLocalizedString(@"Choose a query from your recent queries (⌥⌘Y)", @"query history popup button tooltip")];
+	[historyButton setAutoresizingMask:NSViewMaxXMargin | NSViewMinYMargin];
+	[topBar addSubview:historyButton];
+
+	// MySQL's run pop-up button: a click runs the primary action, the menu has both and Switch Default. The items show
+	// MySQL's keys; SPPostgresQueryView takes ⌘R and ⌥⌘R first (see there)
+	runButton = [[SPComboPopupButton alloc] initWithFrame:NSMakeRect(width - 188, 0, 180, 22) pullsDown:YES];
+	[runButton setBezelStyle:NSBezelStyleRoundRect];
+	[[runButton cell] setControlSize:NSControlSizeSmall];
+	[runButton setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+	[[runButton cell] setLineBreakMode:NSLineBreakByTruncatingTail];
+	[runButton setAutoresizingMask:NSViewMinXMargin | NSViewMinYMargin];
+	// SPComboPopupButton reads its line offset from the control size at init: made small, it is set again here
+	[runButton setValue:@15 forKey:@"lineOffset"];
+
+	// Built in the button's own menu, whose delegate the button already is (it tracks the menu being open)
+	NSMenu *runMenu = [runButton menu];
+	[runMenu setAutoenablesItems:NO];
+	[[runMenu addItemWithTitle:NSLocalizedString(@"Run Current", @"Title of button to run current query in custom query view") action:NULL keyEquivalent:@""] setHidden:YES];
+	runPrimaryActionMenuItem = [[runMenu addItemWithTitle:NSLocalizedString(@"Run Current Query", @"Title of action menu item to run current query in custom query view") action:@selector(runPrimaryQueryAction:) keyEquivalent:@"r"] retain];
+	[runPrimaryActionMenuItem setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+	[runPrimaryActionMenuItem setTag:SPPostgresQueryPrimaryRunTag];
+	[runPrimaryActionMenuItem setTarget:self];
+	[runMenu addItem:[NSMenuItem separatorItem]];
+	runSecondaryActionMenuItem = [[runMenu addItemWithTitle:NSLocalizedString(@"Run All Queries", @"Run All menu item title") action:@selector(runSecondaryQueryAction:) keyEquivalent:@"r"] retain];
+	[runSecondaryActionMenuItem setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
+	[runSecondaryActionMenuItem setTag:SPPostgresQuerySecondaryRunTag];
+	[runSecondaryActionMenuItem setTarget:self];
+	switchDefaultMenuItem = [[runMenu addItemWithTitle:NSLocalizedString(@"Switch Default", @"Postgres query: switch default run action menu item") action:@selector(switchDefaultQueryAction:) keyEquivalent:@""] retain];
+	[switchDefaultMenuItem setTarget:self];
+	[runButton setTarget:self];
+	[runButton setAction:@selector(runPrimaryQueryAction:)];
+	[topBar addSubview:runButton];
+
+	[pane addSubview:topBar];
+	return pane;
+}
+
+/// The query information pane (DBView.xib): "Query Status" over the read-only text.
+- (NSView *)_newInfoPaneWithFrame:(NSRect)frame
+{
+	CGFloat width = NSWidth(frame), height = NSHeight(frame);
+	NSView *pane = [[NSView alloc] initWithFrame:frame];
+	[pane setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+
+	NSTextField *heading = [[[NSTextField alloc] initWithFrame:NSMakeRect(15, height - 26, 363, 14)] autorelease];
+	[heading setEditable:NO];
+	[heading setSelectable:NO];
+	[heading setBordered:NO];
+	[heading setDrawsBackground:NO];
+	[[heading cell] setControlSize:NSControlSizeSmall];
+	[heading setFont:[NSFont boldSystemFontOfSize:[NSFont smallSystemFontSize]]];
+	[heading setStringValue:NSLocalizedString(@"Query Status", @"Postgres query: information pane heading")];
+	[heading setAutoresizingMask:NSViewMaxXMargin | NSViewMinYMargin];
+	[pane addSubview:heading];
+
+	NSScrollView *scrollView = [[[NSScrollView alloc] initWithFrame:NSMakeRect(12, 12, width - 24, height - 45)] autorelease];
+	[scrollView setBorderType:NSNoBorder];
+	[scrollView setHasVerticalScroller:YES];
+	[scrollView setHasHorizontalScroller:NO];
+	[scrollView setAutohidesScrollers:YES];
+	[scrollView setDrawsBackground:NO];
+	[scrollView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+
+	NSSize contentSize = [scrollView contentSize];
+	infoPaneText = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, contentSize.width, contentSize.height)];
+	[infoPaneText setEditable:NO];
+	[infoPaneText setSelectable:YES];
+	[infoPaneText setRichText:NO];
+	[infoPaneText setImportsGraphics:NO];
+	[infoPaneText setDrawsBackground:NO];
+	[infoPaneText setMinSize:NSMakeSize(0, contentSize.height)];
+	[infoPaneText setMaxSize:NSMakeSize(CGFLOAT_MAX, CGFLOAT_MAX)];
+	[infoPaneText setVerticallyResizable:YES];
+	[infoPaneText setHorizontallyResizable:NO];
+	[infoPaneText setAutoresizingMask:NSViewWidthSizable];
+	[[infoPaneText textContainer] setContainerSize:NSMakeSize(contentSize.width, CGFLOAT_MAX)];
+	[[infoPaneText textContainer] setWidthTracksTextView:YES];
+	[infoPaneText setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+	[scrollView setDocumentView:infoPaneText];
+	[pane addSubview:scrollView];
+
+	return pane;
+}
+
+/// MySQL's results bar (DBView.xib, its frames less the bar's origin there): the info pane toggle, the results gear,
+/// the edit mode toggle and the status line.
+- (NSView *)_newResultsBarWithWidth:(CGFloat)width
+{
+	SPButtonBar *bar = [[SPButtonBar alloc] initWithFrame:NSMakeRect(0, 0, width, SPPostgresQueryBarHeight)];
+	[bar setAutoresizingMask:NSViewWidthSizable | NSViewMaxYMargin];
+
+	resultsGearButton = [self _newGearButtonWithFrame:NSMakeRect(29, 0, 36, 23)];
+	[resultsGearButton setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
+	NSMenu *exportMenu = [[[NSMenu alloc] initWithTitle:NSLocalizedString(@"Export Result", @"Postgres query: export result menu")] autorelease];
+	[exportMenu setAutoenablesItems:NO];
+	exportCSVMenuItem = [[exportMenu addItemWithTitle:NSLocalizedString(@"As CSV file…", @"Postgres query: export result as CSV menu item") action:@selector(exportResultAsCSV:) keyEquivalent:@""] retain];
+	[exportCSVMenuItem setTag:1];
+	[exportCSVMenuItem setTarget:self];
+	NSMenuItem *exportItem = [[resultsGearButton menu] addItemWithTitle:NSLocalizedString(@"Export Result", @"Postgres query: export result menu") action:NULL keyEquivalent:@""];
+	[exportItem setSubmenu:exportMenu];
+	[bar addSubview:resultsGearButton];
+
+	infoPaneButton = [self _newBarToggleWithImage:@"button_pane_hide" alternateImage:@"button_pane_show"
+										  toolTip:NSLocalizedString(@"Toggle the visibility of the Query Information Pane", @"toggle query information pane tooltip")
+												x:-1];
+	[infoPaneButton setKeyEquivalent:@"a"];
+	[infoPaneButton setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
+	[infoPaneButton setTarget:infoPaneSplitView];
+	[infoPaneButton setAction:@selector(toggleCollapse:)];
+	[bar addSubview:infoPaneButton];
+
+	// Bound to MySQL's shared preference (see -_bindEditModeButton)
+	editModeButton = [self _newBarToggleWithImage:@"button_edit_mode" alternateImage:@"button_edit_mode_selected"
+										  toolTip:NSLocalizedString(@"Toggle between editing simple text cells as a spreadsheet or in pop-up sheets", @"edit mode toggle button tooltip")
+												x:61];
+	[bar addSubview:editModeButton];
+
+	statusField = [[NSTextField alloc] initWithFrame:NSMakeRect(96, 2, width - 96 - 10, 17)];
+	[statusField setEditable:NO];
+	[statusField setSelectable:YES];
+	[statusField setBordered:NO];
+	[statusField setDrawsBackground:NO];
+	[statusField setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+	[[statusField cell] setLineBreakMode:NSLineBreakByTruncatingTail];
+	[statusField setAutoresizingMask:NSViewWidthSizable | NSViewMaxYMargin];
+	[statusField setStringValue:@""];
+	[bar addSubview:statusField];
+
+	return bar;
+}
+
+/**
+ * As MySQL's Query tab (DBView.xib), filling the right pane: the results bar along the bottom; over it the outer split
+ * view (thin divider) of the editor and results (an inner split view, default divider, each at least 100 pt) and the
+ * info pane, collapsible and collapsed at start, its divider not draggable. Nothing is autosaved.
+ */
 - (void)_buildView
 {
-	NSRect frame = NSMakeRect(0, 0, 700, 500);
+	NSRect frame = NSMakeRect(0, 0, 695, 534);
+	CGFloat width = NSWidth(frame);
 	view = [[SPPostgresQueryView alloc] initWithFrame:frame];
 	[view setController:self];
 	[view setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 
-	CGFloat width = NSWidth(frame);
+	CGFloat splitHeight = NSHeight(frame) - SPPostgresQueryBarHeight;
+	infoPaneSplitView = [[SPPostgresQueryInfoPaneSplitView alloc] initWithFrame:NSMakeRect(0, SPPostgresQueryBarHeight, width, splitHeight)];
+	[infoPaneSplitView setVertical:NO];
+	[infoPaneSplitView setDividerStyle:NSSplitViewDividerStyleThin];
+	[infoPaneSplitView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 
-	splitView = [[NSSplitView alloc] initWithFrame:frame];
-	[splitView setVertical:NO];
-	[splitView setDividerStyle:NSSplitViewDividerStyleThin];
-	[splitView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+	CGFloat upperHeight = splitHeight - SPPostgresQueryInfoPaneHeight - [infoPaneSplitView dividerThickness];
+	NSView *upper = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, width, upperHeight)] autorelease];
+	[upper setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+
+	editorSplitView = [[SPSplitView alloc] initWithFrame:[upper bounds]];
+	[editorSplitView setVertical:NO];
+	[editorSplitView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 
 	// Editor
-	CGFloat editorHeight = 200;
+	CGFloat editorHeight = 142;
 	NSScrollView *editorScrollView = [[[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, width, editorHeight)] autorelease];
 	[editorScrollView setHasVerticalScroller:YES];
 	[editorScrollView setHasHorizontalScroller:NO];
@@ -400,67 +772,32 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	NSFont *editorFont = [self _editorFont];
 	[editor setFont:editorFont];
 	[editor setTypingAttributes:@{NSFontAttributeName: editorFont, NSForegroundColorAttributeName: [NSColor textColor]}];
+	// The run button's title follows the caret (see -textViewDidChangeSelection:)
+	[editor setDelegate:self];
 	[editorScrollView setDocumentView:editor];
-	[splitView addSubview:editorScrollView];
+	[editorSplitView addSubview:editorScrollView];
 
-	// Run bar, results, status bar
-	CGFloat lowerHeight = NSHeight(frame) - editorHeight - [splitView dividerThickness];
-	NSView *lower = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, width, lowerHeight)] autorelease];
-	[lower setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+	// Top bar and results
+	CGFloat resultsHeight = upperHeight - editorHeight - [editorSplitView dividerThickness];
+	NSView *resultsPane = [[self _newResultsPaneWithFrame:NSMakeRect(0, 0, width, resultsHeight)] autorelease];
+	[editorSplitView addSubview:resultsPane];
+	[editorSplitView adjustSubviews];
+	[editorSplitView setMinSize:SPPostgresQueryMinPaneHeight ofSubviewAtIndex:0];
+	[editorSplitView setMinSize:SPPostgresQueryMinPaneHeight ofSubviewAtIndex:1];
+	[upper addSubview:editorSplitView];
+	[infoPaneSplitView addSubview:upper];
 
-	NSView *runBar = [[[NSView alloc] initWithFrame:NSMakeRect(0, lowerHeight - SPPostgresQueryRunBarHeight, width, SPPostgresQueryRunBarHeight)] autorelease];
-	[runBar setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+	NSView *infoPane = [[self _newInfoPaneWithFrame:NSMakeRect(0, upperHeight + [infoPaneSplitView dividerThickness], width, SPPostgresQueryInfoPaneHeight)] autorelease];
+	[infoPaneSplitView addSubview:infoPane];
+	[infoPaneSplitView adjustSubviews];
+	[view addSubview:infoPaneSplitView];
 
-	// MySQL's keys, ⌘R (primary) and ⌥⌘R (secondary), are handled by the view (see SPPostgresQueryView), the
-	// single place that follows MySQL's run preference; the buttons have no key equivalents of their own
-	runAllButton = [self _newRunButtonWithTitle:NSLocalizedString(@"Run All", @"run all button")
-										 action:@selector(runAllQueries:)
-										  frame:NSMakeRect(width - 98, 4, 90, 22)];
+	[view addSubview:[[self _newResultsBarWithWidth:width] autorelease]];
 
-	runCurrentButton = [self _newRunButtonWithTitle:NSLocalizedString(@"Run Current", @"Postgres query: run current button")
-											 action:@selector(runCurrentQuery:)
-											  frame:NSMakeRect(width - 98 - 100, 4, 100, 22)];
-
-	[runBar addSubview:runCurrentButton];
-	[runBar addSubview:runAllButton];
-	[lower addSubview:runBar];
-
-	NSScrollView *resultsScrollView = [[[NSScrollView alloc] initWithFrame:NSMakeRect(0, SPPostgresQueryStatusBarHeight, width, lowerHeight - SPPostgresQueryStatusBarHeight - SPPostgresQueryRunBarHeight)] autorelease];
-	[resultsScrollView setHasVerticalScroller:YES];
-	[resultsScrollView setHasHorizontalScroller:YES];
-	[resultsScrollView setAutohidesScrollers:YES];
-	[resultsScrollView setBorderType:NSNoBorder];
-	[resultsScrollView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
-
-	resultsView = [[SPTableView alloc] initWithFrame:[[resultsScrollView contentView] bounds]];
-	[resultsView setUsesAlternatingRowBackgroundColors:YES];
-	[resultsView setAllowsMultipleSelection:YES];
-	[resultsView setAllowsColumnReordering:YES];
-	[resultsView setColumnAutoresizingStyle:NSTableViewNoColumnAutoresizing];
-	[resultsView setFocusRingType:NSFocusRingTypeNone];
-	[resultsView setGridStyleMask:[[NSUserDefaults standardUserDefaults] boolForKey:SPDisplayTableViewVerticalGridlines] ? NSTableViewSolidVerticalGridLineMask : NSTableViewGridNone];
-	[resultsView setDataSource:self];
-	[resultsView setDelegate:self];
-	[resultsScrollView setDocumentView:resultsView];
-	[lower addSubview:resultsScrollView];
-
-	SPButtonBar *statusBar = [[[SPButtonBar alloc] initWithFrame:NSMakeRect(0, 0, width, SPPostgresQueryStatusBarHeight)] autorelease];
-	[statusBar setAutoresizingMask:NSViewWidthSizable | NSViewMaxYMargin];
-	statusField = [[NSTextField alloc] initWithFrame:NSMakeRect(8, 4, width - 16, 14)];
-	[statusField setEditable:NO];
-	[statusField setSelectable:YES];
-	[statusField setBordered:NO];
-	[statusField setDrawsBackground:NO];
-	[statusField setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
-	[[statusField cell] setLineBreakMode:NSLineBreakByTruncatingTail];
-	[statusField setAutoresizingMask:NSViewWidthSizable];
-	[statusField setStringValue:@""];
-	[statusBar addSubview:statusField];
-	[lower addSubview:statusBar];
-
-	[splitView addSubview:lower];
-	[splitView adjustSubviews];
-	[view addSubview:splitView];
+	// As -[SPCustomQuery awakeFromNib]: the info pane collapses with its toggle, collapsed at start
+	[infoPaneSplitView setCollapsibleSubviewIndex:1];
+	[infoPaneSplitView setToggleCollapseButton:infoPaneButton];
+	[infoPaneSplitView setCollapsibleSubviewCollapsed:YES animate:NO];
 }
 
 - (NSView *)view
@@ -505,7 +842,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 		statements = [SPPostgresStatementSplitter statementsInSQL:[text substringWithRange:selection]];
 	}
 	else {
-		NSRange range = [SPPostgresStatementSplitter rangeOfStatementAtLocation:selection.location inSQL:text];
+		NSRange range = [self currentQueryRange];
 		if (range.location != NSNotFound) statements = [SPPostgresStatementSplitter statementsInSQL:[text substringWithRange:range]];
 	}
 
@@ -515,6 +852,101 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	}
 
 	[self _runStatements:statements];
+}
+
+- (IBAction)runPrimaryQueryAction:(id)sender
+{
+	if ([defaults boolForKey:SPQueryPrimaryControlRunsAll]) [self runAllQueries:sender];
+	else [self runCurrentQuery:sender];
+}
+
+- (IBAction)runSecondaryQueryAction:(id)sender
+{
+	if ([defaults boolForKey:SPQueryPrimaryControlRunsAll]) [self runCurrentQuery:sender];
+	else [self runAllQueries:sender];
+}
+
+- (IBAction)switchDefaultQueryAction:(id)sender
+{
+	if (invalidated) return;
+	[defaults setBool:![defaults boolForKey:SPQueryPrimaryControlRunsAll] forKey:SPQueryPrimaryControlRunsAll];
+	[self _updateQueryInteractionInterface];
+}
+
+#pragma mark - Run titles
+
+- (NSRange)currentQueryRange
+{
+	return [SPPostgresStatementSplitter rangeOfStatementAtLocation:[editor selectedRange].location inSQL:[editor string] ?: @""];
+}
+
+/// The caret is after range's statement: past its semicolon, in the whitespace or comments that follow (MySQL's
+/// "Run Previous"). Not when the statement isn't terminated (the caret is then still in it, as MySQL's).
+- (BOOL)_caretIsAfterQueryRange:(NSRange)range
+{
+	if (range.location == NSNotFound) return NO;
+	NSUInteger caret = [editor selectedRange].location;
+	NSString *text = [editor string];
+	if (caret <= NSMaxRange(range) || caret > [text length]) return NO;
+	NSString *rest = [[text substringWithRange:NSMakeRange(NSMaxRange(range), caret - NSMaxRange(range))] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	return [rest hasPrefix:@";"];
+}
+
+/// As MySQL's -updateQueryInteractionInterface (SPCustomQuery.m): the run button and items follow the primary action.
+- (void)_updateQueryInteractionInterface
+{
+	if (invalidated) return;
+	if ([defaults boolForKey:SPQueryPrimaryControlRunsAll]) {
+		[runButton setTitle:NSLocalizedString(@"Run All", @"run all button")];
+		[runPrimaryActionMenuItem setTitle:NSLocalizedString(@"Run All Queries", @"Run All menu item title")];
+	}
+	else {
+		[runSecondaryActionMenuItem setTitle:NSLocalizedString(@"Run All Queries", @"Run All menu item title")];
+	}
+	[self _updateContextualRunInterface];
+}
+
+/// As MySQL's -updateContextualRunInterface: "Run Current", "Run Previous" or "Run Selection" on the button (when it
+/// runs that) and on the item that runs it.
+- (void)_updateContextualRunInterface
+{
+	if (invalidated) return;
+	BOOL primaryRunsAll = [defaults boolForKey:SPQueryPrimaryControlRunsAll];
+	NSPopUpButton *button = primaryRunsAll ? nil : runButton;
+	NSMenuItem *item = primaryRunsAll ? runSecondaryActionMenuItem : runPrimaryActionMenuItem;
+
+	if (![editor selectedRange].length) {
+		if ([self _caretIsAfterQueryRange:[self currentQueryRange]]) {
+			[button setTitle:NSLocalizedString(@"Run Previous", @"Title of button to run query just before text caret in custom query view")];
+			[item setTitle:NSLocalizedString(@"Run Previous Query", @"Title of action menu item to run query just before text caret in custom query view")];
+		}
+		else {
+			[button setTitle:NSLocalizedString(@"Run Current", @"Title of button to run current query in custom query view")];
+			[item setTitle:NSLocalizedString(@"Run Current Query", @"Title of action menu item to run current query in custom query view")];
+		}
+	}
+	else {
+		[button setTitle:NSLocalizedString(@"Run Selection", @"Title of button to run selected text in custom query view")];
+		[item setTitle:NSLocalizedString(@"Run Selected Text", @"Title of action menu item to run selected text in custom query view")];
+	}
+}
+
+- (void)textViewDidChangeSelection:(NSNotification *)notification
+{
+	if ([notification object] != editor) return;
+	[self _updateContextualRunInterface];
+}
+
+#pragma mark - Export
+
+/// Results gear ▸ Export Result ▸ As CSV file… (the tab's Export sheet, on the query result).
+- (IBAction)exportResultAsCSV:(id)sender
+{
+	if (invalidated || !result || [taskRunner isBusy]) {
+		NSBeep();
+		return;
+	}
+	if (exportResultHandler) exportResultHandler();
 }
 
 /// "1 row" / "N rows", or with " affected".
@@ -773,6 +1205,8 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[resultsView deselectAll:nil];
 	[resultsView reloadData];
 	[resultsView scrollRowToVisible:0];
+
+	[self _updateExportItem];
 }
 
 - (id)_valueAtRow:(NSInteger)rowIndex tableColumn:(NSTableColumn *)tableColumn

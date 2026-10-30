@@ -537,6 +537,16 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 
 - (void)beginSheet
 {
+	[self _beginSheetChoosingQueryResult:NO];
+}
+
+- (void)beginSheetWithQueryResultSource
+{
+	[self _beginSheetChoosingQueryResult:YES];
+}
+
+- (void)_beginSheetChoosingQueryResult:(BOOL)queryResult
+{
 	NSWindow *window = [document parentWindow];
 	if (began || !window || [window attachedSheet]) {
 		began = YES;
@@ -548,6 +558,10 @@ static NSString *SPPostgresExportCSVFileName(NSString *schema, NSString *table)
 
 	[self _buildSheet];
 	[self _loadLists];
+	if (queryResult) {
+		[formatControl setSelectedSegment:SPPostgresExportFormatCSV];
+		[sourcePopup selectItemAtIndex:SPPostgresExportSourceQueryResult];
+	}
 	[self _updateControls];
 	[window beginSheet:sheet completionHandler:nil];
 }

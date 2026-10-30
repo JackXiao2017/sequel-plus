@@ -30,6 +30,10 @@ __attribute__((visibility("default")))
 /// Shows the sheet on the document's window. The controller keeps itself alive until the export (or Cancel) ends.
 - (void)beginSheet;
 
+/// As -beginSheet, with the Query result source chosen and the format on CSV (the Query view's Export Result ▸ As CSV
+/// file…). The source falls back as -beginSheet's when the Query view holds no result.
+- (void)beginSheetWithQueryResultSource;
+
 /// Called on the main thread once the sheet and any export it started have ended.
 @property (copy) void (^didEnd)(void);
 
