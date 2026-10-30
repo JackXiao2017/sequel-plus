@@ -86,8 +86,9 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	self.continueAfterFailure = NO;
 	[SPPostgresTestServers loadFixtureNamed:@"content" onPort:SPContentTestPort];
 
-	// The filter bar hidden (its default): the filters are applied without it being shown
-	[self overridePrefs:@{SPLimitResults: @YES, SPLimitResultsValue: @1000, SPNullValue: SPContentTestNull, @"RuleFilterEditorLastVisibilityChoice": @NO}];
+	// The filter bar hidden (its default): the filters are applied without it being shown; edit mode off (cells are
+	// edited in place, never in the field editor sheet), whatever the saved preferences say
+	[self overridePrefs:@{SPLimitResults: @YES, SPLimitResultsValue: @1000, SPNullValue: SPContentTestNull, @"RuleFilterEditorLastVisibilityChoice": @NO, @"EditInSheetEnabled": @NO}];
 	XCTAssertEqualObjects([[NSUserDefaults standardUserDefaults] stringForKey:SPNullValue], SPContentTestNull);
 
 	SPPostgresFavorite *favorite = [[SPPostgresFavorite alloc] init];
