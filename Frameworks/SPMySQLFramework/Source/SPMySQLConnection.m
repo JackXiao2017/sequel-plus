@@ -682,8 +682,14 @@ asm(".desc ___crashreporter_info__, 0x10");
 		//   mysql 5.7.11+ (5.7.3 - 5.7.10 with a different name)
 		//   mysql 8.0+
 		mysql_ssl_set(theConnection, theSSLKeyFilePath, theSSLCertificatePath, theCACertificatePath, NULL, theSSLCiphers);
+#ifdef LIBMARIADB
+		// MariaDB Connector/C has no MYSQL_OPT_SSL_MODE; MYSQL_OPT_SSL_ENFORCE is its equivalent
+		my_bool opt_ssl_enforce = TRUE;
+		if(mysql_options(theConnection, MYSQL_OPT_SSL_ENFORCE, (void *)&opt_ssl_enforce)) {
+#else
 		enum mysql_ssl_mode opt_ssl_mode = SSL_MODE_REQUIRED;
 		if(mysql_options(theConnection, MYSQL_OPT_SSL_MODE, (void *)&opt_ssl_mode)) {
+#endif
 			if(isMaster) {
 				[self _updateLastErrorMessage:@"libmysqlclient is missing support for MYSQL_OPT_SSL_MODE"];
 				[self _updateLastSqlstate:@"HY000"];
@@ -692,6 +698,15 @@ asm(".desc ___crashreporter_info__, 0x10");
 			return NULL;
 		}
 	}
+#ifdef LIBMARIADB
+	else {
+		// MariaDB Connector/C 3.4+ verifies the server certificate by default, which implicitly requires TLS
+		// and fails against servers without SSL support. Restore the old libmysqlclient behaviour of only
+		// using SSL when explicitly requested.
+		my_bool opt_ssl_verify = FALSE;
+		mysql_options(theConnection, MYSQL_OPT_SSL_VERIFY_SERVER_CERT, (void *)&opt_ssl_verify);
+	}
+#endif
 
 	MYSQL *connectionStatus = mysql_real_connect(theConnection, theHost, theUsername, thePassword, NULL, (unsigned int)port, theSocket, [self clientFlags]);
 
@@ -728,8 +743,11 @@ asm(".desc ___crashreporter_info__, 0x10");
 		return NULL;
 	}
 
+#ifndef LIBMARIADB
 	// Ensure automatic reconnection is disabled for older versions
+	// (MariaDB Connector/C has no such field; MYSQL_OPT_RECONNECT above covers it)
 	theConnection->reconnect = 0;
+#endif
 
 	// Successful connection - return the handle
 	return theConnection;
@@ -1019,7 +1037,7 @@ asm(".desc ___crashreporter_info__, 0x10");
 	// Close the underlying MySQL connection if it still appears to be active, and not reading
 	// or writing.  While this may result in a leak of the MySQL object, it prevents crashes
 	// due to attempts to close a blocked/stuck connection.
-	if (mySQLConnection && !mySQLConnection->net.reading_or_writing && mySQLConnection->net.vio && mySQLConnection->net.buff) {
+	if (mySQLConnection && !mySQLConnection->net.reading_or_writing && SPMySQLNetVio(mySQLConnection) && mySQLConnection->net.buff) {
 		mysql_close(mySQLConnection);
 	}
 	mySQLConnection = NULL;

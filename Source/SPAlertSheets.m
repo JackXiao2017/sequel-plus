@@ -60,17 +60,18 @@
 
 	// Ensure execution on the main thread
 	if (![[NSThread currentThread] isMainThread]) {
-		return [[self onMainThread] beginWaitingAlertSheetWithTitle:title
-		                                              defaultButton:defaultButton
-		                                            alternateButton:alternateButton
-		                                                otherButton:otherButton
-		                                                 alertStyle:alertStyle
-		                                                  docWindow:docWindow
-		                                              modalDelegate:modalDelegate
-		                                             didEndSelector:didEndSelector
-		                                                contextInfo:contextInfo
-		                                                   infoText:infoText
-		                                                 returnCode:returnCode];
+		[[self onMainThread] beginWaitingAlertSheetWithTitle:title
+		                                       defaultButton:defaultButton
+		                                     alternateButton:alternateButton
+		                                         otherButton:otherButton
+		                                          alertStyle:alertStyle
+		                                           docWindow:docWindow
+		                                       modalDelegate:modalDelegate
+		                                      didEndSelector:didEndSelector
+		                                         contextInfo:contextInfo
+		                                            infoText:infoText
+		                                          returnCode:returnCode];
+		return;
 	}
 
 	NSButton *aButton;

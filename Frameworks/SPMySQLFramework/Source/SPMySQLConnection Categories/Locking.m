@@ -88,7 +88,7 @@
 	if (
 		state == SPMySQLConnected &&
 		mySQLConnection &&
-		mySQLConnection->net.vio &&
+		SPMySQLNetVio(mySQLConnection) &&
 		mySQLConnection->net.buff &&
 		mysql_more_results(mySQLConnection)
 	) {

@@ -365,8 +365,8 @@ typedef struct {
     NSRange range = NSMakeRange(0, [contents length]);
     
     // Add font attribute
-    [attrStr addAttribute:NSFontAttributeName value:[NSFont systemFontOfSize:11.0f] range:range];
-    [attrStr addAttribute:NSForegroundColorAttributeName value:[[NSColor textColor] colorWithAlphaComponent:0.75f] range:range];
+    [attrStr addAttribute:NSFontAttributeName value:[NSFont boldSystemFontOfSize:11.0f] range:range];
+    [attrStr addAttribute:NSForegroundColorAttributeName value:[[NSColor textColor] colorWithAlphaComponent:0.8f] range:range];
     
     // Add shadow attribute
     NSShadow* textShadow;
@@ -447,38 +447,26 @@ typedef struct {
 	// Draw for our whole bounds; it'll be automatically clipped to fit the appropriate drawing area
 	rect = [tabBar bounds];
 	
-	// Find active cell
-	PSMTabBarCell *selectedCell = nil;
-
-	for (PSMTabBarCell *aCell in [tabBar cells]) {
-		if (aCell.tabState & PSMTab_SelectedMask) {
-			selectedCell = aCell;
-			break;
-		}
-	}
-
 	[NSGraphicsContext saveGraphicsState];
 	[[NSGraphicsContext currentContext] setShouldAntialias:NO];
 
-	float backgroundCalibratedWhite = 0.73f;
-
-	float lineCalibratedWhite = [[NSColor grayColor] whiteComponent];
-	float shadowAlpha = 0.4f;
+	float backgroundCalibratedWhite = 0.914f;
+	float shadingCalibratedWhite = 0.86f;
+	float lineCalibratedWhite = 0.52f;
 
 	// When the window is in the background, tone down the colours
 	if ((![[tabBar window] isMainWindow] && ![[[tabBar window] attachedSheet] isMainWindow]) || ![NSApp isActive]) {
-		backgroundCalibratedWhite = 0.86f;
-		lineCalibratedWhite = 0.49f;
-		shadowAlpha = 0.3f;
+		backgroundCalibratedWhite = 0.95f;
+		shadingCalibratedWhite = 0.92f;
+		lineCalibratedWhite = 0.66f;
 	}
-	
-	// Fill in background of tab bar
-	if (tabBar.cells.count != 1) { // multiple tabs - fill with background color
-		[[NSColor colorWithCalibratedWhite:backgroundCalibratedWhite alpha:1.0f] set];
-	} else { // When there's only one tab, the tabs are probably hidden, so use the selected cell's highlight colour as our background colour
-		[[self fillColorForCell:selectedCell] set];
-	}
+
+	// Fill in background of tab bar, shaded slightly below the top edge
+	[[NSColor colorWithCalibratedWhite:backgroundCalibratedWhite alpha:1.0f] set];
 	NSRectFill(NSMakeRect(rect.origin.x, rect.origin.y, rect.size.width, rect.size.height));
+
+	NSGradient *shading = [[[NSGradient alloc] initWithStartingColor:[NSColor colorWithCalibratedWhite:shadingCalibratedWhite alpha:1.0f] endingColor:[NSColor colorWithCalibratedWhite:backgroundCalibratedWhite alpha:1.0f]] autorelease];
+	[shading drawInRect:NSMakeRect(rect.origin.x, rect.origin.y, rect.size.width, 5) angle:90];
 
 	// Draw horizontal line across the top edge
 	[[NSColor colorWithCalibratedWhite:lineCalibratedWhite alpha:1.0f] set];
@@ -536,7 +524,7 @@ typedef struct {
 		// Slightly darken background tabs on mouse over
 		if ([cell state] == NSOffState) {
 			NSColor *lineColor = [self _lineColorForTabCellDrawing];
-			NSColor *fillColor = [[self fillColorForCell:cell] shadowWithLevel:0.03f];
+			NSColor *fillColor = [[self fillColorForCell:cell] shadowWithLevel:0.03f] ?: [NSColor colorWithCalibratedWhite:0.0f alpha:0.04f];
 
 			[self _drawTabCell:cell withBackgroundColor:fillColor lineColor:lineColor];
 		}
@@ -597,18 +585,8 @@ typedef struct {
         labelRect.size.width -= myRect.size.width + kPSMTabBarCellPadding;
     }
 	
-	// determine text colour
-	NSAttributedString *labelString = cell.attributedStringValue;
-	if (cell.state != NSOnState) {
-		NSMutableAttributedString *newLabelString = labelString.mutableCopy;
-		
-		[newLabelString addAttribute:NSForegroundColorAttributeName value:[NSColor darkGrayColor] range:NSMakeRange(0, newLabelString.length)];
-		
-		labelString = newLabelString.copy;
-	}
-	
 	// draw label
-	[labelString drawInRect:labelRect];
+	[cell.attributedStringValue drawInRect:labelRect];
 }
 
 - (NSColor *)fillColorForCell:(PSMTabBarCell *)cell
@@ -618,15 +596,8 @@ typedef struct {
 	// Set up colours
 	if (([[tabBar window] isMainWindow] || [[[tabBar window] attachedSheet] isMainWindow]) && [NSApp isActive]) {
 		if ([cell state] == NSOnState) { //active window, active cell
-			float tabWhiteComponent = 0.795f;
-			
-			if (!tabBar.window.toolbar.isVisible) tabWhiteComponent += 0.02f;
-			
-			fillColor = [cell backgroundColor] ? [cell backgroundColor] : [NSColor colorWithCalibratedWhite:tabWhiteComponent alpha:1.0f];
-		} else { //active window, background cell
-			float tabWhiteComponent = 0.68f;
-			fillColor = [NSColor colorWithCalibratedWhite:tabWhiteComponent alpha:1.0f];
-			
+			fillColor = [cell backgroundColor] ? [cell backgroundColor] : [NSColor whiteColor];
+		} else { //active window, background cell - uncoloured cells show the tab bar background
 			if([cell backgroundColor]) {
 				//should be a slightly darker variant of the color
 				fillColor = [[cell backgroundColor] shadowWithLevel:0.15];
@@ -637,20 +608,14 @@ typedef struct {
 		}
 	} else {
 		if ([cell state] == NSOnState) { //background window, active cell
-			float tabWhiteComponent = 0.957f;
-			if (!tabBar.window.toolbar.isVisible) tabWhiteComponent += 0.01f;
-			
 			//create a slightly desaturated variant (gray can't be desaturated so we instead make it brighter)
 			if (cell.backgroundColor) {
 				fillColor = [NSColor colorWithCalibratedHue:cell.backgroundColor.hueComponent saturation:cell.backgroundColor.saturationComponent brightness:(cell.backgroundColor.brightnessComponent * 1.28) alpha:1.0f];
 			} else {
-				fillColor = [NSColor colorWithCalibratedWhite:tabWhiteComponent alpha:1.0f];
+				fillColor = [NSColor whiteColor];
 			}
-			
-		} else { //background window, background cell
-			float tabWhiteComponent = 0.86f;
-			fillColor = [NSColor colorWithCalibratedWhite:tabWhiteComponent alpha:1.0f];
-			
+
+		} else { //background window, background cell - uncoloured cells show the tab bar background
 			//make it dark first, then desaturate
 			if (cell.backgroundColor) {
 				NSColor *dark = [[cell backgroundColor] shadowWithLevel:0.15];
@@ -680,25 +645,47 @@ typedef struct {
 - (void)_drawTabCell:(PSMTabBarCell *)cell withBackgroundColor:(NSColor *)backgroundColor lineColor:(NSColor *)lineColor
 {
 	NSRect cellFrame = [cell frame];
+	CGFloat radius = 9.0f;
+	CGFloat top = NSMinY(cellFrame);
+	CGFloat bottom = NSMaxY(cellFrame) - 0.5f;
+	CGFloat left = NSMinX(cellFrame) + 0.5f;
+	CGFloat right = NSMaxX(cellFrame) - 0.5f;
 
-	// Setup fill rect
-	NSRect fillRect = NSMakeRect(cellFrame.origin.x, cellFrame.origin.y + 1, cellFrame.size.width, cellFrame.size.height - 1.5);
-
-	// Draw
 	[NSGraphicsContext saveGraphicsState];
 
-	[backgroundColor set];
-	NSRectFill(fillRect);
+	// Unfilled background tabs are only separated by a divider, unless the next tab draws its own edge
+	if (!backgroundColor) {
+		NSArray *cells = [tabBar cells];
+		NSUInteger cellIndex = [cells indexOfObject:cell];
+		BOOL nextIsSelected = (cellIndex != NSNotFound && cellIndex + 1 < [cells count] && [[cells objectAtIndex:cellIndex + 1] state] == NSOnState);
+
+		if (lineColor && !nextIsSelected) {
+			[lineColor setStroke];
+			[NSBezierPath strokeLineFromPoint:NSMakePoint(right, top + 5) toPoint:NSMakePoint(right, bottom - 5)];
+		}
+
+		[NSGraphicsContext restoreGraphicsState];
+		return;
+	}
+
+	// Tab outline: flares out of the top edge of the bar, with rounded bottom corners
+	NSBezierPath *outline = [NSBezierPath bezierPath];
+	[outline moveToPoint:NSMakePoint(left - radius, top)];
+	[outline appendBezierPathWithArcFromPoint:NSMakePoint(left, top) toPoint:NSMakePoint(left, bottom) radius:radius];
+	[outline appendBezierPathWithArcFromPoint:NSMakePoint(left, bottom) toPoint:NSMakePoint(right, bottom) radius:radius];
+	[outline appendBezierPathWithArcFromPoint:NSMakePoint(right, bottom) toPoint:NSMakePoint(right, top) radius:radius];
+	[outline appendBezierPathWithArcFromPoint:NSMakePoint(right, top) toPoint:NSMakePoint(right + radius, top) radius:radius];
+	[outline lineToPoint:NSMakePoint(right + radius, top)];
+
+	NSBezierPath *fillPath = [[outline copy] autorelease];
+	[fillPath closePath];
+	[backgroundColor setFill];
+	[fillPath fill];
 
 	if (lineColor) {
-
-		// Stroke left edge
 		[lineColor setStroke];
-
-		NSPoint point1 = NSMakePoint(fillRect.origin.x + fillRect.size.width - 0.5, fillRect.origin.y);
-		NSPoint point2 = NSMakePoint(fillRect.origin.x + fillRect.size.width - 0.5, fillRect.origin.y + fillRect.size.height);
-
-		[NSBezierPath strokeLineFromPoint:point1 toPoint:point2];
+		[outline setLineWidth:1.0f];
+		[outline stroke];
 	}
 
 	[NSGraphicsContext restoreGraphicsState];
