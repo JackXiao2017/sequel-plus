@@ -32,6 +32,8 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 - (void)closeRenameTableSheet:(id)sender;
 - (BOOL)sidebarShouldChangeSelection:(SPPostgresSidebarController *)sidebar;
 - (void)sidebar:(SPPostgresSidebarController *)sidebar dropExtensionNamed:(NSString *)name;
+- (void)sidebar:(SPPostgresSidebarController *)sidebar truncateTables:(NSArray<NSString *> *)tables;
+- (void)sidebar:(SPPostgresSidebarController *)sidebar removeRelations:(NSArray<NSString *> *)names;
 @end
 
 @interface SPWindowController (SPPostgresDocumentTests)
@@ -2236,6 +2238,299 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
 	for (NSString *identifier in identifiers) XCTAssertTrue([self.document validateToolbarItem:[self toolbarItem:identifier of:self.document]], @"%@ idle again", identifier);
 	for (NSMenuItem *item in menuItems) XCTAssertTrue([self.controller validateMenuItem:item], @"%@ idle again", item.title);
+}
+
+#pragma mark - Truncate and Remove
+
+/// An admin connection that has run sql (throwaway sp9_* tables and views in public); they are dropped (views
+/// first, never CASCADE) when the test ends. The tab's lists are reloaded to show them.
+- (PGPostgresConnection *)sp9AdminRunning:(NSArray<NSString *> *)sql
+{
+	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPPostgresDocumentTestPort];
+	NSArray *cleanup = @[@"DROP VIEW IF EXISTS public.sp9_v, public.sp9_dep",
+						 @"DROP TABLE IF EXISTS public.sp9_a, public.sp9_b, public.sp9_keep, public.sp9_base, public.sp9_other"];
+	for (NSString *statement in cleanup) XCTAssertNotNil([admin execute:statement], @"%@", statement);
+	for (NSString *statement in sql) XCTAssertNotNil([admin execute:statement], @"%@", statement);
+	[self addTeardownBlock:^{
+		for (NSString *statement in cleanup) [admin execute:statement];
+		[admin disconnect];
+	}];
+	[self.document.sidebar reloadKeepingSelection];
+	[self waitForTab];
+	return admin;
+}
+
+- (NSString *)value:(NSString *)sql on:(PGPostgresConnection *)connection
+{
+	return [[connection execute:sql] rowAsArray].firstObject;
+}
+
+/// The confirmation's texts, buttons and style, as MySQL's.
+- (void)assertConfirmation:(NSAlert *)alert message:(NSString *)message informative:(NSString *)informative action:(NSString *)action
+{
+	XCTAssertEqualObjects(alert.messageText, message);
+	XCTAssertEqualObjects(alert.informativeText, informative);
+	XCTAssertEqualObjects([alert.buttons valueForKey:@"title"], (@[action, @"Cancel"]));
+	XCTAssertEqual(alert.alertStyle, NSAlertStyleCritical);
+	XCTAssertTrue(alert.buttons.firstObject.hasDestructiveAction);
+	XCTAssertEqualObjects(alert.buttons[0].keyEquivalent, @"\r");
+	XCTAssertEqualObjects(alert.buttons[1].keyEquivalent, @"\033");
+}
+
+- (void)testTruncateConfirmedEmptiesTable
+{
+	PGPostgresConnection *admin = [self sp9AdminRunning:@[@"CREATE TABLE public.sp9_a (id integer)", @"INSERT INTO public.sp9_a VALUES (1), (2), (3)",
+														  @"CREATE TABLE public.sp9_b (id integer)", @"INSERT INTO public.sp9_b VALUES (1), (2)"]];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	NSMutableArray<NSAlert *> *asked = [self answerConfirmationsWith:YES];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+
+	// One table, shown in Content: emptied, and Content shows it empty
+	XCTAssertTrue([sidebar selectTableNamed:@"sp9_a"]);
+	[self waitForTab];
+	XCTAssertEqual([self.document.contentController.tableView numberOfRows], 3);
+	[self.document sidebar:sidebar truncateTables:@[@"sp9_a"]];
+	[self waitForTab];
+	XCTAssertEqual(asked.count, 1u);
+	[self assertConfirmation:asked[0] message:@"Truncate table 'sp9_a'?"
+				 informative:@"Are you sure you want to delete ALL records in the table 'sp9_a'? This operation cannot be undone." action:@"Truncate"];
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_a" on:admin], @"0");
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_b" on:admin], @"2");
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"sp9_a");
+	XCTAssertEqualObjects(self.document.contentController.table, @"sp9_a");
+	XCTAssertEqual([self.document.contentController.tableView numberOfRows], 0);
+
+	// Two tables
+	XCTAssertNotNil([admin execute:@"INSERT INTO public.sp9_a VALUES (4)"]);
+	XCTAssertTrue(([sidebar selectRelationsNamed:@[@"sp9_a", @"sp9_b"]]));
+	[self waitForTab];
+	[self.document sidebar:sidebar truncateTables:sidebar.selectedRelationNames];
+	[self waitForTab];
+	XCTAssertEqual(asked.count, 2u);
+	[self assertConfirmation:asked[1] message:@"Truncate selected tables?"
+				 informative:@"Are you sure you want to delete ALL records in the selected tables? This operation cannot be undone." action:@"Truncate"];
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_a" on:admin], @"0");
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_b" on:admin], @"0");
+	XCTAssertEqualObjects(sidebar.selectedRelationNames, (@[@"sp9_a", @"sp9_b"]));
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+	XCTAssertEqual(self.document.connection.transactionStatus, PGPostgresTransactionIdle);
+}
+
+- (void)testTruncateCancelledKeepsRows
+{
+	PGPostgresConnection *admin = [self sp9AdminRunning:@[@"CREATE TABLE public.sp9_a (id integer)", @"INSERT INTO public.sp9_a VALUES (1), (2), (3)",
+														  @"CREATE TABLE public.sp9_b (id integer)", @"INSERT INTO public.sp9_b VALUES (1), (2)"]];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	NSMutableArray<NSAlert *> *asked = [self answerConfirmationsWith:NO];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+
+	[self.document sidebar:sidebar truncateTables:@[@"sp9_b"]];
+	[self waitForTab];
+	XCTAssertEqual(asked.count, 1u);
+	[self assertConfirmation:asked[0] message:@"Truncate table 'sp9_b'?"
+				 informative:@"Are you sure you want to delete ALL records in the table 'sp9_b'? This operation cannot be undone." action:@"Truncate"];
+
+	[self.document sidebar:sidebar truncateTables:@[@"sp9_a", @"sp9_b"]];
+	[self waitForTab];
+	XCTAssertEqual(asked.count, 2u);
+	[self assertConfirmation:asked[1] message:@"Truncate selected tables?"
+				 informative:@"Are you sure you want to delete ALL records in the selected tables? This operation cannot be undone." action:@"Truncate"];
+
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_a" on:admin], @"3");
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_b" on:admin], @"2");
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+}
+
+- (void)testRemoveTwoItemsDropsBothAndClearsSelection
+{
+	PGPostgresConnection *admin = [self sp9AdminRunning:@[@"CREATE TABLE public.sp9_keep (id integer)", @"CREATE TABLE public.sp9_a (id integer)",
+														  @"CREATE TABLE public.sp9_b (id integer)", @"CREATE VIEW public.sp9_v AS SELECT 1 AS x"]];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	__block BOOL answer = NO;
+	NSMutableArray<NSAlert *> *asked = [NSMutableArray array];
+	self.document.confirmationPresenter = ^(NSAlert *alert, void (^completion)(BOOL)) {
+		[asked addObject:alert];
+		completion(answer);
+	};
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+
+	// The kind words, answered Cancel: table, view, tables, views
+	[self.document sidebar:sidebar removeRelations:@[@"sp9_a"]];
+	[self.document sidebar:sidebar removeRelations:@[@"sp9_v"]];
+	[self.document sidebar:sidebar removeRelations:@[@"sp9_a", @"sp9_b"]];
+	[self waitForTab];
+	XCTAssertEqual(asked.count, 3u);
+	[self assertConfirmation:asked[0] message:@"Delete table 'sp9_a'?"
+				 informative:@"Are you sure you want to delete the table 'sp9_a'? This operation cannot be undone." action:@"Delete"];
+	[self assertConfirmation:asked[1] message:@"Delete view 'sp9_v'?"
+				 informative:@"Are you sure you want to delete the view 'sp9_v'? This operation cannot be undone." action:@"Delete"];
+	[self assertConfirmation:asked[2] message:@"Delete selected tables?"
+				 informative:@"Are you sure you want to delete the selected tables? This operation cannot be undone." action:@"Delete"];
+	XCTAssertTrue([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"sp9_a"]);
+	XCTAssertTrue([[sidebar itemTitlesInSection:@"VIEWS"] containsObject:@"sp9_v"]);
+
+	// History: sp9_keep, then sp9_a (the one shown before the multiple selection)
+	XCTAssertTrue([sidebar selectTableNamed:@"sp9_keep"]);
+	[self waitForTab];
+	XCTAssertTrue([sidebar selectTableNamed:@"sp9_a"]);
+	[self waitForTab];
+	XCTAssertTrue(([sidebar selectRelationsNamed:@[@"sp9_a", @"sp9_v"]]));
+	[self waitForTab];
+
+	// A table and a view, confirmed: both dropped, unlisted, nothing selected
+	answer = YES;
+	[self.document sidebar:sidebar removeRelations:sidebar.selectedRelationNames];
+	[self waitForTab];
+	XCTAssertEqual(asked.count, 4u);
+	[self assertConfirmation:asked[3] message:@"Delete selected items?"
+				 informative:@"Are you sure you want to delete the selected items? This operation cannot be undone." action:@"Delete"];
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+	XCTAssertFalse([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"sp9_a"]);
+	XCTAssertFalse([[sidebar itemTitlesInSection:@"VIEWS"] containsObject:@"sp9_v"]);
+	XCTAssertTrue([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"sp9_keep"]);
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM pg_class WHERE relname IN ('sp9_a', 'sp9_v')" on:admin], @"0");
+	XCTAssertEqual(sidebar.selectedRelationNames.count, 0u);
+	XCTAssertNil(sidebar.selectedTableName);
+	XCTAssertNil(self.document.contentController.table);
+	XCTAssertEqual(self.document.connection.transactionStatus, PGPostgresTransactionIdle);
+
+	// Back: sp9_keep; Forward: sp9_a, gone, selects nothing (no alert)
+	[self.document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	[self waitForTab];
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"sp9_keep");
+	[self.document backForwardInHistory:[self historyMenuItemWithTag:1]];
+	[self waitForTab];
+	XCTAssertNil(sidebar.selectedTableName);
+	XCTAssertNil(self.document.contentController.table);
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+}
+
+/// Review Focus 2: a table a view depends on isn't dropped, nor is anything else of the selection; the server's message
+/// names the view.
+- (void)testRemoveDependencyErrorShowsServerMessage
+{
+	PGPostgresConnection *admin = [self sp9AdminRunning:@[@"CREATE TABLE public.sp9_base (id integer)", @"CREATE VIEW public.sp9_dep AS SELECT id FROM public.sp9_base",
+														  @"CREATE TABLE public.sp9_other (id integer)"]];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	NSMutableArray<NSAlert *> *asked = [self answerConfirmationsWith:YES];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	XCTAssertTrue(([sidebar selectRelationsNamed:@[@"sp9_base", @"sp9_other"]]));
+	[self waitForTab];
+	NSArray *tables = [sidebar itemTitlesInSection:@"TABLES"], *views = [sidebar itemTitlesInSection:@"VIEWS"];
+
+	[self.document sidebar:sidebar removeRelations:@[@"sp9_other", @"sp9_base"]];
+	[self waitForTab];
+	XCTAssertEqual(asked.count, 1u);
+	XCTAssertEqualObjects(asked[0].messageText, @"Delete selected tables?");
+	XCTAssertEqual(alerts.count, 1u);
+	XCTAssertEqualObjects(alerts[0].messageText, @"Error deleting table");
+	XCTAssertTrue([alerts[0].informativeText containsString:@"sp9_dep"], @"%@", alerts[0].informativeText);
+	XCTAssertFalse([alerts[0].informativeText containsString:@"CASCADE"], @"%@", alerts[0].informativeText);
+
+	XCTAssertEqualObjects([sidebar itemTitlesInSection:@"TABLES"], tables);
+	XCTAssertEqualObjects([sidebar itemTitlesInSection:@"VIEWS"], views);
+	XCTAssertEqualObjects(sidebar.selectedRelationNames, (@[@"sp9_base", @"sp9_other"]));
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM pg_class WHERE relname IN ('sp9_base', 'sp9_dep', 'sp9_other')" on:admin], @"3");
+	XCTAssertEqual(self.document.connection.transactionStatus, PGPostgresTransactionIdle);
+}
+
+/// Review Focus 3: while the tab's runner is busy nothing is asked or dropped; a confirmation answered after a load
+/// was queued meanwhile drops nothing either.
+- (void)testRemoveRefusedWhileBusy
+{
+	PGPostgresConnection *admin = [self sp9AdminRunning:@[@"CREATE TABLE public.sp9_a (id integer)", @"INSERT INTO public.sp9_a VALUES (1)"]];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	NSMutableArray<NSAlert *> *asked = [self answerConfirmationsWith:YES];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	SPPostgresTaskRunner *runner = self.document.taskRunner;
+
+	[SPPostgresTestServers queueSleep:1 onRunner:runner];
+	XCTAssertTrue(self.document.isProcessing);
+	[self.document sidebar:sidebar removeRelations:@[@"sp9_a"]];
+	[self.document sidebar:sidebar truncateTables:@[@"sp9_a"]];
+	XCTAssertEqual(asked.count, 0u);
+	[self waitForTab];
+	XCTAssertEqual(asked.count, 0u);
+	XCTAssertEqual(alerts.count, 0u);
+
+	// Busy again by the time the answer comes
+	self.document.confirmationPresenter = ^(NSAlert *alert, void (^completion)(BOOL)) {
+		[asked addObject:alert];
+		[SPPostgresTestServers queueSleep:1 onRunner:runner];
+		completion(YES);
+	};
+	[self.document sidebar:sidebar removeRelations:@[@"sp9_a"]];
+	[self.document sidebar:sidebar truncateTables:@[@"sp9_a"]];
+	XCTAssertEqual(asked.count, 1u, @"the second is refused while the first's sleep runs");
+	[self waitForTab];
+
+	XCTAssertTrue([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"sp9_a"]);
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_a" on:admin], @"1");
+	XCTAssertEqual(alerts.count, 0u);
+}
+
+/// Review Focus 3: a Structure draft on the shown table is saved before the confirmation is asked; one that can't be
+/// saved asks nothing and drops nothing. The removed shown table leaves the panes showing no table.
+- (void)testRemoveShownTableCommitsEditFirst
+{
+	PGPostgresConnection *admin = [self sp9AdminRunning:@[@"CREATE TABLE public.sp9_a (id integer)", @"CREATE TABLE public.sp9_b (id integer)"]];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	SPPostgresStructureController *structure = self.document.structureController;
+	NSString *addedColumn = @"SELECT count(*)::text FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'sp9_a' AND column_name = 'added_col'";
+
+	// What was saved when the question came; answered once the tab is idle
+	NSMutableArray<NSAlert *> *asked = [NSMutableArray array];
+	__block NSString *savedWhenAsked = nil;
+	__block BOOL draftWhenAsked = YES;
+	__block void (^answer)(BOOL) = nil;
+	self.document.confirmationPresenter = ^(NSAlert *alert, void (^completion)(BOOL)) {
+		[asked addObject:alert];
+		savedWhenAsked = [self value:addedColumn on:admin];
+		draftWhenAsked = structure.hasDraftColumn;
+		answer = completion;
+	};
+
+	XCTAssertTrue([sidebar selectTableNamed:@"sp9_a"]);
+	[self waitForTab];
+	[self.document viewStructure:nil];
+	[self waitForTab];
+	[structure addColumn:nil];
+	[self waitForTab];
+	[[structure.columnsView currentEditor] setString:@"added_col"];
+
+	[self.document sidebar:sidebar removeRelations:@[@"sp9_a"]];
+	XCTAssertEqual(asked.count, 1u);
+	XCTAssertEqualObjects(savedWhenAsked, @"1");
+	XCTAssertFalse(draftWhenAsked);
+	XCTAssertEqualObjects(asked[0].messageText, @"Delete table 'sp9_a'?");
+	[self waitForTab];
+	answer(YES);
+	[self waitForTab];
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM pg_class WHERE relname = 'sp9_a'" on:admin], @"0");
+	XCTAssertFalse([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"sp9_a"]);
+	XCTAssertNil(sidebar.selectedTableName);
+	XCTAssertNil(self.document.contentController.table);
+	XCTAssertNil(structure.table);
+
+	// A draft that can't be saved (the name is taken): its error, no question, nothing dropped
+	XCTAssertTrue([sidebar selectTableNamed:@"sp9_b"]);
+	[self waitForTab];
+	[self.document viewStructure:nil];
+	[self waitForTab];
+	XCTAssertEqualObjects(structure.table, @"sp9_b");
+	[structure addColumn:nil];
+	[self waitForTab];
+	[[structure.columnsView currentEditor] setString:@"id"];
+	[self.document sidebar:sidebar removeRelations:@[@"sp9_b"]];
+	[self waitForTab];
+	XCTAssertEqual(asked.count, 1u);
+	XCTAssertEqual(alerts.count, 1u);
+	XCTAssertTrue(structure.hasDraftColumn);
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM pg_class WHERE relname = 'sp9_b'" on:admin], @"1");
+	XCTAssertTrue([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"sp9_b"]);
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"sp9_b");
 }
 
 @end
