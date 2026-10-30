@@ -18,6 +18,9 @@ static NSString * const SPPostgresSQLKeywordValue = @"x";        // kValue
 static const NSUInteger SPPostgresSyntaxHiliteBias = 2000;
 static const NSUInteger SPPostgresMaxTextSizeForSyntaxHighlighting = 20000000;
 
+// The context menu's "MySQL Help for Word/Selection" item (SP_CQ_SEARCH_IN_MYSQL_HELP_MENU_ITEM_TAG, SPTextView.m)
+static const NSInteger SPPostgresHelpMenuItemTag = 1000;
+
 // SPTextView's private pop-up placement (Source/SPTextView.m), used as SPTextView's own completion uses it
 @interface SPTextView (SPPostgresCompletionPlacement)
 - (void)_positionCompletionPopup:(SPNarrowDownCompletion *)aPopup relativeToTextAtLocation:(NSUInteger)aLocation;
@@ -31,6 +34,10 @@ static const NSUInteger SPPostgresMaxTextSizeForSyntaxHighlighting = 20000000;
 @end
 
 /**
+ * The overrides below mirror private SPNarrowDownCompletion code (Source/SPNarrowDownCompletion.m), and must follow it
+ * if it changes: -filter its filtering (lines 644–770), -insertAutocompletePlaceholder its placeholder (958–995) and
+ * -insert_text: its insertion (1048–1092).
+ *
  * MySQL's completion pop-up for the Postgres editor's items, whose "match" may be a double-quoted name:
  * - a filter typed without a leading " (Ord) finds a quoted name by the name itself (Order Items), as one typed after a
  *   " finds it by its quoted form (SPNarrowDownCompletion only compares "match" when an item has one);
@@ -143,7 +150,8 @@ static const NSUInteger SPPostgresMaxTextSizeForSyntaxHighlighting = 20000000;
 
 #pragma mark -
 
-/// The name as completion inserts it: double-quoted ("" for ") unless it is an all-lowercase identifier and no keyword.
+/// The name as completion inserts it: double-quoted ("" for ") unless it is an all-lowercase identifier and not a
+/// RESERVED keyword (an unreserved one, e.g. name or type, is a valid column name as it is).
 static NSString *SPPostgresCompletionInsertedName(NSString *name)
 {
 	static NSCharacterSet *notIdentifier = nil;
@@ -158,7 +166,7 @@ static NSString *SPPostgresCompletionInsertedName(NSString *name)
 	BOOL plain = [name length]
 		&& [name rangeOfCharacterFromSet:notIdentifier].location == NSNotFound
 		&& ![notFirst characterIsMember:[name characterAtIndex:0]]
-		&& ![[SPPostgresSQLTokenizer keywords] containsObject:name];
+		&& ![[SPPostgresSQLTokenizer reservedKeywords] containsObject:name];
 	if (plain) return name;
 
 	return [NSString stringWithFormat:@"\"%@\"", [name stringByReplacingOccurrencesOfString:@"\"" withString:@"\"\""]];
@@ -337,12 +345,72 @@ static BOOL SPPostgresIsIdentifierCharacter(unichar c)
 		if (token.kind == SPPostgresTokenKeyword) {
 			[textStore addAttribute:SPPostgresSQLKeyword value:SPPostgresSQLKeywordValue range:tokenRange];
 		}
-		else if (token.kind == SPPostgresTokenString) {
+		else if (token.kind == SPPostgresTokenString || token.kind == SPPostgresTokenComment) {
+			// As SPTextView (its tokens < 4: strings and comments): auto-help skips them
 			[textStore addAttribute:SPPostgresQuote value:SPPostgresQuoteValue range:tokenRange];
 		}
 	}
 
 	[self setNeedsDisplayInRect:[self bounds]];
+}
+
+#pragma mark - Help
+
+/**
+ * SPTextView's -autoHelp for the Query controller (the delegate) instead of MySQL's SPCustomQuery: when
+ * CustomQueryUpdateAutoHelp is on, the help for the selection, or for the word at the caret when it is not inside a
+ * string or comment, after 0.1 s (-showAutoHelpForCurrentWord:).
+ */
+- (void)autoHelp
+{
+	if (![prefs boolForKey:SPCustomQueryUpdateAutoHelp] || ![[self string] length]) return;
+
+	id helpTarget = [self delegate];
+	if (![helpTarget respondsToSelector:@selector(showAutoHelpForCurrentWord:)]) return;
+
+	// If selection show Help for it
+	if ([self selectedRange].length) {
+		[helpTarget performSelector:@selector(showAutoHelpForCurrentWord:) withObject:self afterDelay:0.1];
+		return;
+	}
+	// Otherwise show Help if caret is not inside quotes
+	NSUInteger cursorPosition = [self selectedRange].location;
+	// If cursor at the end go one char leftwards
+	if (cursorPosition > 0 && cursorPosition >= [[self string] length]) cursorPosition--;
+	if (cursorPosition < [[self string] length] && ![(NSString *)[[self textStorage] attribute:SPPostgresQuote atIndex:cursorPosition effectiveRange:NULL] length]) {
+		[helpTarget performSelector:@selector(showAutoHelpForCurrentWord:) withObject:self afterDelay:0.1];
+	}
+}
+
+/// The context menu's help item (⌃H): the PostgreSQL help for the word or selection (the Query controller's).
+- (IBAction)showMySQLHelpForCurrentWord:(id)sender
+{
+	id helpTarget = [self delegate];
+	if ([helpTarget respondsToSelector:@selector(showHelpForCurrentWord:)]) [helpTarget performSelector:@selector(showHelpForCurrentWord:) withObject:self];
+	else NSBeep();
+}
+
+/// The help item's title: "PostgreSQL Help for Word" / "… for Selection".
+- (NSString *)_helpMenuItemTitle
+{
+	return [self selectedRange].length
+		? NSLocalizedString(@"PostgreSQL Help for Selection", @"Postgres query editor: context menu help item (selection)")
+		: NSLocalizedString(@"PostgreSQL Help for Word", @"Postgres query editor: context menu help item (word)");
+}
+
+/// SPTextView's context menu, its help item titled for PostgreSQL (SPTextView titles it again for MySQL's editors).
+- (NSMenu *)menuForEvent:(NSEvent *)event
+{
+	NSMenu *menu = [super menuForEvent:event];
+	[[menu itemWithTag:SPPostgresHelpMenuItemTag] setTitle:[self _helpMenuItemTitle]];
+	return menu;
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem *)menuItem
+{
+	BOOL valid = [super validateMenuItem:menuItem];
+	if ([menuItem action] == @selector(showMySQLHelpForCurrentWord:)) [menuItem setTitle:[self _helpMenuItemTitle]];
+	return valid;
 }
 
 #pragma mark - Completion
