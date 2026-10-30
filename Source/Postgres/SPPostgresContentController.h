@@ -5,8 +5,8 @@
 
 /**
  * The Content view of a PostgreSQL tab, laid out as MySQL's Content tab: a filter bar on top (column,
- * comparison, value, Filter), the rows in an SPTableView, and a bottom bar with add, delete and refresh
- * buttons, the row count, the read-only reason (if any) and previous/next page buttons. Built in code.
+ * comparison, value, Filter), the rows in an SPTableView, and MySQL's bottom bar (see addButton). ⌫ or ⌦ in the
+ * grid deletes the selected rows (see removeRows:). Built in code.
  * Use on the main thread.
  *
  * Rows come from SPPostgresTableData as PostgreSQL text. The page size is MySQL's "Limit results"
@@ -49,6 +49,15 @@ __attribute__((visibility("default")))
 - (IBAction)applyFilter:(id)sender;
 
 @property (readonly) NSTableView *tableView;
+
+/// The bottom bar, as MySQL's (DBView.xib): add, delete, duplicate, refresh, edit mode, filter toggle | count, notice |
+/// previous, jump to page, next. While the runner is busy every button but the edit mode toggle is disabled.
+@property (readonly) NSButton *addButton, *removeButton, *duplicateButton, *refreshButton, *editModeButton, *filterToggleButton, *previousPageButton, *paginationButton, *nextPageButton;
+@property (readonly) NSTextField *countField;
+
+/// Where the preferences the view reads (page size, NULL placeholder, table font, gridlines) come from. Default: standardUserDefaults.
+/// The gridlines are read when the view is built.
+@property (nonatomic, retain) NSUserDefaults *defaults;
 @property (readonly, copy) NSString *schema;
 @property (readonly, copy) NSString *table;
 
