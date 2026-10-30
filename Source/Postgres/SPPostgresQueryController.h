@@ -24,14 +24,17 @@
  *
  * The status line and the info pane use MySQL's words (SPCustomQuery.m), times as +[NSString stringForTimeInterval:]:
  * - the status line: "No errors; 3 rows affected, taking 1.2 ms" (a row set with rows: ", first row available
- *   after …"), "Errors; 1 row affected in total, by 2 queries taking 3 ms", "No errors; Cancelled after 5 s" or
- *   "No errors; Cancelled in query K, after …" (a run of several statements). Rows are a row set's rows or a
- *   command's affected rows, summed over the statements that succeeded; the queries are those sent, the failing one
- *   too. The status line is cleared when a run starts.
- * - the info pane: while running, "Query Status" and the run's description ("Running query..."), without opening.
- *   On an error it opens, titled "Last Error Message", with the server's message and its DETAIL/HINT lines (in a
- *   run of several statements "[ERROR in query K] <message>", then "Execution stopped!" when statements remain);
- *   otherwise it closes and says "There were no errors." (cancelled: "Query cancelled."). The Postgres-only notes
+ *   after …"), "Errors; 1 row affected in total, by 2 queries taking 3 ms", "Errors; Cancelled after 5 s" or
+ *   "Errors; Cancelled in query K, after …" (K > 1). Rows are a row set's rows or a command's affected rows, summed
+ *   over the statements that succeeded; the queries (K) are those sent to the server, the failing or interrupted one
+ *   too (a cancel between statements: those run; before the run starts: none). The status line is cleared when a
+ *   run starts.
+ * - the info pane: while running, "Query Status" and the run's description ("Running query..." / "Running query K
+ *   of N...", as each statement starts), without opening. On an error, a cancel being one as MySQL's, it opens,
+ *   titled "Last Error Message", with the server's message and its DETAIL/HINT lines (in a run of several
+ *   statements "[ERROR in query K] <message>", then "Execution stopped!" when statements remain), or "Query
+ *   cancelled." ("[ERROR in query K] Query cancelled." in a run of several statements, once one was sent);
+ *   otherwise it closes and says "There were no errors.". The Postgres-only notes
  *   follow, one per line: COPY … TO STDOUT output not shown, the grid's rows being an earlier statement's (after
  *   a run that completed: "Note: results shown from statement N, …"), an aborted transaction.
  *
@@ -116,8 +119,8 @@ __attribute__((visibility("default")))
 /// Whether a run opens and closes the info pane animated (default YES; the tests turn it off).
 @property (assign) BOOL infoPaneAnimates;
 
-/// The statements the last run ran (the failing one too), joined with ";\n", as MySQL's usedQuery; nil before the
-/// first run.
+/// The statements the last run sent to the server (the failing or interrupted one too), joined with ";\n", as MySQL's
+/// usedQuery. Unchanged by a run that sent none (cancelled before it started); nil before the first.
 @property (readonly, copy) NSString *lastRunQueryText;
 
 /// The editor font from MySQL's query editor font preference data (an archived NSFont), else the monospaced system font.

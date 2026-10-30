@@ -11,6 +11,7 @@
 #import "../Source/Postgres/SPPostgresConsoleLogger.h"
 #import "../Source/Postgres/SPPostgresTaskRunner.h"
 #import "../Source/SPComboPopupButton.h"
+#import "../Source/SPSplitView.h"
 
 /// The controller's test seam: called before each statement runs.
 @interface SPPostgresQueryController (Testing)
@@ -916,11 +917,12 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	[runner cancelAll];
 
 	NSDate *start = [NSDate date];
-	XCTAssertTrue([self spinUntil:^BOOL{ return [self.query.statusText hasPrefix:@"No errors; Cancelled"]; } timeout:5], @"%@", self.query.statusText);
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self.query.statusText hasPrefix:@"Errors; Cancelled"]; } timeout:5], @"%@", self.query.statusText);
 	XCTAssertLessThan([[NSDate date] timeIntervalSinceDate:start], 5.0);
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:5]);
-	[self assertText:self.query.statusText matches:@"No errors; Cancelled in query 2, after TIME"];
-	XCTAssertEqualObjects([self.query infoPaneString], @"Query cancelled.");
+	[self assertText:self.query.statusText matches:@"Errors; Cancelled in query 2, after TIME"];
+	XCTAssertEqualObjects([self.query infoPaneString], @"[ERROR in query 2] Query cancelled.");
+	XCTAssertFalse([self.query.infoPaneSplitView isCollapsibleSubviewCollapsed], @"a cancel is an error, as MySQL's: the pane opens");
 	XCTAssertEqual(self.alerts.count, 0u, @"a cancel shows no alert");
 	XCTAssertNil([self.controller window].attachedSheet);
 	XCTAssertFalse(logger.loggingCustomQueries, @"restored after a cancel");
@@ -956,7 +958,9 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	[runner cancelAll];
 
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:5]);
-	[self assertText:self.query.statusText matches:@"No errors; Cancelled in query 2, after TIME"];
+	[self assertText:self.query.statusText matches:@"Errors; Cancelled in query 2, after TIME"];
+	XCTAssertEqualObjects([self.query infoPaneString], @"[ERROR in query 2] Query cancelled.");
+	XCTAssertFalse([self.query.infoPaneSplitView isCollapsibleSubviewCollapsed]);
 	XCTAssertEqual(calls, 1u, @"the CREATE before the cancel is reported");
 	XCTAssertTrue(schema);
 	XCTAssertEqual(self.alerts.count, 0u);
