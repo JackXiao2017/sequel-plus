@@ -34,6 +34,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 - (void)sidebar:(SPPostgresSidebarController *)sidebar dropExtensionNamed:(NSString *)name;
 - (void)sidebar:(SPPostgresSidebarController *)sidebar truncateTables:(NSArray<NSString *> *)tables;
 - (void)sidebar:(SPPostgresSidebarController *)sidebar removeRelations:(NSArray<NSString *> *)names;
+- (void)closeAddTableSheet:(id)sender;
 @end
 
 @interface SPWindowController (SPPostgresDocumentTests)
@@ -2630,6 +2631,235 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM pg_class WHERE relname = 'sp9_b'" on:admin], @"0");
 	XCTAssertFalse([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"sp9_b"]);
 	XCTAssertEqualObjects(sidebar.selectedTableName, @"sp9_a");
+}
+
+#pragma mark - Add Table
+
+/// An admin connection; the throwaway sp9_added table (and sp9_a, which some tests use) is dropped before and after the test.
+- (PGPostgresConnection *)sp9AddAdmin
+{
+	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPPostgresDocumentTestPort];
+	NSString *cleanup = @"DROP TABLE IF EXISTS public.sp9_added, public.sp9_a";
+	XCTAssertNotNil([admin execute:cleanup]);
+	[self addTeardownBlock:^{
+		[admin execute:cleanup];
+		[admin disconnect];
+	}];
+	return admin;
+}
+
+/// Clicks the table list bar's Add and returns the New Table sheet (once the tab is idle).
+- (NSWindow *)openAddTableSheet
+{
+	NSButton *add = self.document.sidebar.addButton;
+	XCTAssertTrue(add.isEnabled);
+	[add performClick:nil];
+	[self waitForTabAndQuestions];
+	NSWindow *sheet = [self window].attachedSheet;
+	XCTAssertNotNil(sheet);
+	return sheet;
+}
+
+- (void)typeName:(NSString *)name inSheet:(NSWindow *)sheet
+{
+	NSTextField *field = [self viewWithIdentifier:@"addTableName" in:sheet.contentView];
+	field.stringValue = name;
+	[[NSNotificationCenter defaultCenter] postNotificationName:NSControlTextDidChangeNotification object:field];
+}
+
+- (void)testAddTableCreatesSelectsAndShowsStructure
+{
+	PGPostgresConnection *admin = [self sp9AddAdmin];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self.controller showWindow:nil];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
+	[self waitForTab];
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneContent);
+
+	// MySQL's New Table sheet, with the name only
+	NSWindow *sheet = [self openAddTableSheet];
+	XCTAssertEqualObjects(sheet.title, @"New Table");
+	NSTextField *field = [self viewWithIdentifier:@"addTableName" in:sheet.contentView];
+	NSButton *add = [self viewWithIdentifier:@"addTableButton" in:sheet.contentView];
+	XCTAssertEqualObjects(field.stringValue, @"");
+	XCTAssertEqualObjects(add.title, @"Add");
+	XCTAssertFalse(add.isEnabled);
+	NSMutableArray *labels = [NSMutableArray array];
+	for (NSView *view in sheet.contentView.subviews) {
+		if ([view isKindOfClass:[NSTextField class]] && !((NSTextField *)view).isEditable) [labels addObject:((NSTextField *)view).stringValue];
+	}
+	XCTAssertEqualObjects(labels, @[@"Table Name:"]);
+
+	[self typeName:@"sp9_added" inSheet:sheet];
+	XCTAssertTrue(add.isEnabled);
+	[add performClick:nil];
+	[self waitForTab];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [sidebar.selectedTableName isEqualToString:@"sp9_added"]; } timeout:5], @"%@ %@", sidebar.selectedTableName, alerts.firstObject.informativeText);
+	[self waitForTab];
+	XCTAssertNil([self window].attachedSheet);
+
+	// The table, with the spec's id column; listed, selected and shown in Structure
+	XCTAssertEqualObjects([self value:@"SELECT string_agg(a.attname || ' ' || format_type(a.atttypid, a.atttypmod) || ' ' || a.attidentity::text || ' ' || a.attnotnull::text, ',') "
+									  @"FROM pg_attribute a WHERE a.attrelid = 'public.sp9_added'::regclass AND a.attnum > 0 AND NOT a.attisdropped" on:admin], @"id integer d true");
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM pg_constraint WHERE conrelid = 'public.sp9_added'::regclass AND contype = 'p'" on:admin], @"1");
+	XCTAssertTrue([[sidebar itemTitlesInSection:@"TABLES"] containsObject:@"sp9_added"]);
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
+	XCTAssertEqualObjects(self.document.structureController.table, @"sp9_added");
+	XCTAssertTrue([[self.document windowTitleString] hasSuffix:@"/pgkit_test/public.sp9_added"]);
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+
+	// History: the new table is a place the user went to, as a selection then Structure (as MySQL's)
+	XCTAssertEqualObjects(self.document.history.currentEntry[@"table"], @"sp9_added");
+	XCTAssertEqualObjects(self.document.history.currentEntry[@"pane"], SPPostgresPaneStructure);
+	[self.document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	[self waitForTab];
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"sp9_added");
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneContent);
+	[self.document backForwardInHistory:[self historyMenuItemWithTag:0]];
+	[self waitForTab];
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"customers");
+}
+
+- (void)testAddButtonDisabledForBlankName
+{
+	PGPostgresConnection *admin = [self sp9AddAdmin];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self.controller showWindow:nil];
+
+	NSWindow *sheet = [self openAddTableSheet];
+	NSButton *add = [self viewWithIdentifier:@"addTableButton" in:sheet.contentView];
+	XCTAssertFalse(add.isEnabled);
+
+	// Blank after trimming, or longer than PostgreSQL's 63 bytes: disabled
+	[self typeName:@"   " inSheet:sheet];
+	XCTAssertFalse(add.isEnabled);
+	[self typeName:[@"" stringByPaddingToLength:64 withString:@"n" startingAtIndex:0] inSheet:sheet];
+	XCTAssertFalse(add.isEnabled);
+	[self typeName:@" sp9_added " inSheet:sheet];
+	XCTAssertTrue(add.isEnabled);
+	// Return: Add is the sheet's default button (AppKit keeps its Return key equivalent there)
+	XCTAssertEqual(sheet.defaultButtonCell, add.cell);
+	[self typeName:@"\t" inSheet:sheet];
+	XCTAssertFalse(add.isEnabled);
+
+	// Return (Add's action, sent anyway) does nothing while Add is disabled: the sheet stays
+	[self.document closeAddTableSheet:add];
+	[self waitForTab];
+	XCTAssertEqual([self window].attachedSheet, sheet);
+
+	// Cancel (Escape) ends the sheet, adding nothing
+	NSButton *cancel = nil;
+	for (NSView *view in sheet.contentView.subviews) {
+		if ([view isKindOfClass:[NSButton class]] && [((NSButton *)view).title isEqualToString:@"Cancel"]) cancel = (NSButton *)view;
+	}
+	XCTAssertEqualObjects(cancel.keyEquivalent, @"\e");
+	[self typeName:@"sp9_added" inSheet:sheet];
+	[cancel performClick:nil];
+	[self waitForTab];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self window].attachedSheet == nil; } timeout:5]);
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM pg_class WHERE relname = 'sp9_added'" on:admin], @"0");
+	XCTAssertEqual(alerts.count, 0u);
+
+	// The next sheet starts empty
+	sheet = [self openAddTableSheet];
+	XCTAssertEqualObjects(((NSTextField *)[self viewWithIdentifier:@"addTableName" in:sheet.contentView]).stringValue, @"");
+}
+
+- (void)testAddExistingNameShowsError
+{
+	[self sp9AddAdmin];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self.controller showWindow:nil];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
+	[self waitForTab];
+	NSArray *tables = [sidebar itemTitlesInSection:@"TABLES"];
+	NSDictionary *entry = self.document.history.currentEntry;
+
+	NSWindow *sheet = [self openAddTableSheet];
+	[self typeName:@"customers" inSheet:sheet];
+	[[self viewWithIdentifier:@"addTableButton" in:sheet.contentView] performClick:nil];
+	[self waitForTab];
+	XCTAssertTrue([self spinUntil:^BOOL{ return alerts.count == 1; } timeout:5]);
+	[self waitForTab];
+
+	XCTAssertEqualObjects(alerts[0].messageText, @"Error adding new table");
+	XCTAssertTrue([alerts[0].informativeText hasPrefix:@"An error occurred while trying to add the new table 'customers'.\n\nPostgreSQL said: "], @"%@", alerts[0].informativeText);
+	XCTAssertTrue([alerts[0].informativeText containsString:@"already exists"], @"%@", alerts[0].informativeText);
+	XCTAssertEqualObjects([alerts[0].buttons valueForKey:@"title"], @[@"OK"]);
+
+	// Nothing changed: the sheet is gone, the lists, the selection, the pane and History are as they were
+	XCTAssertNil([self window].attachedSheet);
+	XCTAssertEqualObjects([sidebar itemTitlesInSection:@"TABLES"], tables);
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"customers");
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneContent);
+	XCTAssertEqualObjects(self.document.history.currentEntry, entry);
+	XCTAssertFalse(self.document.history.canGoForward);
+}
+
+/// A load started while the sheet is up: Add is disabled (and Return refused) until the tab is idle, the sheet keeps
+/// the name, and Add then creates the table.
+- (void)testAddRefusedWhileBusyKeepsSheet
+{
+	PGPostgresConnection *admin = [self sp9AddAdmin];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self.controller showWindow:nil];
+
+	NSWindow *sheet = [self openAddTableSheet];
+	NSButton *add = [self viewWithIdentifier:@"addTableButton" in:sheet.contentView];
+	[self typeName:@"sp9_added" inSheet:sheet];
+	XCTAssertTrue(add.isEnabled);
+
+	[SPPostgresTestServers queueSleep:1 onRunner:self.document.taskRunner];
+	XCTAssertTrue(self.document.isProcessing);
+	XCTAssertFalse(add.isEnabled);
+	[self.document closeAddTableSheet:add];
+	XCTAssertEqual([self window].attachedSheet, sheet);
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM pg_class WHERE relname = 'sp9_added'" on:admin], @"0");
+
+	[self waitForTab];
+	XCTAssertTrue(add.isEnabled);
+	XCTAssertEqualObjects(((NSTextField *)[self viewWithIdentifier:@"addTableName" in:sheet.contentView]).stringValue, @"sp9_added");
+	[add performClick:nil];
+	[self waitForTab];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self.document.sidebar.selectedTableName isEqualToString:@"sp9_added"]; } timeout:5]);
+	[self waitForTab];
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM pg_class WHERE relname = 'sp9_added'" on:admin], @"1");
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+}
+
+/// Saving an edit before the sheet queues a list reload: the sheet comes up once the tab is idle.
+- (void)testAddSheetWaitsForIdleAfterCommit
+{
+	PGPostgresConnection *admin = [self sp9AddAdmin];
+	XCTAssertNotNil([admin execute:@"CREATE TABLE public.sp9_a (id integer)"]);
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self.controller showWindow:nil];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	SPPostgresStructureController *structure = self.document.structureController;
+	[sidebar reloadKeepingSelection];
+	[self waitForTab];
+
+	XCTAssertTrue([sidebar selectTableNamed:@"sp9_a"]);
+	[self waitForTab];
+	[self.document viewStructure:nil];
+	[self waitForTab];
+	[structure addColumn:nil];
+	[self waitForTab];
+	[[structure.columnsView currentEditor] setString:@"added_col"];
+
+	[sidebar.addButton performClick:nil];
+	XCTAssertFalse(structure.hasDraftColumn);
+	XCTAssertTrue(self.document.isProcessing, @"saving the column queued a list reload");
+	XCTAssertNil([self window].attachedSheet, @"not shown while busy");
+
+	[self waitForTabAndQuestions];
+	NSWindow *sheet = [self window].attachedSheet;
+	XCTAssertNotNil(sheet);
+	XCTAssertEqualObjects(sheet.title, @"New Table");
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.messageText);
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM pg_attribute WHERE attrelid = 'public.sp9_a'::regclass AND attname = 'added_col'" on:admin], @"1");
 }
 
 @end
