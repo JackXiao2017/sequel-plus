@@ -525,7 +525,8 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	NSMutableArray *queue = [NSMutableArray arrayWithObject:view];
 	while (queue.count) {
 		NSView *v = queue.firstObject; [queue removeObjectAtIndex:0];
-		if ([v isKindOfClass:[NSPopUpButton class]]) popup = (NSPopUpButton *)v;
+		// The first pop-up is the schema's (the bar's gear pop-up comes after it)
+		if (!popup && [v isKindOfClass:[NSPopUpButton class]]) popup = (NSPopUpButton *)v;
 		if ([v isKindOfClass:[NSOutlineView class]]) outline = (NSOutlineView *)v;
 		[queue addObjectsFromArray:v.subviews];
 	}

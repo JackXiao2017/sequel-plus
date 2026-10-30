@@ -450,6 +450,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 	// As MySQL's database pop-up during a task
 	[databasePopup setEnabled:!processing];
+	// The table list bar's Add, gear and Refresh (they start queries)
+	[sidebar setActionsEnabled:!processing];
 
 	// What isProcessing disables (as MySQL's task start and end revalidate the toolbar)
 	[self _updateHistoryControl];
@@ -485,6 +487,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[sidebarView setFrame:NSMakeRect(0, 0, SPPostgresSidebarDefaultWidth, NSHeight(splitFrame))];
 	[sidebarView setAutoresizingMask:NSViewHeightSizable]; // keeps its width as the window resizes
 	[splitView addSubview:sidebarView];
+	// The bar's handle drags the divider, as MySQL's table list bar handle does
+	[splitView setAdditionalDragHandleView:[sidebar splitHandleView]];
 
 	// The right pane: the Content view of the selected table
 	CGFloat contentX = SPPostgresSidebarDefaultWidth + [splitView dividerThickness];
@@ -1734,6 +1738,19 @@ NSString * const SPPostgresPaneExtension = @"extension";
 		[self performSelector:@selector(_reloadDeferredSidebar) withObject:nil afterDelay:0];
 	}
 	return ended;
+}
+
+/// The bar's Refresh: the lists reload keeping the selection (not recorded in History), once an edit in progress is
+/// saved. Refused while the tab is processing.
+- (void)sidebarRefresh:(SPPostgresSidebarController *)theSidebar
+{
+	if (tornDown) return;
+	if (isProcessing) {
+		NSBeep();
+		return;
+	}
+	if (![self _endPaneEditing]) return;
+	[sidebar reloadKeepingSelection:[self _quietSidebarCompletion:nil]];
 }
 
 - (void)sidebar:(SPPostgresSidebarController *)theSidebar didFailToLoadWithError:(NSError *)error

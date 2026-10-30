@@ -3,6 +3,7 @@
 @class SPPostgresCatalog;
 @class SPPostgresTaskRunner;
 @class SPPostgresSidebarController;
+@class SPSplitView;
 
 @protocol SPPostgresSidebarControllerDelegate <NSObject>
 /// The selected schema or table changed (by the user or through the API).
@@ -26,6 +27,10 @@
 - (void)sidebarInstallExtension:(SPPostgresSidebarController *)sidebar;
 /// "Drop Extension…" was chosen in the outline's menu for `name`, an installed extension.
 - (void)sidebar:(SPPostgresSidebarController *)sidebar dropExtensionNamed:(NSString *)name;
+/// The bar's Refresh button: reload the lists keeping the selection (the delegate decides whether it may run now).
+- (void)sidebarRefresh:(SPPostgresSidebarController *)sidebar;
+/// The bar's Add button ("Add new table"): the Add Table sheet for the selected schema.
+- (void)sidebarAddTable:(SPPostgresSidebarController *)sidebar;
 @end
 
 /**
@@ -47,7 +52,8 @@ __attribute__((visibility("default")))
 /// runner over the catalog's connection (so they are loaded when this returns).
 - (instancetype)initWithCatalog:(SPPostgresCatalog *)catalog;
 
-/// Schema popup on top, outline below. Built once; sized by the caller (autoresizes).
+/// Schema popup on top, outline below (over the information pane), MySQL's table list bar along the bottom. Built
+/// once; sized by the caller (autoresizes).
 - (NSView *)view;
 
 /// Shows the tables, views and sequences of `schema` and selects it in the popup. Clears the selection of a table,
@@ -158,6 +164,39 @@ __attribute__((visibility("default")))
 /// Runs the reloads (default: an inline runner on the catalog's connection, so a reload has been applied when its
 /// method returns). With a background runner (the tab's, from Stage 8 Task 7) a reload returns at once.
 @property (nonatomic, retain) SPPostgresTaskRunner *taskRunner;
+
+#pragma mark - Bottom bar (MySQL's table list bar, DBView.xib)
+
+/// "Add new table" (button_add): -addTable:, enabled while actionsEnabled and the delegate implements -sidebarAddTable:.
+@property (readonly) NSButton *addButton;
+/// The gear: a pull-down whose item 0 is the hidden button_action image item.
+@property (readonly) NSPopUpButton *gearButton;
+/// "Refresh table list" (button_refresh): -refreshTables:.
+@property (readonly) NSButton *refreshButton;
+/// Shows or hides the information pane below the outline (button_pane_hide / button_pane_show): -toggleInfoPane:.
+/// On (button_pane_show) while the pane is collapsed. Always enabled.
+@property (readonly) NSButton *infoToggleButton;
+/// The bar's handle (button_bar_handle) at its right end: an extra drag handle for the owner's divider.
+@property (readonly) NSView *splitHandleView;
+/// The outline (top) over infoPaneContainer (bottom, collapsible: subview 1, toggled by infoToggleButton).
+@property (readonly) SPSplitView *infoSplitView;
+/// The information pane's container, 166 pt tall.
+@property (readonly) NSView *infoPaneContainer;
+
+/// Where the information pane's collapsed state (SPTableInformationPanelCollapsed) is read and stored (default:
+/// standardUserDefaults). Setting it applies the state it stores (as a view built with it would start).
+@property (nonatomic, retain) NSUserDefaults *defaults;
+
+/// Whether Add, the gear and Refresh are enabled (NO while the owner is processing; default YES). The info toggle
+/// stays enabled.
+@property (nonatomic) BOOL actionsEnabled;
+
+/// Refresh: the delegate's -sidebarRefresh: (else -reloadKeepingSelection).
+- (IBAction)refreshTables:(id)sender;
+/// Collapses or expands the information pane, storing the new state in defaults (as -[SPTablesList togglePaneCollapse:]).
+- (IBAction)toggleInfoPane:(id)sender;
+/// Add: the delegate's -sidebarAddTable:.
+- (IBAction)addTable:(id)sender;
 
 /// Detaches the outline and popup from this controller, and drops the reloads still to come (no completion is called
 /// after this). Called by the window on close; also on dealloc.

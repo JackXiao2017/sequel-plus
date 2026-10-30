@@ -1,6 +1,9 @@
 #import "SPPostgresSidebarController.h"
 #import "SPPostgresCatalog.h"
 #import "SPPostgresTaskRunner.h"
+#import "SPButtonBar.h"
+#import "SPSplitView.h"
+#import "SPConstants.h"
 
 static NSString * const SPPostgresSidebarTables = @"TABLES";
 static NSString * const SPPostgresSidebarViews = @"VIEWS";
@@ -11,6 +14,9 @@ static NSString * const SPPostgresSidebarGroupCell = @"SPPostgresSidebarGroupCel
 static NSString * const SPPostgresSidebarItemCell = @"SPPostgresSidebarItemCell";
 
 static const CGFloat SPPostgresSidebarSchemaBarHeight = 32;
+/// MySQL's table list bar and information pane (DBView.xib)
+static const CGFloat SPPostgresSidebarButtonBarHeight = 23;
+static const CGFloat SPPostgresSidebarInfoPaneHeight = 166;
 static const NSInteger SPPostgresSidebarDetailTag = 1;
 
 /// What a reload reads (on the runner's thread) before it is applied (on the main thread).
@@ -127,9 +133,12 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 #pragma mark -
 
-@interface SPPostgresSidebarController () <NSMenuItemValidation>
+@interface SPPostgresSidebarController () <NSMenuItemValidation, NSSplitViewDelegate>
 
 - (void)_buildView;
+- (void)_buildButtonBarInView:(NSView *)container;
+- (void)_updateBarButtons;
+- (void)_applyStoredInfoPaneState;
 - (void)_reloadSchemaPopup;
 - (void)_runReload:(SPPostgresSidebarReloadKind)kind schema:(NSString *)schema cancelTitle:(NSString *)cancelTitle apply:(BOOL (^)(NSDictionary *read))apply completion:(void (^)(BOOL loaded))completion;
 - (void)_reloadWithCatalog:(SPPostgresCatalog *)theCatalog emptyingFailedLists:(BOOL)emptying completion:(void (^)(BOOL loaded))completion;
@@ -164,6 +173,17 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	NSMenu *extensionMenu;
 	NSMenuItem *dropExtensionItem; // not retained; extensionMenu's
 
+	// The bottom bar and the information pane (see -_buildButtonBarInView:)
+	NSButton *addButton;
+	NSPopUpButton *gearButton;
+	NSButton *refreshButton;
+	NSButton *infoToggleButton;
+	NSImageView *splitHandleView;
+	SPSplitView *infoSplitView;
+	NSView *infoPaneContainer;
+	NSUserDefaults *defaults;
+	BOOL actionsEnabled;
+
 	BOOL reloading;
 
 	/// Set by -invalidate: reloads still to come are dropped
@@ -193,6 +213,15 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 @synthesize delegate;
 @synthesize tableMenu;
 @synthesize taskRunner;
+@synthesize addButton;
+@synthesize gearButton;
+@synthesize refreshButton;
+@synthesize infoToggleButton;
+@synthesize splitHandleView;
+@synthesize infoSplitView;
+@synthesize infoPaneContainer;
+@synthesize defaults;
+@synthesize actionsEnabled;
 
 - (instancetype)initWithCatalog:(SPPostgresCatalog *)theCatalog
 {
@@ -202,6 +231,8 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 		              [SPPostgresSidebarItem itemWithTitle:SPPostgresSidebarSequences detail:nil kind:SPPostgresSidebarSection],
 		              [SPPostgresSidebarItem itemWithTitle:SPPostgresSidebarExtensions detail:nil kind:SPPostgresSidebarSection]] retain];
 		schemas = [@[] retain];
+		defaults = [[NSUserDefaults standardUserDefaults] retain];
+		actionsEnabled = YES;
 
 		[self _buildView];
 
@@ -226,6 +257,14 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[tableMenu release];
 	[sequenceMenu release];
 	[extensionMenu release];
+	[addButton release];
+	[gearButton release];
+	[refreshButton release];
+	[infoToggleButton release];
+	[splitHandleView release];
+	[infoSplitView release];
+	[infoPaneContainer release];
+	[defaults release];
 	[selectedSchema release];
 	[pendingSchema release];
 	[selectedTableName release];
@@ -247,6 +286,12 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	for (NSMenuItem *item in [tableMenu itemArray]) [item setTarget:nil];
 	for (NSMenuItem *item in [sequenceMenu itemArray]) [item setTarget:nil];
 	for (NSMenuItem *item in [extensionMenu itemArray]) [item setTarget:nil];
+	[addButton setTarget:nil];
+	[gearButton setTarget:nil];
+	for (NSMenuItem *item in [gearButton itemArray]) [item setTarget:nil];
+	[refreshButton setTarget:nil];
+	[infoToggleButton setTarget:nil];
+	[infoSplitView setDelegate:nil];
 }
 
 #pragma mark - View
@@ -289,8 +334,15 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[schemaPopup setToolTip:NSLocalizedString(@"Choose the schema whose tables and views are listed", @"PostgreSQL sidebar: schema picker tooltip")];
 	[container addSubview:schemaPopup];
 
-	// Outline below
-	NSScrollView *scrollView = [[[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, NSWidth(frame), barY)] autorelease];
+	// Outline below, over the information pane (infoSplitView), over the bottom bar
+	CGFloat splitHeight = barY - SPPostgresSidebarButtonBarHeight;
+	infoSplitView = [[SPSplitView alloc] initWithFrame:NSMakeRect(0, SPPostgresSidebarButtonBarHeight, NSWidth(frame), splitHeight)];
+	[infoSplitView setVertical:NO];
+	[infoSplitView setDividerStyle:NSSplitViewDividerStyleThin];
+	[infoSplitView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+
+	CGFloat outlineHeight = splitHeight - SPPostgresSidebarInfoPaneHeight - [infoSplitView dividerThickness];
+	NSScrollView *scrollView = [[[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, NSWidth(frame), outlineHeight)] autorelease];
 	[scrollView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 	[scrollView setHasVerticalScroller:YES];
 	[scrollView setHasHorizontalScroller:NO];
@@ -347,7 +399,188 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[dropExtensionItem setToolTip:NSLocalizedString(@"Drop the selected extension", @"PostgreSQL sidebar: drop extension menu item tooltip")];
 	[dropExtensionItem setTarget:self];
 
-	[container addSubview:scrollView];
+	[infoSplitView addSubview:scrollView];
+
+	// Not height-sizable: the pane keeps its height as the panel resizes (the outline takes the difference)
+	infoPaneContainer = [[NSView alloc] initWithFrame:NSMakeRect(0, outlineHeight + [infoSplitView dividerThickness], NSWidth(frame), SPPostgresSidebarInfoPaneHeight)];
+	[infoPaneContainer setAutoresizingMask:NSViewWidthSizable];
+	[infoSplitView addSubview:infoPaneContainer];
+	[infoSplitView adjustSubviews];
+	[container addSubview:infoSplitView];
+
+	[self _buildButtonBarInView:container];
+
+	// As -[SPTablesList awakeFromNib]: the pane collapses with the toggle, starting as last left
+	[infoSplitView setCollapsibleSubviewIndex:1];
+	[infoSplitView setToggleCollapseButton:infoToggleButton];
+	[infoSplitView setDelegate:self];
+	[self _applyStoredInfoPaneState];
+}
+
+/**
+ * MySQL's table list bar (DBView.xib): an SPButtonBar along the bottom, with Add, the gear, Refresh and the info
+ * toggle over it at the xib's frames, and the handle at its right end. The gear comes after the schema pop-up among the
+ * panel's subviews.
+ */
+- (void)_buildButtonBarInView:(NSView *)container
+{
+	CGFloat width = NSWidth([container frame]);
+
+	SPButtonBar *bar = [[[SPButtonBar alloc] initWithFrame:NSMakeRect(0, 0, width, SPPostgresSidebarButtonBarHeight)] autorelease];
+	[bar setAutoresizingMask:NSViewWidthSizable | NSViewMaxYMargin];
+	[container addSubview:bar];
+
+	splitHandleView = [[NSImageView alloc] initWithFrame:NSMakeRect(width - 15, 0, 15, SPPostgresSidebarButtonBarHeight)];
+	[splitHandleView setImage:[NSImage imageNamed:@"button_bar_handle"]];
+	[splitHandleView setImageFrameStyle:NSImageFrameNone];
+	[splitHandleView setImageAlignment:NSImageAlignLeft];
+	[splitHandleView setRefusesFirstResponder:YES];
+	[splitHandleView setEditable:NO];
+	[splitHandleView setAutoresizingMask:NSViewMinXMargin];
+	[container addSubview:splitHandleView];
+
+	addButton = [[NSButton alloc] initWithFrame:NSMakeRect(-1, 0, 32, SPPostgresSidebarButtonBarHeight)];
+	[addButton setButtonType:NSButtonTypeMomentaryChange];
+	[addButton setBezelStyle:NSBezelStyleSmallSquare];
+	[addButton setImage:[NSImage imageNamed:@"button_add"]];
+	[addButton setAlternateImage:[NSImage imageNamed:@"button_add"]];
+	[addButton setTitle:@""];
+	[addButton setImagePosition:NSImageOnly];
+	[addButton setToolTip:NSLocalizedString(@"Add new table", @"PostgreSQL sidebar: add table button tooltip")];
+	[addButton setTarget:self];
+	[addButton setAction:@selector(addTable:)];
+	[addButton setAutoresizingMask:NSViewMaxXMargin];
+	[container addSubview:addButton];
+
+	gearButton = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(29, 0, 36, SPPostgresSidebarButtonBarHeight) pullsDown:YES];
+	NSPopUpButtonCell *gearCell = [gearButton cell];
+	[gearButton setBezelStyle:NSBezelStyleRegularSquare];
+	[gearCell setArrowPosition:NSPopUpNoArrow];
+	[gearCell setImagePosition:NSImageRight];
+	[gearCell setAlignment:NSTextAlignmentCenter];
+	[gearCell setUsesItemFromMenu:YES];
+	[gearButton setFont:[NSFont menuFontOfSize:0]];
+	[gearButton removeAllItems];
+	[gearButton addItemWithTitle:@""];
+	NSMenuItem *gearImageItem = [gearButton itemAtIndex:0];
+	[gearImageItem setImage:[NSImage imageNamed:@"button_action"]];
+	[gearImageItem setHidden:YES];
+	[gearButton setAutoresizingMask:NSViewMaxXMargin];
+	[container addSubview:gearButton];
+
+	refreshButton = [[NSButton alloc] initWithFrame:NSMakeRect(61, 0, 32, SPPostgresSidebarButtonBarHeight)];
+	[refreshButton setButtonType:NSButtonTypeMomentaryChange];
+	[refreshButton setBezelStyle:NSBezelStyleSmallSquare];
+	[refreshButton setImage:[NSImage imageNamed:@"button_refresh"]];
+	[refreshButton setTitle:@""];
+	[refreshButton setImagePosition:NSImageOnly];
+	[refreshButton setToolTip:NSLocalizedString(@"Refresh table list", @"PostgreSQL sidebar: refresh button tooltip")];
+	[refreshButton setTarget:self];
+	[refreshButton setAction:@selector(refreshTables:)];
+	[refreshButton setAutoresizingMask:NSViewMaxXMargin];
+	[container addSubview:refreshButton];
+
+	infoToggleButton = [[NSButton alloc] initWithFrame:NSMakeRect(92, -1, 32, 25)];
+	[infoToggleButton setButtonType:NSButtonTypeToggle];
+	[infoToggleButton setBezelStyle:NSBezelStyleTexturedRounded];
+	[infoToggleButton setImage:[NSImage imageNamed:@"button_pane_hide"]];
+	[infoToggleButton setAlternateImage:[NSImage imageNamed:@"button_pane_show"]];
+	[infoToggleButton setTitle:@""];
+	[infoToggleButton setImagePosition:NSImageOnly];
+	[infoToggleButton setToolTip:NSLocalizedString(@"Toggle the visibility of the Information panel", @"PostgreSQL sidebar: info pane toggle tooltip")];
+	[infoToggleButton setTarget:self];
+	[infoToggleButton setAction:@selector(toggleInfoPane:)];
+	[infoToggleButton setAutoresizingMask:NSViewMaxXMargin];
+	[container addSubview:infoToggleButton];
+
+	[self _updateBarButtons];
+}
+
+#pragma mark - Bottom bar
+
+- (id<SPPostgresSidebarControllerDelegate>)delegate
+{
+	return delegate;
+}
+
+- (void)setDelegate:(id<SPPostgresSidebarControllerDelegate>)theDelegate
+{
+	delegate = theDelegate;
+	[self _updateBarButtons];
+}
+
+- (void)setActionsEnabled:(BOOL)enabled
+{
+	actionsEnabled = enabled;
+	[self _updateBarButtons];
+}
+
+/// Add, the gear and Refresh follow actionsEnabled (Add also needs the delegate's -sidebarAddTable:); the toggle is
+/// always enabled.
+- (void)_updateBarButtons
+{
+	[addButton setEnabled:actionsEnabled && [delegate respondsToSelector:@selector(sidebarAddTable:)]];
+	[gearButton setEnabled:actionsEnabled];
+	[refreshButton setEnabled:actionsEnabled];
+	[infoToggleButton setEnabled:YES];
+}
+
+- (void)setDefaults:(NSUserDefaults *)theDefaults
+{
+	if (theDefaults == defaults) return;
+	[defaults release];
+	defaults = [theDefaults retain];
+	[self _applyStoredInfoPaneState];
+}
+
+/// Collapses or expands the information pane (without animating) as SPTableInformationPanelCollapsed in defaults says.
+- (void)_applyStoredInfoPaneState
+{
+	[infoSplitView setCollapsibleSubviewCollapsed:[[defaults objectForKey:SPTableInformationPanelCollapsed] boolValue] animate:NO];
+}
+
+- (IBAction)addTable:(id)sender
+{
+	if (!actionsEnabled) return;
+	if ([delegate respondsToSelector:@selector(sidebarAddTable:)]) [delegate sidebarAddTable:self];
+}
+
+- (IBAction)refreshTables:(id)sender
+{
+	if (invalidated) return;
+	if ([delegate respondsToSelector:@selector(sidebarRefresh:)]) [delegate sidebarRefresh:self];
+	else [self reloadKeepingSelection];
+}
+
+- (IBAction)toggleInfoPane:(id)sender
+{
+	[infoSplitView toggleCollapse:sender];
+
+	[defaults setObject:[NSNumber numberWithBool:[infoSplitView isCollapsibleSubviewCollapsed]] forKey:SPTableInformationPanelCollapsed];
+}
+
+/// The information pane keeps its height as the panel resizes; the outline takes the difference. While the pane is
+/// collapsed or animating (wrapped by the split view), the split view lays it out itself.
+- (void)splitView:(NSSplitView *)theSplitView resizeSubviewsWithOldSize:(NSSize)oldSize
+{
+	NSArray *subviews = [theSplitView subviews];
+	if (theSplitView != infoSplitView || [infoSplitView isCollapsibleSubviewCollapsed] || [subviews count] != 2 || [subviews lastObject] != infoPaneContainer) {
+		[theSplitView adjustSubviews];
+		return;
+	}
+
+	NSRect bounds = [theSplitView bounds];
+	CGFloat paneHeight = MIN(SPPostgresSidebarInfoPaneHeight, NSHeight(bounds));
+	CGFloat outlineHeight = MAX(0, NSHeight(bounds) - paneHeight - [theSplitView dividerThickness]);
+	[[subviews objectAtIndex:0] setFrame:NSMakeRect(0, 0, NSWidth(bounds), outlineHeight)];
+	[infoPaneContainer setFrame:NSMakeRect(0, NSHeight(bounds) - paneHeight, NSWidth(bounds), paneHeight)];
+}
+
+/// As -[SPTablesList splitView:effectiveRect:…]: the information pane isn't resized by dragging its divider.
+- (NSRect)splitView:(NSSplitView *)theSplitView effectiveRect:(NSRect)proposedEffectiveRect forDrawnRect:(NSRect)drawnRect ofDividerAtIndex:(NSInteger)dividerIndex
+{
+	if (theSplitView == infoSplitView) return NSZeroRect;
+	return proposedEffectiveRect;
 }
 
 #pragma mark - Loading
