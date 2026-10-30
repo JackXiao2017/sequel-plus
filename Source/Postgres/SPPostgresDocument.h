@@ -84,7 +84,8 @@ __attribute__((visibility("default")))
  * passwords this session was opened with (nothing is written to the Keychain or the favorites; an SSH favorite opens
  * a tunnel of its own, its sheets on this window). Meanwhile this tab shows it is connecting (isProcessing). On
  * success a new tab, on the new session, is added right after this one and selected, or is the only tab of a new
- * window; it then selects `schema` and `name` (a table or view, see -selectRelationAfterLoad:inSchema:). On failure
+ * window. It gets the Query editor's text and shows the pane shown here (as they were when asked), then selects
+ * `schema` and `name` (a table or view, see -selectRelationAfterLoad:inSchema:pane:). History is not copied. On failure
  * this tab shows the error (see alertPresenter) and nothing is opened. Refused (beep) while this tab is processing.
  */
 - (void)openRelation:(NSString *)name inSchema:(NSString *)schema inNewWindow:(BOOL)newWindow;
@@ -94,6 +95,12 @@ __attribute__((visibility("default")))
  * runner, not polled). A schema that can't be loaded, or a name that isn't listed, leaves the tab as it is.
  */
 - (void)selectRelationAfterLoad:(NSString *)name inSchema:(NSString *)schema;
+
+/**
+ * The same, showing `pane` (Structure, Content, Relations, Triggers, Table Info or Query; nil or another one: the pane
+ * stays) before the table or view is selected. Neither the pane nor the schema on the way is recorded in History.
+ */
+- (void)selectRelationAfterLoad:(NSString *)name inSchema:(NSString *)schema pane:(NSString *)pane;
 
 /**
  * Makes the connector -openRelation:inSchema:inNewWindow: connects (it may return a connector of another favorite).

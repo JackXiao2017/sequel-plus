@@ -2403,12 +2403,15 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	__block SPPostgresConnector *blockConnector = newConnector;
 	NSString *theName = [[name copy] autorelease];
 	NSString *theSchema = [[schema copy] autorelease];
+	// As MySQL's (which duplicates the session): the new tab shows the pane shown here, and the Query editor's text
+	NSString *thePane = [[currentPane copy] autorelease];
+	NSString *theQueryText = [[[[queryController editor] string] copy] autorelease];
 	[newConnector connectWithCompletion:^(PGPostgresConnection *newConnection, NSError *error) {
-		[self _openRelation:theName inSchema:theSchema inNewWindow:newWindow favorite:target by:blockConnector finishedWithConnection:newConnection error:error];
+		[self _openRelation:theName inSchema:theSchema pane:thePane queryText:theQueryText inNewWindow:newWindow favorite:target by:blockConnector finishedWithConnection:newConnection error:error];
 	}];
 }
 
-- (void)_openRelation:(NSString *)name inSchema:(NSString *)schema inNewWindow:(BOOL)newWindow favorite:(SPPostgresFavorite *)theFavorite by:(SPPostgresConnector *)theConnector finishedWithConnection:(PGPostgresConnection *)newConnection error:(NSError *)error
+- (void)_openRelation:(NSString *)name inSchema:(NSString *)schema pane:(NSString *)pane queryText:(NSString *)queryText inNewWindow:(BOOL)newWindow favorite:(SPPostgresFavorite *)theFavorite by:(SPPostgresConnector *)theConnector finishedWithConnection:(PGPostgresConnection *)newConnection error:(NSError *)error
 {
 	// Cancelled by the tab closing (the teardown let go of it)
 	if (tornDown || theConnector != pendingOpenConnector) return;
@@ -2464,18 +2467,35 @@ NSString * const SPPostgresPaneExtension = @"extension";
 		[windowController addTabDocument:document atIndex:position select:YES];
 	}
 
-	[document selectRelationAfterLoad:name inSchema:schema];
+	if ([queryText length]) [[[document queryController] editor] setString:queryText];
+	[document selectRelationAfterLoad:name inSchema:schema pane:pane];
 }
 
 - (void)selectRelationAfterLoad:(NSString *)name inSchema:(NSString *)schema
 {
+	[self selectRelationAfterLoad:name inSchema:schema pane:nil];
+}
+
+- (void)selectRelationAfterLoad:(NSString *)name inSchema:(NSString *)schema pane:(NSString *)pane
+{
 	if (tornDown || ![name length]) return;
 
+	// A table's or view's pane, or Query (not a sequence's or an extension's)
+	NSArray *panes = @[SPPostgresPaneStructure, SPPostgresPaneContent, SPPostgresPaneRelations, SPPostgresPaneTriggers, SPPostgresPaneInfo, SPPostgresPaneQuery];
+	NSString *thePane = [panes containsObject:pane] ? [[pane copy] autorelease] : nil;
+
 	// The reload queues on the runner behind the loads asked for so far (the first ones of a new tab), and its
-	// selection changes on the way aren't places the user went to; the table or view, once its schema is shown, is
+	// selection changes on the way aren't places the user went to. Then the pane (first, so another pane doesn't
+	// show the table on the way; not a place the user went to either), and the table or view once its schema is shown
 	NSString *theName = [[name copy] autorelease];
 	NSString *theSchema = [[schema copy] autorelease];
 	void (^select)(BOOL) = ^(BOOL loaded) {
+		if (thePane && ![thePane isEqualToString:currentPane]) {
+			BOOL wasRestoring = restoringHistory;
+			restoringHistory = YES;
+			[self showPane:thePane];
+			restoringHistory = wasRestoring;
+		}
 		if ([theSchema length] && ![theSchema isEqualToString:[sidebar selectedSchema]]) return;
 		[sidebar selectTableNamed:theName];
 	};

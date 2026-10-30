@@ -143,7 +143,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 
 	// Windows a test opened (Open Table in New Window): closing one closes its tabs and lets go of its controller
 	for (NSWindow *other in [NSApp windows]) {
-		if (other != window && [other.windowController isKindOfClass:[SPWindowController class]]) [other close];
+		if (other != window && other.isVisible && [other.windowController isKindOfClass:[SPWindowController class]]) [other close];
 	}
 	self.document = nil;
 	self.controller = nil;
@@ -3243,9 +3243,11 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	NSArray *windowsBefore = [NSApp windows];
 	[self.document openRelation:@"Orders 2026" inSchema:@"Sales Data" inNewWindow:NO];
 	XCTAssertTrue(self.document.isProcessing);
-	// Refused while the first one connects
+	// Refused while the first one connects: the pending connector stays the first one's
+	id pending = [self.document valueForKey:@"pendingOpenConnector"];
+	XCTAssertNotNil(pending);
 	[self.document openRelation:@"Orders 2026" inSchema:@"Sales Data" inNewWindow:YES];
-	XCTAssertEqual([[self.document valueForKey:@"pendingOpenConnector"] parentWindow], [self window]);
+	XCTAssertEqual([self.document valueForKey:@"pendingOpenConnector"], pending);
 
 	[[self tabView] removeTabViewItem:self.document.parentTabViewItem];
 	XCTAssertFalse(self.document.isProcessing);
@@ -3254,6 +3256,56 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	for (NSWindow *window in [NSApp windows]) {
 		XCTAssertFalse(![windowsBefore containsObject:window] && [window.windowController isKindOfClass:[SPWindowController class]], @"no window opened");
 	}
+}
+
+/// The new tab shows the pane shown in the source tab, shown before the table is selected (so History has no entry of
+/// the table in Content: it was never shown there).
+- (void)testOpenInNewTabKeepsPane
+{
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self selectOrders2026];
+	[self.document showPane:SPPostgresPaneStructure];
+	[self waitForTab];
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
+
+	[self.document openRelation:@"Orders 2026" inSchema:@"Sales Data" inNewWindow:NO];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self tabView].numberOfTabViewItems == 2; } timeout:20]);
+	SPPostgresDocument *opened = [self tabDocumentsIn:self.controller][1];
+	[self waitForDocument:opened toSelect:@"Orders 2026" inSchema:@"Sales Data"];
+
+	XCTAssertEqualObjects(opened.currentPane, SPPostgresPaneStructure);
+	XCTAssertEqualObjects(opened.structureController.table, @"Orders 2026");
+	XCTAssertEqualObjects(opened.structureController.schema, @"Sales Data");
+	XCTAssertNil([[opened.contentController view] superview], @"Content isn't shown");
+	XCTAssertEqualObjects(opened.history.currentEntry[@"pane"], SPPostgresPaneStructure);
+	XCTAssertEqualObjects(opened.history.currentEntry[@"table"], @"Orders 2026");
+	// Before it: where the tab started (no table), not the table in Content, nor Structure with no table
+	NSDictionary *previous = [opened.history goBack];
+	XCTAssertNil(previous[@"table"], @"%@", previous);
+	XCTAssertEqualObjects(previous[@"pane"], SPPostgresPaneContent);
+	XCTAssertFalse(opened.history.canGoBack);
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+}
+
+/// From the Query view: the new tab shows Query with the editor's text (the table selected behind it).
+- (void)testOpenInNewTabCopiesQueryText
+{
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	[self selectOrders2026];
+	[self.document showPane:SPPostgresPaneQuery];
+	[self.document.queryController.editor setString:@"SELECT * FROM \"Sales Data\".\"Orders 2026\";"];
+
+	[self.document openRelation:@"Orders 2026" inSchema:@"Sales Data" inNewWindow:NO];
+	// Asked for: a later edit here isn't carried over
+	[self.document.queryController.editor setString:@"SELECT 2;"];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self tabView].numberOfTabViewItems == 2; } timeout:20]);
+	SPPostgresDocument *opened = [self tabDocumentsIn:self.controller][1];
+	[self waitForDocument:opened toSelect:@"Orders 2026" inSchema:@"Sales Data"];
+
+	XCTAssertEqualObjects(opened.currentPane, SPPostgresPaneQuery);
+	XCTAssertEqualObjects(opened.queryController.editor.string, @"SELECT * FROM \"Sales Data\".\"Orders 2026\";");
+	XCTAssertNotEqual(opened.queryController.editor, self.document.queryController.editor);
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
 }
 
 @end
