@@ -73,14 +73,20 @@ static const NSInteger SPPostgresQueryStoreVersion = 1;
 	return @{@"date": [attributes fileModificationDate] ?: [NSDate distantPast], @"size": @([attributes fileSize])};
 }
 
-/// The stored items, or nil (with *error set) when the file exists but is unreadable, corrupt, not the expected
-/// structure, or of a newer version. A missing file gives no items.
-- (NSArray *)_readItemsError:(NSError **)error
+/**
+ * Reads the file. Returns YES when it may be written over: missing (no items) or valid. Otherwise (unreadable,
+ * corrupt, not the expected structure, or of a newer version) returns NO with *error set; *outItems is still the
+ * items that could be read (a newer version's "items" array, shown read-only), or nil.
+ */
+- (BOOL)_readItems:(NSArray **)outItems error:(NSError **)error
 {
-	if (![[NSFileManager defaultManager] fileExistsAtPath:[fileURL path]]) return @[];
+	if (outItems) *outItems = nil;
+	if (![[NSFileManager defaultManager] fileExistsAtPath:[fileURL path]]) {
+		if (outItems) *outItems = @[];
+		return YES;
+	}
 
 	NSString *problem = nil;
-	NSArray *result = nil;
 	NSData *data = [NSData dataWithContentsOfURL:fileURL];
 	id root = data ? [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:NULL] : nil;
 	if (![root isKindOfClass:[NSDictionary class]]) {
@@ -92,11 +98,12 @@ static const NSInteger SPPostgresQueryStoreVersion = 1;
 		if (![version isKindOfClass:[NSNumber class]] || ![list isKindOfClass:[NSArray class]]) {
 			problem = NSLocalizedString(@"The file does not have the expected structure.", @"Postgres query store: bad structure");
 		}
-		else if ([version integerValue] > SPPostgresQueryStoreVersion) {
-			problem = [NSString stringWithFormat:NSLocalizedString(@"The file uses version %@, which is newer than this version of the application supports.", @"Postgres query store: newer version"), version];
-		}
 		else {
-			result = list;
+			// What can be read is shown, even from a newer version (which is not written over)
+			if (outItems) *outItems = list;
+			if ([version integerValue] > SPPostgresQueryStoreVersion) {
+				problem = [NSString stringWithFormat:NSLocalizedString(@"The file uses version %@, which is newer than this version of the application supports.", @"Postgres query store: newer version"), version];
+			}
 		}
 	}
 	if (problem) {
@@ -105,9 +112,9 @@ static const NSInteger SPPostgresQueryStoreVersion = 1;
 				NSLocalizedDescriptionKey: [NSString stringWithFormat:NSLocalizedString(@"Cannot use the file \"%@\". %@ It was left untouched.", @"Postgres query store: load error"), [fileURL path], problem]
 			}];
 		}
-		return nil;
+		return NO;
 	}
-	return result;
+	return YES;
 }
 
 /// Reads the file when it changed since it was last read (or written).
@@ -117,9 +124,10 @@ static const NSInteger SPPostgresQueryStoreVersion = 1;
 	if (loaded && (signature == loadedSignature || [signature isEqual:loadedSignature])) return;
 
 	NSError *error = nil;
-	NSArray *read = [self _readItemsError:&error];
+	NSArray *read = nil;
+	BOOL valid = [self _readItems:&read error:&error];
 	[lastLoadError release];
-	lastLoadError = read ? nil : [error retain];
+	lastLoadError = valid ? nil : [error retain];
 	[items release];
 	items = [(read ?: @[]) copy];
 	[loadedSignature release];
@@ -143,11 +151,40 @@ static const NSInteger SPPostgresQueryStoreVersion = 1;
 {
 	// Never overwrite a file this code could not read (corrupt, or written by a newer version)
 	NSError *readError = nil;
-	if (![self _readItemsError:&readError]) {
+	if (![self _readItems:NULL error:&readError]) {
 		if (error) *error = readError;
 		return NO;
 	}
+	return [self _writeItems:newItems error:error];
+}
 
+- (BOOL)replaceItems:(NSArray *)newItems error:(NSError **)error
+{
+	// User-confirmed: an unreadable file is moved aside (never deleted), then items are written
+	if (![self _readItems:NULL error:NULL]) {
+		NSURL *folder = [fileURL URLByDeletingLastPathComponent];
+		NSString *base = [[fileURL lastPathComponent] stringByDeletingPathExtension];
+		NSDateFormatter *formatter = [[[NSDateFormatter alloc] init] autorelease];
+		[formatter setLocale:[NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"]];
+		[formatter setDateFormat:@"yyyyMMdd-HHmmss"];
+		NSString *stamp = [formatter stringFromDate:[NSDate date]];
+		NSFileManager *manager = [NSFileManager defaultManager];
+		NSURL *aside = [folder URLByAppendingPathComponent:[NSString stringWithFormat:@"%@.unreadable-%@.plist", base, stamp]];
+		for (NSUInteger n = 2; [manager fileExistsAtPath:[aside path]]; n++) {
+			aside = [folder URLByAppendingPathComponent:[NSString stringWithFormat:@"%@.unreadable-%@-%lu.plist", base, stamp, (unsigned long)n]];
+		}
+		NSError *moveError = nil;
+		if (![manager moveItemAtURL:fileURL toURL:aside error:&moveError]) {
+			if (error) *error = moveError;
+			return NO;
+		}
+	}
+	return [self _writeItems:newItems error:error];
+}
+
+/// Writes items atomically (creating the folder), updates the cache and posts the change notification.
+- (BOOL)_writeItems:(NSArray *)newItems error:(NSError **)error
+{
 	NSError *dirError = nil;
 	if (![[NSFileManager defaultManager] createDirectoryAtURL:[fileURL URLByDeletingLastPathComponent]
 								  withIntermediateDirectories:YES

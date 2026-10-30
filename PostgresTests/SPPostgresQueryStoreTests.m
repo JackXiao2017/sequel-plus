@@ -6,6 +6,13 @@
 @property (copy) NSString *directory;
 @end
 
+/// "History.unreadable-<yyyyMMdd-HHmmss>[-n].plist"
+static BOOL SPMatchesAsideName(NSString *name)
+{
+	NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"^History\\.unreadable-\\d{8}-\\d{6}(-\\d+)?\\.plist$" options:0 error:NULL];
+	return [regex firstMatchInString:name options:0 range:NSMakeRange(0, [name length])] != nil;
+}
+
 @implementation SPPostgresQueryStoreTests
 
 - (void)setUp
@@ -39,6 +46,27 @@
 	XCTAssertEqualObjects([[favorites fileURL] lastPathComponent], @"PostgresQueryFavorites.plist");
 	XCTAssertFalse([[[history fileURL] path] containsString:@"Application Support"], @"never the real store in tests");
 	XCTAssertFalse([[[favorites fileURL] path] containsString:@"Application Support"], @"never the real store in tests");
+}
+
+/// The guard empties the redirected shared stores after every test: whichever of these two runs second sees nothing
+/// the first wrote.
+- (void)assertSharedStoresStartEmptyThenWrite
+{
+	for (SPPostgresQueryStore *store in @[[SPPostgresQueryStore sharedHistoryStore], [SPPostgresQueryStore sharedFavoritesStore]]) {
+		XCTAssertEqualObjects(store.items, @[], @"%@", [store fileURL]);
+		NSError *error = nil;
+		XCTAssertTrue([store setItems:@[@"left by a test"] error:&error], @"%@", error);
+	}
+}
+
+- (void)testSharedStoresStartEmpty
+{
+	[self assertSharedStoresStartEmptyThenWrite];
+}
+
+- (void)testSharedStoresStartEmptyAgain
+{
+	[self assertSharedStoresStartEmptyThenWrite];
 }
 
 - (void)testRoundTrip
@@ -79,12 +107,12 @@
 	XCTAssertNotNil(error);
 	XCTAssertEqualObjects([NSData dataWithContentsOfURL:url], garbage, @"left untouched");
 
-	// A file written by a newer build is not overwritten either
+	// A file written by a newer build is not overwritten either; its readable items are shown (read-only)
 	NSURL *newer = [self urlNamed:@"Newer.plist"];
 	XCTAssertTrue(([@{@"version": @2, @"items": @[@"SELECT 1"]} writeToURL:newer atomically:YES]));
 	NSData *newerData = [NSData dataWithContentsOfURL:newer];
 	SPPostgresQueryStore *newerStore = [[SPPostgresQueryStore alloc] initWithFileURL:newer];
-	XCTAssertEqualObjects(newerStore.items, @[]);
+	XCTAssertEqualObjects(newerStore.items, @[@"SELECT 1"], @"the menus show what can be read");
 	XCTAssertNotNil(newerStore.lastLoadError);
 	error = nil;
 	XCTAssertFalse([newerStore setItems:@[] error:&error]);
@@ -97,6 +125,52 @@
 	XCTAssertNil(store.lastLoadError);
 	XCTAssertTrue([store setItems:@[@"SELECT 2"] error:&error], @"%@", error);
 	XCTAssertEqualObjects(store.items, @[@"SELECT 2"]);
+}
+
+/// The files beside url whose names start with "<basename>.unreadable-".
+- (NSArray<NSString *> *)asideFilesFor:(NSURL *)url
+{
+	NSString *prefix = [[[url lastPathComponent] stringByDeletingPathExtension] stringByAppendingString:@".unreadable-"];
+	NSMutableArray *found = [NSMutableArray array];
+	for (NSString *name in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:self.directory error:NULL]) {
+		if ([name hasPrefix:prefix] && [name hasSuffix:@".plist"]) [found addObject:[self.directory stringByAppendingPathComponent:name]];
+	}
+	return found;
+}
+
+- (void)testReplaceItemsMovesUnreadableFileAside
+{
+	NSURL *url = [self urlNamed:@"History.plist"];
+	NSData *garbage = [@"garbage, not a plist" dataUsingEncoding:NSUTF8StringEncoding];
+	XCTAssertTrue([garbage writeToURL:url atomically:YES]);
+	SPPostgresQueryStore *store = [[SPPostgresQueryStore alloc] initWithFileURL:url];
+	XCTAssertNotNil(store.lastLoadError);
+
+	__block NSUInteger posted = 0;
+	id token = [[NSNotificationCenter defaultCenter] addObserverForName:SPPostgresQueryStoreDidChangeNotification object:store queue:nil usingBlock:^(NSNotification *note) { posted++; }];
+
+	NSError *error = nil;
+	XCTAssertTrue([store replaceItems:@[@"SELECT 9"] error:&error], @"%@", error);
+	XCTAssertEqual(posted, 1u);
+	XCTAssertEqualObjects(store.items, @[@"SELECT 9"]);
+	XCTAssertNil(store.lastLoadError);
+	NSArray *aside = [self asideFilesFor:url];
+	XCTAssertEqual([aside count], 1u, @"moved aside, never deleted");
+	XCTAssertEqualObjects([NSData dataWithContentsOfFile:aside[0]], garbage);
+	NSString *name = [aside[0] lastPathComponent];
+	XCTAssertTrue(SPMatchesAsideName(name), @"%@", name);
+
+	// A newer build's file is moved aside the same way (a second one gets its own name)
+	XCTAssertTrue(([@{@"version": @7, @"items": @[@"x"]} writeToURL:url atomically:YES]));
+	XCTAssertTrue([store replaceItems:@[] error:&error], @"%@", error);
+	XCTAssertEqualObjects(store.items, @[]);
+	XCTAssertEqual([[self asideFilesFor:url] count], 2u);
+
+	// A readable file is simply replaced (nothing moved aside)
+	XCTAssertTrue([store replaceItems:@[@"SELECT 1"] error:&error], @"%@", error);
+	XCTAssertEqual([[self asideFilesFor:url] count], 2u);
+	XCTAssertEqualObjects([[SPPostgresQueryStore alloc] initWithFileURL:url].items, @[@"SELECT 1"]);
+	[[NSNotificationCenter defaultCenter] removeObserver:token];
 }
 
 - (void)testChangeNotification

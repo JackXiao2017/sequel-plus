@@ -141,7 +141,8 @@ __attribute__((visibility("default")))
 - (IBAction)copyQueryHistory:(id)sender;
 /// The entries joined with ";\n", written (UTF-8) to the file savePathProvider (or the save panel) gives.
 - (IBAction)saveQueryHistory:(id)sender;
-/// Asks (confirmationPresenter), then empties the history store.
+/// Asks (confirmationPresenter), then empties the history store (-replaceItems:error:: an unreadable history file is
+/// moved aside, never deleted).
 - (IBAction)clearQueryHistory:(id)sender;
 /// Hides the entries that don't contain the filter's text (case-insensitive); they stay in the menu, as MySQL's.
 - (IBAction)filterQueryHistory:(id)sender;
