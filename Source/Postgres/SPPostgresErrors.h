@@ -1,5 +1,7 @@
 #import <Foundation/Foundation.h>
 
+@class PGPostgresConnection;
+
 /// Error domain for the PostgreSQL side of Sequel Pro.
 extern NSString * const SPPostgresErrorDomain __attribute__((visibility("default")));
 
@@ -46,3 +48,11 @@ extern NSString * const SPPostgresSQLStateErrorKey __attribute__((visibility("de
 
 /// An error in SPPostgresErrorDomain with message as its localized description, plus userInfo's entries (may be nil).
 extern NSError *SPPostgresMakeError(NSInteger code, NSString *message, NSDictionary *userInfo) __attribute__((visibility("default")));
+
+/**
+ * For a failed DROP: when serverError is the server's dependency refusal (SQLSTATE 2BP01) returns an
+ * SPPostgresErrorHasDependents error whose SPPostgresDependentsErrorKey lists the DETAIL lines of connection's last
+ * error (read now, so call it before the savepoint or transaction is rolled back), with messageOrNil as its
+ * description (nil: serverError's own message). Any other serverError is returned unchanged.
+ */
+extern NSError *SPPostgresDependentsError(PGPostgresConnection *connection, NSError *serverError, NSString *messageOrNil) __attribute__((visibility("default")));
