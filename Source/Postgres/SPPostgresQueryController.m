@@ -88,8 +88,6 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 /// The run stopped because the runner was cancelled (as MySQL's lastQueryWasCancelled: not when the cancel came after
 /// every statement had run).
 @property (assign) BOOL cancelled;
-/// The statement the cancel stopped (or kept from running), counted from 1.
-@property (assign) NSUInteger cancelledQuery;
 /// The work ran (NO: the runner skipped it, cancelled before it started).
 @property (assign) BOOL started;
 /// Raised during the run (e.g. by the test hook); the run stopped there.
@@ -117,7 +115,6 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 @synthesize schemaChanged;
 @synthesize dataChanged;
 @synthesize cancelled;
-@synthesize cancelledQuery;
 @synthesize started;
 @synthesize exception;
 @synthesize transactionStatus;
@@ -1021,9 +1018,10 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	NSString *statusString;
 
 	if ([run cancelled]) {
-		if ([run total] > 1) {
+		// As MySQL's: by totalQueriesRun, the statements sent (the interrupted one too)
+		if (queriesRun > 1) {
 			statusString = [NSString stringWithFormat:NSLocalizedString(@"%@; Cancelled in query %ld, after %@", @"text showing multiple queries were cancelled"),
-							statusErrorString, (long)[run cancelledQuery], time];
+							statusErrorString, (long)queriesRun, time];
 		}
 		else {
 			statusString = [NSString stringWithFormat:NSLocalizedString(@"%@; Cancelled after %@", @"text showing a query was cancelled"),
@@ -1068,9 +1066,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	NSMutableArray *notes = [NSMutableArray arrayWithArray:[run discardedOutputNotes]];
 
 	// After a row set, other statements ran: the rows are the earlier statement's (said of a run that completed; an
-	// error or a cancel is what the pane reports then)
+	// error, a cancel too, is what the pane reports then)
 	NSUInteger shown = [run shownStatement];
-	if (shown && shown != [[run ranStatements] count] && ![[run errors] length] && ![run cancelled]) {
+	if (shown && shown != [[run ranStatements] count] && ![[run errors] length]) {
 		[notes addObject:[NSString stringWithFormat:NSLocalizedString(@"Note: results shown from statement %lu, the last one that returned rows.", @"Postgres query: the grid's rows are from an earlier statement (number)"), (unsigned long)shown]];
 	}
 
@@ -1087,7 +1085,6 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 {
 	NSString *text;
 	if ([[run errors] length]) text = [[run errors] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-	else if ([run cancelled]) text = NSLocalizedString(@"Query cancelled.", @"Query cancelled error");
 	else text = NSLocalizedString(@"There were no errors.", @"text shown when query was successfull");
 
 	NSArray *notes = [self _notesForRun:run];
@@ -1114,7 +1111,8 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
  * arguments (a class method: never the controller's views or state).
  */
 + (void)_runStatements:(NSArray *)statements onConnection:(PGPostgresConnection *)connection runner:(SPPostgresTaskRunner *)runner
-				logger:(SPPostgresConsoleLogger *)logger hook:(void (^)(NSString *statement))hook into:(SPPostgresQueryRun *)run
+				logger:(SPPostgresConsoleLogger *)logger hook:(void (^)(NSString *statement))hook
+			  progress:(void (^)(NSString *description))progress into:(SPPostgresQueryRun *)run
 {
 	NSUInteger total = [statements count];
 	NSUInteger number = 0;
@@ -1133,15 +1131,16 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	@try {
 		for (NSString *statement in statements) {
 			if ([runner isCancelled]) {
-				// Stopped before this statement could run
+				// Stopped before this statement was sent
 				[run setCancelled:YES];
-				[run setCancelledQuery:number + 1];
 				break;
 			}
 			number++;
 
 			if (total > 1) {
-				[runner updateDescription:[NSString stringWithFormat:NSLocalizedString(@"Running query %ld of %lu...", @"Running multiple queries string"), (long)number, (unsigned long)total]];
+				NSString *description = [NSString stringWithFormat:NSLocalizedString(@"Running query %ld of %lu...", @"Running multiple queries string"), (long)number, (unsigned long)total];
+				[runner updateDescription:description];
+				if (progress) progress(description);
 			}
 
 			if (hook) hook(statement);
@@ -1168,7 +1167,6 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 				// Interrupted by a cancel: not an error to report
 				if ([runner isCancelled]) {
 					[run setCancelled:YES];
-					[run setCancelledQuery:number];
 					break;
 				}
 
@@ -1259,8 +1257,18 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[statusField setStringValue:@""];
 	[statusField setToolTip:nil];
 
+	// As MySQL's (SPCustomQuery.m, its progress updater): the info pane follows the statement running, on the main
+	// thread (before the completion, which is delivered after it on the main queue)
+	void (^progress)(NSString *) = ^(NSString *text) {
+		void (^apply)(void) = ^{
+			if (!invalidated && running) [infoPaneText setString:text];
+		};
+		if ([NSThread isMainThread]) apply();
+		else dispatch_async(dispatch_get_main_queue(), apply);
+	};
+
 	[runner runTaskWithDescription:description cancelTitle:cancelTitle work:^id(PGPostgresConnection *theConnection, NSError **error) {
-		[SPPostgresQueryController _runStatements:theStatements onConnection:theConnection runner:runner logger:logger hook:hook into:run];
+		[SPPostgresQueryController _runStatements:theStatements onConnection:theConnection runner:runner logger:logger hook:hook progress:progress into:run];
 		[run setTransactionStatus:[theConnection transactionStatus]];
 		return run;
 	} completion:^(id result, NSError *error, BOOL cancelled) {
@@ -1277,11 +1285,23 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 		if (cancelled && ![run started]) {
 			[run setTotal:total];
 			[run setCancelled:YES];
-			[run setCancelledQuery:1];
+		}
+		// As MySQL's: a cancel is an error ("Query cancelled.", "[ERROR in query K] Query cancelled." in a run of
+		// several statements, K the statements sent; none sent: the message alone)
+		if ([run cancelled]) {
+			NSString *cancelText = NSLocalizedString(@"Query cancelled.", @"Query cancelled error");
+			NSUInteger sent = [[run ranStatements] count];
+			if ([run total] > 1 && sent) {
+				[[run errors] appendFormat:NSLocalizedString(@"[ERROR in query %ld] %@\n", @"error text when multiple custom query failed"), (long)sent, cancelText];
+			}
+			else {
+				[[run errors] setString:cancelText];
+			}
 		}
 		[self _showResult:[run rowsResult]];
 		lastRunTransactionStatus = [run transactionStatus];
-		[self setLastRunQueryText:[[run ranStatements] componentsJoinedByString:@";\n"]];
+		// As MySQL's usedQuery, recorded only when a statement was sent
+		if ([[run ranStatements] count]) [self setLastRunQueryText:[[run ranStatements] componentsJoinedByString:@";\n"]];
 		NSString *status = [SPPostgresQueryController _statusTextForRun:run];
 		[self setStatusText:status];
 		[statusField setStringValue:status];

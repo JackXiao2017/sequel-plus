@@ -18,6 +18,10 @@ static NSString * const SPQueryBarPrimaryRunsAllKey = @"QueryPrimaryControlRunsA
 static NSString * const SPQueryBarEditInSheetKey = @"EditInSheetEnabled";
 static NSString * const SPQueryBarScratchSuite = @"SPPostgresStage11Tests";
 
+@interface SPPostgresQueryController (Testing)
+- (void)setStatementWillRunHook:(void (^)(NSString *statement))hook;
+@end
+
 /// The Query tab's layout (Stage 11 Task 1): MySQL's split views, the top bar with the run pop-up button, the
 /// results bar (info pane toggle, results gear, edit mode toggle, status line), and the run controls' states.
 @interface SPPostgresQueryBarTests : XCTestCase
@@ -583,18 +587,67 @@ static NSString * const SPQueryBarScratchSuite = @"SPPostgresStage11Tests";
 	[runner cancelAll];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return [query.statusText length] > 0; } timeout:5]);
-	[self assertText:query.statusText matches:@"No errors; Cancelled after TIME"];
+	// As MySQL's, a cancel is an error
+	[self assertText:query.statusText matches:@"Errors; Cancelled after TIME"];
 	XCTAssertEqualObjects([query infoPaneString], @"Query cancelled.");
+	XCTAssertEqualObjects([query.infoPaneTitle stringValue], @"Last Error Message");
+	XCTAssertFalse([query.infoPaneSplitView isCollapsibleSubviewCollapsed], @"the pane opens");
+	XCTAssertEqualObjects(query.lastRunQueryText, @"SELECT pg_sleep(30)");
 
+	// Two statements, the first interrupted: one query sent
 	[self setSQL:@"SELECT pg_sleep(30); SELECT 2"];
 	[query runAllQueries:nil];
 	XCTAssertTrue([self spinUntil:^BOOL{ return [runner.currentDescription isEqualToString:@"Running query 1 of 2..."]; } timeout:10], @"%@", runner.currentDescription);
+	XCTAssertEqualObjects([query infoPaneString], @"Running query 1 of 2...");
 	[self spinUntil:^BOOL{ return NO; } timeout:0.3];
 	[runner cancelAll];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
-	XCTAssertTrue([self spinUntil:^BOOL{ return [query.statusText containsString:@"in query"]; } timeout:5], @"%@", query.statusText);
-	[self assertText:query.statusText matches:@"No errors; Cancelled in query 1, after TIME"];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [query.statusText length] > 0; } timeout:5]);
+	[self assertText:query.statusText matches:@"Errors; Cancelled after TIME"];
+	XCTAssertEqualObjects([query infoPaneString], @"[ERROR in query 1] Query cancelled.");
+	XCTAssertEqualObjects([query.infoPaneTitle stringValue], @"Last Error Message");
+	XCTAssertFalse([query.infoPaneSplitView isCollapsibleSubviewCollapsed]);
+
+	// The second interrupted: "in query 2"; the pane followed the statement running (MySQL's progress updater)
+	[self setSQL:@"SELECT 1; SELECT pg_sleep(30)"];
+	[query runAllQueries:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [[query infoPaneString] isEqualToString:@"Running query 2 of 2..."]; } timeout:10], @"%@", [query infoPaneString]);
+	XCTAssertEqualObjects([query.infoPaneTitle stringValue], @"Query Status");
+	[self spinUntil:^BOOL{ return NO; } timeout:0.3];
+	[runner cancelAll];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+	XCTAssertTrue([self spinUntil:^BOOL{ return [query.statusText length] > 0; } timeout:5]);
+	[self assertText:query.statusText matches:@"Errors; Cancelled in query 2, after TIME"];
+	XCTAssertEqualObjects([query infoPaneString], @"[ERROR in query 2] Query cancelled.");
+	XCTAssertEqualObjects(query.lastRunQueryText, @"SELECT 1;\nSELECT pg_sleep(30)");
 	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+/// Ruling 4: a cancel between statements (the next one never sent) counts the statements run.
+- (void)testCancelBetweenStatementsCountsStatementsRun
+{
+	SPPostgresQueryController *query = self.query;
+	SPPostgresTaskRunner *runner = [self useBackgroundRunner];
+	__block NSUInteger calls = 0;
+	[query setStatementWillRunHook:^(NSString *statement) {
+		// Before statement 2 is sent: the cancel request reaches the idle server (which ignores it) before the
+		// statement, so statement 2 runs and the run stops before statement 3
+		if (++calls == 2) {
+			[runner cancelAll];
+			usleep(300000);
+		}
+	}];
+	[self setSQL:@"SELECT 1; SELECT 2 AS two; SELECT 3"];
+	[query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+	XCTAssertTrue([self spinUntil:^BOOL{ return [query.statusText length] > 0; } timeout:5]);
+	[query setStatementWillRunHook:nil];
+
+	[self assertText:query.statusText matches:@"Errors; Cancelled in query 2, after TIME"];
+	XCTAssertEqualObjects([query infoPaneString], @"[ERROR in query 2] Query cancelled.");
+	XCTAssertEqualObjects(query.lastRunQueryText, @"SELECT 1;\nSELECT 2 AS two", @"statement 3 was never sent");
+	XCTAssertEqualObjects([self columnTitles], @[@"two"]);
+	XCTAssertFalse([query.infoPaneSplitView isCollapsibleSubviewCollapsed]);
 }
 
 - (void)testPostgresNotesInInfoPane
