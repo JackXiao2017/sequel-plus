@@ -210,7 +210,8 @@ static NSString * const SPQueryBarScratchSuite = @"SPPostgresStage11Tests";
 	XCTAssertTrue([query.gearButton pullsDown]);
 	XCTAssertEqualObjects([self titlesOfMenu:[query.favoritesButton menu]], @[@"Query Favorites"]);
 	XCTAssertTrue([[[query.favoritesButton menu] itemAtIndex:0] isHidden]);
-	XCTAssertEqualObjects([self titlesOfMenu:[query.historyButton menu]], @[@"Query History"]);
+	// (the history's items and entries: SPPostgresQueryHistoryTests)
+	XCTAssertEqualObjects([[[query.historyButton menu] itemAtIndex:0] title], @"Query History");
 	XCTAssertTrue([[[query.historyButton menu] itemAtIndex:0] isHidden]);
 	XCTAssertEqualObjects([query.favoritesButton toolTip], @"Choose a favorite from the menu or save queries to the favorites (⌥⌘F)");
 	XCTAssertEqualObjects([query.historyButton toolTip], @"Choose a query from your recent queries (⌥⌘Y)");
