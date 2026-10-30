@@ -10,6 +10,7 @@
 #import "../Source/Postgres/SPPostgresQueryController.h"
 #import "../Source/Postgres/SPPostgresConsoleLogger.h"
 #import "../Source/Postgres/SPPostgresTaskRunner.h"
+#import "../Source/SPComboPopupButton.h"
 
 /// The controller's test seam: called before each statement runs.
 @interface SPPostgresQueryController (Testing)
@@ -517,8 +518,10 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	XCTAssertTrue([editor allowsUndo]);
 	XCTAssertFalse([editor isRichText]);
 
-	XCTAssertNotNil([self buttonTitled:@"Run All" inView:[self.query view]]);
-	XCTAssertNotNil([self buttonTitled:@"Run Current" inView:[self.query view]]);
+	// MySQL's run pop-up button (Stage 11) in place of the Run All / Run Current buttons
+	XCTAssertNotNil(self.query.runButton);
+	XCTAssertEqualObjects([self.query.runButton title], @"Run Current");
+	XCTAssertNil([self buttonTitled:@"Run All" inView:[self.query view]]);
 }
 
 - (NSEvent *)keyDown:(NSString *)characters flags:(NSEventModifierFlags)flags
@@ -534,32 +537,31 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	return [[[self.controller window] contentView] performKeyEquivalent:[self keyDown:characters flags:flags]];
 }
 
-- (NSString *)toolTipOf:(NSButton *)button
-{
-	return [(id<NSViewToolTipOwner>)self.query view:button stringForToolTip:0 point:NSZeroPoint userData:NULL];
-}
-
 - (void)testRunKeysFollowMySQLsPrimaryAction
 {
 	[self overridePrefs:@{@"QueryPrimaryControlRunsAll": @NO}];
 	[self.document viewQuery:nil];
 	[self setSQL:@"SELECT 1 AS one; SELECT 2 AS two"];
 
-	// The buttons have no key equivalents of their own: the view handles MySQL's keys
-	NSButton *runAll = [self buttonTitled:@"Run All" inView:[self.query view]];
-	NSButton *runCurrent = [self buttonTitled:@"Run Current" inView:[self.query view]];
-	XCTAssertEqualObjects([runAll keyEquivalent], @"");
-	XCTAssertEqualObjects([runCurrent keyEquivalent], @"");
+	// The run pop-up button's items show MySQL's keys, but the view takes them first: a key press runs once
+	NSMenu *runMenu = [self.query.runButton menu];
+	XCTAssertEqualObjects([[runMenu itemWithTag:2] keyEquivalent], @"r");
+	XCTAssertEqual([[runMenu itemWithTag:2] keyEquivalentModifierMask], NSEventModifierFlagCommand);
+	XCTAssertEqualObjects([[runMenu itemWithTag:1] keyEquivalent], @"r");
+	XCTAssertEqual([[runMenu itemWithTag:1] keyEquivalentModifierMask], NSEventModifierFlagCommand | NSEventModifierFlagOption);
+	__block NSUInteger statementsRun = 0;
+	[self.query setStatementWillRunHook:^(NSString *statement) { statementsRun++; }];
 
 	// MySQL's default (DBView.xib's run popup): ⌘R runs Current, ⌥⌘R runs All
 	XCTAssertTrue([self pressKey:@"r" flags:NSEventModifierFlagCommand]);
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self columnTitles], @[@"one"], @"⌘R: Run Current");
+	XCTAssertEqual(statementsRun, 1u, @"run once");
 	XCTAssertTrue([self pressKey:@"r" flags:NSEventModifierFlagCommand | NSEventModifierFlagOption]);
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self columnTitles], @[@"two"], @"⌥⌘R: Run All");
-	XCTAssertTrue([[self toolTipOf:runCurrent] hasSuffix:@"(⌘R)"], @"%@", [self toolTipOf:runCurrent]);
-	XCTAssertTrue([[self toolTipOf:runAll] hasSuffix:@"(⌥⌘R)"], @"%@", [self toolTipOf:runAll]);
+	XCTAssertEqual(statementsRun, 3u, @"run once");
+	[self.query setStatementWillRunHook:nil];
 
 	// ⇧⌘R is MySQL's Refresh Databases menu item: not swallowed, it goes on to the main menu
 	[self.query.editor setSelectedRange:NSMakeRange(0, 0)];
@@ -579,8 +581,6 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	XCTAssertTrue([self pressKey:@"r" flags:NSEventModifierFlagCommand | NSEventModifierFlagOption]);
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self columnTitles], @[@"one"], @"⌥⌘R: Run Current");
-	XCTAssertTrue([[self toolTipOf:runAll] hasSuffix:@"(⌘R)"]);
-	XCTAssertTrue([[self toolTipOf:runCurrent] hasSuffix:@"(⌥⌘R)"]);
 
 	// Not in the window (Content showing): the keys aren't the Query view's
 	[self.document.sidebar reloadSchema:@"content_test"];

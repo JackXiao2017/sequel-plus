@@ -3,12 +3,19 @@
 
 @class PGPostgresConnection;
 @class SPPostgresTaskRunner;
+@class SPComboPopupButton;
+@class SPSplitView;
 
 /**
- * The Query view of a PostgreSQL tab, laid out as MySQL's Query tab: the SQL editor on top, then a bar with
- * Run Current and Run All, the read-only results grid (an SPTableView) and a status line at the bottom. As
- * MySQL's: ⌘R runs Current and ⌥⌘R runs All, swapped by MySQL's "QueryPrimaryControlRunsAll" preference.
- * Built in code. Use on the main thread.
+ * The Query view of a PostgreSQL tab, laid out as MySQL's Query tab (DBView.xib): an outer SPSplitView holding
+ * the editor and results (an inner SPSplitView: the SQL editor on top, the results below) over the query information
+ * pane (collapsed at start, not saved), over MySQL's results bar. The results pane has MySQL's top bar: the gear,
+ * Query Favorites and Query History pop-ups, and the run pop-up button (MySQL's SPComboPopupButton: Run Current / Run
+ * Previous / Run Selection, or Run All, with its menu). The results bar has the info pane toggle, the results gear
+ * (Export Result ▸ As CSV file…), the edit mode toggle (MySQL's shared "EditInSheetEnabled" preference) and the
+ * status line. As MySQL's: ⌘R runs the primary action and ⌥⌘R the secondary one; by default the primary action is
+ * Run Current, and MySQL's "QueryPrimaryControlRunsAll" preference (Switch Default) makes it Run All. Built in code.
+ * Use on the main thread.
  *
  * Statements (see SPPostgresStatementSplitter) run in order on the tab's connection, in one task of taskRunner. The
  * grid shows the last row set the run returned, values in PostgreSQL's text format and NULL as MySQL's NULL
@@ -20,14 +27,15 @@
  * A run is described as MySQL's ("Running query..." / "Running query K of N...", per statement) and can be
  * stopped ("Stop query" / "Stop queries"): the status line then says "Query cancelled.", the grid shows the
  * last row set returned before the cancel, and what ran before it is still reported (runDidChangeDatabase).
- * While the runner is busy, ⌘R, ⌥⌘R and the run buttons do nothing (NSBeep). The editor's text is read on the
- * main thread when the run is asked for; the statements run on the runner's thread. The tests' statement hook
- * (-setStatementWillRunHook:, a test seam) is called on that thread, before each statement.
+ * While the runner is busy the run button and its run items are disabled, and ⌘R, ⌥⌘R and the run actions do
+ * nothing (NSBeep). The editor's text is read on the main thread when the run is asked for; the statements run on
+ * the runner's thread. The tests' statement hook (-setStatementWillRunHook:, a test seam) is called on that thread,
+ * before each statement.
  *
  * The editor uses MySQL's query editor font preference, without smart quotes or dashes, with undo.
  */
 __attribute__((visibility("default")))
-@interface SPPostgresQueryController : NSObject <NSTableViewDataSource, NSTableViewDelegate, NSViewToolTipOwner>
+@interface SPPostgresQueryController : NSObject <NSTableViewDataSource, NSTableViewDelegate, NSTextViewDelegate>
 
 - (instancetype)initWithConnection:(PGPostgresConnection *)connection;
 
@@ -36,14 +44,58 @@ __attribute__((visibility("default")))
 /// completes; the documented end state then holds once the runner is idle.
 @property (retain) SPPostgresTaskRunner *taskRunner;
 
-/// Editor, run bar, grid and status line. Built once; sized by the caller (autoresizes).
+/// Editor, bars, grid and info pane. Built once; sized by the caller (autoresizes).
 - (NSView *)view;
 
 /// Runs every statement of the editor.
 - (IBAction)runAllQueries:(id)sender;
 
-/// Runs the statement at the cursor; with text selected, the statements of the selection (as MySQL's Run Selection).
+/// Runs the statement at the cursor (see -currentQueryRange); with text selected, the statements of the selection
+/// (as MySQL's Run Selection). Nothing to run (only whitespace or comments): NSBeep.
 - (IBAction)runCurrentQuery:(id)sender;
+
+/// As MySQL's: Run All when defaults' "QueryPrimaryControlRunsAll" is set, else Run Current (the run button, ⌘R).
+- (IBAction)runPrimaryQueryAction:(id)sender;
+
+/// As MySQL's: the other one (⌥⌘R).
+- (IBAction)runSecondaryQueryAction:(id)sender;
+
+/// As MySQL's Switch Default: flips "QueryPrimaryControlRunsAll" in defaults and retitles the run button and items.
+- (IBAction)switchDefaultQueryAction:(id)sender;
+
+/**
+ * The statement Run Current runs: the one the caret is in, or (as MySQL's "Run Previous") the one before it when the
+ * caret is after its semicolon, in the whitespace or comments that follow. Trimmed as SPPostgresStatementSplitter
+ * returns it; {NSNotFound, 0} when the editor holds no statement.
+ */
+- (NSRange)currentQueryRange;
+
+/// Where MySQL's shared preferences are read and written (QueryPrimaryControlRunsAll, EditInSheetEnabled, through an
+/// NSUserDefaultsController for the bindings). Default: standardUserDefaults.
+@property (nonatomic, retain) NSUserDefaults *defaults;
+
+/// Called by the results gear's Export Result ▸ As CSV file… (set by the tab to its -exportQueryResult:). The item is
+/// enabled while the grid shows a row set and the runner is idle. Dropped by -invalidate.
+@property (copy) void (^exportResultHandler)(void);
+
+#pragma mark - MySQL's bars (DBView.xib)
+
+/// The top bar: the gear (its hidden image item only, for now), Query Favorites and Query History (their hidden title
+/// item only, for now) and the run button.
+@property (readonly) NSPopUpButton *gearButton;
+@property (readonly) NSPopUpButton *favoritesButton;
+@property (readonly) NSPopUpButton *historyButton;
+@property (readonly) SPComboPopupButton *runButton;
+
+/// The results bar.
+@property (readonly) NSButton *infoPaneButton;
+@property (readonly) NSPopUpButton *resultsGearButton;
+@property (readonly) NSButton *editModeButton;
+@property (readonly) NSTextField *statusField;
+
+/// The query information pane's text, and the split view whose second subview (the pane) collapses.
+@property (readonly) NSTextView *infoPaneText;
+@property (readonly) SPSplitView *infoPaneSplitView;
 
 /// The editor font from MySQL's query editor font preference data (an archived NSFont), else the monospaced system font.
 + (NSFont *)editorFontFromPreferenceData:(NSData *)data;
@@ -71,7 +123,7 @@ __attribute__((visibility("default")))
 /// task's).
 @property (readonly) PGPostgresTransactionStatus lastRunTransactionStatus;
 
-/// Detaches the grid, editor and buttons from this controller (called by the tab when it closes or replaces it; also on dealloc).
+/// Detaches the grid, editor, bars and bindings from this controller (called by the tab when it closes or replaces it; also on dealloc).
 - (void)invalidate;
 
 @property (readonly) NSTextView *editor;
