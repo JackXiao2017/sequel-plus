@@ -295,15 +295,22 @@ __attribute__((visibility("default")))
  * gets (NO, YES); then, with MySQL's "ReloadAfterEditingRow" (read from defaults) and when the shown statement may
  * change neither data nor schema, that statement alone is run again through the runner, adding no history entry,
  * keeping lastRunQueryText, the selected rows and the scroll position, and never while a cell is being edited (it
- * waits for that edit to end). Otherwise the grid shows the saved value. In edit mode (MySQL's "EditInSheetEnabled")
- * no cell is edited in the grid. A run, a new result and -invalidate close a cell editor still open without
- * committing it, and a value is saved only into the result whose editor let its cell be edited.
+ * waits for that edit to end). Otherwise the grid shows the saved value. In edit mode (MySQL's "EditInSheetEnabled",
+ * the edit mode toggle) no cell is edited in the grid: it opens MySQL's field editor sheet instead (fieldEditorPresenter;
+ * one at a time), with the cell's text or the NULL placeholder, the result column's name, the origin column's type and
+ * nullability, editable only where the cell can be edited (otherwise read-only, without MySQL's tooltip). Its value is
+ * saved as a grid edit to the row it was opened on, only while that result is still shown. A run, a new result and
+ * -invalidate close a cell editor still open without committing it, and a value is saved only into the result whose
+ * editor let its cell be edited.
  */
 @property (readonly) SPPostgresQueryResultEditor *resultEditor;
 
 /// Test seam: shows why a cell can't be edited (default: NSBeep and an SPTooltip under the cell, as MySQL's). row is
 /// the grid's row, column the table column's index in the grid.
 @property (copy) void (^editRefusalPresenter)(NSString *message, NSInteger row, NSInteger column);
+
+/// Test seam, as SPPostgresContentController's: presents the field editor instead of the sheet.
+@property (copy) void (^fieldEditorPresenter)(NSString *value, NSString *columnName, NSString *typeName, BOOL editable, BOOL allowNull, void (^completion)(id newValue));
 
 /// The status line (see the class comment): @"" before the first run and while a run runs.
 @property (readonly, copy) NSString *statusText;

@@ -437,4 +437,138 @@ static NSString * const SPQueryEditingSuiteName = @"SPPostgresStage12Tests";
 	}
 }
 
+#pragma mark - Edit mode: the field editor sheet
+
+/// What the controller's fieldEditorPresenter got (the completion kept to end the "sheet" later).
+- (NSMutableArray<NSDictionary *> *)installSheetPresenter
+{
+	NSMutableArray<NSDictionary *> *sheets = [NSMutableArray array];
+	self.query.fieldEditorPresenter = ^(NSString *value, NSString *columnName, NSString *typeName, BOOL editable, BOOL allowNull, void (^completion)(id newValue)) {
+		[sheets addObject:@{@"value": value ?: [NSNull null], @"column": columnName ?: [NSNull null], @"type": typeName ?: [NSNull null],
+							@"editable": @(editable), @"allowNull": @(allowNull), @"completion": [completion copy]}];
+	};
+	return sheets;
+}
+
+- (void)completeSheet:(NSDictionary *)sheet with:(id)value
+{
+	void (^completion)(id) = sheet[@"completion"];
+	completion(value);
+}
+
+- (void)testEditModeOpensSheetInsteadOfInline
+{
+	[self.scratch setBool:YES forKey:SPQueryEditingInSheetKey];
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		[self openQueryOnPort:port];
+		NSMutableArray<NSDictionary *> *sheets = [self installSheetPresenter];
+		[self run:@"SELECT id, name, price FROM query_edit_test.items ORDER BY id"];
+
+		XCTAssertFalse([self shouldEditRow:0 column:1], @"port %@", port);
+		XCTAssertEqual(sheets.count, 1u, @"port %@", port);
+		XCTAssertEqualObjects(sheets[0][@"value"], @"one");
+		XCTAssertEqualObjects(sheets[0][@"column"], @"name");
+		XCTAssertEqualObjects(sheets[0][@"type"], @"text");
+		XCTAssertEqualObjects(sheets[0][@"editable"], @YES);
+		XCTAssertEqualObjects(sheets[0][@"allowNull"], @YES);
+		XCTAssertEqual(self.refusals.count, 0u);
+
+		// One sheet at a time
+		XCTAssertFalse([self shouldEditRow:1 column:1]);
+		XCTAssertEqual(sheets.count, 1u);
+
+		[self completeSheet:sheets[0] with:@"sheet"];
+		XCTAssertEqual(self.alerts.count, 0u, @"port %@: %@", port, [self.alerts.firstObject informativeText]);
+		XCTAssertEqualObjects([self serverValue:@"SELECT name FROM query_edit_test.items WHERE id = 1" port:port], @"sheet");
+		XCTAssertEqualObjects([self gridValueAtRow:0 column:1], @"sheet");
+		XCTAssertEqualObjects([self serverValue:@"SELECT name FROM query_edit_test.items WHERE id = 2" port:port], @"two");
+		// A second call of the same completion sends nothing
+		[self completeSheet:sheets[0] with:@"again"];
+		XCTAssertEqualObjects([self serverValue:@"SELECT name FROM query_edit_test.items WHERE id = 1" port:port], @"sheet");
+
+		// NULL shows the placeholder; the next sheet opens once the first has ended
+		XCTAssertFalse([self shouldEditRow:1 column:2]);
+		XCTAssertEqual(sheets.count, 2u);
+		XCTAssertEqualObjects(sheets[1][@"value"], SPQueryEditingNull);
+		XCTAssertEqualObjects(sheets[1][@"column"], @"price");
+		XCTAssertEqualObjects(sheets[1][@"type"], @"numeric");
+		[self completeSheet:sheets[1] with:nil];
+	}
+}
+
+- (void)testSheetReadOnlyForUneditableCell
+{
+	[self.scratch setBool:YES forKey:SPQueryEditingInSheetKey];
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		[self openQueryOnPort:port];
+		NSMutableArray<NSDictionary *> *sheets = [self installSheetPresenter];
+		[self run:@"SELECT id, upper(name) AS shout FROM query_edit_test.items ORDER BY id"];
+
+		XCTAssertFalse([self shouldEditRow:0 column:1], @"port %@", port);
+		XCTAssertEqual(sheets.count, 1u, @"port %@", port);
+		XCTAssertEqualObjects(sheets[0][@"value"], @"ONE");
+		XCTAssertEqualObjects(sheets[0][@"column"], @"shout");
+		XCTAssertEqualObjects(sheets[0][@"type"], @"");
+		XCTAssertEqualObjects(sheets[0][@"editable"], @NO);
+		XCTAssertEqual(self.refusals.count, 0u, @"MySQL shows no tooltip in the sheet's path");
+
+		[self completeSheet:sheets[0] with:@"changed"];
+		XCTAssertEqual(self.changes.count, 0u, @"port %@", port);
+		XCTAssertEqual(self.alerts.count, 0u, @"nothing was tried: %@", [self.alerts.firstObject informativeText]);
+		XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(name, ',' ORDER BY id) FROM query_edit_test.items" port:port], @"one,two");
+
+		// Also an editable cell's sheet can't commit to a cell the sheet didn't approve
+		XCTAssertFalse([self shouldEditRow:0 column:0]);
+		XCTAssertEqual(sheets.count, 2u);
+		XCTAssertEqualObjects(sheets[1][@"editable"], @YES);
+		[self completeSheet:sheets[1] with:@"5"];
+		XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(id::text, ',' ORDER BY id) FROM query_edit_test.items" port:port], @"2,5");
+	}
+}
+
+- (void)testSheetResultDroppedAfterNewRun
+{
+	[self.scratch setBool:YES forKey:SPQueryEditingInSheetKey];
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		[self openQueryOnPort:port];
+		NSMutableArray<NSDictionary *> *sheets = [self installSheetPresenter];
+		[self run:@"SELECT id, name FROM query_edit_test.items ORDER BY id"];
+		XCTAssertFalse([self shouldEditRow:0 column:1], @"port %@", port);
+		XCTAssertEqual(sheets.count, 1u);
+		XCTAssertEqualObjects(sheets[0][@"editable"], @YES);
+
+		// Another run: row 0 is now id 2, and the new result's cell was approved inline-wise by no one
+		[self run:@"SELECT id, name FROM query_edit_test.items ORDER BY id DESC"];
+		[self completeSheet:sheets[0] with:@"stale"];
+
+		XCTAssertEqual(self.changes.count, 0u, @"port %@", port);
+		XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(name, ',' ORDER BY id) FROM query_edit_test.items" port:port], @"one,two");
+		XCTAssertEqualObjects([self gridValueAtRow:0 column:1], @"two");
+
+		// The ended sheet lets the next one open
+		XCTAssertFalse([self shouldEditRow:0 column:1]);
+		XCTAssertEqual(sheets.count, 2u);
+		[self completeSheet:sheets[1] with:nil];
+	}
+}
+
+- (void)testCancelledSheetSendsNothing
+{
+	[self.scratch setBool:YES forKey:SPQueryEditingInSheetKey];
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		[self openQueryOnPort:port];
+		NSMutableArray<NSDictionary *> *sheets = [self installSheetPresenter];
+		[self run:@"SELECT id, name FROM query_edit_test.items ORDER BY id"];
+		[self recordStatements];
+		XCTAssertFalse([self shouldEditRow:0 column:1], @"port %@", port);
+		XCTAssertEqual(sheets.count, 1u);
+		[self completeSheet:sheets[0] with:nil];
+
+		XCTAssertEqual(self.statements.count, 0u, @"port %@: %@", port, self.statements);
+		XCTAssertEqual(self.changes.count, 0u);
+		XCTAssertEqual(self.alerts.count, 0u);
+		XCTAssertEqualObjects([self serverValue:@"SELECT name FROM query_edit_test.items WHERE id = 1" port:port], @"one");
+	}
+}
+
 @end
