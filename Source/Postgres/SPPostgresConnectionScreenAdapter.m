@@ -1,5 +1,6 @@
 #import "SPPostgresConnectionScreenAdapter.h"
 #import "SPPostgresFavorite.h"
+#import "SPPostgresFavoriteNode.h"
 #import "SPPostgresFavoritesStore.h"
 #import "SPPostgresConnector.h"
 #import "SPPostgresDocument.h"
@@ -21,24 +22,6 @@ static NSString * const SPPostgresScreenDatabaseImage = @"database-small"; // th
 @end
 
 @implementation SPKeychain (SPPostgresKeychainAccess)
-@end
-
-/**
- * Represented object of a Postgres favorite's outline node. -nodeFavorite returns nil so that any MySQL
- * code reading a favorite dictionary from the selected node sees "no MySQL favorite" rather than crashing.
- */
-@interface SPPostgresFavoriteNode : NSObject <SPNamedNode>
-{
-	SPPostgresFavorite *favorite;
-}
-@property (nonatomic, retain) SPPostgresFavorite *favorite;
-@end
-
-@implementation SPPostgresFavoriteNode
-@synthesize favorite;
-- (NSString *)nodeName { return [favorite name]; }
-- (NSMutableDictionary *)nodeFavorite { return nil; }
-- (void)dealloc { [favorite release]; [super dealloc]; }
 @end
 
 static NSString *SPPGNonEmpty(NSString *s)
