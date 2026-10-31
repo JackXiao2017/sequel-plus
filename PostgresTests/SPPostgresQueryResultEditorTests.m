@@ -38,7 +38,7 @@
 
 #pragma mark - Fixture
 
-/// Drops and rebuilds schema query_edit_test (items, pair, nokey, "Mixed Case", customers, orders, flags, items_view).
+/// Drops and rebuilds schema query_edit_test (items, pair, nokey, "Mixed Case", customers, orders, flags, emp, items_view).
 - (void)buildFixtureOnPort:(NSUInteger)port
 {
 	PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port];
@@ -60,6 +60,8 @@
 		@"INSERT INTO query_edit_test.orders VALUES (10, 1, 'first')",
 		@"CREATE TABLE query_edit_test.flags (b boolean, c char(4), ip inet)",
 		@"INSERT INTO query_edit_test.flags VALUES (true, 'ab', '10.0.0.1'), (false, 'cd', '10.0.0.2')",
+		@"CREATE TABLE query_edit_test.emp (id integer PRIMARY KEY, name text, manager integer)",
+		@"INSERT INTO query_edit_test.emp VALUES (1, 'boss', NULL), (2, 'worker', 1)",
 		@"CREATE VIEW query_edit_test.items_view AS SELECT id, name FROM query_edit_test.items",
 	];
 	for (NSString *sql in statements) {
@@ -513,6 +515,52 @@
 		NSPredicate *updates = [NSPredicate predicateWithFormat:@"SELF CONTAINS[c] 'UPDATE'"];
 		XCTAssertEqual([[recorder.statements filteredArrayUsingPredicate:updates] count], 0u, @"port %@: %@", port, recorder.statements);
 		XCTAssertEqualObjects([self serverValue:@"SELECT name FROM query_edit_test.items WHERE id = 1" port:port], @"one");
+	}
+}
+
+/// PostgreSQL reports a field's table and column, not its alias: in a self-join, editing m.name must not find e's row
+/// by e.id. Both aliases' values are compared, which disagree, so nothing matches.
+- (void)testSelfJoinEditIsRefused
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		NSArray *queries = @[
+			@"SELECT e.id, e.name, m.id, m.name FROM query_edit_test.emp e JOIN query_edit_test.emp m ON m.id = e.manager",
+			@"SELECT e.name, m.name FROM query_edit_test.emp e JOIN query_edit_test.emp m ON m.id = e.manager",
+		];
+		NSArray *columns = @[@3, @1], *workerColumns = @[@1, @0]; // m.name, e.name
+		for (NSUInteger i = 0; i < [queries count]; i++) {
+			NSUInteger column = [columns[i] unsignedIntegerValue];
+			SPPostgresQueryResultEditor *editor = [self editorForSQL:queries[i] port:port];
+			NSInteger count = -2;
+			NSString *message = nil;
+			XCTAssertEqual([editor editabilityOfRow:0 column:column matchCount:&count message:&message], SPPostgresCellNoMatch, @"port %@ %@: %@", port, queries[i], message);
+			XCTAssertEqual(count, 0);
+
+			NSError *error = nil;
+			count = -2;
+			XCTAssertNil([editor saveValue:@"chief" row:0 column:column matchCount:&count error:&error], @"port %@ %@", port, queries[i]);
+			XCTAssertEqual([error code], SPPostgresErrorRowChanged);
+			XCTAssertEqual(count, 0);
+			XCTAssertEqualObjects([editor valueAtRow:0 column:[workerColumns[i] unsignedIntegerValue]], @"worker");
+			XCTAssertEqualObjects([editor valueAtRow:0 column:column], @"boss");
+			XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(name, ',' ORDER BY id) FROM query_edit_test.emp" port:port], @"boss,worker");
+		}
+	}
+}
+
+/// The saved value is the column's output text, as the result shows it, not its ::text.
+- (void)testSavedValueIsOutputText
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:@"SELECT b, c, ip FROM query_edit_test.flags ORDER BY ip" port:port];
+		NSError *error = nil;
+		XCTAssertEqualObjects([editor saveValue:@"false" row:0 column:0 matchCount:NULL error:&error], @"f", @"port %@: %@", port, error);
+		XCTAssertEqualObjects([editor valueAtRow:0 column:0], @"f");
+		XCTAssertEqualObjects([editor saveValue:@"xy" row:0 column:1 matchCount:NULL error:&error], @"xy  ", @"port %@: %@", port, error);
+		XCTAssertEqualObjects([editor saveValue:@"10.0.0.5" row:0 column:2 matchCount:NULL error:&error], @"10.0.0.5", @"port %@: %@", port, error);
+		// A later edit of the row still finds it by these values
+		XCTAssertEqualObjects([editor saveValue:@"true" row:0 column:0 matchCount:NULL error:&error], @"t", @"port %@: %@", port, error);
+		XCTAssertEqualObjects([self serverValue:@"SELECT b::text || ',' || c::text || ',' || host(ip) FROM query_edit_test.flags WHERE ip = '10.0.0.5'" port:port], @"true,xy,10.0.0.5");
 	}
 }
 

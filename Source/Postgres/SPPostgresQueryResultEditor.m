@@ -181,17 +181,16 @@ static NSString *SPQueryEditAbortedMessage(void)
 #pragma mark - Editability
 
 /// The result columns that identify a row of the origin table oid (MySQL's rule): those in its primary key, or every
-/// one of its columns when none of those is present. A column repeating an attnum counts once.
+/// one of its columns when none of those is present. Every occurrence counts: PostgreSQL reports a field's table and
+/// column but not its alias, so in a self-join (e.id, m.id) both are compared, and when they disagree no row matches
+/// (rather than the other alias's row). Agreeing repeats (SELECT id, name, name) are merely redundant.
 - (NSArray *)identifyingColumnsForOrigin:(unsigned int)oid
 {
 	NSMutableArray *all = [NSMutableArray array], *keys = [NSMutableArray array];
-	NSMutableSet *seen = [NSMutableSet set];
 	for (NSUInteger column = 0; column < [self columnCount]; column++) {
 		if ([self originOfColumn:column] != oid) continue;
-		NSNumber *attnum = @([_result tableColumnForField:column]);
 		NSDictionary *info = [self originColumnOfColumn:column];
-		if (!info || [seen containsObject:attnum]) continue;
-		[seen addObject:attnum];
+		if (!info) continue;
 		[all addObject:@(column)];
 		if ([[info objectForKey:SPQueryEditKeyPositionKey] integerValue] > 0) [keys addObject:@(column)];
 	}
@@ -360,7 +359,8 @@ static NSString *SPQueryEditAbortedMessage(void)
 		if (error) *error = SPPostgresMakeError(SPPostgresErrorNotEditable, NSLocalizedString(@"Field is not editable. Field has no or multiple table or database origin(s).",@"field is not editable due to no table/database"), nil);
 		return nil;
 	}
-	NSString *sql = [NSString stringWithFormat:@"UPDATE %@ SET %@ = $1::%@ WHERE %@ RETURNING %@::text",
+	// RETURNING the column itself (not ::text): its output text, as the result shows it (t, padded char(n), inet)
+	NSString *sql = [NSString stringWithFormat:@"UPDATE %@ SET %@ = $1::%@ WHERE %@ RETURNING %@",
 					 qualifiedName, name, [originColumn objectForKey:SPQueryEditTypeKey], where, name];
 
 	__block id saved = nil;
