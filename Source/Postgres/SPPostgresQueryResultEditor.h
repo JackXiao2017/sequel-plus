@@ -22,15 +22,20 @@ typedef NS_ENUM(NSInteger, SPPostgresCellEditability) {
  * it.
  *
  * PostgreSQL reports a field's table and column but not its alias, so in a self-join the values of one alias can
- * identify a row of the other, or a row of neither. Such results are refused before any count: the statement's plan
- * (EXPLAIN (VERBOSE, FORMAT JSON), which doesn't run it) must read the origin table, counting its partitions and
- * inheritance children, at most once (one scan, or one Append of scans). This is conservative: a subquery on the
- * same table (WHERE id IN (SELECT … FROM the same table)) also refuses it. Comparing every column of the table is
- * defence in depth on top of that, and also refuses an edit once another shown column of its row has changed.
+ * identify a row of the other, or a row of neither. Such results are refused before any count
+ * (SPPostgresCellOriginRepeated): the statement's plan (EXPLAIN (VERBOSE, FORMAT JSON): the statement is planned,
+ * not executed, though planning takes its locks and may evaluate immutable or stable functions) must read the origin
+ * table, counting its partitions and inheritance children, at most once. One read is one scan, or one Append of
+ * scans, or one CTE Scan of a WITH query that itself reads the table once; a WITH query's columns report its table
+ * as their origin, so a WITH query scanned twice (a self-join through it, at any nesting) counts as two reads, and so
+ * does a recursive WITH query's reference to itself. This is conservative: a subquery on the same table (WHERE id IN
+ * (SELECT … FROM the same table)) also refuses it. Comparing every column of the table is defence in depth on top of
+ * that, and also refuses an edit once another shown column of its row has changed.
  *
  * The origin tables' columns, their partitions/children and the statement's plan are read once per editor (a failed
- * lookup is retried on the next check). Reads run through SPPostgresRunGuardedRead, so inside the user's open transaction a
- * failure leaves it open. Identifiers are quoted and values sent as parameters.
+ * lookup, including a plan whose WITH query can't be found, is SPPostgresCellCheckFailed and retried on the next
+ * check). Reads run through SPPostgresRunGuardedRead, so inside the user's open transaction a failure leaves it open.
+ * Identifiers are quoted and values sent as parameters.
  */
 __attribute__((visibility("default")))
 @interface SPPostgresQueryResultEditor : NSObject

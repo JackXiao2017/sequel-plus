@@ -657,6 +657,81 @@
 	}
 }
 
+#pragma mark - Common table expressions
+
+/// A CTE's columns report the CTE's table as their origin (checked on PG12 and PG18), and a CTE read twice is a
+/// self-join whose plan has no second scan of the table: one Seq Scan in the InitPlan "CTE x", read by two CTE Scans.
+/// Case A data (both names 'Sam'): editing b.name would build id = 2 AND name = 'Sam', the other alias's row.
+- (void)testCTEReadTwiceIsRefused
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue];
+		NSError *error = nil;
+		XCTAssertNotNil(SPPostgresExecute(connection, @"UPDATE query_edit_test.emp SET name = 'Sam' WHERE id IN (1, 2)", nil, &error), @"%@", error);
+		for (NSString *with in @[@"WITH x AS (SELECT * FROM query_edit_test.emp) ", @"WITH x AS MATERIALIZED (SELECT * FROM query_edit_test.emp) "]) {
+			[self assertOriginRepeatedForSQL:[with stringByAppendingString:@"SELECT a.id, b.name FROM x a JOIN x b ON b.id = a.manager"] row:0 column:1 port:port];
+			[self assertOriginRepeatedForSQL:[with stringByAppendingString:@"SELECT a.id, b.name FROM x a JOIN x b ON b.id = a.manager"] row:0 column:0 port:port];
+		}
+	}
+}
+
+/// Case B through a CTE: e.dept plus m.name of the worker row (B, boss) would identify row 3, in neither alias.
+- (void)testCTESelfJoinMatchingNeitherAliasIsRefused
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		[self assertOriginRepeatedForSQL:@"WITH x AS (SELECT * FROM query_edit_test.emp) SELECT e.dept, m.name FROM x e JOIN x m ON m.id = e.manager" row:0 column:1 port:port];
+		[self assertOriginRepeatedForSQL:@"WITH x AS MATERIALIZED (SELECT * FROM query_edit_test.emp) SELECT e.dept, m.name FROM x e JOIN x m ON m.id = e.manager" row:0 column:1 port:port];
+	}
+}
+
+/// A CTE referenced once is one read of its table, also through a second CTE (y reads x once, the query reads y once).
+/// PQftable reports emp for the CTE's columns on both servers, so the cell is editable and the save finds the row.
+- (void)testCTEReadOnceIsEditable
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		NSArray *statements = @[
+			@"WITH x AS MATERIALIZED (SELECT * FROM query_edit_test.emp) SELECT id, name FROM x WHERE id = 2",
+			@"WITH x AS (SELECT * FROM query_edit_test.emp) SELECT id, name FROM x WHERE id = 2",
+			@"WITH x AS MATERIALIZED (SELECT * FROM query_edit_test.emp), y AS MATERIALIZED (SELECT * FROM x) SELECT id, name FROM y WHERE id = 2",
+		];
+		for (NSString *sql in statements) {
+			SPPostgresQueryResultEditor *editor = [self editorForSQL:sql port:port];
+			NSInteger count = -2;
+			NSString *message = nil;
+			XCTAssertEqual([editor editabilityOfRow:0 column:1 matchCount:&count message:&message], SPPostgresCellEditable, @"port %@ %@: %@", port, sql, message);
+			XCTAssertEqual(count, 1);
+			NSError *error = nil;
+			NSString *saved = [NSString stringWithFormat:@"w%lu", (unsigned long)[statements indexOfObject:sql]];
+			XCTAssertEqualObjects([editor saveValue:saved row:0 column:1 matchCount:&count error:&error], saved, @"port %@ %@: %@", port, sql, error);
+			NSString *expected = [NSString stringWithFormat:@"boss,%@,boss", saved];
+			XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(name, ',' ORDER BY id) FROM query_edit_test.emp" port:port], expected);
+		}
+	}
+}
+
+/// A CTE read twice inside another CTE, or a CTE over a CTE read twice: the reads are expanded through every level.
+- (void)testNestedCTEReadTwiceIsRefused
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		[self assertOriginRepeatedForSQL:@"WITH x AS MATERIALIZED (SELECT * FROM query_edit_test.emp), y AS MATERIALIZED (SELECT a.id, b.name FROM x a JOIN x b ON b.id = a.manager) SELECT id, name FROM y" row:0 column:1 port:port];
+		[self assertOriginRepeatedForSQL:@"WITH x AS MATERIALIZED (SELECT * FROM query_edit_test.emp), y AS MATERIALIZED (SELECT * FROM x) SELECT a.id, b.name FROM y a JOIN y b ON b.id = a.manager" row:0 column:1 port:port];
+	}
+}
+
+/// A recursive CTE's columns have no origin (PQftable reports 0), but a table joined to it is read again through the
+/// CTE, whose WorkTable Scan is a further read.
+- (void)testRecursiveCTEJoinedWithItsTableIsRefused
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		NSString *sql = @"WITH RECURSIVE r AS (SELECT id, manager FROM query_edit_test.emp WHERE manager IS NULL "
+			"UNION ALL SELECT e.id, e.manager FROM query_edit_test.emp e JOIN r ON e.manager = r.id) "
+			"SELECT e.id, e.name, r.id FROM query_edit_test.emp e JOIN r ON r.id = e.id ORDER BY e.id";
+		[self assertOriginRepeatedForSQL:sql row:0 column:1 port:port];
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:sql port:port];
+		XCTAssertEqual([editor editabilityOfRow:0 column:2 matchCount:NULL message:NULL], SPPostgresCellNoOrigin, @"port %@", port);
+	}
+}
+
 /// Without the statement (or with one that can't be explained) nothing can be checked, and nothing is saved.
 - (void)testMissingOrUnexplainableStatementFailsCheck
 {
