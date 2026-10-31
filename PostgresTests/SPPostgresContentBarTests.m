@@ -9,6 +9,7 @@
 #import "../Source/Postgres/SPPostgresContentController.h"
 #import "../Source/Postgres/SPPostgresTaskRunner.h"
 #import "../Source/Postgres/SPPostgresPaginationView.h"
+#import "../Source/Postgres/SPPostgresFieldEditorSheet.h"
 
 static const NSUInteger SPContentBarTestPort = 55418;
 // MySQL's preference keys (Source/SPConstants.m; the header is not ARC-clean)
@@ -55,11 +56,6 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 @end
 
 @implementation SPContentBarSheetCall
-@end
-
-/// The field editor's callback (SPFieldEditorControllerDelegate, adopted privately).
-@interface SPPostgresContentController (SPContentBarFieldEditorResult)
-- (void)processFieldEditorResult:(id)data contextInfo:(NSDictionary *)contextInfo;
 @end
 
 /// The Content tab's bottom bar (Stage 10): MySQL's layout, images, tooltips and keys, ⌫ in the grid, the busy state.
@@ -781,7 +777,7 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 
 	// A file loaded into the sheet (NSData) that is UTF-8: its text is sent
 	[self openAndEndDefaultSheetOn:content row:1 column:@"name"];
-	[content processFieldEditorResult:[@"from a file ✓" dataUsingEncoding:NSUTF8StringEncoding] contextInfo:nil];
+	[[SPPostgresFieldEditorSheet openSheetOnWindow:content.tableView.window] processFieldEditorResult:[@"from a file ✓" dataUsingEncoding:NSUTF8StringEncoding] contextInfo:nil];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:content.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT name FROM content_test.items WHERE id = 2"], @"from a file ✓");
 	XCTAssertEqualObjects([content tableView:content.tableView objectValueForTableColumn:[self columnNamed:@"name" of:content] row:1], @"from a file ✓");
@@ -789,13 +785,13 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 	// Not UTF-8: refused, nothing sent (not NULL)
 	[self openAndEndDefaultSheetOn:content row:2 column:@"name"];
 	const unsigned char bytes[] = {0xff, 0xfe, 0x00, 0x80};
-	[content processFieldEditorResult:[NSData dataWithBytes:bytes length:sizeof(bytes)] contextInfo:nil];
+	[[SPPostgresFieldEditorSheet openSheetOnWindow:content.tableView.window] processFieldEditorResult:[NSData dataWithBytes:bytes length:sizeof(bytes)] contextInfo:nil];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:content.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT name FROM content_test.items WHERE id = 3"], [@"" stringByPaddingToLength:10000 withString:@"x" startingAtIndex:0]);
 
 	// The sheet is no longer pending: another opens
 	[self openAndEndDefaultSheetOn:content row:0 column:@"name"];
-	[content processFieldEditorResult:nil contextInfo:nil];
+	[[SPPostgresFieldEditorSheet openSheetOnWindow:content.tableView.window] processFieldEditorResult:nil contextInfo:nil];
 	XCTAssertEqualObjects([self serverValue:@"SELECT name FROM content_test.items WHERE id = 1"], @"item 1");
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
 }
