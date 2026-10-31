@@ -69,7 +69,7 @@ A placement is an `NSDictionary`, keyed in the file by the Postgres favorite's `
    - Any step missing: top level, appended at the end, after every MySQL child.
 2. **Find the slot within the group.**
    - `After` names a direct MySQL child of that group: insert right after it.
-   - `After` is gone: insert before the MySQL child at `min(Index, count)`.
+   - `After` is gone: insert before the MySQL child at `min(max(Index - 1, 0), count)` (Index counted the anchor itself).
    - `After` absent: insert at the start.
 3. **Several Postgres favorites in one slot:** ascending `Order`, then name, case-insensitive.
 4. **Postgres favorites with no placement** (for example, an old file): end of the top level, in the store's

@@ -1219,6 +1219,56 @@
 }
 
 
+/// Two windows show P in the second of two groups named X; the first X is deleted (the shared MySQL tree
+/// changes under both). Each window's reload saves its layout snapshot against the changed tree: P stays in
+/// its group, and the file says so for later windows. A reload from the file alone would lose the group.
+- (void)testDeletingAMySQLGroupKeepsPostgresPlaceWhenSavingLayout
+{
+	NSString *pid = [self savedFavoriteNamed:@"p"];
+	id x1 = [self mysqlGroup:@"X" children:@[[self mysqlFavorite:1]]];
+	id x2 = [self mysqlGroup:@"X" children:@[[self mysqlFavorite:2], [self mysqlFavorite:3]]];
+	id section = [self mysqlGroup:@"FAVORITES" children:@[x1, x2, [self mysqlFavorite:4]]];
+
+	SPPGFakeConnectionScreen *screenB = [[SPPGFakeConnectionScreen alloc] init];
+	screenB.mysqlSection = section;
+	SPPostgresConnectionScreenAdapter *adapterB = [self adapterWithScreen:screenB];
+	[adapterB prepareOutlineWithMySQLSection:section savingLayout:YES];
+	self.screen.mysqlSection = section;
+	SPPostgresConnectionScreenAdapter *adapterA = [self adapterWithScreen:self.screen];
+	[adapterA prepareOutlineWithMySQLSection:section savingLayout:YES];
+	[adapterA moveNodes:@[[adapterA nodeForFavoriteID:pid]] toGroup:x2 displayedIndex:1];
+	XCTAssertEqualObjects([self namesIn:[adapterB displayedChildrenOfGroup:x2]], (@[@"m2", @"p", @"m3"]));
+
+	[[section mutableChildNodes] removeObject:x1];
+	[adapterA prepareOutlineWithMySQLSection:section savingLayout:YES];
+	[adapterB prepareOutlineWithMySQLSection:section savingLayout:YES];
+
+	for (SPPostgresConnectionScreenAdapter *adapter in @[adapterA, adapterB]) {
+		XCTAssertEqual([adapter displayedParentOfNode:[adapter nodeForFavoriteID:pid]], x2);
+		XCTAssertEqualObjects([self namesIn:[adapter displayedChildrenOfGroup:x2]], (@[@"m2", @"p", @"m3"]));
+	}
+	XCTAssertEqualObjects([self placementsOnDisk][pid][@"Group"], (@[@{@"Name": @"X", @"Nth": @0}]));
+	XCTAssertEqualObjects([self placementsOnDisk][pid][@"After"], (@{@"FavoriteID": @2}));
+}
+
+/// A MySQL favorite P followed is deleted: P stays between the neighbours, and the file says so.
+- (void)testDeletingAnchorMySQLFavoriteKeepsPostgresBetweenNeighbours
+{
+	NSString *pid = [self savedFavoriteNamed:@"p"];
+	id m2 = [self mysqlFavorite:2];
+	id section = [self mysqlGroup:@"FAVORITES" children:@[[self mysqlFavorite:1], m2, [self mysqlFavorite:3]]];
+	self.screen.mysqlSection = section;
+	SPPostgresConnectionScreenAdapter *adapter = [self adapterWithScreen:self.screen];
+	[adapter prepareOutlineWithMySQLSection:section savingLayout:YES];
+	[adapter moveNodes:@[[adapter nodeForFavoriteID:pid]] toGroup:section displayedIndex:2];
+	XCTAssertEqualObjects([self namesIn:[adapter displayedChildrenOfGroup:section]], (@[@"m1", @"m2", @"p", @"m3"]));
+
+	[[section mutableChildNodes] removeObject:m2];
+	[adapter prepareOutlineWithMySQLSection:section savingLayout:YES];
+	XCTAssertEqualObjects([self namesIn:[adapter displayedChildrenOfGroup:section]], (@[@"m1", @"p", @"m3"]));
+	XCTAssertEqualObjects([self placementsOnDisk][pid][@"After"], (@{@"FavoriteID": @1}));
+}
+
 /// Another window adds a favorite into G: its placement is written before the favorite is saved, and this
 /// window's reload in between must not prune it.
 - (void)testNewFavoriteFromAnotherWindowKeepsItsPlacement

@@ -169,9 +169,12 @@ static NSUInteger SPPGIndexOfGroup(NSArray *siblings, NSString *name, NSInteger 
 					slot = anchor + 1;
 				}
 				else {
-					// The anchor is gone: before the MySQL child at min(Index, count)
+					// The anchor is gone: before the MySQL child at min(max(Index - 1, 0), count), as Index
+					// counted the anchor itself. An After naming no anchor (a MySQL favorite without an id)
+					// uses Index as it is: that anchor may still be there.
 					NSNumber *index = SPPGValue(record, SPPGPlacementIndexKey, [NSNumber class]);
 					NSInteger wanted = index ? [index integerValue] : (NSInteger)[children count];
+					if (index && (anchorID || anchorGroup)) wanted--;
 					slot = (NSUInteger)MIN(MAX(wanted, 0), (NSInteger)[children count]);
 				}
 			}
@@ -411,12 +414,21 @@ static NSDictionary *SPPGAfterForAnchor(SPTreeNode *anchor, NSArray *siblings)
 		}
 	}
 
+	// A MySQL child of the group left out of `children` stays in the MySQL tree, at the end
+	NSMutableArray *displayed = [NSMutableArray arrayWithArray:children];
+	for (SPTreeNode *child in [group childNodes]) {
+		if ([mysqlChildren indexOfObjectIdenticalTo:child] == NSNotFound) {
+			[mysqlChildren addObject:child];
+			[displayed addObject:child];
+		}
+	}
+
 	NSMutableArray *groupChildren = [group mutableChildNodes];
 	if (![groupChildren isEqualToArray:mysqlChildren]) {
 		[groupChildren removeAllObjects];
 		[groupChildren addObjectsFromArray:mysqlChildren];
 	}
-	[self _storeDisplayed:children forGroup:group];
+	[self _storeDisplayed:displayed forGroup:group];
 }
 
 - (void)moveNodes:(NSArray *)nodes toGroup:(SPTreeNode *)group displayedIndex:(NSInteger)index
