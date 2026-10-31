@@ -555,11 +555,6 @@ static NSString *SPPGOrEmpty(NSString *s)
 	return current;
 }
 
-- (id)sectionNode
-{
-	return nil;
-}
-
 - (BOOL)hasPostgresFavorites
 {
 	return [nodesByID count] > 0;
