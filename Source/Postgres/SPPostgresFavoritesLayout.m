@@ -357,4 +357,106 @@ static NSDictionary *SPPGAfterForAnchor(SPTreeNode *anchor, NSArray *siblings)
 	return placements;
 }
 
+#pragma mark - Changes
+
+/// Stores `displayed` for `group`, or drops the group from the arrangement when no Postgres node is in it.
+- (void)_storeDisplayed:(NSArray *)displayed forGroup:(SPTreeNode *)group
+{
+	for (id child in displayed) {
+		if (SPPGIsPostgresNode(child)) {
+			[displayedByGroup setObject:[NSArray arrayWithArray:displayed] forKey:group];
+			return;
+		}
+	}
+	[displayedByGroup removeObjectForKey:group];
+}
+
+/// Takes `node` out of the stored displayed children of `group`, if it has any.
+- (void)_removeNode:(SPTreeNode *)node fromDisplayedOfGroup:(SPTreeNode *)group
+{
+	NSArray *displayed = group ? [displayedByGroup objectForKey:group] : nil;
+	NSUInteger idx = [displayed indexOfObjectIdenticalTo:node];
+	if (idx == NSNotFound) return;
+	NSMutableArray *remaining = [[displayed mutableCopy] autorelease];
+	[remaining removeObjectAtIndex:idx];
+	[self _storeDisplayed:remaining forGroup:group];
+}
+
+- (void)setDisplayedChildren:(NSArray *)children ofGroup:(SPTreeNode *)group
+{
+	if (!group) return;
+	children = [[children copy] autorelease]; // the caller's array may be one of ours
+
+	// Postgres nodes shown here before but not in `children` are no longer displayed anywhere
+	for (SPTreeNode *old in [self displayedChildrenOfGroup:group]) {
+		if (SPPGIsPostgresNode(old) && [children indexOfObjectIdenticalTo:old] == NSNotFound) {
+			[parentByNode removeObjectForKey:old];
+		}
+	}
+
+	NSMutableArray *mysqlChildren = [NSMutableArray arrayWithCapacity:[children count]];
+	for (SPTreeNode *node in children) {
+		if (SPPGIsPostgresNode(node)) {
+			SPTreeNode *oldGroup = [parentByNode objectForKey:node];
+			if (oldGroup && oldGroup != group) [self _removeNode:node fromDisplayedOfGroup:oldGroup];
+			[parentByNode setObject:group forKey:node];
+		}
+		else {
+			SPTreeNode *oldParent = (SPTreeNode *)[node parentNode];
+			if (oldParent && oldParent != group) {
+				[self _removeNode:node fromDisplayedOfGroup:oldParent];
+				[[oldParent mutableChildNodes] removeObjectIdenticalTo:node];
+			}
+			[mysqlChildren addObject:node];
+		}
+	}
+
+	NSMutableArray *groupChildren = [group mutableChildNodes];
+	if (![groupChildren isEqualToArray:mysqlChildren]) {
+		[groupChildren removeAllObjects];
+		[groupChildren addObjectsFromArray:mysqlChildren];
+	}
+	[self _storeDisplayed:children forGroup:group];
+}
+
+- (void)moveNodes:(NSArray *)nodes toGroup:(SPTreeNode *)group displayedIndex:(NSInteger)index
+{
+	if (!group) return;
+	NSMutableArray *displayed = [NSMutableArray arrayWithArray:[self displayedChildrenOfGroup:group]];
+	if (index < 0) index = 0;
+
+	for (SPTreeNode *node in nodes) {
+		NSUInteger oldIndex = [displayed indexOfObjectIdenticalTo:node];
+		if (oldIndex != NSNotFound) {
+			[displayed removeObjectAtIndex:oldIndex];
+			if (index > (NSInteger)oldIndex) index--;
+		}
+		index = MIN(index, (NSInteger)[displayed count]);
+		[displayed insertObject:node atIndex:(NSUInteger)index];
+		index++;
+	}
+
+	[self setDisplayedChildren:displayed ofGroup:group];
+}
+
+- (void)appendPostgresNode:(SPTreeNode *)node toGroup:(SPTreeNode *)group
+{
+	if (!group || !SPPGIsPostgresNode(node)) return;
+	[self setDisplayedChildren:[[self displayedChildrenOfGroup:group] arrayByAddingObject:node] ofGroup:group];
+}
+
+- (void)insertPostgresNode:(SPTreeNode *)node afterNode:(SPTreeNode *)existing
+{
+	if (!SPPGIsPostgresNode(node)) return;
+	SPTreeNode *group = existing ? [parentByNode objectForKey:existing] : nil;
+	NSUInteger idx = [[self displayedChildrenOfGroup:group] indexOfObjectIdenticalTo:existing];
+	if (!group || idx == NSNotFound) {
+		[self appendPostgresNode:node toGroup:section];
+		return;
+	}
+	NSMutableArray *displayed = [NSMutableArray arrayWithArray:[self displayedChildrenOfGroup:group]];
+	[displayed insertObject:node atIndex:idx + 1];
+	[self setDisplayedChildren:displayed ofGroup:group];
+}
+
 @end
