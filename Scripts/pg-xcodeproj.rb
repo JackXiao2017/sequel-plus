@@ -1,5 +1,5 @@
 #!/usr/bin/env ruby
-# Edits sequel-pro.xcodeproj for the PostgreSQL work. The only supported way to touch project.pbxproj.
+# Edits sequel-plus.xcodeproj for the PostgreSQL work. The only supported way to touch project.pbxproj.
 #
 #   ruby Scripts/pg-xcodeproj.rb setup               one-time (idempotent) wiring of PostgresKit + "Postgres Tests"
 #   ruby Scripts/pg-xcodeproj.rb add-app  <files...>  add sources to the "Sequel Pro" target (group Source/Postgres)
@@ -15,7 +15,7 @@ require 'xcodeproj'
 require 'fileutils'
 
 ROOT      = File.expand_path('..', __dir__)
-PROJ_PATH = File.join(ROOT, 'sequel-pro.xcodeproj')
+PROJ_PATH = File.join(ROOT, 'sequel-plus.xcodeproj')
 APP       = 'Sequel Pro'
 TESTS     = 'Postgres Tests'
 KIT_PROJ  = 'Frameworks/PostgresKit/PostgresKit.xcodeproj'
@@ -169,7 +169,7 @@ end
 def write_scheme(project, app, tests)
   dir = File.join(PROJ_PATH, 'xcshareddata', 'xcschemes')
   FileUtils.mkdir_p(dir)
-  c = 'sequel-pro.xcodeproj'
+  c = 'sequel-plus.xcodeproj'
   xml = <<-X
 <?xml version="1.0" encoding="UTF-8"?>
 <Scheme
