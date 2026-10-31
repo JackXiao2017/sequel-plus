@@ -296,7 +296,8 @@ __attribute__((visibility("default")))
  * change neither data nor schema, that statement alone is run again through the runner, adding no history entry,
  * keeping lastRunQueryText, the selected rows and the scroll position, and never while a cell is being edited (it
  * waits for that edit to end). Otherwise the grid shows the saved value. In edit mode (MySQL's "EditInSheetEnabled")
- * no cell is edited in the grid.
+ * no cell is edited in the grid. A run, a new result and -invalidate close a cell editor still open without
+ * committing it, and a value is saved only into the result whose editor let its cell be edited.
  */
 @property (readonly) SPPostgresQueryResultEditor *resultEditor;
 
