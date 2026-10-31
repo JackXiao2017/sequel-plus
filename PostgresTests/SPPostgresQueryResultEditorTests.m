@@ -37,7 +37,7 @@
 
 #pragma mark - Fixture
 
-/// Drops and rebuilds schema query_edit_test (items, pair, nokey, "Mixed Case", customers, orders, items_view).
+/// Drops and rebuilds schema query_edit_test (items, pair, nokey, "Mixed Case", customers, orders, flags, items_view).
 - (void)buildFixtureOnPort:(NSUInteger)port
 {
 	PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port];
@@ -57,6 +57,8 @@
 		@"INSERT INTO query_edit_test.customers VALUES (1, 'Ann')",
 		@"CREATE TABLE query_edit_test.orders (id integer PRIMARY KEY, customer integer, note text)",
 		@"INSERT INTO query_edit_test.orders VALUES (10, 1, 'first')",
+		@"CREATE TABLE query_edit_test.flags (b boolean, c char(4), ip inet)",
+		@"INSERT INTO query_edit_test.flags VALUES (true, 'ab', '10.0.0.1'), (false, 'cd', '10.0.0.2')",
 		@"CREATE VIEW query_edit_test.items_view AS SELECT id, name FROM query_edit_test.items",
 	];
 	for (NSString *sql in statements) {
@@ -233,6 +235,19 @@
 	}
 }
 
+/// Output text differs from ::text for these types (t vs true, space padding, 10.0.0.1 vs 10.0.0.1/32), so both
+/// sides are compared through the column's type.
+- (void)testCastTextComparisonForBoolCharInet
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:@"SELECT b, c, ip FROM query_edit_test.flags ORDER BY ip" port:port];
+		NSInteger count = -2;
+		NSString *message = nil;
+		XCTAssertEqual([editor editabilityOfRow:0 column:0 matchCount:&count message:&message], SPPostgresCellEditable, @"port %@: %@", port, message);
+		XCTAssertEqual(count, 1);
+	}
+}
+
 - (void)testNoMatchMessageNamesTheTable
 {
 	for (NSNumber *port in [SPPostgresTestServers ports]) {
@@ -284,7 +299,7 @@
 		NSString *message = nil;
 		XCTAssertEqual([editor editabilityOfRow:0 column:0 matchCount:&count message:&message], SPPostgresCellCheckFailed, @"port %@", port);
 		XCTAssertEqual(count, -1);
-		XCTAssertGreaterThan([message length], 0u);
+		XCTAssertEqualObjects(message, @"The current transaction is aborted, so the cell can't be checked for editing. Roll it back first.");
 	}
 }
 

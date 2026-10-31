@@ -182,21 +182,52 @@ static NSString *SPQueryEditAbortedMessage(void)
 
 /// The result columns that identify a row of the origin table oid (MySQL's rule): those in its primary key, or every
 /// one of its columns when none of those is present. A column repeating an attnum counts once.
-- (NSArray *)identifyingColumnsForOrigin:(unsigned int)oid table:(NSDictionary *)table
+- (NSArray *)identifyingColumnsForOrigin:(unsigned int)oid
 {
-	NSDictionary *columns = [table objectForKey:SPQueryEditColumnsKey];
 	NSMutableArray *all = [NSMutableArray array], *keys = [NSMutableArray array];
 	NSMutableSet *seen = [NSMutableSet set];
 	for (NSUInteger column = 0; column < [self columnCount]; column++) {
 		if ([self originOfColumn:column] != oid) continue;
 		NSNumber *attnum = @([_result tableColumnForField:column]);
-		NSDictionary *info = [columns objectForKey:attnum];
+		NSDictionary *info = [self originColumnOfColumn:column];
 		if (!info || [seen containsObject:attnum]) continue;
 		[seen addObject:attnum];
 		[all addObject:@(column)];
 		if ([[info objectForKey:SPQueryEditKeyPositionKey] integerValue] > 0) [keys addObject:@(column)];
 	}
 	return [keys count] ? keys : all;
+}
+
+/**
+ * The WHERE condition (without the keyword) that identifies row of the origin table oid, by MySQL's rule (see
+ * -identifyingColumnsForOrigin:), with this editor's saved edits applied. Its $n parameters are appended to
+ * values, numbered from [values count] + 1. Key columns are compared in their own type ("c" = $n::<type>); other
+ * columns as text, with both sides through the column's type ("c"::text = ($n::<type>)::text), so types without =
+ * (point, json) still identify their row and types whose output text differs from ::text (boolean, char(n), inet)
+ * still match; NULL as "c" IS NULL.
+ */
+- (NSString *)whereClauseForRow:(NSUInteger)row origin:(unsigned int)oid values:(NSMutableArray *)values
+{
+	NSMutableArray *conditions = [NSMutableArray array];
+	for (NSNumber *identifying in [self identifyingColumnsForOrigin:oid]) {
+		NSUInteger index = [identifying unsignedIntegerValue];
+		NSDictionary *info = [self originColumnOfColumn:index];
+		NSString *name = SPPostgresQuoteIdentifier([info objectForKey:SPQueryEditNameKey]);
+		NSString *type = [info objectForKey:SPQueryEditTypeKey];
+		id value = [self valueAtRow:row column:index];
+		if (![value isKindOfClass:[NSString class]]) {
+			[conditions addObject:[NSString stringWithFormat:@"%@ IS NULL", name]];
+			continue;
+		}
+		[values addObject:value];
+		unsigned long parameter = (unsigned long)[values count];
+		if ([[info objectForKey:SPQueryEditKeyPositionKey] integerValue] > 0) {
+			[conditions addObject:[NSString stringWithFormat:@"%@ = $%lu::%@", name, parameter, type]];
+		} else {
+			[conditions addObject:[NSString stringWithFormat:@"%@::text = ($%lu::%@)::text", name, parameter, type]];
+		}
+	}
+	return [conditions componentsJoinedByString:@" AND "];
 }
 
 - (SPPostgresCellEditability)editabilityOfRow:(NSUInteger)row column:(NSUInteger)column
@@ -240,28 +271,10 @@ static NSString *SPQueryEditAbortedMessage(void)
 		return SPPostgresCellGeneratedColumn;
 	}
 
-	// 4–5. Count the rows the identifying values match: keys compared in their own type, other columns as text
-	// (so types without = still identify their row), NULL as IS NULL.
-	NSDictionary *columns = [table objectForKey:SPQueryEditColumnsKey];
-	NSMutableArray *conditions = [NSMutableArray array], *values = [NSMutableArray array];
-	for (NSNumber *identifying in [self identifyingColumnsForOrigin:oid table:table]) {
-		NSUInteger index = [identifying unsignedIntegerValue];
-		NSDictionary *info = [columns objectForKey:@([_result tableColumnForField:index])];
-		NSString *name = SPPostgresQuoteIdentifier([info objectForKey:SPQueryEditNameKey]);
-		id value = [self valueAtRow:row column:index];
-		if (![value isKindOfClass:[NSString class]]) {
-			[conditions addObject:[NSString stringWithFormat:@"%@ IS NULL", name]];
-			continue;
-		}
-		[values addObject:value];
-		if ([[info objectForKey:SPQueryEditKeyPositionKey] integerValue] > 0) {
-			[conditions addObject:[NSString stringWithFormat:@"%@ = $%lu::%@", name, (unsigned long)[values count], [info objectForKey:SPQueryEditTypeKey]]];
-		} else {
-			[conditions addObject:[NSString stringWithFormat:@"%@::text = $%lu", name, (unsigned long)[values count]]];
-		}
-	}
+	// 4–5. Count the rows the identifying values match
+	NSMutableArray *values = [NSMutableArray array];
 	NSString *sql = [NSString stringWithFormat:@"SELECT count(*) FROM %@ WHERE %@", [self qualifiedName:table],
-					 [conditions componentsJoinedByString:@" AND "]];
+					 [self whereClauseForRow:row origin:oid values:values]];
 
 	__block NSInteger count = -1;
 	NSError *error = nil;
