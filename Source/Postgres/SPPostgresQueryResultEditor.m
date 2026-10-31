@@ -230,10 +230,13 @@ static NSString *SPQueryEditAbortedMessage(void)
 	return [conditions componentsJoinedByString:@" AND "];
 }
 
-- (SPPostgresCellEditability)editabilityOfRow:(NSUInteger)row column:(NSUInteger)column
-								   matchCount:(NSInteger *)matchCount message:(NSString **)message
+/**
+ * Steps 1–3 of the rule, which need no count: SPPostgresCellEditable when column is a plain, non-generated column of a
+ * table (tableOut set to that table's info), else why not, with the message to show.
+ */
+- (SPPostgresCellEditability)originCheckOfColumn:(NSUInteger)column table:(NSDictionary **)tableOut message:(NSString **)message
 {
-	if (matchCount) *matchCount = -1;
+	if (tableOut) *tableOut = nil;
 	if (message) *message = nil;
 
 	unsigned int oid = [self originOfColumn:column];
@@ -271,6 +274,21 @@ static NSString *SPQueryEditAbortedMessage(void)
 		return SPPostgresCellGeneratedColumn;
 	}
 
+	if (tableOut) *tableOut = table;
+	return SPPostgresCellEditable;
+}
+
+- (SPPostgresCellEditability)editabilityOfRow:(NSUInteger)row column:(NSUInteger)column
+								   matchCount:(NSInteger *)matchCount message:(NSString **)message
+{
+	if (matchCount) *matchCount = -1;
+	if (message) *message = nil;
+
+	NSDictionary *table = nil;
+	SPPostgresCellEditability origin = [self originCheckOfColumn:column table:&table message:message];
+	if (origin != SPPostgresCellEditable) return origin;
+	unsigned int oid = [self originOfColumn:column];
+
 	// 4–5. Count the rows the identifying values match
 	NSMutableArray *values = [NSMutableArray array];
 	NSString *sql = [NSString stringWithFormat:@"SELECT count(*) FROM %@ WHERE %@", [self qualifiedName:table],
@@ -298,6 +316,88 @@ static NSString *SPQueryEditAbortedMessage(void)
 	}
 	if (message) *message = [NSString stringWithFormat:NSLocalizedString(@"Field is not editable. Couldn't identify field origin unambiguously (%ld matches).", @"Query result editing error - could not match row being edited uniquely"), (long)count];
 	return SPPostgresCellTooManyMatches;
+}
+
+#pragma mark - Saving
+
+- (id)saveValue:(id)value row:(NSUInteger)row column:(NSUInteger)column matchCount:(NSInteger *)matchCount error:(NSError **)error
+{
+	if (matchCount) *matchCount = -1;
+
+	if (![value isKindOfClass:[NSString class]] && ![value isKindOfClass:[NSNull class]]) {
+		if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, NSLocalizedString(@"The value must be text or NULL.", @"Postgres content: bad value class"), nil);
+		return nil;
+	}
+	// Past the last row every value reads as NULL, which could identify some other row
+	if (row >= [self rowCount]) {
+		[NSException raise:NSRangeException format:@"%s: row %lu beyond %lu", __PRETTY_FUNCTION__, (unsigned long)row, (unsigned long)[self rowCount]];
+	}
+
+	// Refused before anything is sent (as SPPostgresRunAtomically would), also when the catalog isn't read yet
+	NSString *aborted = NSLocalizedString(@"The current transaction is aborted, so the row was not changed. Roll it back first.", @"Postgres content: edit inside an aborted transaction");
+	if ([_connection transactionStatus] == PGPostgresTransactionInError) {
+		if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, aborted, nil);
+		return nil;
+	}
+
+	NSDictionary *table = nil;
+	NSString *message = nil;
+	if ([self originCheckOfColumn:column table:&table message:&message] != SPPostgresCellEditable) {
+		if (error) *error = SPPostgresMakeError(SPPostgresErrorNotEditable, message, nil);
+		return nil;
+	}
+
+	unsigned int oid = [self originOfColumn:column];
+	NSInteger attnum = [_result tableColumnForField:column];
+	NSDictionary *originColumn = [self originColumnOfColumn:column];
+	NSString *name = SPPostgresQuoteIdentifier([originColumn objectForKey:SPQueryEditNameKey]);
+	NSString *qualifiedName = [self qualifiedName:table];
+
+	// $1 is the new value; the identifying values follow it
+	NSMutableArray *values = [NSMutableArray arrayWithObject:value];
+	NSString *where = [self whereClauseForRow:row origin:oid values:values];
+	if (![where length]) { // can't happen: the cell's own column identifies its row when nothing else does
+		if (error) *error = SPPostgresMakeError(SPPostgresErrorNotEditable, NSLocalizedString(@"Field is not editable. Field has no or multiple table or database origin(s).",@"field is not editable due to no table/database"), nil);
+		return nil;
+	}
+	NSString *sql = [NSString stringWithFormat:@"UPDATE %@ SET %@ = $1::%@ WHERE %@ RETURNING %@::text",
+					 qualifiedName, name, [originColumn objectForKey:SPQueryEditTypeKey], where, name];
+
+	__block id saved = nil;
+	__block NSInteger matched = -1;
+	BOOL ok = SPPostgresRunAtomically(_connection, @"sp_query_edit", aborted, ^BOOL(NSError **bodyError) {
+		PGPostgresResult *result = SPPostgresExecute(_connection, sql, values, bodyError);
+		if (!result) return NO;
+
+		// No LIMIT in a PostgreSQL UPDATE: one that didn't change exactly one row is undone
+		unsigned long long rows = [result numberOfRows];
+		if (rows != 1) {
+			matched = (NSInteger)rows;
+			if (bodyError) *bodyError = SPPostgresMakeError(SPPostgresErrorRowChanged, [NSString stringWithFormat:NSLocalizedString(@"Updating field content failed. Couldn't identify field origin unambiguously (%1$ld matches). It's very likely that while editing this field of table %2$@ was changed.", @"message of panel when error while updating field of a PostgreSQL query result"), (long)matched, qualifiedName], nil);
+			return NO;
+		}
+		[saved release];
+		saved = [[result textValueAtRow:0 column:0] retain];
+		return YES;
+	}, error);
+
+	if (!ok) {
+		if (matchCount && matched >= 0) *matchCount = matched;
+		[saved release];
+		return nil;
+	}
+
+	if (![saved isKindOfClass:[NSString class]]) {
+		[saved release];
+		saved = [[NSNull null] retain];
+	}
+	// Every result column showing this origin column, in this row, now shows the saved value
+	for (NSUInteger other = 0; other < [self columnCount]; other++) {
+		if ([self originOfColumn:other] == oid && [_result tableColumnForField:other] == attnum) {
+			[_edits setObject:saved forKey:[self keyForRow:row column:other]];
+		}
+	}
+	return [saved autorelease];
 }
 
 @end
