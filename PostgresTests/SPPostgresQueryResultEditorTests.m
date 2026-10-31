@@ -691,7 +691,7 @@
 }
 
 /// Each CTE reads the previous one twice, so expanding every CTE Scan visits 2^25 scans: the walk gives up after its
-/// budget (CheckFailed, "too complex") or, were it to finish, refuses the repeated table; either way, quickly.
+/// budget (CheckFailed, "too complex"), quickly.
 - (void)testChainedCTEsAreRefusedQuickly
 {
 	for (NSNumber *port in [SPPostgresTestServers ports]) {
@@ -705,17 +705,39 @@
 		SPPostgresQueryResultEditor *editor = [self editorForSQL:sql port:port];
 		NSInteger count = -2;
 		NSString *message = nil;
-		SPPostgresCellEditability status = [editor editabilityOfRow:0 column:1 matchCount:&count message:&message];
-		if (status == SPPostgresCellCheckFailed) {
-			XCTAssertEqualObjects(message, [self tooComplexMessage], @"port %@", port);
-		} else {
-			XCTAssertEqual(status, SPPostgresCellOriginRepeated, @"port %@: %@", port, message);
-		}
+		XCTAssertEqual([editor editabilityOfRow:0 column:1 matchCount:&count message:&message], SPPostgresCellCheckFailed, @"port %@: %@", port, message);
+		XCTAssertEqualObjects(message, [self tooComplexMessage], @"port %@", port);
 		NSError *error = nil;
 		XCTAssertNil([editor saveValue:@"chief" row:0 column:1 matchCount:NULL error:&error], @"port %@", port);
 		XCTAssertEqual([error code], SPPostgresErrorNotEditable);
 		XCTAssertLessThan(-[start timeIntervalSinceNow], 20.0, @"port %@", port);
 		XCTAssertEqualObjects([self serverValue:@"SELECT name FROM query_edit_test.emp WHERE id = 2" port:port], @"worker");
+	}
+}
+
+/// A walk over its budget is a failed check, not cached: the next check explains the statement again.
+- (void)testTooComplexCheckIsRetried
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		NSMutableString *sql = [NSMutableString stringWithString:@"WITH x0 AS MATERIALIZED (SELECT * FROM query_edit_test.emp)"];
+		for (NSUInteger level = 1; level <= 16; level++) {
+			[sql appendFormat:@", x%lu AS MATERIALIZED (SELECT a.* FROM x%lu a JOIN x%lu b ON b.id = a.id WHERE a.id = 2)", (unsigned long)level, (unsigned long)level - 1, (unsigned long)level - 1];
+		}
+		[sql appendString:@" SELECT id, name FROM x16"];
+		SPQueryEditStatementRecorder *recorder = [[SPQueryEditStatementRecorder alloc] init];
+		if (!self.recorders) self.recorders = [NSMutableArray array];
+		[self.recorders addObject:recorder];
+		PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_test" delegate:recorder];
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:sql connection:connection];
+		[recorder.statements removeAllObjects];
+
+		NSPredicate *explain = [NSPredicate predicateWithFormat:@"SELF BEGINSWITH 'EXPLAIN'"];
+		for (NSUInteger attempt = 1; attempt <= 2; attempt++) {
+			NSString *message = nil;
+			XCTAssertEqual([editor editabilityOfRow:0 column:1 matchCount:NULL message:&message], SPPostgresCellCheckFailed, @"port %@ attempt %lu", port, (unsigned long)attempt);
+			XCTAssertEqualObjects(message, [self tooComplexMessage]);
+			XCTAssertEqual([[recorder.statements filteredArrayUsingPredicate:explain] count], attempt, @"port %@: %@", port, recorder.statements);
+		}
 	}
 }
 

@@ -31,9 +31,8 @@ static NSString * const SPQueryEditingSuiteName = @"SPPostgresStage12Tests";
 
 /**
  * The Query tab's inline editing (Stage 12 Task 6): the grid's data source and delegate methods driven directly on a
- * controller with an inline runner (a run has finished when its action returns), on both servers. Preferences go to
- * a scratch suite (the controller's defaults); the NULL placeholder, read from the standard defaults, is pinned in
- * the volatile argument domain; the history is a temporary store.
+ * controller with an inline runner (a run has finished when its action returns), on both servers. Preferences, the
+ * NULL placeholder too, go to a scratch suite (the controller's defaults); the history is a temporary store.
  */
 @interface SPPostgresQueryEditingTests : XCTestCase
 @property (strong) SPPostgresQueryController *query;
@@ -68,8 +67,7 @@ static NSString * const SPQueryEditingSuiteName = @"SPPostgresStage12Tests";
 - (void)setUp
 {
 	self.continueAfterFailure = NO;
-	[self overridePrefs:@{SPQueryEditingNullValueKey: SPQueryEditingNull,
-						  @"CustomQueryAutoIndent": @NO, @"CustomQueryAutoPairCharacters": @NO, @"CustomQueryAutoUppercaseKeywords": @NO,
+	[self overridePrefs:@{@"CustomQueryAutoIndent": @NO, @"CustomQueryAutoPairCharacters": @NO, @"CustomQueryAutoUppercaseKeywords": @NO,
 						  @"CustomQueryAutoComplete": @NO, @"CustomQueryUpdateAutoHelp": @NO, @"CustomQueryHighlightCurrentQuery": @NO}];
 
 	[[NSUserDefaults standardUserDefaults] removePersistentDomainForName:SPQueryEditingSuiteName];
@@ -77,6 +75,9 @@ static NSString * const SPQueryEditingSuiteName = @"SPPostgresStage12Tests";
 	[self.scratch setBool:NO forKey:SPQueryEditingReloadKey];
 	[self.scratch setBool:NO forKey:SPQueryEditingInSheetKey];
 	[self.scratch setInteger:10 forKey:SPQueryEditingMaxHistoryKey];
+	// Read through the controller's defaults (the argument domain would override the suite: it must not hold it)
+	XCTAssertNil([[[NSUserDefaults standardUserDefaults] volatileDomainForName:NSArgumentDomain] objectForKey:SPQueryEditingNullValueKey]);
+	[self.scratch setObject:SPQueryEditingNull forKey:SPQueryEditingNullValueKey];
 
 	self.directory = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSUUID UUID] UUIDString]];
 	[[NSFileManager defaultManager] createDirectoryAtPath:self.directory withIntermediateDirectories:YES attributes:nil error:NULL];
@@ -158,11 +159,9 @@ static NSString * const SPQueryEditingSuiteName = @"SPPostgresStage12Tests";
 /// Records every statement the controller runs from now on.
 - (void)recordStatements
 {
-	__weak SPPostgresQueryEditingTests *weakSelf = self;
 	NSMutableArray *statements = self.statements;
 	[self.query setStatementWillRunHook:^(NSString *statement) {
 		@synchronized (statements) { [statements addObject:statement]; }
-		(void)weakSelf;
 	}];
 }
 
@@ -287,6 +286,55 @@ static NSString * const SPQueryEditingSuiteName = @"SPPostgresStage12Tests";
 		XCTAssertTrue([self.alerts.firstObject.informativeText hasPrefix:@"Couldn't write field.\nPostgreSQL said:"], @"%@", self.alerts.firstObject.informativeText);
 		XCTAssertEqualObjects([self gridValueAtRow:0 column:0], @"1");
 		XCTAssertEqual(self.changes.count, 0u);
+	}
+}
+
+/// A value from an edit begun on an earlier result is never sent to the new result's row of the same number.
+- (void)testCommitAfterNewRunIsNotSent
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		[self openQueryOnPort:port];
+		[self run:@"SELECT id, name FROM query_edit_test.items ORDER BY id"];
+		NSTableColumn *staleColumn = [self column:1];
+		XCTAssertTrue([self shouldEditRow:0 column:1], @"port %@", port);
+
+		// Another run: row 0 is now id 2
+		[self run:@"SELECT id, name FROM query_edit_test.items ORDER BY id DESC"];
+		XCTAssertEqualObjects([self gridValueAtRow:0 column:0], @"2");
+		[self.query tableView:[self grid] setObjectValue:@"stale" forTableColumn:staleColumn row:0];
+		// Also with the new result's own column, which no shouldEdit approved
+		[self setValue:@"stale" row:0 column:1];
+
+		XCTAssertEqual(self.changes.count, 0u, @"port %@", port);
+		XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(name, ',' ORDER BY id) FROM query_edit_test.items" port:port], @"one,two");
+		XCTAssertEqualObjects([self gridValueAtRow:0 column:1], @"two");
+	}
+}
+
+/// A cell editor open in the grid when a run starts is closed without committing.
+- (void)testRunAbortsOpenCellEditor
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		[self openQueryOnPort:port];
+		[self run:@"SELECT id, name FROM query_edit_test.items ORDER BY id"];
+		XCTAssertTrue([self shouldEditRow:0 column:1]);
+		[[self grid] editColumn:1 row:0 withEvent:nil select:YES];
+		XCTAssertNotNil([[self grid] currentEditor], @"port %@: the grid's field editor opened", port);
+		[(NSText *)[[self grid] currentEditor] setString:@"typed"];
+
+		[self run:@"SELECT id, name FROM query_edit_test.items ORDER BY id DESC"];
+		XCTAssertNil([[self grid] currentEditor], @"port %@", port);
+		XCTAssertEqual([[self grid] editedRow], -1);
+		XCTAssertEqual(self.changes.count, 0u);
+		XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(name, ',' ORDER BY id) FROM query_edit_test.items" port:port], @"one,two");
+
+		// Invalidating closes one too
+		XCTAssertTrue([self shouldEditRow:0 column:1]);
+		[[self grid] editColumn:1 row:0 withEvent:nil select:YES];
+		XCTAssertNotNil([[self grid] currentEditor]);
+		[self.query invalidate];
+		XCTAssertNil([[self grid] currentEditor]);
+		XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(name, ',' ORDER BY id) FROM query_edit_test.items" port:port], @"one,two");
 	}
 }
 

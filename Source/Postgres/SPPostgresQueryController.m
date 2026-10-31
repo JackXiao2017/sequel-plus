@@ -324,6 +324,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	NSString *shownStatementText;              // the statement that produced the shown result
 	void (^editRefusalPresenter)(NSString *message, NSInteger row, NSInteger column);
 	BOOL reloadPending;                        // a save's reload waits for the grid's editing to end
+	SPPostgresQueryResultEditor *approvingEditor; // the editor that last let a grid cell be edited (commits need it shown)
 }
 
 @synthesize editor;
@@ -456,6 +457,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[resultEditor release];
 	[shownStatementText release];
 	[editRefusalPresenter release];
+	[approvingEditor release];
 
 	[super dealloc];
 }
@@ -514,7 +516,11 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	exportResultHandler = nil;
 	[helpHandler release];
 	helpHandler = nil;
-	// The shown result's editor (its connection is the tab's) and a save's pending reload
+	// A cell being edited is dropped (its value would go to whatever is shown next), then the shown result's editor
+	// (its connection is the tab's) and a save's pending reload
+	if ([resultsView currentEditor]) [resultsView abortEditing];
+	[approvingEditor release];
+	approvingEditor = nil;
 	[resultEditor release];
 	resultEditor = nil;
 	reloadPending = NO;
@@ -739,7 +745,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 - (NSString *)_nullPlaceholder
 {
-	return [[NSUserDefaults standardUserDefaults] stringForKey:SPNullValue] ?: @"NULL";
+	return [defaults stringForKey:SPNullValue] ?: @"NULL";
 }
 
 /// A 32 x 25 textured toggle of MySQL's results bar (DBView.xib), at x in the bar.
@@ -2584,6 +2590,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 - (void)_runStatements:(NSArray *)statements reload:(BOOL)reload
 {
 	if (invalidated || ![statements count]) return;
+	// A cell being edited belongs to the shown result, which this run replaces: its edit is dropped, so it can never
+	// be committed to the next result's row (a reload starts only once no cell is being edited)
+	if ([resultsView currentEditor]) [resultsView abortEditing];
 	// A run while the runner is busy (a key equivalent the task display's blocker doesn't stop) is refused
 	if (running || [taskRunner isBusy] || [taskRunner isInvalidated]) {
 		NSBeep();
@@ -2715,6 +2724,10 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	}
 	resultRowCount = result ? (NSUInteger)[result numberOfRows] : 0;
 
+	// An edit still open belongs to the previous result
+	if ([resultsView currentEditor]) [resultsView abortEditing];
+	[approvingEditor release];
+	approvingEditor = nil;
 	[resultEditor release];
 	resultEditor = result ? [[SPPostgresQueryResultEditor alloc] initWithResult:result connection:connection statement:statement] : nil;
 	[shownStatementText release];
@@ -2878,6 +2891,13 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 		return;
 	}
 
+	// Only into the result whose editor let the cell be edited (a value from an edit begun on an earlier result,
+	// mapped by its column's number, would go to another row)
+	if (approvingEditor != resultEditor) {
+		NSBeep();
+		[resultsView setNeedsDisplay:YES];
+		return;
+	}
 	SPPostgresQueryResultEditor *cellEditor = [[resultEditor retain] autorelease];
 	NSUInteger row = (NSUInteger)rowIndex;
 	id oldValue = [cellEditor valueAtRow:row column:(NSUInteger)column];
@@ -2938,7 +2958,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 /// something else is running: its result replaces the shown one anyway, or the grid keeps the saved value.
 - (void)_reloadIfPending
 {
-	if (invalidated || !reloadPending || [resultsView currentEditor]) return;
+	if (invalidated || !reloadPending || [resultsView currentEditor] || [resultsView editedRow] >= 0) return;
 	reloadPending = NO;
 	if ([self _runnerBusy] || ![shownStatementText length]) return;
 	[self _runStatements:@[[[shownStatementText copy] autorelease]] reload:YES];
@@ -2971,7 +2991,13 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 	NSString *message = nil;
 	SPPostgresCellEditability editability = [resultEditor editabilityOfRow:(NSUInteger)rowIndex column:(NSUInteger)column matchCount:NULL message:&message];
-	if (editability == SPPostgresCellEditable) return YES;
+	if (editability == SPPostgresCellEditable) {
+		if (approvingEditor != resultEditor) {
+			[approvingEditor release];
+			approvingEditor = [resultEditor retain];
+		}
+		return YES;
+	}
 	[self _presentEditRefusal:message row:rowIndex column:[[theTableView tableColumns] indexOfObjectIdenticalTo:tableColumn]];
 	return NO;
 }
