@@ -370,6 +370,10 @@ static NSString * const SPUserSchemas = @"nspname NOT LIKE 'pg\\_%' AND nspname 
 		@"INSERT INTO query_edit_test.oj_orders VALUES (10, 1, 'first'), (11, 1, NULL)",
 		@"CREATE TABLE query_edit_test.blank (a text, b text)",
 		@"INSERT INTO query_edit_test.blank VALUES (NULL, NULL), ('x', 'y')",
+		@"CREATE TABLE query_edit_test.bits (n integer, b bit(3), v bit varying(5))",
+		@"INSERT INTO query_edit_test.bits VALUES (1, '101', '11'), (2, '011', '1')",
+		@"CREATE TABLE query_edit_test.keyed_bits (b bit(3) PRIMARY KEY, t text)",
+		@"INSERT INTO query_edit_test.keyed_bits VALUES ('101', 'a'), ('011', 'b')",
 	];
 	for (NSString *sql in statements) {
 		XCTAssertNotNil([connection execute:sql], @"%@: %@", sql, connection.lastError.errorPrimaryMessage);
