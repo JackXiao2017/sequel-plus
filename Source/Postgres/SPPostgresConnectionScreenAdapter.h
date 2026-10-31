@@ -3,6 +3,8 @@
 @class SPPostgresDocument;
 @class SPPostgresFavorite;
 @class SPPostgresFavoritesStore;
+@class SPPostgresFavoritePlacementsStore;
+@class SPTreeNode;
 
 typedef NS_ENUM(NSInteger, SPConnectionEngine) {
 	SPConnectionEngineMySQL = 0,
@@ -65,6 +67,10 @@ typedef NS_ENUM(NSInteger, SPConnectionEngine) {
 - (void)postgresSetConnecting:(BOOL)connecting;
 /// Show the result of "Test connection" in the form's status text.
 - (void)postgresShowTestResult:(NSString *)result;
+/// The FAVORITES section node (first child of the MySQL favorites tree).
+- (SPTreeNode *)postgresMySQLSection;
+/// Where a new Postgres favorite goes: the selected group, else the selected item's displayed parent, else the section.
+- (SPTreeNode *)postgresGroupForNewFavorite;
 
 @end
 
@@ -84,9 +90,11 @@ typedef NS_ENUM(NSInteger, SPConnectionEngine) {
  *
  * - The engine choice: a centred MySQL / PostgreSQL segmented control above the TCP/IP | Socket | SSH
  *   tabs. With PostgreSQL chosen, empty port fields show 5432.
- * - The "POSTGRESQL" section of the favorites outline, below FAVORITES. Its favorites come from
- *   SPPostgresFavoritesStore (never Favorites.plist); passwords use the "Sequel Pro (PostgreSQL)"
- *   keychain names.
+ * - Postgres favorites in the one FAVORITES list, placed among the MySQL favorites and groups by an
+ *   SPPostgresFavoritesLayout. The MySQL tree is never given a Postgres node: the nodes belong to a hidden
+ *   holder node, and where each is displayed is remembered in PostgresFavoritePlacements.plist. The
+ *   favorites come from SPPostgresFavoritesStore (never Favorites.plist); passwords use the
+ *   "Sequel Pro (PostgreSQL)" keychain names.
  * - Connecting: on success the connection screen's tab becomes an SPPostgresDocument tab (see
  *   -postgresReplaceConnectionTabWithDocument:); no window is opened. On failure the error is shown as a
  *   sheet and the tab stays on its connection screen.
@@ -97,7 +105,11 @@ __attribute__((visibility("default")))
 @interface SPPostgresConnectionScreenAdapter : NSObject
 
 /// `controller` is normally the SPConnectionController (not retained).
+/// The placements store is the one beside `store`'s file (+[SPPostgresFavoritePlacementsStore storeBesideFavoritesStore:]).
 - (instancetype)initWithConnectionController:(id <SPPostgresConnectionScreenHost>)controller store:(SPPostgresFavoritesStore *)store;
+- (instancetype)initWithConnectionController:(id <SPPostgresConnectionScreenHost>)controller
+                                       store:(SPPostgresFavoritesStore *)store
+                             placementsStore:(SPPostgresFavoritePlacementsStore *)placementsStore;
 
 /// Defaults to an SPKeychain.
 @property (nonatomic, retain) id <SPPostgresKeychainAccess> keychain;
@@ -132,11 +144,31 @@ __attribute__((visibility("default")))
 
 #pragma mark Outline
 
-/// The "POSTGRESQL" section node (a top-level group), or nil when there are no Postgres favorites.
+/// Always nil: there is no POSTGRESQL section any more. A shim so SPConnectionController builds until
+/// Stage 13 Task 5 moves it to the one-list methods below; removed then.
 - (id)sectionNode;
-/// The Postgres favorites' outline nodes, sorted by name.
-- (NSArray *)favoriteNodesForOutline;
-/// YES for the POSTGRESQL section node and its favorite nodes. A MySQL favorite node (whose favorite
+
+/// YES when the store has Postgres favorites (whether or not the outline was prepared yet).
+- (BOOL)hasPostgresFavorites;
+/**
+ * Called by the host before every outline reload. With `saveLayout`, first saves the current arrangement's
+ * placements (merged over the stored ones for favorites not in the arrangement, pruned to existing
+ * favorites; written only when different). Then resolves against `section` and the stored placements.
+ */
+- (void)prepareOutlineWithMySQLSection:(SPTreeNode *)section savingLayout:(BOOL)saveLayout;
+/// The displayed children of a MySQL group (or of the section): its childNodes with Postgres nodes inserted.
+- (NSArray *)displayedChildrenOfGroup:(SPTreeNode *)group;
+/// The MySQL group a Postgres node is displayed in (the section for the top level); for a MySQL node, its parentNode.
+- (SPTreeNode *)displayedParentOfNode:(SPTreeNode *)node;
+/// Drag and drop (see -[SPPostgresFavoritesLayout moveNodes:toGroup:displayedIndex:]), then saves the placements.
+- (void)moveNodes:(NSArray *)nodes toGroup:(SPTreeNode *)group displayedIndex:(NSInteger)index;
+/// Sorting: `children` must be the complete displayed children of `group`, reordered. Not saved: the host
+/// reloads next, saving the layout.
+- (void)setDisplayedChildren:(NSArray *)children ofGroup:(SPTreeNode *)group;
+/// Removes every Postgres favorite displayed within `group` (store and keychain items), without asking.
+- (void)removePostgresFavoritesWithinGroup:(SPTreeNode *)group;
+
+/// YES for the hidden holder node and the Postgres favorite nodes. A MySQL favorite node (whose favorite
 /// dictionary has no engine key) is never a Postgres node.
 - (BOOL)isPostgresNode:(id)outlineItem;
 /// The favorite for a Postgres favorite node, else nil.
@@ -164,7 +196,8 @@ __attribute__((visibility("default")))
 - (NSError *)validationErrorForForm;
 
 /// Saves the form to the loaded favorite, or as a new favorite when none is loaded, with its passwords
-/// in the keychain. Selects the saved favorite in the outline.
+/// in the keychain. Selects the saved favorite in the outline. A new favorite goes to the end of the
+/// host's -postgresGroupForNewFavorite.
 - (BOOL)saveFormAsFavorite:(NSError **)error;
 /// Saves the form as a new favorite, even when one is loaded.
 - (BOOL)saveFormAsNewFavorite:(NSError **)error;
@@ -173,10 +206,11 @@ __attribute__((visibility("default")))
 
 /// Validates, shows a sheet on failure, else saves. `asNew` as for -saveFormAsNewFavorite:. YES when saved.
 - (BOOL)saveFormShowingErrors:(BOOL)asNew;
-/// Adds a blank "New Favorite", returns its node.
+/// Adds a blank "New Favorite" at the end of the host's -postgresGroupForNewFavorite, returns its node.
 - (id)addNewFavorite;
 /// Asks for confirmation, then removes the favorite and its keychain items.
 - (void)removeFavoriteNodeAfterConfirmation:(id)outlineItem;
+/// The copy is displayed right after the original.
 - (id)duplicateFavoriteNode:(id)outlineItem;
 - (void)renameFavoriteNode:(id)outlineItem to:(NSString *)newName;
 

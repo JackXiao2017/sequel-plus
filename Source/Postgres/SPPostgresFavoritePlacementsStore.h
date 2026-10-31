@@ -16,6 +16,8 @@ __attribute__((visibility("default")))
 - (instancetype)initWithFileURL:(NSURL *)fileURL;
 /// The store beside `favoritesStore`'s file: same directory, "PostgresFavoritePlacements.plist".
 + (instancetype)storeBesideFavoritesStore:(SPPostgresFavoritesStore *)favoritesStore;
+/// The placements file this store reads and writes.
+- (NSURL *)fileURL;
 
 /// favoriteID -> placement record; reread from disk on each call; empty when missing/unreadable/newer.
 - (NSDictionary *)placements;
