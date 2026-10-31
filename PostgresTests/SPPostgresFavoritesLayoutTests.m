@@ -164,13 +164,74 @@
 	id section = [self section:@[a, b, c]];
 	id p = [self pg:@"p"];
 
-	SPPostgresFavoritesLayout *layout = [self resolve:section nodes:@[p] placements:@{ [self pgID:p]: @{ @"Group": @[], @"After": @{@"FavoriteID": @99}, @"Index": @1, @"Order": @0 } }];
+	// Index counted the anchor itself: with it gone, before the MySQL child at min(max(Index - 1, 0), count)
+	SPPostgresFavoritesLayout *layout = [self resolve:section nodes:@[p] placements:@{ [self pgID:p]: @{ @"Group": @[], @"After": @{@"FavoriteID": @99}, @"Index": @2, @"Order": @0 } }];
 	NSArray *expected = @[a, p, b, c];
+	XCTAssertEqualObjects([layout displayedChildrenOfGroup:section], expected);
+
+	layout = [self resolve:section nodes:@[p] placements:@{ [self pgID:p]: @{ @"Group": @[], @"After": @{@"GroupName": @"Gone", @"Nth": @0}, @"Index": @1, @"Order": @0 } }];
+	expected = @[p, a, b, c];
+	XCTAssertEqualObjects([layout displayedChildrenOfGroup:section], expected);
+
+	layout = [self resolve:section nodes:@[p] placements:@{ [self pgID:p]: @{ @"Group": @[], @"After": @{@"FavoriteID": @99}, @"Index": @0, @"Order": @0 } }];
 	XCTAssertEqualObjects([layout displayedChildrenOfGroup:section], expected);
 
 	layout = [self resolve:section nodes:@[p] placements:@{ [self pgID:p]: @{ @"Group": @[], @"After": @{@"FavoriteID": @99}, @"Index": @10, @"Order": @0 } }];
 	expected = @[a, b, c, p];
 	XCTAssertEqualObjects([layout displayedChildrenOfGroup:section], expected);
+}
+
+/// An After naming nothing (a MySQL favorite without an id was the anchor) keeps Index as the slot: the
+/// anchor may still be there, Index - 1 would put it before it.
+- (void)testEmptyAfterUsesIndex
+{
+	id a = [self mysqlFavorite:1], b = [self mysqlFavorite:2], c = [self mysqlFavorite:3];
+	id section = [self section:@[a, b, c]];
+	id p = [self pg:@"p"];
+
+	SPPostgresFavoritesLayout *layout = [self resolve:section nodes:@[p] placements:@{ [self pgID:p]: @{ @"Group": @[], @"After": @{}, @"Index": @1, @"Order": @0 } }];
+	NSArray *expected = @[a, p, b, c];
+	XCTAssertEqualObjects([layout displayedChildrenOfGroup:section], expected);
+}
+
+/// The 1.1.2 app (or this one) deleted the MySQL favorite a Postgres favorite followed: it stays between the
+/// neighbours, whether re-placed from the file or snapshot against the changed tree first.
+- (void)testDeletedAnchorKeepsPlaceBetweenNeighbours
+{
+	id m1 = [self mysqlFavorite:1], m2 = [self mysqlFavorite:2], m3 = [self mysqlFavorite:3];
+	id section = [self section:@[m1, m2, m3]];
+	id p = [self pg:@"p"];
+	NSDictionary *placements = @{ [self pgID:p]: @{ @"Group": @[], @"After": @{@"FavoriteID": @2}, @"Index": @2, @"Order": @0 } };
+
+	SPPostgresFavoritesLayout *layout = [self resolve:section nodes:@[p] placements:placements];
+	XCTAssertEqualObjects([layout displayedChildrenOfGroup:section], (@[m1, m2, p, m3]));
+	[[section mutableChildNodes] removeObject:m2];
+
+	NSArray *expected = @[m1, p, m3];
+	SPPostgresFavoritesLayout *fromSnapshot = [self resolve:section nodes:@[p] placements:[layout placements]];
+	XCTAssertEqualObjects([fromSnapshot displayedChildrenOfGroup:section], expected);
+	SPPostgresFavoritesLayout *fromFile = [self resolve:section nodes:@[p] placements:placements];
+	XCTAssertEqualObjects([fromFile displayedChildrenOfGroup:section], expected);
+}
+
+/// P is in the second of two groups named X; the first is deleted in this app. The snapshot taken against
+/// the changed tree renames the step to Nth 0, so P stays in its group.
+- (void)testDeletedSameNameGroupKeepsPlaceInTheOther
+{
+	id m1 = [self mysqlFavorite:1], m2 = [self mysqlFavorite:2];
+	id x1 = [self groupNamed:@"X" children:@[m1]], x2 = [self groupNamed:@"X" children:@[m2]];
+	id section = [self section:@[x1, x2]];
+	id p = [self pg:@"p"];
+
+	SPPostgresFavoritesLayout *layout = [self resolve:section nodes:@[p] placements:@{ [self pgID:p]: @{ @"Group": @[@{@"Name": @"X", @"Nth": @1}], @"After": @{@"FavoriteID": @2}, @"Index": @1, @"Order": @0 } }];
+	XCTAssertEqual([layout displayedParentOfNode:p], x2);
+	[[section mutableChildNodes] removeObject:x1];
+
+	NSDictionary *snapshot = [layout placements];
+	XCTAssertEqualObjects([[snapshot objectForKey:[self pgID:p]] objectForKey:@"Group"], (@[@{@"Name": @"X", @"Nth": @0}]));
+	SPPostgresFavoritesLayout *again = [self resolve:section nodes:@[p] placements:snapshot];
+	XCTAssertEqual([again displayedParentOfNode:p], x2);
+	XCTAssertEqualObjects([again displayedChildrenOfGroup:x2], (@[m2, p]));
 }
 
 - (void)testMissingGroupFallsBackToTopLevelEnd
@@ -428,6 +489,20 @@
 
 	SPPostgresFavoritesLayout *again = [self resolve:section nodes:@[pa, pc] placements:[layout placements]];
 	XCTAssertEqualObjects([again displayedChildrenOfGroup:section], sorted);
+}
+
+/// A MySQL child of the group left out of `children` stays in the MySQL tree, at the end of the group.
+- (void)testSetDisplayedChildrenKeepsOmittedMySQLChild
+{
+	id m1 = [self mysqlFavorite:1], m2 = [self mysqlFavorite:2];
+	id section = [self section:@[m1, m2]];
+	id p = [self pg:@"p"];
+	SPPostgresFavoritesLayout *layout = [self resolve:section nodes:@[p] placements:@{}];
+
+	[layout setDisplayedChildren:@[p, m2] ofGroup:section];
+	XCTAssertEqualObjects([section childNodes], (@[m2, m1]));
+	XCTAssertEqual([m1 parentNode], section);
+	XCTAssertEqualObjects([layout displayedChildrenOfGroup:section], (@[p, m2, m1]));
 }
 
 - (void)testAppendAndInsertAfter

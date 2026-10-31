@@ -7,7 +7,8 @@
  * The layout never changes the MySQL tree: Postgres nodes keep their own parent (the adapter's holder node)
  * and the MySQL groups' childNodes are left alone; the displayed arrangement lives only here.
  * A placement record: Group = @[@{Name, Nth}...] from the section down (@[] = top level); After = absent (first),
- * @{FavoriteID} or @{GroupName, Nth}; Index = MySQL siblings before it (fallback when After is gone);
+ * @{FavoriteID} or @{GroupName, Nth}; Index = MySQL siblings before it, counting the After anchor (when the
+ * anchor is gone: before the MySQL child at min(max(Index - 1, 0), count));
  * Order = its position among Postgres favorites with the same Group and After.
  */
 __attribute__((visibility("default")))
@@ -32,7 +33,8 @@ __attribute__((visibility("default")))
 
 /// Makes `children` (a mix of MySQL and Postgres nodes, each already displayed somewhere or new Postgres
 /// nodes) the displayed children of `group`. The MySQL subset, in that order, becomes [group mutableChildNodes]
-/// (removing each MySQL node from its old parent first). The Postgres ones move here from wherever they were.
+/// (removing each MySQL node from its old parent first); a MySQL child of `group` left out of `children` stays
+/// in the MySQL tree, appended at the end. The Postgres ones move here from wherever they were.
 /// Postgres nodes no longer displayed anywhere leave the arrangement.
 - (void)setDisplayedChildren:(NSArray *)children ofGroup:(SPTreeNode *)group;
 /// Drag and drop: moves `nodes` (in order) to `group` at displayed index `index`, as SPConnectionController's
