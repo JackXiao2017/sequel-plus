@@ -72,7 +72,7 @@ static NSString *SPRemoveNode              = @"RemoveNode";
 static NSString *SPExportFavoritesFilename = @"SequelProFavorites.plist";
 static NSString *SPLocalhostAddress        = @"127.0.0.1";
 
-static NSString *SPDatabaseImage           = @"database-small";
+static NSString *SPMySQLFavoriteImage      = @"mysql-dolphin"; // MySQL favorites: the MySQL dolphin
 static NSString *SPQuickConnectImage       = @"quick-connect-icon.pdf";
 static NSString *SPQuickConnectImageWhite  = @"quick-connect-icon-white.pdf";
 
@@ -2730,7 +2730,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 			[favoriteCell setLabelColor:nil];
 		}
 		else {
-			[favoriteCell setImage:[NSImage imageNamed:SPDatabaseImage]];
+			[favoriteCell setImage:[NSImage imageNamed:SPMySQLFavoriteImage]];
 			NSColor *bgColor = nil;
 			NSNumber *colorIndexObj = [[[node representedObject] nodeFavorite] objectForKey:SPFavoriteColorIndexKey];
 			if(colorIndexObj != nil) {
