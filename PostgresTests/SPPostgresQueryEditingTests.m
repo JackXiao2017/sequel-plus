@@ -397,6 +397,41 @@ static NSString * const SPQueryEditingSuiteName = @"SPPostgresStage12Tests";
 	}
 }
 
+/// A run refused while the runner is busy leaves an open cell editor, and its typed text, alone.
+- (void)testRefusedRunKeepsOpenCellEditor
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		[self openQueryOnPort:port];
+		SPPostgresTaskRunner *runner = [[SPPostgresTaskRunner alloc] initWithConnection:self.connection];
+		self.query.taskRunner = runner;
+		[self run:@"SELECT id, name FROM query_edit_test.items ORDER BY id"];
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+		XCTAssertTrue([self shouldEditRow:0 column:1], @"port %@", port);
+		[[self grid] editColumn:1 row:0 withEvent:nil select:YES];
+		XCTAssertNotNil([[self grid] currentEditor], @"port %@: the grid's field editor opened", port);
+		[(NSText *)[[self grid] currentEditor] setString:@"typed"];
+
+		[SPPostgresTestServers queueSleep:2 onRunner:runner];
+		XCTAssertTrue(runner.isBusy);
+		[self run:@"SELECT id, name FROM query_edit_test.items ORDER BY id DESC"];
+		XCTAssertNotNil([[self grid] currentEditor], @"port %@: the refused run left the edit open", port);
+		XCTAssertEqualObjects([(NSText *)[[self grid] currentEditor] string], @"typed");
+		XCTAssertEqual([[self grid] editedRow], 0);
+
+		[runner cancelAll];
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+
+		// Also a run refused by -_runStatements: itself (a runner already invalidated, which the actions let through)
+		[runner invalidateWithCompletion:nil];
+		XCTAssertTrue(runner.isInvalidated);
+		[self run:@"SELECT id, name FROM query_edit_test.items ORDER BY id DESC"];
+		XCTAssertNotNil([[self grid] currentEditor], @"port %@: the refused run left the edit open", port);
+		XCTAssertEqualObjects([(NSText *)[[self grid] currentEditor] string], @"typed");
+		XCTAssertEqualObjects([self gridValueAtRow:0 column:0], @"1");
+		[[self grid] abortEditing];
+	}
+}
+
 #pragma mark - After a save
 
 - (void)testReloadAfterEditRerunsSelect

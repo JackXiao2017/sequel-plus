@@ -2601,14 +2601,15 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 - (void)_runStatements:(NSArray *)statements reload:(BOOL)reload
 {
 	if (invalidated || ![statements count]) return;
-	// A cell being edited belongs to the shown result, which this run replaces: its edit is dropped, so it can never
-	// be committed to the next result's row (a reload starts only once no cell is being edited)
-	if ([resultsView currentEditor]) [resultsView abortEditing];
-	// A run while the runner is busy (a key equivalent the task display's blocker doesn't stop) is refused
+	// A run while the runner is busy (a key equivalent the task display's blocker doesn't stop) is refused, leaving a
+	// cell being edited, and its typed text, alone
 	if (running || [taskRunner isBusy] || [taskRunner isInvalidated]) {
 		NSBeep();
 		return;
 	}
+	// A cell being edited belongs to the shown result, which this run replaces: its edit is dropped, so it can never
+	// be committed to the next result's row (a reload starts only once no cell is being edited)
+	if ([resultsView currentEditor]) [resultsView abortEditing];
 
 	// Hold on: an action may arrive from a view whose tab closes while the run's alerts or callbacks spin (the
 	// inline runner calls the completion before the blocks are copied)
