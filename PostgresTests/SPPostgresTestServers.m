@@ -4,7 +4,48 @@
 #import <PostgresKit/PostgresKit.h>
 #import "../Source/Postgres/SPPostgresTaskRunner.h"
 
+// Connections handed out while a test case runs. PostgresKit's connection <-> type-handler retain cycle means a
+// connection is never deallocated, so one nobody disconnects stays open for the whole suite.
+static NSMutableArray<PGPostgresConnection *> *SPTrackedConnections = nil; // nil: no test case is running
+static NSObject *SPTrackedConnectionsLock = nil;
+
+@interface SPPostgresTestConnectionObserver : NSObject <XCTestObservation>
+@end
+
+@implementation SPPostgresTestConnectionObserver
+
++ (void)load
+{
+	SPTrackedConnectionsLock = [[NSObject alloc] init];
+	[[XCTestObservationCenter sharedTestObservationCenter] addTestObserver:[[SPPostgresTestConnectionObserver alloc] init]];
+}
+
+- (void)testCaseWillStart:(XCTestCase *)testCase
+{
+	@synchronized (SPTrackedConnectionsLock) { SPTrackedConnections = [NSMutableArray array]; }
+}
+
+- (void)testCaseDidFinish:(XCTestCase *)testCase
+{
+	[SPPostgresTestServers disconnectConnectionsOpenedDuringCurrentTest];
+	@synchronized (SPTrackedConnectionsLock) { SPTrackedConnections = nil; }
+}
+
+@end
+
 @implementation SPPostgresTestServers
+
++ (void)disconnectConnectionsOpenedDuringCurrentTest
+{
+	NSArray<PGPostgresConnection *> *connections;
+	@synchronized (SPTrackedConnectionsLock) {
+		connections = [SPTrackedConnections copy];
+		[SPTrackedConnections removeAllObjects];
+	}
+	for (PGPostgresConnection *connection in connections) {
+		if (connection.isConnected) [connection disconnect];
+	}
+}
 
 + (NSArray<NSNumber *> *)ports
 {
@@ -43,6 +84,7 @@
 				connection.connectionError ?: @"timed out after 10 s");
 		return nil;
 	}
+	@synchronized (SPTrackedConnectionsLock) { [SPTrackedConnections addObject:connection]; }
 	return connection;
 }
 

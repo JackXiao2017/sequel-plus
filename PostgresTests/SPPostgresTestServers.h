@@ -22,6 +22,11 @@
 + (PGPostgresConnection *)connectedConnectionOnPort:(NSUInteger)port database:(NSString *)database
 										   delegate:(NSObject<PGPostgresConnectionDelegate> *)delegate;
 
+/// Disconnects every connection the helpers above handed out since the current test started (skipping ones already
+/// disconnected). Runs by itself when each test ends; connections opened outside a test case (a class +setUp) are
+/// not tracked, and PostgresKit never deallocates a connection, so those must be disconnected explicitly.
++ (void)disconnectConnectionsOpenedDuringCurrentTest;
+
 /// The path of PostgresTests/Fixtures/<fileName> (fileName with its extension).
 + (NSString *)fixturePathNamed:(NSString *)fileName;
 
