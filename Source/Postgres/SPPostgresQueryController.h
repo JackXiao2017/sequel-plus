@@ -299,7 +299,9 @@ __attribute__((visibility("default")))
  * the edit mode toggle) no cell is edited in the grid: it opens MySQL's field editor sheet instead (fieldEditorPresenter;
  * one at a time), with the cell's text or the NULL placeholder, the result column's name, the origin column's type and
  * nullability, editable only where the cell can be edited (otherwise read-only, without MySQL's tooltip). Its value is
- * saved as a grid edit to the row it was opened on, only while that result is still shown. A run, a new result and
+ * saved as a grid edit to the row it was opened on, only while that result is still shown. A value longer than the
+ * grid shows (10,000 characters) also opens the sheet, with its full text, outside edit mode too, and the grid's cut
+ * text of it is never saved as a change. A run, a new result and
  * -invalidate close a cell editor still open without committing it, and a value is saved only into the result whose
  * editor let its cell be edited.
  */
