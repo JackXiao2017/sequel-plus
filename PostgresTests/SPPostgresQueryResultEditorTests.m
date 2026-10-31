@@ -38,7 +38,7 @@
 
 #pragma mark - Fixture
 
-/// Drops and rebuilds schema query_edit_test (items, pair, nokey, "Mixed Case", customers, orders, flags, emp, items_view).
+/// Drops and rebuilds schema query_edit_test (items, pair, nokey, "Mixed Case", customers, orders, flags, emp, parts, base, child, items_view).
 - (void)buildFixtureOnPort:(NSUInteger)port
 {
 	PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port];
@@ -60,8 +60,16 @@
 		@"INSERT INTO query_edit_test.orders VALUES (10, 1, 'first')",
 		@"CREATE TABLE query_edit_test.flags (b boolean, c char(4), ip inet)",
 		@"INSERT INTO query_edit_test.flags VALUES (true, 'ab', '10.0.0.1'), (false, 'cd', '10.0.0.2')",
-		@"CREATE TABLE query_edit_test.emp (id integer PRIMARY KEY, name text, manager integer)",
-		@"INSERT INTO query_edit_test.emp VALUES (1, 'boss', NULL), (2, 'worker', 1)",
+		@"CREATE TABLE query_edit_test.emp (id integer PRIMARY KEY, name text, dept text, manager integer)",
+		@"INSERT INTO query_edit_test.emp VALUES (1, 'boss', 'A', NULL), (2, 'worker', 'B', 1), (3, 'boss', 'B', NULL)",
+		@"CREATE TABLE query_edit_test.parts (id integer, k integer, v text, PRIMARY KEY (id, k)) PARTITION BY LIST (k)",
+		@"CREATE TABLE query_edit_test.parts_1 PARTITION OF query_edit_test.parts FOR VALUES IN (1)",
+		@"CREATE TABLE query_edit_test.parts_2 PARTITION OF query_edit_test.parts FOR VALUES IN (2)",
+		@"INSERT INTO query_edit_test.parts VALUES (1, 1, 'a'), (2, 2, 'b')",
+		@"CREATE TABLE query_edit_test.base (id integer PRIMARY KEY, v text)",
+		@"CREATE TABLE query_edit_test.child () INHERITS (query_edit_test.base)",
+		@"INSERT INTO query_edit_test.base VALUES (1, 'a')",
+		@"INSERT INTO query_edit_test.child VALUES (2, 'c')",
 		@"CREATE VIEW query_edit_test.items_view AS SELECT id, name FROM query_edit_test.items",
 	];
 	for (NSString *sql in statements) {
@@ -106,7 +114,7 @@
 {
 	PGPostgresResult *result = [connection execute:sql];
 	XCTAssertNotNil(result, @"%@ failed: %@", sql, [connection lastError]);
-	return [[SPPostgresQueryResultEditor alloc] initWithResult:result connection:connection];
+	return [[SPPostgresQueryResultEditor alloc] initWithResult:result connection:connection statement:sql];
 }
 
 /// MySQL's strings (Source/SPCustomQuery.m), as the editor must give them.
@@ -283,6 +291,8 @@
 
 		NSPredicate *catalog = [NSPredicate predicateWithFormat:@"SELF CONTAINS 'pg_attribute'"];
 		NSPredicate *counts = [NSPredicate predicateWithFormat:@"SELF BEGINSWITH 'SELECT count(*)'"];
+		NSPredicate *plans = [NSPredicate predicateWithFormat:@"SELF BEGINSWITH 'EXPLAIN'"];
+		XCTAssertEqual([[recorder.statements filteredArrayUsingPredicate:plans] count], 1u, @"port %@: %@", port, recorder.statements);
 		XCTAssertEqual([[recorder.statements filteredArrayUsingPredicate:catalog] count], 1u, @"port %@: %@", port, recorder.statements);
 		XCTAssertEqual([[recorder.statements filteredArrayUsingPredicate:counts] count], 2u, @"port %@: %@", port, recorder.statements);
 	}
@@ -518,36 +528,6 @@
 	}
 }
 
-/// PostgreSQL reports a field's table and column, not its alias: in a self-join, editing m.name must not find e's row
-/// by e.id. Both aliases' values are compared, which disagree, so nothing matches.
-- (void)testSelfJoinEditIsRefused
-{
-	for (NSNumber *port in [SPPostgresTestServers ports]) {
-		NSArray *queries = @[
-			@"SELECT e.id, e.name, m.id, m.name FROM query_edit_test.emp e JOIN query_edit_test.emp m ON m.id = e.manager",
-			@"SELECT e.name, m.name FROM query_edit_test.emp e JOIN query_edit_test.emp m ON m.id = e.manager",
-		];
-		NSArray *columns = @[@3, @1], *workerColumns = @[@1, @0]; // m.name, e.name
-		for (NSUInteger i = 0; i < [queries count]; i++) {
-			NSUInteger column = [columns[i] unsignedIntegerValue];
-			SPPostgresQueryResultEditor *editor = [self editorForSQL:queries[i] port:port];
-			NSInteger count = -2;
-			NSString *message = nil;
-			XCTAssertEqual([editor editabilityOfRow:0 column:column matchCount:&count message:&message], SPPostgresCellNoMatch, @"port %@ %@: %@", port, queries[i], message);
-			XCTAssertEqual(count, 0);
-
-			NSError *error = nil;
-			count = -2;
-			XCTAssertNil([editor saveValue:@"chief" row:0 column:column matchCount:&count error:&error], @"port %@ %@", port, queries[i]);
-			XCTAssertEqual([error code], SPPostgresErrorRowChanged);
-			XCTAssertEqual(count, 0);
-			XCTAssertEqualObjects([editor valueAtRow:0 column:[workerColumns[i] unsignedIntegerValue]], @"worker");
-			XCTAssertEqualObjects([editor valueAtRow:0 column:column], @"boss");
-			XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(name, ',' ORDER BY id) FROM query_edit_test.emp" port:port], @"boss,worker");
-		}
-	}
-}
-
 /// The saved value is the column's output text, as the result shows it, not its ::text.
 - (void)testSavedValueIsOutputText
 {
@@ -564,44 +544,135 @@
 	}
 }
 
-/// A key shown for only one alias of a self-join must not identify the other alias's row: m.name is compared too.
-- (void)testSelfJoinWithOneAliasKeyIsRefused
+#pragma mark - Tables read more than once
+
+- (NSString *)originRepeatedMessage
+{
+	return NSLocalizedString(@"This table appears more than once in the query, so its rows can't be identified.", @"Postgres query result: origin table read more than once (self-join)");
+}
+
+/// sql's cell (row, column) is refused by the check (OriginRepeated, no count) and by the save (NotEditable, nothing
+/// changed on the server).
+- (void)assertOriginRepeatedForSQL:(NSString *)sql row:(NSUInteger)row column:(NSUInteger)column port:(NSNumber *)port
+{
+	NSString *before = [self serverValue:@"SELECT string_agg(id || ':' || name || ':' || dept, ',' ORDER BY id) FROM query_edit_test.emp" port:port];
+	SPPostgresQueryResultEditor *editor = [self editorForSQL:sql port:port];
+	NSInteger count = -2;
+	NSString *message = nil;
+	XCTAssertEqual([editor editabilityOfRow:row column:column matchCount:&count message:&message], SPPostgresCellOriginRepeated, @"port %@ %@: %@", port, sql, message);
+	XCTAssertEqual(count, -1);
+	XCTAssertEqualObjects(message, [self originRepeatedMessage]);
+
+	NSError *error = nil;
+	count = -2;
+	id original = [editor valueAtRow:row column:column];
+	XCTAssertNil([editor saveValue:@"chief" row:row column:column matchCount:&count error:&error], @"port %@ %@", port, sql);
+	XCTAssertEqual([error code], SPPostgresErrorNotEditable);
+	XCTAssertEqualObjects([error localizedDescription], [self originRepeatedMessage]);
+	XCTAssertEqual(count, -1);
+	XCTAssertEqualObjects([editor valueAtRow:row column:column], original);
+	XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(id || ':' || name || ':' || dept, ',' ORDER BY id) FROM query_edit_test.emp" port:port], before);
+}
+
+/// PostgreSQL reports a field's table and column, not its alias, so a self-join's values can't tell its aliases apart.
+- (void)testSelfJoinIsRefused
 {
 	for (NSNumber *port in [SPPostgresTestServers ports]) {
-		// e is worker (2), m is boss (1)
-		SPPostgresQueryResultEditor *editor = [self editorForSQL:@"SELECT e.id, m.name FROM query_edit_test.emp e JOIN query_edit_test.emp m ON m.id = e.manager" port:port];
+		NSString *join = @"FROM query_edit_test.emp e JOIN query_edit_test.emp m ON m.id = e.manager";
+		[self assertOriginRepeatedForSQL:[@"SELECT e.id, e.name, m.id, m.name " stringByAppendingString:join] row:0 column:3 port:port];
+		[self assertOriginRepeatedForSQL:[@"SELECT e.id, e.name, m.id, m.name " stringByAppendingString:join] row:0 column:1 port:port];
+		[self assertOriginRepeatedForSQL:[@"SELECT e.name, m.name " stringByAppendingString:join] row:0 column:1 port:port];
+		[self assertOriginRepeatedForSQL:[@"SELECT e.id, m.name " stringByAppendingString:join] row:0 column:1 port:port];
+	}
+}
+
+/// Case A: with equal names, e.id plus m.name would identify e's row (2) for m's cell.
+- (void)testSelfJoinWithCoincidingValuesIsRefused
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue];
+		NSError *error = nil;
+		XCTAssertNotNil(SPPostgresExecute(connection, @"UPDATE query_edit_test.emp SET name = 'Sam' WHERE id IN (1, 2)", nil, &error), @"%@", error);
+		[self assertOriginRepeatedForSQL:@"SELECT e.id, m.name FROM query_edit_test.emp e JOIN query_edit_test.emp m ON m.id = e.manager" row:0 column:1 port:port];
+	}
+}
+
+/// Case B: e.dept plus m.name of the worker row (B, boss) would identify row 3, in neither alias.
+- (void)testSelfJoinMatchingNeitherAliasIsRefused
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		[self assertOriginRepeatedForSQL:@"SELECT e.dept, m.name FROM query_edit_test.emp e JOIN query_edit_test.emp m ON m.id = e.manager" row:0 column:1 port:port];
+	}
+}
+
+/// Conservative: any second read of the table refuses it, also a subquery's.
+- (void)testSubqueryOnSameTableIsRefused
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		[self assertOriginRepeatedForSQL:@"SELECT * FROM query_edit_test.emp WHERE id IN (SELECT manager FROM query_edit_test.emp)" row:0 column:1 port:port];
+	}
+}
+
+- (void)testSingleReadOfEmpIsEditable
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:@"SELECT id, name FROM query_edit_test.emp WHERE id = 2" port:port];
 		NSInteger count = -2;
 		NSString *message = nil;
-		XCTAssertEqual([editor editabilityOfRow:0 column:1 matchCount:&count message:&message], SPPostgresCellNoMatch, @"port %@: %@", port, message);
-		XCTAssertEqual(count, 0);
+		XCTAssertEqual([editor editabilityOfRow:0 column:1 matchCount:&count message:&message], SPPostgresCellEditable, @"port %@: %@", port, message);
+		XCTAssertEqual(count, 1);
+	}
+}
+
+/// A partitioned table's partitions are one read (one Append).
+- (void)testPartitionedTableIsEditable
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:@"SELECT id, k, v FROM query_edit_test.parts ORDER BY id" port:port];
+		NSInteger count = -2;
+		NSString *message = nil;
+		XCTAssertEqual([editor editabilityOfRow:1 column:2 matchCount:&count message:&message], SPPostgresCellEditable, @"port %@: %@", port, message);
+		XCTAssertEqual(count, 1);
 		NSError *error = nil;
-		count = -2;
-		XCTAssertNil([editor saveValue:@"chief" row:0 column:1 matchCount:&count error:&error], @"port %@", port);
-		XCTAssertEqual([error code], SPPostgresErrorRowChanged);
-		XCTAssertEqual(count, 0);
-		XCTAssertEqualObjects([editor valueAtRow:0 column:1], @"boss");
-		XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(name, ',' ORDER BY id) FROM query_edit_test.emp" port:port], @"boss,worker");
+		XCTAssertEqualObjects([editor saveValue:@"bb" row:1 column:2 matchCount:&count error:&error], @"bb", @"port %@: %@", port, error);
+		XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(v, ',' ORDER BY id) FROM query_edit_test.parts" port:port], @"a,bb");
+	}
+}
 
-		// With e.name shown too: m.name is still refused
-		editor = [self editorForSQL:@"SELECT e.id, e.name, m.name FROM query_edit_test.emp e JOIN query_edit_test.emp m ON m.id = e.manager" port:port];
-		XCTAssertEqual([editor editabilityOfRow:0 column:2 matchCount:&count message:&message], SPPostgresCellNoMatch, @"port %@: %@", port, message);
-		XCTAssertEqual(count, 0);
-		error = nil;
-		XCTAssertNil([editor saveValue:@"chief" row:0 column:2 matchCount:&count error:&error], @"port %@", port);
-		XCTAssertEqual([error code], SPPostgresErrorRowChanged);
-		XCTAssertEqual(count, 0);
-		XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(name, ',' ORDER BY id) FROM query_edit_test.emp" port:port], @"boss,worker");
+/// An inheritance parent and its child are one read (one Append).
+- (void)testInheritanceParentIsEditable
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:@"SELECT id, v FROM query_edit_test.base ORDER BY id" port:port];
+		NSInteger count = -2;
+		NSString *message = nil;
+		XCTAssertEqual([editor editabilityOfRow:0 column:1 matchCount:&count message:&message], SPPostgresCellEditable, @"port %@: %@", port, message);
+		XCTAssertEqual(count, 1);
+		XCTAssertEqual([editor editabilityOfRow:1 column:1 matchCount:&count message:&message], SPPostgresCellEditable, @"port %@: %@", port, message);
+		XCTAssertEqual(count, 1);
+		NSError *error = nil;
+		XCTAssertEqualObjects([editor saveValue:@"cc" row:1 column:1 matchCount:&count error:&error], @"cc", @"port %@: %@", port, error);
+		XCTAssertEqualObjects([self serverValue:@"SELECT v FROM query_edit_test.child" port:port], @"cc");
+		XCTAssertEqualObjects([self serverValue:@"SELECT v FROM ONLY query_edit_test.base" port:port], @"a");
+	}
+}
 
-		// e.name has the same origin column as m.name (PostgreSQL doesn't report the alias), so it is refused too
-		XCTAssertEqual([editor editabilityOfRow:0 column:1 matchCount:&count message:&message], SPPostgresCellNoMatch, @"port %@: %@", port, message);
-		XCTAssertEqual(count, 0);
-		error = nil;
-		XCTAssertNil([editor saveValue:@"hand" row:0 column:1 matchCount:&count error:&error], @"port %@", port);
-		XCTAssertEqual([error code], SPPostgresErrorRowChanged);
-		XCTAssertEqual(count, 0);
-		XCTAssertEqualObjects([editor valueAtRow:0 column:1], @"worker");
-		XCTAssertEqualObjects([editor valueAtRow:0 column:2], @"boss");
-		XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(name, ',' ORDER BY id) FROM query_edit_test.emp" port:port], @"boss,worker");
+/// Without the statement (or with one that can't be explained) nothing can be checked, and nothing is saved.
+- (void)testMissingOrUnexplainableStatementFailsCheck
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue];
+		PGPostgresResult *result = [connection execute:@"SELECT id, name FROM query_edit_test.items ORDER BY id"];
+		for (NSString *statement in @[@"", @"SELECT id, name FROM query_edit_test.missing"]) {
+			SPPostgresQueryResultEditor *editor = [[SPPostgresQueryResultEditor alloc] initWithResult:result connection:connection statement:statement];
+			NSString *message = nil;
+			XCTAssertEqual([editor editabilityOfRow:0 column:1 matchCount:NULL message:&message], SPPostgresCellCheckFailed, @"port %@ '%@'", port, statement);
+			XCTAssertGreaterThan([message length], 0u);
+			NSError *error = nil;
+			XCTAssertNil([editor saveValue:@"uno" row:0 column:1 matchCount:NULL error:&error]);
+			XCTAssertEqual([error code], SPPostgresErrorNotEditable);
+		}
+		XCTAssertEqualObjects([self serverValue:@"SELECT name FROM query_edit_test.items WHERE id = 1" port:port], @"one");
 	}
 }
 

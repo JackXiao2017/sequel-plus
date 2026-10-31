@@ -11,18 +11,25 @@ typedef NS_ENUM(NSInteger, SPPostgresCellEditability) {
 	SPPostgresCellTooManyMatches,          // MySQL's >1
 	SPPostgresCellNotATable,               // view, materialized view, foreign table…
 	SPPostgresCellGeneratedColumn,         // GENERATED … STORED or GENERATED ALWAYS identity
-	SPPostgresCellCheckFailed              // catalog lookup or count failed (aborted transaction, lost connection)
+	SPPostgresCellCheckFailed,             // catalog lookup, plan or count failed (aborted transaction, lost connection)
+	SPPostgresCellOriginRepeated           // the origin table is read more than once by the statement (a self-join)
 };
 
 /**
  * One result of the Query tab, made editable cell by cell as MySQL's rule (SPCustomQuery's
  * fieldEditStatusForRow:andColumn:) does: a cell is editable when its column is a plain column of a table, and the
  * row's values in every result column of that table (keys and non-keys, every occurrence) match exactly one row of
- * it. Unlike MySQL, non-key columns count even when a key is shown: PostgreSQL doesn't report a field's alias, so in
- * a self-join one alias's key would otherwise identify the other alias's row.
+ * it.
  *
- * The origin tables' columns are read from the catalog once per editor (one query for all of them; a failed lookup is
- * retried on the next check). Reads run through SPPostgresRunGuardedRead, so inside the user's open transaction a
+ * PostgreSQL reports a field's table and column but not its alias, so in a self-join the values of one alias can
+ * identify a row of the other, or a row of neither. Such results are refused before any count: the statement's plan
+ * (EXPLAIN (VERBOSE, FORMAT JSON), which doesn't run it) must read the origin table, counting its partitions and
+ * inheritance children, at most once (one scan, or one Append of scans). This is conservative: a subquery on the
+ * same table (WHERE id IN (SELECT … FROM the same table)) also refuses it. Comparing every column of the table is
+ * defence in depth on top of that, and also refuses an edit once another shown column of its row has changed.
+ *
+ * The origin tables' columns, their partitions/children and the statement's plan are read once per editor (a failed
+ * lookup is retried on the next check). Reads run through SPPostgresRunGuardedRead, so inside the user's open transaction a
  * failure leaves it open. Identifiers are quoted and values sent as parameters.
  */
 __attribute__((visibility("default")))
@@ -30,11 +37,14 @@ __attribute__((visibility("default")))
 {
 	PGPostgresResult *_result;
 	PGPostgresConnection *_connection;
+	NSString *_statement;
 	NSDictionary *_tables;          // origin OID (NSNumber) -> table info
+	NSSet *_repeatedOrigins;        // origin OIDs (NSNumber) the statement's plan reads more than once
 	NSMutableDictionary *_edits;    // NSIndexPath (row, column) -> saved value (NSString / NSNull)
 }
 
-- (instancetype)initWithResult:(PGPostgresResult *)result connection:(PGPostgresConnection *)connection;
+/// statement is the SQL that produced result, as it was run (its plan decides which tables are read more than once).
+- (instancetype)initWithResult:(PGPostgresResult *)result connection:(PGPostgresConnection *)connection statement:(NSString *)statement;
 
 @property (readonly) PGPostgresResult *result;
 
@@ -44,7 +54,7 @@ __attribute__((visibility("default")))
 /// The cell's text (NSString) or NSNull, with this editor's saved edits applied.
 - (id)valueAtRow:(NSUInteger)row column:(NSUInteger)column;
 
-/// Checks the cell (catalog lookup once per editor, then a count). matchCount is the count (or -1 when not counted);
+/// Checks the cell (catalog lookup and plan once per editor, then a count). matchCount is the count (or -1 when not counted);
 /// message is the explanation to show when not editable (MySQL's text for NoOrigin/NoMatch/TooManyMatches), else nil.
 - (SPPostgresCellEditability)editabilityOfRow:(NSUInteger)row column:(NSUInteger)column
 								   matchCount:(NSInteger *)matchCount message:(NSString **)message;
@@ -63,8 +73,8 @@ __attribute__((visibility("default")))
 ///
 /// The UPDATE (identified as -editabilityOfRow:column:matchCount:message: counts, with this editor's saved edits
 /// applied) runs through SPPostgresRunAtomically and is undone unless it changed exactly one row
-/// (SPPostgresErrorRowChanged). A cell refused before counting (no origin, not a table, generated, catalog lookup
-/// failed) fails with SPPostgresErrorNotEditable and the same message, without an UPDATE.
+/// (SPPostgresErrorRowChanged). A cell refused before counting (no origin, not a table, generated, table read more
+/// than once, catalog lookup or plan failed) fails with SPPostgresErrorNotEditable and the same message, without an UPDATE.
 - (id)saveValue:(id)value row:(NSUInteger)row column:(NSUInteger)column matchCount:(NSInteger *)matchCount error:(NSError **)error;
 
 @end

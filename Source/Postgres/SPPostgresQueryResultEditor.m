@@ -19,15 +19,36 @@ static NSString *SPQueryEditAbortedMessage(void)
 	return NSLocalizedString(@"The current transaction is aborted, so the cell can't be checked for editing. Roll it back first.", @"Postgres query result: edit check inside an aborted transaction");
 }
 
+/**
+ * Adds to scans each relation scan of a plan node (EXPLAIN (VERBOSE, FORMAT JSON)) and its descendants (Plans, which
+ * include InitPlans and SubPlans), as @[schema, relation, group]. group identifies the read: the topmost of the
+ * Append / Merge Append nodes directly above the scan (a partitioned or inheritance parent's children are one read),
+ * else the scan itself. A ModifyTable's own relation is the statement's target, not a read, so it isn't added.
+ */
+static void SPQueryEditCollectScans(id node, NSDictionary *appendAbove, NSMutableArray *scans)
+{
+	if (![node isKindOfClass:[NSDictionary class]]) return;
+	NSString *type = [node objectForKey:@"Node Type"];
+	id schema = [node objectForKey:@"Schema"], relation = [node objectForKey:@"Relation Name"];
+	if ([schema isKindOfClass:[NSString class]] && [relation isKindOfClass:[NSString class]] && ![type isEqual:@"ModifyTable"]) {
+		[scans addObject:@[schema, relation, [NSValue valueWithNonretainedObject:(appendAbove ?: node)]]];
+	}
+	BOOL append = [type isEqual:@"Append"] || [type isEqual:@"Merge Append"];
+	id children = [node objectForKey:@"Plans"];
+	if (![children isKindOfClass:[NSArray class]]) return;
+	for (id child in children) SPQueryEditCollectScans(child, append ? (appendAbove ?: node) : nil, scans);
+}
+
 @implementation SPPostgresQueryResultEditor
 
 @synthesize result = _result;
 
-- (instancetype)initWithResult:(PGPostgresResult *)result connection:(PGPostgresConnection *)connection
+- (instancetype)initWithResult:(PGPostgresResult *)result connection:(PGPostgresConnection *)connection statement:(NSString *)statement
 {
 	if ((self = [super init])) {
 		_result = [result retain];
 		_connection = [connection retain];
+		_statement = [statement copy];
 		_edits = [[NSMutableDictionary alloc] init];
 	}
 	return self;
@@ -37,7 +58,9 @@ static NSString *SPQueryEditAbortedMessage(void)
 {
 	[_result release];
 	[_connection release];
+	[_statement release];
 	[_tables release];
+	[_repeatedOrigins release];
 	[_edits release];
 	[super dealloc];
 }
@@ -78,9 +101,14 @@ static NSString *SPQueryEditAbortedMessage(void)
 }
 
 /**
- * Reads, once per editor, every live column of every origin table of the result, in one query: per table its schema,
- * name and relkind; per column its name, type, nullability, whether it is generated and its primary-key position.
- * A failure is not cached, so the next check retries.
+ * Reads, once per editor:
+ * - every live column of every origin table of the result, in one query: per table its schema, name and relkind; per
+ *   column its name, type, nullability, whether it is generated and its primary-key position;
+ * - each origin's family: itself and its partitions / inheritance children, recursively;
+ * - the statement's plan (EXPLAIN without ANALYZE doesn't run it), to find the origins read more than once: those
+ *   whose family's scans form more than one group (see SPQueryEditCollectScans).
+ * A failure (no statement, one that can't be explained, an aborted transaction) is not cached, so the next check
+ * retries.
  */
 - (BOOL)loadTables:(NSError **)error
 {
@@ -96,8 +124,13 @@ static NSString *SPQueryEditAbortedMessage(void)
 		return YES;
 	}
 
+	if (![[_statement stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] length]) {
+		if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, NSLocalizedString(@"The statement that produced this result isn't known, so its rows can't be identified.", @"Postgres query result: edit check without the result's statement"), nil);
+		return NO;
+	}
+
 	NSString *array = [NSString stringWithFormat:@"{%@}", [[oids array] componentsJoinedByString:@","]];
-	__block PGPostgresResult *catalog = nil;
+	__block PGPostgresResult *catalog = nil, *family = nil, *plan = nil;
 	BOOL read = SPPostgresRunGuardedRead(_connection, @"sp_query_edit_read", SPQueryEditAbortedMessage(), ^BOOL(NSError **bodyError) {
 		catalog = SPPostgresExecute(_connection,
 			@"SELECT c.oid::text AS oid, n.nspname::text AS schema, c.relname::text AS name, c.relkind::text AS kind, "
@@ -111,9 +144,53 @@ static NSString *SPQueryEditAbortedMessage(void)
 			 "LEFT JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary "
 			 "WHERE c.oid = ANY($1::oid[])",
 			@[array], bodyError);
-		return catalog != nil;
+		if (!catalog) return NO;
+		family = SPPostgresExecute(_connection,
+			@"WITH RECURSIVE family(origin, rel) AS ("
+			 "SELECT o, o FROM unnest($1::oid[]) AS o "
+			 "UNION SELECT f.origin, i.inhrelid FROM family f JOIN pg_inherits i ON i.inhparent = f.rel) "
+			 "SELECT f.origin::text, n.nspname::text, c.relname::text "
+			 "FROM family f JOIN pg_class c ON c.oid = f.rel JOIN pg_namespace n ON n.oid = c.relnamespace",
+			@[array], bodyError);
+		if (!family) return NO;
+		plan = SPPostgresExecute(_connection, [@"EXPLAIN (VERBOSE, FORMAT JSON) " stringByAppendingString:_statement], nil, bodyError);
+		return plan != nil;
 	}, error);
 	if (!read) return NO;
+
+	// The plan's scans, grouped into reads
+	id planText = [plan textValueAtRow:0 column:0];
+	id explained = [planText isKindOfClass:[NSString class]]
+		? [NSJSONSerialization JSONObjectWithData:[planText dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL] : nil;
+	if (![explained isKindOfClass:[NSArray class]]) {
+		if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, NSLocalizedString(@"The statement's plan couldn't be read, so its rows can't be identified.", @"Postgres query result: edit check couldn't parse EXPLAIN output"), nil);
+		return NO;
+	}
+	NSMutableArray *scans = [NSMutableArray array];
+	for (id statementPlan in explained) {
+		if ([statementPlan isKindOfClass:[NSDictionary class]]) SPQueryEditCollectScans([statementPlan objectForKey:@"Plan"], nil, scans);
+	}
+
+	// Each origin's reads: the groups of the scans of its family
+	NSMutableDictionary *originsByRelation = [NSMutableDictionary dictionary]; // @[schema, name] -> origin OIDs
+	for (unsigned long long row = 0; row < [family numberOfRows]; row++) {
+		NSArray *relation = @[[family textValueAtRow:row column:1], [family textValueAtRow:row column:2]];
+		NSMutableSet *origins = [originsByRelation objectForKey:relation];
+		if (!origins) [originsByRelation setObject:(origins = [NSMutableSet set]) forKey:relation];
+		[origins addObject:@([[family textValueAtRow:row column:0] longLongValue])];
+	}
+	NSMutableDictionary *readsByOrigin = [NSMutableDictionary dictionary]; // origin OID -> groups
+	for (NSArray *scan in scans) {
+		for (NSNumber *origin in [originsByRelation objectForKey:[scan subarrayWithRange:NSMakeRange(0, 2)]]) {
+			NSMutableSet *reads = [readsByOrigin objectForKey:origin];
+			if (!reads) [readsByOrigin setObject:(reads = [NSMutableSet set]) forKey:origin];
+			[reads addObject:[scan objectAtIndex:2]];
+		}
+	}
+	NSMutableSet *repeated = [NSMutableSet set];
+	for (NSNumber *origin in readsByOrigin) {
+		if ([[readsByOrigin objectForKey:origin] count] > 1) [repeated addObject:origin];
+	}
 
 	NSMutableDictionary *tables = [NSMutableDictionary dictionary];
 	for (unsigned long long row = 0; row < [catalog numberOfRows]; row++) {
@@ -137,6 +214,7 @@ static NSString *SPQueryEditAbortedMessage(void)
 		[[table objectForKey:SPQueryEditColumnsKey] setObject:column forKey:@([[catalog textValueAtRow:row column:4] integerValue])];
 	}
 	_tables = [tables copy];
+	_repeatedOrigins = [repeated copy];
 	return YES;
 }
 
@@ -181,10 +259,11 @@ static NSString *SPQueryEditAbortedMessage(void)
 #pragma mark - Editability
 
 /// The result columns that identify a row of the origin table oid: every one of its columns in the result, every
-/// occurrence. MySQL uses only the primary-key columns when any is present, but PostgreSQL reports a field's table and
-/// column, not its alias: in a self-join (SELECT e.id, m.name … m.id = e.manager) e.id alone would find e's row for
-/// m.name. With every occurrence compared, aliases that disagree match no row; agreeing repeats (SELECT id, name, name)
-/// are merely redundant. So an edit is also refused when another shown column of its row changed since the run.
+/// occurrence (MySQL uses only the primary-key columns when any is present). Self-joins are refused before this, by
+/// the plan (SPPostgresCellOriginRepeated), since PostgreSQL doesn't report a field's alias and the values of one
+/// alias can identify another row; comparing every occurrence is defence in depth: aliases that disagree match no
+/// row, and agreeing repeats (SELECT id, name, name) are merely redundant. A consequence: an edit is also refused once
+/// another shown column of its row has changed since the run.
 - (NSArray *)identifyingColumnsForOrigin:(unsigned int)oid
 {
 	NSMutableArray *columns = [NSMutableArray array];
@@ -227,8 +306,8 @@ static NSString *SPQueryEditAbortedMessage(void)
 }
 
 /**
- * Steps 1–3 of the rule, which need no count: SPPostgresCellEditable when column is a plain, non-generated column of a
- * table (tableOut set to that table's info), else why not, with the message to show.
+ * Steps 1–4 of the rule, which need no count: SPPostgresCellEditable when column is a plain, non-generated column of a
+ * table the statement reads once (tableOut set to that table's info), else why not, with the message to show.
  */
 - (SPPostgresCellEditability)originCheckOfColumn:(NSUInteger)column table:(NSDictionary **)tableOut message:(NSString **)message
 {
@@ -270,6 +349,12 @@ static NSString *SPQueryEditAbortedMessage(void)
 		return SPPostgresCellGeneratedColumn;
 	}
 
+	// 4. Read more than once by the statement (a self-join): the values can't tell its occurrences apart
+	if ([_repeatedOrigins containsObject:@((long long)oid)]) {
+		if (message) *message = NSLocalizedString(@"This table appears more than once in the query, so its rows can't be identified.", @"Postgres query result: origin table read more than once (self-join)");
+		return SPPostgresCellOriginRepeated;
+	}
+
 	if (tableOut) *tableOut = table;
 	return SPPostgresCellEditable;
 }
@@ -285,7 +370,7 @@ static NSString *SPQueryEditAbortedMessage(void)
 	if (origin != SPPostgresCellEditable) return origin;
 	unsigned int oid = [self originOfColumn:column];
 
-	// 4–5. Count the rows the identifying values match
+	// 5–6. Count the rows the identifying values match
 	NSMutableArray *values = [NSMutableArray array];
 	NSString *sql = [NSString stringWithFormat:@"SELECT count(*) FROM %@ WHERE %@", [self qualifiedName:table],
 					 [self whereClauseForRow:row origin:oid values:values]];
@@ -303,7 +388,7 @@ static NSString *SPQueryEditAbortedMessage(void)
 		return SPPostgresCellCheckFailed;
 	}
 
-	// 6. Exactly one row
+	// 7. Exactly one row
 	if (matchCount) *matchCount = count;
 	if (count == 1) return SPPostgresCellEditable;
 	if (count == 0) {
