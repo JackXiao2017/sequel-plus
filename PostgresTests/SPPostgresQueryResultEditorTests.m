@@ -3,6 +3,7 @@
 #import "SPPostgresTestServers.h"
 #import "../Source/Postgres/SPPostgresTableData.h"
 #import "../Source/Postgres/SPPostgresQueryResultEditor.h"
+#import "../Source/Postgres/SPPostgresErrors.h"
 
 /// Records the statements a connection is about to send (PostgresKit reports willExecute only to a delegate
 /// passed at init).
@@ -300,6 +301,218 @@
 		XCTAssertEqual([editor editabilityOfRow:0 column:0 matchCount:&count message:&message], SPPostgresCellCheckFailed, @"port %@", port);
 		XCTAssertEqual(count, -1);
 		XCTAssertEqualObjects(message, @"The current transaction is aborted, so the cell can't be checked for editing. Roll it back first.");
+	}
+}
+
+#pragma mark - Saving
+
+/// The first cell of sql's result, read on a fresh connection to port (so it sees only committed data).
+- (id)serverValue:(NSString *)sql port:(NSNumber *)port
+{
+	PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue];
+	NSError *error = nil;
+	PGPostgresResult *result = SPPostgresExecute(connection, sql, nil, &error);
+	XCTAssertNotNil(result, @"%@ failed: %@", sql, error);
+	return [result textValueAtRow:0 column:0];
+}
+
+- (void)testSaveUpdatesRowAndCell
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:@"SELECT id, name FROM query_edit_test.items ORDER BY id" port:port];
+		NSInteger count = -2;
+		NSError *error = nil;
+		XCTAssertEqualObjects([editor saveValue:@"uno" row:0 column:1 matchCount:&count error:&error], @"uno", @"port %@: %@", port, error);
+		XCTAssertEqual(count, -1);
+		XCTAssertEqualObjects([editor valueAtRow:0 column:1], @"uno");
+		XCTAssertEqualObjects([editor valueAtRow:1 column:1], @"two");
+		XCTAssertEqualObjects([self serverValue:@"SELECT name FROM query_edit_test.items WHERE id = 1" port:port], @"uno");
+		XCTAssertEqualObjects([self serverValue:@"SELECT name FROM query_edit_test.items WHERE id = 2" port:port], @"two");
+	}
+}
+
+- (void)testSaveNullAndServerFormat
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:@"SELECT id, name, price FROM query_edit_test.items ORDER BY id" port:port];
+		NSError *error = nil;
+		XCTAssertEqualObjects([editor saveValue:[NSNull null] row:0 column:1 matchCount:NULL error:&error], [NSNull null], @"port %@: %@", port, error);
+		XCTAssertEqualObjects([editor valueAtRow:0 column:1], [NSNull null]);
+		XCTAssertEqualObjects([self serverValue:@"SELECT (name IS NULL)::text FROM query_edit_test.items WHERE id = 1" port:port], @"true");
+
+		XCTAssertEqualObjects([editor saveValue:@"3.5" row:0 column:2 matchCount:NULL error:&error], @"3.50", @"port %@: %@", port, error);
+		XCTAssertEqualObjects([editor valueAtRow:0 column:2], @"3.50");
+		XCTAssertEqualObjects([self serverValue:@"SELECT price::text FROM query_edit_test.items WHERE id = 1" port:port], @"3.50");
+	}
+}
+
+- (void)testSecondEditUsesEditedKey
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:@"SELECT id, name FROM query_edit_test.items ORDER BY id" port:port];
+		NSError *error = nil;
+		XCTAssertEqualObjects([editor saveValue:@"5" row:0 column:0 matchCount:NULL error:&error], @"5", @"port %@: %@", port, error);
+		XCTAssertEqualObjects([editor saveValue:@"five" row:0 column:1 matchCount:NULL error:&error], @"five", @"port %@: %@", port, error);
+		XCTAssertEqualObjects([self serverValue:@"SELECT name FROM query_edit_test.items WHERE id = 5" port:port], @"five");
+		XCTAssertEqualObjects([self serverValue:@"SELECT count(*)::text FROM query_edit_test.items WHERE id = 1" port:port], @"0");
+	}
+}
+
+- (void)testDuplicateResultColumnsUpdatedTogether
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:@"SELECT id, name, name FROM query_edit_test.items ORDER BY id" port:port];
+		NSError *error = nil;
+		XCTAssertEqualObjects([editor saveValue:@"uno" row:0 column:1 matchCount:NULL error:&error], @"uno", @"port %@: %@", port, error);
+		XCTAssertEqualObjects([editor valueAtRow:0 column:1], @"uno");
+		XCTAssertEqualObjects([editor valueAtRow:0 column:2], @"uno");
+		XCTAssertEqualObjects([editor valueAtRow:1 column:2], @"two");
+	}
+}
+
+- (void)testUpdateMatchingTwoRowsIsRolledBack
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:@"SELECT n, t FROM query_edit_test.nokey WHERE n = 2" port:port];
+		PGPostgresConnection *other = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue];
+		NSError *error = nil;
+		XCTAssertNotNil(SPPostgresExecute(other, @"INSERT INTO query_edit_test.nokey VALUES (2, 'b', '(2,2)')", nil, &error), @"%@", error);
+
+		NSInteger count = -2;
+		error = nil;
+		XCTAssertNil([editor saveValue:@"z" row:0 column:1 matchCount:&count error:&error], @"port %@", port);
+		XCTAssertEqualObjects([error domain], SPPostgresErrorDomain);
+		XCTAssertEqual([error code], SPPostgresErrorRowChanged);
+		XCTAssertEqual(count, 2);
+		XCTAssertTrue([[error localizedDescription] containsString:@"(2 matches)"], @"%@", [error localizedDescription]);
+		XCTAssertTrue([[error localizedDescription] containsString:@"\"query_edit_test\".\"nokey\""], @"%@", [error localizedDescription]);
+		XCTAssertEqualObjects([editor valueAtRow:0 column:1], @"b");
+		XCTAssertEqualObjects([self serverValue:@"SELECT count(*)::text FROM query_edit_test.nokey WHERE t = 'z'" port:port], @"0");
+	}
+}
+
+- (void)testRowDeletedMeanwhileMatchesZero
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:@"SELECT id, name FROM query_edit_test.items ORDER BY id" port:port];
+		PGPostgresConnection *other = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue];
+		NSError *error = nil;
+		XCTAssertNotNil(SPPostgresExecute(other, @"DELETE FROM query_edit_test.items WHERE id = 1", nil, &error), @"%@", error);
+
+		NSInteger count = -2;
+		error = nil;
+		XCTAssertNil([editor saveValue:@"uno" row:0 column:1 matchCount:&count error:&error], @"port %@", port);
+		XCTAssertEqual([error code], SPPostgresErrorRowChanged);
+		XCTAssertEqual(count, 0);
+		XCTAssertTrue([[error localizedDescription] containsString:@"(0 matches)"], @"%@", [error localizedDescription]);
+		XCTAssertEqualObjects([editor valueAtRow:0 column:1], @"one");
+	}
+}
+
+- (void)testJoinUpdatesOnlyTheOriginTable
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:@"SELECT o.id, o.note, c.id, c.name, o.note || c.name FROM query_edit_test.orders o JOIN query_edit_test.customers c ON c.id = o.customer" port:port];
+		NSError *error = nil;
+		XCTAssertEqualObjects([editor saveValue:@"Bea" row:0 column:3 matchCount:NULL error:&error], @"Bea", @"port %@: %@", port, error);
+		XCTAssertEqualObjects([self serverValue:@"SELECT name FROM query_edit_test.customers WHERE id = 1" port:port], @"Bea");
+		XCTAssertEqualObjects([self serverValue:@"SELECT id::text || ',' || customer::text || ',' || note FROM query_edit_test.orders" port:port], @"10,1,first");
+		XCTAssertEqualObjects([editor valueAtRow:0 column:1], @"first");
+		XCTAssertEqualObjects([editor valueAtRow:0 column:4], @"firstAnn"); // an expression isn't an edit of the column
+	}
+}
+
+- (void)testMixedCaseNamesUpdate
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:@"SELECT \"Key\", \"Value\" FROM query_edit_test.\"Mixed Case\"" port:port];
+		NSError *error = nil;
+		XCTAssertEqualObjects([editor saveValue:@"w" row:0 column:1 matchCount:NULL error:&error], @"w", @"port %@: %@", port, error);
+		XCTAssertEqualObjects([self serverValue:@"SELECT \"Value\" FROM query_edit_test.\"Mixed Case\" WHERE \"Key\" = 1" port:port], @"w");
+	}
+}
+
+- (void)testEditInsideOpenTransactionKeepsItOpen
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue];
+		[self addTeardownBlock:^{ [connection execute:@"ROLLBACK"]; }];
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:@"SELECT id, name FROM query_edit_test.items ORDER BY id" connection:connection];
+		XCTAssertNotNil([connection execute:@"BEGIN"]);
+		NSError *error = nil;
+		XCTAssertEqualObjects([editor saveValue:@"uno" row:0 column:1 matchCount:NULL error:&error], @"uno", @"port %@: %@", port, error);
+		XCTAssertEqual([connection transactionStatus], PGPostgresTransactionInTransaction, @"port %@", port);
+		XCTAssertEqualObjects([[connection execute:@"SELECT name FROM query_edit_test.items WHERE id = 1"] textValueAtRow:0 column:0], @"uno");
+		XCTAssertNotNil([connection execute:@"ROLLBACK"]);
+		XCTAssertEqualObjects([self serverValue:@"SELECT name FROM query_edit_test.items WHERE id = 1" port:port], @"one");
+	}
+}
+
+- (void)testEditInsideAbortedTransactionIsRefused
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue];
+		[self addTeardownBlock:^{ [connection execute:@"ROLLBACK"]; }];
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:@"SELECT id, name FROM query_edit_test.items ORDER BY id" connection:connection];
+		XCTAssertNotNil([connection execute:@"BEGIN"]);
+		XCTAssertNil([connection execute:@"SELECT 1/0"]);
+		XCTAssertEqual([connection transactionStatus], PGPostgresTransactionInError);
+
+		NSInteger count = -2;
+		NSError *error = nil;
+		XCTAssertNil([editor saveValue:@"uno" row:0 column:1 matchCount:&count error:&error], @"port %@", port);
+		XCTAssertEqual(count, -1);
+		XCTAssertEqualObjects([error localizedDescription], @"The current transaction is aborted, so the row was not changed. Roll it back first.");
+		XCTAssertEqualObjects([editor valueAtRow:0 column:1], @"one");
+		XCTAssertNotNil([connection execute:@"ROLLBACK"]);
+		XCTAssertEqualObjects([self serverValue:@"SELECT name FROM query_edit_test.items WHERE id = 1" port:port], @"one");
+	}
+}
+
+- (void)testBadValueReportsServerError
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:@"SELECT id, name FROM query_edit_test.items ORDER BY id" port:port];
+		NSInteger count = -2;
+		NSError *error = nil;
+		XCTAssertNil([editor saveValue:@"abc" row:0 column:0 matchCount:&count error:&error], @"port %@", port);
+		XCTAssertEqual(count, -1);
+		XCTAssertTrue([[error localizedDescription] containsString:@"invalid input syntax"], @"%@", [error localizedDescription]);
+		XCTAssertEqualObjects([editor valueAtRow:0 column:0], @"1");
+	}
+}
+
+/// A cell Task 3's rule refuses before counting is refused without an UPDATE, with the same message.
+- (void)testNotEditableCellsAreRefusedWithoutUpdate
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPQueryEditStatementRecorder *recorder = [[SPQueryEditStatementRecorder alloc] init];
+		if (!self.recorders) self.recorders = [NSMutableArray array];
+		[self.recorders addObject:recorder];
+		PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_test" delegate:recorder];
+
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:@"SELECT id, twice, upper(name) FROM query_edit_test.items ORDER BY id" connection:connection];
+		NSInteger count = -2;
+		NSError *error = nil;
+		XCTAssertNil([editor saveValue:@"x" row:0 column:2 matchCount:&count error:&error], @"port %@", port);
+		XCTAssertEqual([error code], SPPostgresErrorNotEditable);
+		XCTAssertEqual(count, -1);
+		XCTAssertEqualObjects([error localizedDescription], [self noOriginMessage]);
+
+		error = nil;
+		XCTAssertNil([editor saveValue:@"4" row:0 column:1 matchCount:&count error:&error], @"port %@", port);
+		XCTAssertEqual([error code], SPPostgresErrorNotEditable);
+		XCTAssertEqualObjects([error localizedDescription], @"This column is generated, so it can't be edited.");
+
+		SPPostgresQueryResultEditor *view = [self editorForSQL:@"SELECT id, name FROM query_edit_test.items_view ORDER BY id" connection:connection];
+		error = nil;
+		XCTAssertNil([view saveValue:@"x" row:0 column:1 matchCount:&count error:&error], @"port %@", port);
+		XCTAssertEqual([error code], SPPostgresErrorNotEditable);
+		XCTAssertEqualObjects([error localizedDescription], NSLocalizedString(@"This is a view, so its rows can't be edited.", @"Postgres content: view is read-only"));
+
+		NSPredicate *updates = [NSPredicate predicateWithFormat:@"SELF CONTAINS[c] 'UPDATE'"];
+		XCTAssertEqual([[recorder.statements filteredArrayUsingPredicate:updates] count], 0u, @"port %@: %@", port, recorder.statements);
+		XCTAssertEqualObjects([self serverValue:@"SELECT name FROM query_edit_test.items WHERE id = 1" port:port], @"one");
 	}
 }
 

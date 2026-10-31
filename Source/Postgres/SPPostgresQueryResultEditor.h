@@ -55,4 +55,15 @@ __attribute__((visibility("default")))
 /// "schema"."table" of the column's origin, quoted, or nil.
 - (NSString *)qualifiedTableNameOfColumn:(NSUInteger)column;
 
+/// Sets the cell's origin column in the one row the cell's values identify. value: NSString or NSNull. On success the
+/// server's text of the new value (NSString or NSNull) replaces the cell, and every result column of the same origin
+/// column in that row, and is returned. On failure nil; matchCount (if given) is the rows the UPDATE matched when that
+/// was not 1, else -1.
+///
+/// The UPDATE (identified as -editabilityOfRow:column:matchCount:message: counts, with this editor's saved edits
+/// applied) runs through SPPostgresRunAtomically and is undone unless it changed exactly one row
+/// (SPPostgresErrorRowChanged). A cell refused before counting (no origin, not a table, generated, catalog lookup
+/// failed) fails with SPPostgresErrorNotEditable and the same message, without an UPDATE.
+- (id)saveValue:(id)value row:(NSUInteger)row column:(NSUInteger)column matchCount:(NSInteger *)matchCount error:(NSError **)error;
+
 @end
