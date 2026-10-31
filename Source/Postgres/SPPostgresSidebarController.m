@@ -2,6 +2,7 @@
 #import "SPPostgresCatalog.h"
 #import "SPPostgresTaskRunner.h"
 #import "SPPostgresSidebarInfoPane.h"
+#import "SPPostgresFeatureScope.h"
 #import "SPButtonBar.h"
 #import "SPSplitView.h"
 #import "SPConstants.h"
@@ -1026,12 +1027,31 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	[schemaPopup setEnabled:([schemaPopup numberOfItems] > 0)];
 }
 
+/**
+ * The sections the outline shows: SEQUENCES and EXTENSIONS only while this build's scope has their feature
+ * (SPPostgresFeatureScope); their lists are still loaded, but never shown or selectable.
+ */
+- (NSArray *)_visibleSections
+{
+	BOOL sequences = SPPostgresFeatureIsAvailable(SPPostgresFeatureSequences);
+	BOOL extensions = SPPostgresFeatureIsAvailable(SPPostgresFeatureExtensions);
+	if (sequences && extensions) return sections;
+
+	NSMutableArray *visible = [NSMutableArray arrayWithCapacity:[sections count]];
+	for (SPPostgresSidebarItem *section in sections) {
+		if (!sequences && [[section title] isEqualToString:SPPostgresSidebarSequences]) continue;
+		if (!extensions && [[section title] isEqualToString:SPPostgresSidebarExtensions]) continue;
+		[visible addObject:section];
+	}
+	return visible;
+}
+
 - (void)_reloadOutline
 {
 	reloading = YES;
 	[outlineView deselectAll:nil];
 	[outlineView reloadData];
-	for (SPPostgresSidebarItem *section in sections) [outlineView expandItem:section];
+	for (SPPostgresSidebarItem *section in [self _visibleSections]) [outlineView expandItem:section];
 	reloading = NO;
 }
 
@@ -1079,7 +1099,7 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 
 - (NSArray *)sectionTitles
 {
-	return [sections valueForKey:@"title"];
+	return [[self _visibleSections] valueForKey:@"title"];
 }
 
 - (NSArray *)itemTitlesInSection:(NSString *)sectionTitle
@@ -1165,12 +1185,14 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 - (BOOL)selectSequenceNamed:(NSString *)name
 {
 	if (!name) return [self selectTableNamed:nil];
+	if (!SPPostgresFeatureIsAvailable(SPPostgresFeatureSequences)) return NO;
 	return [self _selectItemNamed:name inSection:SPPostgresSidebarSequences];
 }
 
 - (BOOL)selectExtensionNamed:(NSString *)name
 {
 	if (!name) return [self selectTableNamed:nil];
+	if (!SPPostgresFeatureIsAvailable(SPPostgresFeatureExtensions)) return NO;
 	return [self _selectItemNamed:name inSection:SPPostgresSidebarExtensions];
 }
 
@@ -1441,6 +1463,11 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 	BOOL onExtension = ([item kind] == SPPostgresSidebarExtension);
 	BOOL onExtensionsHeader = ([item kind] == SPPostgresSidebarSection && [[self _sectionNamed:SPPostgresSidebarExtensions] isEqual:item]);
 
+	// Sections this build's scope hides (SPPostgresFeatureScope) have no rows: empty space gets the table menu then
+	BOOL extensionsShown = SPPostgresFeatureIsAvailable(SPPostgresFeatureExtensions);
+	if (!SPPostgresFeatureIsAvailable(SPPostgresFeatureSequences)) onSequence = onSequencesHeader = NO;
+	if (!extensionsShown) onExtension = onExtensionsHeader = NO;
+
 	if (onSequence || onSequencesHeader) {
 		// Delete acts on a sequence only
 		[deleteSequenceItem setHidden:!onSequence];
@@ -1448,7 +1475,7 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 	}
 
 	// Empty space is below EXTENSIONS, the last section
-	if (!item || onExtension || onExtensionsHeader) {
+	if ((!item && extensionsShown) || onExtension || onExtensionsHeader) {
 		// Drop acts on an extension only
 		[dropExtensionItem setHidden:!onExtension];
 		return extensionMenu;
@@ -1461,6 +1488,12 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 {
 	SEL action = [item action];
 	if (!actionsEnabled || invalidated) return NO;
+
+	// The items of features this build's scope holds back (SPPostgresFeatureScope) are disabled
+	if ((action == @selector(addSequence:) || action == @selector(deleteSequence:)) && !SPPostgresFeatureIsAvailable(SPPostgresFeatureSequences)) return NO;
+	if ((action == @selector(installExtension:) || action == @selector(dropExtension:)) && !SPPostgresFeatureIsAvailable(SPPostgresFeatureExtensions)) return NO;
+	if (action == @selector(exportRelations:) && !SPPostgresFeatureIsAvailable(SPPostgresFeatureImportExport)) return NO;
+	if ((action == @selector(showCreateSyntax:) || action == @selector(copyCreateSyntax:)) && !SPPostgresFeatureIsAvailable(SPPostgresFeatureCreateSyntax)) return NO;
 
 	if (action == @selector(addSequence:)) {
 		return [selectedSchema length] && [delegate respondsToSelector:@selector(sidebar:addSequenceInSchema:)];
@@ -1604,12 +1637,12 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 
 - (NSInteger)outlineView:(NSOutlineView *)theOutlineView numberOfChildrenOfItem:(id)item
 {
-	return item ? (NSInteger)[[(SPPostgresSidebarItem *)item children] count] : (NSInteger)[sections count];
+	return item ? (NSInteger)[[(SPPostgresSidebarItem *)item children] count] : (NSInteger)[[self _visibleSections] count];
 }
 
 - (id)outlineView:(NSOutlineView *)theOutlineView child:(NSInteger)index ofItem:(id)item
 {
-	NSArray *children = item ? [(SPPostgresSidebarItem *)item children] : sections;
+	NSArray *children = item ? [(SPPostgresSidebarItem *)item children] : [self _visibleSections];
 	return [children objectAtIndex:(NSUInteger)index];
 }
 
