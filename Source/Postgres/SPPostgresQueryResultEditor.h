@@ -12,7 +12,8 @@ typedef NS_ENUM(NSInteger, SPPostgresCellEditability) {
 	SPPostgresCellNotATable,               // view, materialized view, foreign table…
 	SPPostgresCellGeneratedColumn,         // GENERATED … STORED or GENERATED ALWAYS identity
 	SPPostgresCellCheckFailed,             // catalog lookup, plan or count failed (aborted transaction, lost connection)
-	SPPostgresCellOriginRepeated           // the origin table is read more than once by the statement (a self-join)
+	SPPostgresCellOriginRepeated,          // the origin table is read more than once by the statement (a self-join)
+	SPPostgresCellOuterJoinMissingRow      // the plan has an outer join and the row's values of the origin are all NULL
 };
 
 /**
@@ -32,9 +33,15 @@ typedef NS_ENUM(NSInteger, SPPostgresCellEditability) {
  * (SELECT … FROM the same table)) also refuses it. Comparing every column of the table is defence in depth on top of
  * that, and also refuses an edit once another shown column of its row has changed.
  *
- * The origin tables' columns, their partitions/children and the statement's plan are read once per editor (a failed
- * lookup, including a plan whose WITH query can't be found, that uses an extension's Custom Scan naming no relation,
- * which may hide reads, or that is too large to walk, is SPPostgresCellCheckFailed and retried on the next check).
+ * An outer join NULL-extends the rows it finds no match for: every column of the missing table shows NULL, and
+ * comparing them ("c" IS NULL …) would identify a real row of it. So when the plan has a Left, Right or Full join, a
+ * cell whose row shows NULL in every column of its origin table is refused before any count
+ * (SPPostgresCellOuterJoinMissingRow), also a real row that looks the same.
+ *
+ * The origin tables' columns, their partitions/children and the statement's plan (its reads and whether it has an
+ * outer join) are read once per editor (a failed lookup, including a plan whose WITH query can't be found, that uses
+ * an extension's Custom Scan naming no relation, which may hide reads, or that is too large to walk, is
+ * SPPostgresCellCheckFailed and retried on the next check).
  * Reads run through SPPostgresRunGuardedRead, so inside the user's open transaction a failure leaves it open.
  * Identifiers are quoted and values sent as parameters.
  */
@@ -46,6 +53,7 @@ __attribute__((visibility("default")))
 	NSString *_statement;
 	NSDictionary *_tables;          // origin OID (NSNumber) -> table info
 	NSSet *_repeatedOrigins;        // origin OIDs (NSNumber) the statement's plan reads more than once
+	BOOL _hasOuterJoin;             // the statement's plan has a Left, Right or Full join
 	NSMutableDictionary *_edits;    // NSIndexPath (row, column) -> saved value (NSString / NSNull)
 }
 
@@ -61,6 +69,10 @@ __attribute__((visibility("default")))
 /// reads), or takes more than 10,000 node visits to walk ("This query is too complex to check which rows it shows.").
 /// Used by the check; exposed for tests.
 + (NSArray *)readsInPlan:(id)explained error:(NSError **)error;
+
+/// Whether a parsed EXPLAIN (FORMAT JSON) plan has an outer join anywhere ("Join Type" Left, Right or Full), whose
+/// NULL-extended rows show NULL for every column of a table they have no row of. Exposed for tests.
++ (BOOL)planHasOuterJoin:(id)explained;
 
 - (NSUInteger)rowCount;
 - (NSUInteger)columnCount;
@@ -88,7 +100,8 @@ __attribute__((visibility("default")))
 /// The UPDATE (identified as -editabilityOfRow:column:matchCount:message: counts, with this editor's saved edits
 /// applied) runs through SPPostgresRunAtomically and is undone unless it changed exactly one row
 /// (SPPostgresErrorRowChanged). A cell refused before counting (no origin, not a table, generated, table read more
-/// than once, catalog lookup or plan failed) fails with SPPostgresErrorNotEditable and the same message, without an UPDATE.
+/// than once, an outer join's possibly missing row, catalog lookup or plan failed) fails with
+/// SPPostgresErrorNotEditable and the same message, without an UPDATE.
 - (id)saveValue:(id)value row:(NSUInteger)row column:(NSUInteger)column matchCount:(NSInteger *)matchCount error:(NSError **)error;
 
 @end

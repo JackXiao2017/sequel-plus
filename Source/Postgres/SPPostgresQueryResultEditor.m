@@ -180,6 +180,20 @@ static BOOL SPQueryEditCollectReads(id node, NSArray *appendGroup, NSArray *pref
 	return YES;
 }
 
+/// Whether node's subtree (every node of it once: WITH queries' plans and SubPlans are in the tree) has a join whose
+/// "Join Type" is Left, Right or Full: one that NULL-extends rows (Semi and Anti joins, and PostgreSQL 16's Right Anti,
+/// don't).
+static BOOL SPQueryEditHasOuterJoin(id node)
+{
+	if (![node isKindOfClass:[NSDictionary class]]) return NO;
+	id type = [node objectForKey:@"Join Type"];
+	if ([type isEqual:@"Left"] || [type isEqual:@"Right"] || [type isEqual:@"Full"]) return YES;
+	for (id child in SPQueryEditChildren(node)) {
+		if (SPQueryEditHasOuterJoin(child)) return YES;
+	}
+	return NO;
+}
+
 @implementation SPPostgresQueryResultEditor
 
 @synthesize result = _result;
@@ -209,6 +223,15 @@ static BOOL SPQueryEditCollectReads(id node, NSArray *appendGroup, NSArray *pref
 		}
 	}
 	return reads;
+}
+
++ (BOOL)planHasOuterJoin:(id)explained
+{
+	if (![explained isKindOfClass:[NSArray class]]) return NO;
+	for (id statementPlan in explained) {
+		if ([statementPlan isKindOfClass:[NSDictionary class]] && SPQueryEditHasOuterJoin([statementPlan objectForKey:@"Plan"])) return YES;
+	}
+	return NO;
 }
 
 - (instancetype)initWithResult:(PGPostgresResult *)result connection:(PGPostgresConnection *)connection statement:(NSString *)statement
@@ -275,7 +298,8 @@ static BOOL SPQueryEditCollectReads(id node, NSArray *appendGroup, NSArray *pref
  * - each origin's family: itself and its partitions / inheritance children, recursively;
  * - the statement's plan (EXPLAIN without ANALYZE: planned, not executed, but locks are taken and immutable / stable
  *   functions may be evaluated while planning), to find the origins read more than once: those whose family's reads
- *   form more than one group (see +readsInPlan:error:), counting a read through a CTE once per scan of the CTE.
+ *   form more than one group (see +readsInPlan:error:), counting a read through a CTE once per scan of the CTE,
+ *   and whether it has an outer join (see +planHasOuterJoin:).
  * A failure (no statement, one that can't be explained, a plan reading a CTE it doesn't contain, using an extension's
  * Custom Scan without a relation or too large to walk, an aborted transaction) is not cached, so the next check retries.
  */
@@ -337,6 +361,7 @@ static BOOL SPQueryEditCollectReads(id node, NSArray *appendGroup, NSArray *pref
 	}
 	NSArray *scans = [[self class] readsInPlan:explained error:error];
 	if (!scans) return NO;
+	BOOL outerJoin = [[self class] planHasOuterJoin:explained];
 
 	// Each origin's reads: the groups of the scans of its family
 	NSMutableDictionary *originsByRelation = [NSMutableDictionary dictionary]; // @[schema, name] -> origin OIDs
@@ -382,6 +407,7 @@ static BOOL SPQueryEditCollectReads(id node, NSArray *appendGroup, NSArray *pref
 	}
 	_tables = [tables copy];
 	_repeatedOrigins = [repeated copy];
+	_hasOuterJoin = outerJoin;
 	return YES;
 }
 
@@ -526,6 +552,22 @@ static BOOL SPQueryEditCollectReads(id node, NSArray *appendGroup, NSArray *pref
 	return SPPostgresCellEditable;
 }
 
+/**
+ * Step 5, before the count: with an outer join in the plan, a row whose values of the origin table oid (every
+ * identifying column, with saved edits applied) are all NULL may be a NULL-extended row, standing for no row of that
+ * table, while "c" IS NULL … would identify a real one. Such a row can't be told from a real row whose shown columns
+ * are all NULL, so both are refused (SPPostgresCellOuterJoinMissingRow, with the message to show).
+ */
+- (SPPostgresCellEditability)rowCheckOfRow:(NSUInteger)row origin:(unsigned int)oid message:(NSString **)message
+{
+	if (!_hasOuterJoin) return SPPostgresCellEditable;
+	for (NSNumber *identifying in [self identifyingColumnsForOrigin:oid]) {
+		if ([[self valueAtRow:row column:[identifying unsignedIntegerValue]] isKindOfClass:[NSString class]]) return SPPostgresCellEditable;
+	}
+	if (message) *message = NSLocalizedString(@"This cell may come from an outer join's missing row, so its row can't be identified.", @"Postgres query result: a NULL-extended row of an outer join");
+	return SPPostgresCellOuterJoinMissingRow;
+}
+
 - (SPPostgresCellEditability)editabilityOfRow:(NSUInteger)row column:(NSUInteger)column
 								   matchCount:(NSInteger *)matchCount message:(NSString **)message
 {
@@ -537,7 +579,11 @@ static BOOL SPQueryEditCollectReads(id node, NSArray *appendGroup, NSArray *pref
 	if (origin != SPPostgresCellEditable) return origin;
 	unsigned int oid = [self originOfColumn:column];
 
-	// 5–6. Count the rows the identifying values match
+	// 5. Maybe an outer join's missing row
+	SPPostgresCellEditability missing = [self rowCheckOfRow:row origin:oid message:message];
+	if (missing != SPPostgresCellEditable) return missing;
+
+	// 6. Count the rows the identifying values match
 	NSMutableArray *values = [NSMutableArray array];
 	NSString *sql = [NSString stringWithFormat:@"SELECT count(*) FROM %@ WHERE %@", [self qualifiedName:table],
 					 [self whereClauseForRow:row origin:oid values:values]];
@@ -596,6 +642,10 @@ static BOOL SPQueryEditCollectReads(id node, NSArray *appendGroup, NSArray *pref
 	}
 
 	unsigned int oid = [self originOfColumn:column];
+	if ([self rowCheckOfRow:row origin:oid message:&message] != SPPostgresCellEditable) {
+		if (error) *error = SPPostgresMakeError(SPPostgresErrorNotEditable, message, nil);
+		return nil;
+	}
 	NSInteger attnum = [_result tableColumnForField:column];
 	NSDictionary *originColumn = [self originColumnOfColumn:column];
 	NSString *name = SPPostgresQuoteIdentifier([originColumn objectForKey:SPQueryEditNameKey]);
