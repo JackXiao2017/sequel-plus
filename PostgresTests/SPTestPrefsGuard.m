@@ -1,5 +1,6 @@
 #import "SPTestPrefsGuard.h"
 #import "../Source/Postgres/SPPostgresQueryStore.h"
+#import "../Source/Postgres/SPPostgresFeatureScope.h"
 #import <objc/runtime.h>
 #import <XCTest/XCTest.h>
 
@@ -42,6 +43,10 @@ static const void *SPRequestedAutosaveNameKey = &SPRequestedAutosaveNameKey;
  *
  * - Sparkle's automatic update checks are off (SUEnableAutomaticChecks reads NO from the volatile argument
  *   domain, and a check already scheduled is dropped), so no check runs in the middle of a test.
+ *
+ * - Postgres tabs have every feature (SPPostgresFeatureScopeSetFullScopeForTesting(YES)), not the release's scope
+ *   (SPPostgresFeatureScope.m), so the tests of features a release holds back keep exercising them. It is set again
+ *   before every test, so a test of the release scope (SPPostgresFeatureScopeTests, which sets NO) can't leak it.
  *
  * All are in place before any test runs (+load runs when the bundle is loaded).
  *
@@ -89,6 +94,9 @@ static NSString *SPTestQueryStoreDirectory = nil;
 
 + (void)load
 {
+	// Every Postgres feature, whatever the release's scope (see the comment above)
+	SPPostgresFeatureScopeSetFullScopeForTesting(YES);
+
 	Method original = class_getInstanceMethod([NSToolbar class], @selector(setAutosavesConfiguration:));
 	Method replacement = class_getInstanceMethod([NSToolbar class], @selector(sp_test_setAutosavesConfiguration:));
 	method_exchangeImplementations(original, replacement);
@@ -134,6 +142,12 @@ static NSString *SPTestQueryStoreDirectory = nil;
 		id updater = [updaterClass respondsToSelector:@selector(sharedUpdater)] ? [updaterClass performSelector:@selector(sharedUpdater)] : nil;
 		if ([updater respondsToSelector:@selector(resetUpdateCycle)]) [updater performSelector:@selector(resetUpdateCycle)];
 	});
+}
+
+/// Each test starts with the full Postgres feature scope (a test of the release scope sets its own in -setUp).
+- (void)testCaseWillStart:(XCTestCase *)testCase
+{
+	SPPostgresFeatureScopeSetFullScopeForTesting(YES);
 }
 
 /// The redirected shared stores' files are removed, so the next test starts with no history or favorites (the stores

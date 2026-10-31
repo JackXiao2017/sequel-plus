@@ -26,6 +26,7 @@
 #import "SPPostgresTableActions.h"
 #import "SPPostgresCreateStatement.h"
 #import "SPPostgresSidebarInfoPane.h"
+#import "SPPostgresFeatureScope.h"
 #import "SPPostgresConsoleLogger.h"
 #import "SPPostgresCatalog.h"
 #import "SPPostgresConnector.h"
@@ -982,6 +983,25 @@ NSString * const SPPostgresPaneExtension = @"extension";
 			 @"columns": columns ?: @[]};
 }
 
+/// The feature a pane belongs to (see SPPostgresFeatureScope.h): unknown names are Content's.
+static SPPostgresFeature SPPostgresFeatureForPane(NSString *pane)
+{
+	if ([pane isEqualToString:SPPostgresPaneStructure]) return SPPostgresFeatureStructure;
+	if ([pane isEqualToString:SPPostgresPaneRelations]) return SPPostgresFeatureRelations;
+	if ([pane isEqualToString:SPPostgresPaneTriggers]) return SPPostgresFeatureTriggers;
+	if ([pane isEqualToString:SPPostgresPaneInfo]) return SPPostgresFeatureTableInfo;
+	if ([pane isEqualToString:SPPostgresPaneSequence]) return SPPostgresFeatureSequences;
+	if ([pane isEqualToString:SPPostgresPaneExtension]) return SPPostgresFeatureExtensions;
+	if ([pane isEqualToString:SPPostgresPaneQuery]) return SPPostgresFeatureQuery;
+	return SPPostgresFeatureContent;
+}
+
+/// Whether this build's scope has the pane (SPPostgresFeatureIsAvailable): a pane it holds back is never shown.
+static BOOL SPPostgresPaneIsInScope(NSString *pane)
+{
+	return SPPostgresFeatureIsAvailable(SPPostgresFeatureForPane(pane));
+}
+
 /// The known pane names, in toolbar order.
 - (NSArray *)_paneNames
 {
@@ -1030,6 +1050,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 - (BOOL)_canShowPane:(NSString *)pane
 {
 	if (tornDown || !pane) return NO;
+	// A pane this build's scope holds back (SPPostgresFeatureScope) is never enabled
+	if (!SPPostgresPaneIsInScope(pane)) return NO;
 	if ([pane isEqualToString:SPPostgresPaneQuery]) return YES;
 	if ([pane isEqualToString:SPPostgresPaneSequence]) return [[sidebar selectedSequenceName] length] > 0;
 	if ([pane isEqualToString:SPPostgresPaneExtension]) return [[sidebar selectedExtensionName] length] > 0;
@@ -1111,6 +1133,9 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	BOOL hasExtension = [[sidebar selectedExtensionName] length] > 0;
 	if (hasExtension && ![pane isEqualToString:SPPostgresPaneQuery]) pane = SPPostgresPaneExtension;
 	if (!hasExtension && [pane isEqualToString:SPPostgresPaneExtension]) pane = paneBeforeExtension ?: SPPostgresPaneContent;
+	// A pane this build's scope holds back (SPPostgresFeatureScope; e.g. from History, Add Table, Open in New Tab)
+	// shows Content instead: the tab is never left on a disabled pane
+	if (!SPPostgresPaneIsInScope(pane)) pane = SPPostgresPaneContent;
 
 	NSView *container = [self _rightPane];
 	if (!container) return;
@@ -1953,6 +1978,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// "Add Sequence…": the sheet (after the shown pane's edits are applied); on Add, the sequence is created and selected.
 - (void)sidebar:(SPPostgresSidebarController *)theSidebar addSequenceInSchema:(NSString *)schema
 {
+	if (!SPPostgresFeatureIsAvailable(SPPostgresFeatureSequences)) return;
 	if (tornDown || addSequenceSheet || duplicateSheet || renameSheet || ![schema length] || !parentWindow || isProcessing || [parentWindow attachedSheet]) return;
 	if (![self _endPaneEditing] || ![parentWindow makeFirstResponder:nil]) return;
 
@@ -1991,6 +2017,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// dropped, and they are listed.
 - (void)sidebar:(SPPostgresSidebarController *)theSidebar deleteSequenceNamed:(NSString *)name
 {
+	if (!SPPostgresFeatureIsAvailable(SPPostgresFeatureSequences)) return;
 	if (tornDown || ![name length] || isProcessing) return;
 	if (![self _endPaneEditing]) return;
 
@@ -2303,6 +2330,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
  */
 - (void)sidebar:(SPPostgresSidebarController *)theSidebar exportRelations:(NSArray<NSString *> *)names format:(NSInteger)format
 {
+	if (!SPPostgresFeatureIsAvailable(SPPostgresFeatureImportExport)) return;
 	if (tornDown || ![names count]) return;
 
 	SPPostgresExportController *previous = exportController;
@@ -2341,6 +2369,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
  */
 - (void)sidebar:(SPPostgresSidebarController *)theSidebar showCreateSyntaxForRelations:(NSArray<NSString *> *)names copy:(BOOL)copy
 {
+	if (!SPPostgresFeatureIsAvailable(SPPostgresFeatureCreateSyntax)) return;
 	if (tornDown || ![names count] || isProcessing) return;
 	// An edit in progress is saved first, so the statements include it (as the other table actions)
 	if (![self _endPaneEditing]) return;
@@ -2649,6 +2678,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// schema selected in the left panel; on Install, the lists reload and the new extension is selected.
 - (IBAction)showInstallExtensionSheet:(id)sender
 {
+	if (!SPPostgresFeatureIsAvailable(SPPostgresFeatureExtensions)) return;
 	if (tornDown || installExtensionSheet || addSequenceSheet || duplicateSheet || renameSheet || !parentWindow || isProcessing || [parentWindow attachedSheet]) return;
 	if (![self _endPaneEditing] || ![parentWindow makeFirstResponder:nil]) return;
 
@@ -2687,6 +2717,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// they are listed.
 - (void)sidebar:(SPPostgresSidebarController *)theSidebar dropExtensionNamed:(NSString *)name
 {
+	if (!SPPostgresFeatureIsAvailable(SPPostgresFeatureExtensions)) return;
 	if (tornDown || ![name length] || isProcessing) return;
 	if (![self _endPaneEditing]) return;
 
@@ -3063,7 +3094,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// The History control's segments follow canGoBack/canGoForward (both off while a database switch connects).
 - (void)_updateHistoryControl
 {
-	BOOL enabled = !tornDown && !isProcessing && !confirmingSwitch;
+	// Off for good while this build's scope holds Table History back (SPPostgresFeatureScope); entries are still recorded
+	BOOL enabled = !tornDown && !isProcessing && !confirmingSwitch && SPPostgresFeatureIsAvailable(SPPostgresFeatureTableHistory);
 	[historyControl setEnabled:enabled && [history canGoBack] forSegment:0];
 	[historyControl setEnabled:enabled && [history canGoForward] forSegment:1];
 }
@@ -3089,6 +3121,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// Shows the previous (back) or next history entry, switching database first if it is in another one.
 - (void)_goBackInHistory:(BOOL)back
 {
+	if (!SPPostgresFeatureIsAvailable(SPPostgresFeatureTableHistory)) return;
 	if (tornDown || isProcessing || confirmingSwitch) return;
 
 	// As MySQL's (couldCommitCurrentViewActions): an edit in progress in the shown pane is ended (saved) first. A list
@@ -3688,13 +3721,14 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	if (action == @selector(viewQuery:)) return [self _canSwitchToPane:SPPostgresPaneQuery];
 
 	if (action == @selector(showUserManager:)) return [self _canShowUsers];
-	if (action == @selector(export:)) return [self _canRunSheetJob];
-	if (action == @selector(import:)) return [self _canRunSheetJob];
+	if (action == @selector(export:) || action == @selector(exportQueryResult:)) return [self _canImportExport];
+	if (action == @selector(import:)) return [self _canImportExport];
 	if (action == @selector(showTransfer:)) return [self _canShowTransfer];
+	if (action == @selector(showInstallExtensionSheet:)) return !isProcessing && SPPostgresFeatureIsAvailable(SPPostgresFeatureExtensions);
 
 	// View > Back/Forward In History (tags 0 and 1), as MySQL's
 	if (action == @selector(backForwardInHistory:)) {
-		if (isProcessing) return NO;
+		if (isProcessing || !SPPostgresFeatureIsAvailable(SPPostgresFeatureTableHistory)) return NO;
 		return ([item tag] == 0) ? [history canGoBack] : [history canGoForward];
 	}
 
@@ -3837,6 +3871,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 	if ([identifier isEqualToString:SPMainToolbarUserManager]) return [self _canShowUsers];
 	if ([identifier isEqualToString:SPMainToolbarTransfer]) return [self _canShowTransfer];
+	// The control's segments follow -_updateHistoryControl; the item itself is off while the scope holds History back
+	if ([identifier isEqualToString:SPMainToolbarHistoryNavigation]) return !tornDown && SPPostgresFeatureIsAvailable(SPPostgresFeatureTableHistory);
 
 	// The pane items: see -_canSwitchToPane:
 	NSString *pane = [self _paneForToolbarIdentifier:identifier];
@@ -3909,7 +3945,14 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// The Users sheet can open: connected, not processing (a database switch), and no sheet is attached.
 - (BOOL)_canShowUsers
 {
-	return [self _canRunSheetJob];
+	return SPPostgresFeatureIsAvailable(SPPostgresFeatureUsers) && [self _canRunSheetJob];
+}
+
+/// File ▸ Import… and Export… (and the table list's and Query view's exports) can open: a sheet job can, and this
+/// build's scope has Import/Export (SPPostgresFeatureScope).
+- (BOOL)_canImportExport
+{
+	return SPPostgresFeatureIsAvailable(SPPostgresFeatureImportExport) && [self _canRunSheetJob];
 }
 
 /// The sheet of a job (Users, Export, Import, Transfer) can open: connected, not processing (a database switch), no sheet
@@ -4031,7 +4074,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 - (void)_beginExportChoosingQueryResult:(BOOL)queryResult
 {
-	if (![self _canRunSheetJob] || ![currentDatabase length]) return;
+	if (![self _canImportExport] || ![currentDatabase length]) return;
 
 	SPPostgresExportController *controller = [[SPPostgresExportController alloc] initWithDocument:self];
 	exportController = controller; // released when it ends
@@ -4050,7 +4093,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 /// The Transfer sheet can open: a sheet job can (see -_canRunSheetJob) and a database is selected (the one copied).
 - (BOOL)_canShowTransfer
 {
-	return [self _canRunSheetJob] && [currentDatabase length] > 0;
+	return SPPostgresFeatureIsAvailable(SPPostgresFeatureTransfer) && [self _canRunSheetJob] && [currentDatabase length] > 0;
 }
 
 - (IBAction)showTransfer:(id)sender
@@ -4072,7 +4115,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 - (IBAction)import:(id)sender
 {
-	if (![self _canRunSheetJob] || ![currentDatabase length]) return;
+	if (![self _canImportExport] || ![currentDatabase length]) return;
 	// An edit in progress is saved first: the import's end reloads the lists and panes (see -importDidChangeDatabase)
 	if (![self _endPaneEditing]) return;
 

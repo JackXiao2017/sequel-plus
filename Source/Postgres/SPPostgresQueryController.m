@@ -1,4 +1,5 @@
 #import "SPPostgresQueryController.h"
+#import "SPPostgresFeatureScope.h"
 #import "SPPostgresStatementSplitter.h"
 #import "SPPostgresConsoleLogger.h"
 #import "SPPostgresTableData.h"
@@ -597,7 +598,8 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 - (void)_updateExportItem
 {
 	if (invalidated) return;
-	[exportCSVMenuItem setEnabled:(result != nil) && ![taskRunner isBusy]];
+	// Held back (disabled) while this build's scope has no Import/Export (SPPostgresFeatureScope)
+	[exportCSVMenuItem setEnabled:(result != nil) && ![taskRunner isBusy] && SPPostgresFeatureIsAvailable(SPPostgresFeatureImportExport)];
 }
 
 #pragma mark - Preferences
@@ -2354,7 +2356,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 /// Results gear ▸ Export Result ▸ As CSV file… (the tab's Export sheet, on the query result).
 - (IBAction)exportResultAsCSV:(id)sender
 {
-	if (invalidated || !result || [taskRunner isBusy]) {
+	if (invalidated || !result || [taskRunner isBusy] || !SPPostgresFeatureIsAvailable(SPPostgresFeatureImportExport)) {
 		NSBeep();
 		return;
 	}

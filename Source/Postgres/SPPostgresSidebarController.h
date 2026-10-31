@@ -115,10 +115,12 @@ __attribute__((visibility("default")))
 /// shown when the reload is applied.
 - (void)reloadKeepingSelection:(void (^)(BOOL loaded))completion;
 
-/// @[@"TABLES", @"VIEWS", @"SEQUENCES", @"EXTENSIONS"]: Extensions is always last.
+/// @[@"TABLES", @"VIEWS", @"SEQUENCES", @"EXTENSIONS"]: Extensions is always last. The sections the outline shows: SEQUENCES
+/// and EXTENSIONS only while the build's scope has them (SPPostgresFeatureScope; 2.0.0-RC1: @[@"TABLES", @"VIEWS"]).
 - (NSArray *)sectionTitles;
 
-/// Names listed under a section (tables, views, sequences or extension names), in display order.
+/// Names listed under a section (tables, views, sequences or extension names), in display order (also for a section
+/// the scope hides: its list is still loaded, but never shown or selectable).
 - (NSArray *)itemTitlesInSection:(NSString *)sectionTitle;
 
 /// Selects a table or view of the selected schema in the outline; NO if it is not listed. nil clears the selection.
