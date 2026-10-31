@@ -1,0 +1,290 @@
+#import "SPPostgresQueryResultEditor.h"
+#import "SPPostgresTableData.h"
+#import "SPPostgresErrors.h"
+#import <PostgresKit/PostgresKit.h>
+
+// Keys of an origin table's info (see -loadTables:) and of each of its columns.
+static NSString * const SPQueryEditSchemaKey = @"schema";
+static NSString * const SPQueryEditNameKey = @"name";
+static NSString * const SPQueryEditKindKey = @"kind";
+static NSString * const SPQueryEditColumnsKey = @"columns";     // attnum (NSNumber) -> column info
+static NSString * const SPQueryEditTypeKey = @"type";
+static NSString * const SPQueryEditNullableKey = @"nullable";
+static NSString * const SPQueryEditGeneratedKey = @"generated";
+static NSString * const SPQueryEditKeyPositionKey = @"pkpos";
+
+/// Why a check failed inside an aborted transaction.
+static NSString *SPQueryEditAbortedMessage(void)
+{
+	return NSLocalizedString(@"The current transaction is aborted, so the cell can't be checked for editing. Roll it back first.", @"Postgres query result: edit check inside an aborted transaction");
+}
+
+@implementation SPPostgresQueryResultEditor
+
+@synthesize result = _result;
+
+- (instancetype)initWithResult:(PGPostgresResult *)result connection:(PGPostgresConnection *)connection
+{
+	if ((self = [super init])) {
+		_result = [result retain];
+		_connection = [connection retain];
+		_edits = [[NSMutableDictionary alloc] init];
+	}
+	return self;
+}
+
+- (void)dealloc
+{
+	[_result release];
+	[_connection release];
+	[_tables release];
+	[_edits release];
+	[super dealloc];
+}
+
+#pragma mark - Values
+
+- (NSUInteger)rowCount
+{
+	return [_result returnsRows] ? (NSUInteger)[_result numberOfRows] : 0;
+}
+
+- (NSUInteger)columnCount
+{
+	return [_result numberOfFields];
+}
+
+- (NSIndexPath *)keyForRow:(NSUInteger)row column:(NSUInteger)column
+{
+	NSUInteger indexes[2] = {row, column};
+	return [NSIndexPath indexPathWithIndexes:indexes length:2];
+}
+
+- (id)valueAtRow:(NSUInteger)row column:(NSUInteger)column
+{
+	id edited = [_edits objectForKey:[self keyForRow:row column:column]];
+	if (edited) return edited;
+	id value = [_result textValueAtRow:row column:column];
+	return [value isKindOfClass:[NSString class]] ? value : [NSNull null];
+}
+
+#pragma mark - Catalog
+
+/// The origin table OID of a result column, or 0 when it is not a plain table column.
+- (unsigned int)originOfColumn:(NSUInteger)column
+{
+	if (column >= [_result numberOfFields] || [_result tableColumnForField:column] <= 0) return 0;
+	return [_result tableOIDForField:column];
+}
+
+/**
+ * Reads, once per editor, every live column of every origin table of the result, in one query: per table its schema,
+ * name and relkind; per column its name, type, nullability, whether it is generated and its primary-key position.
+ * A failure is not cached, so the next check retries.
+ */
+- (BOOL)loadTables:(NSError **)error
+{
+	if (_tables) return YES;
+
+	NSMutableOrderedSet *oids = [NSMutableOrderedSet orderedSet];
+	for (NSUInteger column = 0; column < [self columnCount]; column++) {
+		unsigned int oid = [self originOfColumn:column];
+		if (oid) [oids addObject:[NSString stringWithFormat:@"%u", oid]];
+	}
+	if ([oids count] == 0) {
+		_tables = [[NSDictionary alloc] init];
+		return YES;
+	}
+
+	NSString *array = [NSString stringWithFormat:@"{%@}", [[oids array] componentsJoinedByString:@","]];
+	__block PGPostgresResult *catalog = nil;
+	BOOL read = SPPostgresRunGuardedRead(_connection, @"sp_query_edit_read", SPQueryEditAbortedMessage(), ^BOOL(NSError **bodyError) {
+		catalog = SPPostgresExecute(_connection,
+			@"SELECT c.oid::text AS oid, n.nspname::text AS schema, c.relname::text AS name, c.relkind::text AS kind, "
+			 "a.attnum::text AS attnum, a.attname::text AS attname, format_type(a.atttypid, -1) AS type, "
+			 "(NOT a.attnotnull)::text AS nullable, "
+			 "(a.attidentity = 'a' OR a.attgenerated <> '')::text AS generated, "
+			 // indkey is an int2vector, whose subscripts start at 0, so the 1-based position comes from WITH ORDINALITY.
+			 "COALESCE((SELECT k.ord FROM unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) WHERE k.attnum = a.attnum), 0)::text AS pkpos "
+			 "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+			 "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped "
+			 "LEFT JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary "
+			 "WHERE c.oid = ANY($1::oid[])",
+			@[array], bodyError);
+		return catalog != nil;
+	}, error);
+	if (!read) return NO;
+
+	NSMutableDictionary *tables = [NSMutableDictionary dictionary];
+	for (unsigned long long row = 0; row < [catalog numberOfRows]; row++) {
+		NSNumber *oid = @([[catalog textValueAtRow:row column:0] longLongValue]);
+		NSMutableDictionary *table = [tables objectForKey:oid];
+		if (!table) {
+			table = [NSMutableDictionary dictionaryWithObjectsAndKeys:
+				[catalog textValueAtRow:row column:1], SPQueryEditSchemaKey,
+				[catalog textValueAtRow:row column:2], SPQueryEditNameKey,
+				[catalog textValueAtRow:row column:3], SPQueryEditKindKey,
+				[NSMutableDictionary dictionary], SPQueryEditColumnsKey, nil];
+			[tables setObject:table forKey:oid];
+		}
+		NSDictionary *column = @{
+			SPQueryEditNameKey: [catalog textValueAtRow:row column:5],
+			SPQueryEditTypeKey: [catalog textValueAtRow:row column:6],
+			SPQueryEditNullableKey: @([[catalog textValueAtRow:row column:7] isEqual:@"true"]),
+			SPQueryEditGeneratedKey: @([[catalog textValueAtRow:row column:8] isEqual:@"true"]),
+			SPQueryEditKeyPositionKey: @([[catalog textValueAtRow:row column:9] integerValue])
+		};
+		[[table objectForKey:SPQueryEditColumnsKey] setObject:column forKey:@([[catalog textValueAtRow:row column:4] integerValue])];
+	}
+	_tables = [tables copy];
+	return YES;
+}
+
+/// The origin table of a result column (nil when it has none, or the catalog can't be read or doesn't know it).
+- (NSDictionary *)tableOfColumn:(NSUInteger)column
+{
+	unsigned int oid = [self originOfColumn:column];
+	if (!oid || ![self loadTables:NULL]) return nil;
+	return [_tables objectForKey:@((long long)oid)];
+}
+
+/// The origin column's info, or nil (see -tableOfColumn:).
+- (NSDictionary *)originColumnOfColumn:(NSUInteger)column
+{
+	NSDictionary *table = [self tableOfColumn:column];
+	return [[table objectForKey:SPQueryEditColumnsKey] objectForKey:@([_result tableColumnForField:column])];
+}
+
+- (NSString *)typeNameOfColumn:(NSUInteger)column
+{
+	return [[self originColumnOfColumn:column] objectForKey:SPQueryEditTypeKey];
+}
+
+- (BOOL)columnIsNullable:(NSUInteger)column
+{
+	NSNumber *nullable = [[self originColumnOfColumn:column] objectForKey:SPQueryEditNullableKey];
+	return nullable ? [nullable boolValue] : YES;
+}
+
+- (NSString *)qualifiedName:(NSDictionary *)table
+{
+	return [NSString stringWithFormat:@"%@.%@", SPPostgresQuoteIdentifier([table objectForKey:SPQueryEditSchemaKey]),
+			SPPostgresQuoteIdentifier([table objectForKey:SPQueryEditNameKey])];
+}
+
+- (NSString *)qualifiedTableNameOfColumn:(NSUInteger)column
+{
+	NSDictionary *table = [self tableOfColumn:column];
+	return table ? [self qualifiedName:table] : nil;
+}
+
+#pragma mark - Editability
+
+/// The result columns that identify a row of the origin table oid (MySQL's rule): those in its primary key, or every
+/// one of its columns when none of those is present. A column repeating an attnum counts once.
+- (NSArray *)identifyingColumnsForOrigin:(unsigned int)oid table:(NSDictionary *)table
+{
+	NSDictionary *columns = [table objectForKey:SPQueryEditColumnsKey];
+	NSMutableArray *all = [NSMutableArray array], *keys = [NSMutableArray array];
+	NSMutableSet *seen = [NSMutableSet set];
+	for (NSUInteger column = 0; column < [self columnCount]; column++) {
+		if ([self originOfColumn:column] != oid) continue;
+		NSNumber *attnum = @([_result tableColumnForField:column]);
+		NSDictionary *info = [columns objectForKey:attnum];
+		if (!info || [seen containsObject:attnum]) continue;
+		[seen addObject:attnum];
+		[all addObject:@(column)];
+		if ([[info objectForKey:SPQueryEditKeyPositionKey] integerValue] > 0) [keys addObject:@(column)];
+	}
+	return [keys count] ? keys : all;
+}
+
+- (SPPostgresCellEditability)editabilityOfRow:(NSUInteger)row column:(NSUInteger)column
+								   matchCount:(NSInteger *)matchCount message:(NSString **)message
+{
+	if (matchCount) *matchCount = -1;
+	if (message) *message = nil;
+
+	unsigned int oid = [self originOfColumn:column];
+	NSDictionary *table = nil, *originColumn = nil;
+	if (oid) {
+		NSError *error = nil;
+		if (![self loadTables:&error]) {
+			if (message) *message = [error localizedDescription];
+			return SPPostgresCellCheckFailed;
+		}
+		table = [_tables objectForKey:@((long long)oid)];
+		originColumn = [[table objectForKey:SPQueryEditColumnsKey] objectForKey:@([_result tableColumnForField:column])];
+	}
+
+	// 1. No single origin table
+	if (!originColumn) {
+		if (message) *message = NSLocalizedString(@"Field is not editable. Field has no or multiple table or database origin(s).",@"field is not editable due to no table/database");
+		return SPPostgresCellNoOrigin;
+	}
+
+	// 2. Not a table (or partitioned table)
+	NSString *kind = [table objectForKey:SPQueryEditKindKey];
+	if (![kind isEqualToString:@"r"] && ![kind isEqualToString:@"p"]) {
+		if (message) {
+			*message = ([kind isEqualToString:@"v"] || [kind isEqualToString:@"m"])
+				? NSLocalizedString(@"This is a view, so its rows can't be edited.", @"Postgres content: view is read-only")
+				: NSLocalizedString(@"This is not a table, so its rows can't be edited.", @"Postgres content: non-table is read-only");
+		}
+		return SPPostgresCellNotATable;
+	}
+
+	// 3. Generated
+	if ([[originColumn objectForKey:SPQueryEditGeneratedKey] boolValue]) {
+		if (message) *message = NSLocalizedString(@"This column is generated, so it can't be edited.", @"Postgres query result: generated column is read-only");
+		return SPPostgresCellGeneratedColumn;
+	}
+
+	// 4–5. Count the rows the identifying values match: keys compared in their own type, other columns as text
+	// (so types without = still identify their row), NULL as IS NULL.
+	NSDictionary *columns = [table objectForKey:SPQueryEditColumnsKey];
+	NSMutableArray *conditions = [NSMutableArray array], *values = [NSMutableArray array];
+	for (NSNumber *identifying in [self identifyingColumnsForOrigin:oid table:table]) {
+		NSUInteger index = [identifying unsignedIntegerValue];
+		NSDictionary *info = [columns objectForKey:@([_result tableColumnForField:index])];
+		NSString *name = SPPostgresQuoteIdentifier([info objectForKey:SPQueryEditNameKey]);
+		id value = [self valueAtRow:row column:index];
+		if (![value isKindOfClass:[NSString class]]) {
+			[conditions addObject:[NSString stringWithFormat:@"%@ IS NULL", name]];
+			continue;
+		}
+		[values addObject:value];
+		if ([[info objectForKey:SPQueryEditKeyPositionKey] integerValue] > 0) {
+			[conditions addObject:[NSString stringWithFormat:@"%@ = $%lu::%@", name, (unsigned long)[values count], [info objectForKey:SPQueryEditTypeKey]]];
+		} else {
+			[conditions addObject:[NSString stringWithFormat:@"%@::text = $%lu", name, (unsigned long)[values count]]];
+		}
+	}
+	NSString *sql = [NSString stringWithFormat:@"SELECT count(*) FROM %@ WHERE %@", [self qualifiedName:table],
+					 [conditions componentsJoinedByString:@" AND "]];
+
+	__block NSInteger count = -1;
+	NSError *error = nil;
+	BOOL counted = SPPostgresRunGuardedRead(_connection, @"sp_query_edit_read", SPQueryEditAbortedMessage(), ^BOOL(NSError **bodyError) {
+		PGPostgresResult *result = SPPostgresExecute(_connection, sql, values, bodyError);
+		if (!result) return NO;
+		count = [[result textValueAtRow:0 column:0] integerValue];
+		return YES;
+	}, &error);
+	if (!counted) {
+		if (message) *message = [error localizedDescription];
+		return SPPostgresCellCheckFailed;
+	}
+
+	// 6. Exactly one row
+	if (matchCount) *matchCount = count;
+	if (count == 1) return SPPostgresCellEditable;
+	if (count == 0) {
+		if (message) *message = [NSString stringWithFormat:NSLocalizedString(@"Field is not editable. No matching record found.\nReload data, check encoding, or try to add\na primary key field or more fields\nin your SELECT statement for table '%@'\nto identify field origin unambiguously.", @"Custom Query result editing error - could not identify original row"), [table objectForKey:SPQueryEditNameKey]];
+		return SPPostgresCellNoMatch;
+	}
+	if (message) *message = [NSString stringWithFormat:NSLocalizedString(@"Field is not editable. Couldn't identify field origin unambiguously (%ld matches).", @"Query result editing error - could not match row being edited uniquely"), (long)count];
+	return SPPostgresCellTooManyMatches;
+}
+
+@end
