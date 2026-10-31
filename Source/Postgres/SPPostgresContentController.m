@@ -5,7 +5,7 @@
 #import "SPTableView.h"
 #import "SPButtonBar.h"
 #import "SPConstants.h"
-#import "SPFieldEditorController.h"
+#import "SPPostgresFieldEditorSheet.h"
 #import "SPPostgresPaginationView.h"
 
 // MySQL's Content tab (DBView.xib): 23 pt button bar, 32 x 25 textured buttons
@@ -65,7 +65,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 
 @end
 
-@interface SPPostgresContentController () <SPFieldEditorControllerDelegate>
+@interface SPPostgresContentController ()
 
 @property (readwrite, copy) NSString *schema;
 @property (readwrite, copy) NSString *table;
@@ -130,9 +130,6 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	BOOL observingRunner;           // observing taskRunner's busy (the bar is disabled while it is)
 	BOOL observingDefaults;         // observing defaults' SPEditInSheetEnabled (editModeButton follows it)
 	BOOL fieldEditorPending;        // a field editor sheet is open (one at a time)
-	SPFieldEditorController *fieldEditor;    // the default presenter's sheet
-	void (^fieldEditorCompletion)(id);       // its completion
-	NSString *fieldEditorType;               // its field type (SPFieldEditorController doesn't retain it)
 	BOOL invalidated;
 }
 
@@ -1501,62 +1498,14 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	});
 
 	if (fieldEditorPresenter) fieldEditorPresenter(text, [column name], [column typeName], canEdit, [column nullable], once);
-	else [self _showFieldEditorWithValue:text columnName:[column name] typeName:[column typeName] editable:canEdit allowNull:[column nullable] completion:once];
-}
-
-/// MySQL's field editor as a sheet on the view's window (cancelled at once when there is none, or a sheet is up).
-- (void)_showFieldEditorWithValue:(NSString *)value columnName:(NSString *)columnName typeName:(NSString *)typeName
-						 editable:(BOOL)canEdit allowNull:(BOOL)allowNull completion:(void (^)(id newValue))completion
-{
-	NSWindow *window = [view window];
-	if (!window || [window attachedSheet] || fieldEditor) {
-		completion(nil);
-		return;
+	else {
+		// MySQL's field editor as a sheet on the view's window (cancelled at once when there is none, or a sheet is up)
+		[SPPostgresFieldEditorSheet editValue:text columnName:[column name] typeName:[column typeName] editable:canEdit
+									allowNull:[column nullable] window:[view window] completion:^(id newValue) {
+			if (!invalidated) [[tableView window] makeFirstResponder:tableView];
+			once(newValue);
+		}];
 	}
-
-	// These types trigger MySQL-only handling (JSON reformatting, the bit sheet...) that would rewrite unchanged values
-	NSArray *mySQLOnlyTypes = @[@"BIT", @"JSON", @"GEOMETRY", @"BINARY", @"VARBINARY", @"FLOAT"];
-	fieldEditorType = [([mySQLOnlyTypes containsObject:[typeName uppercaseString]] ? @"" : (typeName ?: @"")) copy];
-	fieldEditorCompletion = [completion copy];
-	fieldEditor = [[SPFieldEditorController alloc] init];
-	[fieldEditor setTextMaxLength:0];
-	[fieldEditor setFieldType:fieldEditorType];
-	[fieldEditor setAllowNULL:allowNull];
-	[fieldEditor editWithObject:value fieldName:columnName usingEncoding:NSUTF8StringEncoding isObjectBlob:NO
-					 isEditable:canEdit withWindow:window sender:self contextInfo:nil];
-}
-
-/// Asked by the field editor (as of MySQL's content and query views) for the caret to restore from an in-cell edit; a
-/// sheet here never follows one, so the caret starts at the beginning.
-- (NSRange)fieldEditorSelectedRange
-{
-	return NSMakeRange(0, 0);
-}
-
-- (void)setFieldEditorSelectedRange:(NSRange)range
-{
-}
-
-/// The field editor's result: the new value, or nil when cancelled or not editable. A file loaded into the sheet comes
-/// as NSData: sent as UTF-8 text, or refused (NSBeep, nothing sent) when it isn't UTF-8.
-- (void)processFieldEditorResult:(id)data contextInfo:(NSDictionary *)contextInfo
-{
-	if ([data isKindOfClass:[NSData class]]) {
-		NSString *text = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] autorelease];
-		if (!text) NSBeep();
-		data = text;
-	}
-
-	// Called by the field editor: released once it has returned (as MySQL's)
-	[fieldEditor autorelease];
-	fieldEditor = nil;
-	[fieldEditorType autorelease];
-	fieldEditorType = nil;
-	void (^completion)(id) = [fieldEditorCompletion autorelease];
-	fieldEditorCompletion = nil;
-
-	if (!invalidated) [[tableView window] makeFirstResponder:tableView];
-	if (completion) completion(data);
 }
 
 - (void)tableView:(NSTableView *)theTableView willDisplayCell:(id)cell forTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
