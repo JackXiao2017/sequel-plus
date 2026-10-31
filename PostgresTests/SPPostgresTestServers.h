@@ -61,6 +61,14 @@
  */
 + (void)loadStructureFixtureOnPort:(NSUInteger)port;
 
+/**
+ * The Query result editing fixture (Stage 12): schema query_edit_test with items (key, a generated column), pair
+ * (composite key), nokey (duplicate rows), "Mixed Case", customers, orders, flags, emp (a self-referencing manager),
+ * parts (list-partitioned), base with its inheritance child, pp (range-partitioned into pp1 [0,10) and pp2 [10,20))
+ * and the view items_view, dropped and rebuilt on the server at port, failing the current test if a statement fails.
+ */
++ (void)loadQueryEditFixtureOnPort:(NSUInteger)port;
+
 /// Drops what -loadStructureFixtureOnPort: built.
 + (void)dropStructureFixtureOnPort:(NSUInteger)port;
 

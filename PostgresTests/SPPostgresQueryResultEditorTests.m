@@ -33,53 +33,7 @@
 - (void)setUp
 {
 	self.continueAfterFailure = NO;
-	for (NSNumber *port in [SPPostgresTestServers ports]) [self buildFixtureOnPort:port.unsignedIntegerValue];
-}
-
-#pragma mark - Fixture
-
-/// Drops and rebuilds schema query_edit_test (items, pair, nokey, "Mixed Case", customers, orders, flags, emp, parts, base, child, pp, items_view).
-- (void)buildFixtureOnPort:(NSUInteger)port
-{
-	PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port];
-	XCTAssertNotNil(connection);
-	NSArray *statements = @[
-		@"DROP SCHEMA IF EXISTS query_edit_test CASCADE",
-		@"CREATE SCHEMA query_edit_test",
-		@"CREATE TABLE query_edit_test.items (id integer PRIMARY KEY, name text, price numeric(8,2), doc json, twice integer GENERATED ALWAYS AS (id * 2) STORED)",
-		@"INSERT INTO query_edit_test.items (id, name, price, doc) VALUES (1, 'one', 1.50, '{\"a\":1}'), (2, 'two', NULL, NULL)",
-		@"CREATE TABLE query_edit_test.pair (a integer, b integer, v text, PRIMARY KEY (a, b))",
-		@"INSERT INTO query_edit_test.pair VALUES (1, 1, 'x'), (1, 2, 'x')",
-		@"CREATE TABLE query_edit_test.nokey (n integer, t text, p point)",
-		@"INSERT INTO query_edit_test.nokey VALUES (1, 'a', '(1,1)'), (1, 'a', '(1,1)'), (2, 'b', '(2,2)')",
-		@"CREATE TABLE query_edit_test.\"Mixed Case\" (\"Key\" integer PRIMARY KEY, \"Value\" text)",
-		@"INSERT INTO query_edit_test.\"Mixed Case\" VALUES (1, 'v')",
-		@"CREATE TABLE query_edit_test.customers (id integer PRIMARY KEY, name text)",
-		@"INSERT INTO query_edit_test.customers VALUES (1, 'Ann')",
-		@"CREATE TABLE query_edit_test.orders (id integer PRIMARY KEY, customer integer, note text)",
-		@"INSERT INTO query_edit_test.orders VALUES (10, 1, 'first')",
-		@"CREATE TABLE query_edit_test.flags (b boolean, c char(4), ip inet)",
-		@"INSERT INTO query_edit_test.flags VALUES (true, 'ab', '10.0.0.1'), (false, 'cd', '10.0.0.2')",
-		@"CREATE TABLE query_edit_test.emp (id integer PRIMARY KEY, name text, dept text, manager integer)",
-		@"INSERT INTO query_edit_test.emp VALUES (1, 'boss', 'A', NULL), (2, 'worker', 'B', 1), (3, 'boss', 'B', NULL)",
-		@"CREATE TABLE query_edit_test.parts (id integer, k integer, v text, PRIMARY KEY (id, k)) PARTITION BY LIST (k)",
-		@"CREATE TABLE query_edit_test.parts_1 PARTITION OF query_edit_test.parts FOR VALUES IN (1)",
-		@"CREATE TABLE query_edit_test.parts_2 PARTITION OF query_edit_test.parts FOR VALUES IN (2)",
-		@"INSERT INTO query_edit_test.parts VALUES (1, 1, 'a'), (2, 2, 'b')",
-		@"CREATE TABLE query_edit_test.base (id integer PRIMARY KEY, v text)",
-		@"CREATE TABLE query_edit_test.child () INHERITS (query_edit_test.base)",
-		@"INSERT INTO query_edit_test.base VALUES (1, 'a')",
-		@"INSERT INTO query_edit_test.child VALUES (2, 'c')",
-		@"CREATE TABLE query_edit_test.pp (id integer, k integer, name text, PRIMARY KEY (id, k)) PARTITION BY RANGE (k)",
-		@"CREATE TABLE query_edit_test.pp1 PARTITION OF query_edit_test.pp FOR VALUES FROM (0) TO (10)",
-		@"CREATE TABLE query_edit_test.pp2 PARTITION OF query_edit_test.pp FOR VALUES FROM (10) TO (20)",
-		@"INSERT INTO query_edit_test.pp VALUES (1, 1, 'a'), (2, 11, 'x'), (1, 12, 'x')",
-		@"CREATE VIEW query_edit_test.items_view AS SELECT id, name FROM query_edit_test.items",
-	];
-	for (NSString *sql in statements) {
-		NSError *error = nil;
-		XCTAssertNotNil(SPPostgresExecute(connection, sql, nil, &error), @"%@ failed: %@", sql, error);
-	}
+	for (NSNumber *port in [SPPostgresTestServers ports]) [SPPostgresTestServers loadQueryEditFixtureOnPort:port.unsignedIntegerValue];
 }
 
 #pragma mark - Field origins

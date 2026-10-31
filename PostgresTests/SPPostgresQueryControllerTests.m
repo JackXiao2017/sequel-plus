@@ -348,8 +348,9 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	XCTAssertEqualObjects([cell stringValue], SPQueryTestNull);
 	XCTAssertEqualObjects([cell textColor], [NSColor lightGrayColor]);
 
-	// Read-only
-	XCTAssertFalse([(id<NSTableViewDelegate>)[[self grid] delegate] tableView:[self grid] shouldEditTableColumn:[self columnNamed:@"note"] row:0]);
+	// Editable cell by cell since Stage 12 (whether a cell is, is decided when its editing starts: see
+	// SPPostgresQueryEditingTests)
+	XCTAssertTrue([[self columnNamed:@"note"] isEditable]);
 	XCTAssertTrue([[self grid] isKindOfClass:NSClassFromString(@"SPTableView")]);
 }
 
