@@ -49,7 +49,7 @@
 		@"CREATE TABLE query_edit_test.items (id integer PRIMARY KEY, name text, price numeric(8,2), doc json, twice integer GENERATED ALWAYS AS (id * 2) STORED)",
 		@"INSERT INTO query_edit_test.items (id, name, price, doc) VALUES (1, 'one', 1.50, '{\"a\":1}'), (2, 'two', NULL, NULL)",
 		@"CREATE TABLE query_edit_test.pair (a integer, b integer, v text, PRIMARY KEY (a, b))",
-		@"INSERT INTO query_edit_test.pair VALUES (1, 1, 'x'), (1, 2, 'y')",
+		@"INSERT INTO query_edit_test.pair VALUES (1, 1, 'x'), (1, 2, 'x')",
 		@"CREATE TABLE query_edit_test.nokey (n integer, t text, p point)",
 		@"INSERT INTO query_edit_test.nokey VALUES (1, 'a', '(1,1)'), (1, 'a', '(1,1)'), (2, 'b', '(2,2)')",
 		@"CREATE TABLE query_edit_test.\"Mixed Case\" (\"Key\" integer PRIMARY KEY, \"Value\" text)",
@@ -561,6 +561,47 @@
 		// A later edit of the row still finds it by these values
 		XCTAssertEqualObjects([editor saveValue:@"true" row:0 column:0 matchCount:NULL error:&error], @"t", @"port %@: %@", port, error);
 		XCTAssertEqualObjects([self serverValue:@"SELECT b::text || ',' || c::text || ',' || host(ip) FROM query_edit_test.flags WHERE ip = '10.0.0.5'" port:port], @"true,xy,10.0.0.5");
+	}
+}
+
+/// A key shown for only one alias of a self-join must not identify the other alias's row: m.name is compared too.
+- (void)testSelfJoinWithOneAliasKeyIsRefused
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		// e is worker (2), m is boss (1)
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:@"SELECT e.id, m.name FROM query_edit_test.emp e JOIN query_edit_test.emp m ON m.id = e.manager" port:port];
+		NSInteger count = -2;
+		NSString *message = nil;
+		XCTAssertEqual([editor editabilityOfRow:0 column:1 matchCount:&count message:&message], SPPostgresCellNoMatch, @"port %@: %@", port, message);
+		XCTAssertEqual(count, 0);
+		NSError *error = nil;
+		count = -2;
+		XCTAssertNil([editor saveValue:@"chief" row:0 column:1 matchCount:&count error:&error], @"port %@", port);
+		XCTAssertEqual([error code], SPPostgresErrorRowChanged);
+		XCTAssertEqual(count, 0);
+		XCTAssertEqualObjects([editor valueAtRow:0 column:1], @"boss");
+		XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(name, ',' ORDER BY id) FROM query_edit_test.emp" port:port], @"boss,worker");
+
+		// With e.name shown too: m.name is still refused
+		editor = [self editorForSQL:@"SELECT e.id, e.name, m.name FROM query_edit_test.emp e JOIN query_edit_test.emp m ON m.id = e.manager" port:port];
+		XCTAssertEqual([editor editabilityOfRow:0 column:2 matchCount:&count message:&message], SPPostgresCellNoMatch, @"port %@: %@", port, message);
+		XCTAssertEqual(count, 0);
+		error = nil;
+		XCTAssertNil([editor saveValue:@"chief" row:0 column:2 matchCount:&count error:&error], @"port %@", port);
+		XCTAssertEqual([error code], SPPostgresErrorRowChanged);
+		XCTAssertEqual(count, 0);
+		XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(name, ',' ORDER BY id) FROM query_edit_test.emp" port:port], @"boss,worker");
+
+		// e.name has the same origin column as m.name (PostgreSQL doesn't report the alias), so it is refused too
+		XCTAssertEqual([editor editabilityOfRow:0 column:1 matchCount:&count message:&message], SPPostgresCellNoMatch, @"port %@: %@", port, message);
+		XCTAssertEqual(count, 0);
+		error = nil;
+		XCTAssertNil([editor saveValue:@"hand" row:0 column:1 matchCount:&count error:&error], @"port %@", port);
+		XCTAssertEqual([error code], SPPostgresErrorRowChanged);
+		XCTAssertEqual(count, 0);
+		XCTAssertEqualObjects([editor valueAtRow:0 column:1], @"worker");
+		XCTAssertEqualObjects([editor valueAtRow:0 column:2], @"boss");
+		XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(name, ',' ORDER BY id) FROM query_edit_test.emp" port:port], @"boss,worker");
 	}
 }
 

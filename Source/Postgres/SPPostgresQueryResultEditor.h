@@ -15,10 +15,11 @@ typedef NS_ENUM(NSInteger, SPPostgresCellEditability) {
 };
 
 /**
- * One result of the Query tab, made editable cell by cell with MySQL's rule (SPCustomQuery's
- * fieldEditStatusForRow:andColumn:): a cell is editable when its column is a plain column of a table, and the row's
- * identifying values (the table's primary-key columns present in the result, or else every result column of that
- * table) match exactly one row of it.
+ * One result of the Query tab, made editable cell by cell as MySQL's rule (SPCustomQuery's
+ * fieldEditStatusForRow:andColumn:) does: a cell is editable when its column is a plain column of a table, and the
+ * row's values in every result column of that table (keys and non-keys, every occurrence) match exactly one row of
+ * it. Unlike MySQL, non-key columns count even when a key is shown: PostgreSQL doesn't report a field's alias, so in
+ * a self-join one alias's key would otherwise identify the other alias's row.
  *
  * The origin tables' columns are read from the catalog once per editor (one query for all of them; a failed lookup is
  * retried on the next check). Reads run through SPPostgresRunGuardedRead, so inside the user's open transaction a

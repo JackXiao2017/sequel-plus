@@ -180,27 +180,24 @@ static NSString *SPQueryEditAbortedMessage(void)
 
 #pragma mark - Editability
 
-/// The result columns that identify a row of the origin table oid (MySQL's rule): those in its primary key, or every
-/// one of its columns when none of those is present. Every occurrence counts: PostgreSQL reports a field's table and
-/// column but not its alias, so in a self-join (e.id, m.id) both are compared, and when they disagree no row matches
-/// (rather than the other alias's row). Agreeing repeats (SELECT id, name, name) are merely redundant.
+/// The result columns that identify a row of the origin table oid: every one of its columns in the result, every
+/// occurrence. MySQL uses only the primary-key columns when any is present, but PostgreSQL reports a field's table and
+/// column, not its alias: in a self-join (SELECT e.id, m.name … m.id = e.manager) e.id alone would find e's row for
+/// m.name. With every occurrence compared, aliases that disagree match no row; agreeing repeats (SELECT id, name, name)
+/// are merely redundant. So an edit is also refused when another shown column of its row changed since the run.
 - (NSArray *)identifyingColumnsForOrigin:(unsigned int)oid
 {
-	NSMutableArray *all = [NSMutableArray array], *keys = [NSMutableArray array];
+	NSMutableArray *columns = [NSMutableArray array];
 	for (NSUInteger column = 0; column < [self columnCount]; column++) {
-		if ([self originOfColumn:column] != oid) continue;
-		NSDictionary *info = [self originColumnOfColumn:column];
-		if (!info) continue;
-		[all addObject:@(column)];
-		if ([[info objectForKey:SPQueryEditKeyPositionKey] integerValue] > 0) [keys addObject:@(column)];
+		if ([self originOfColumn:column] == oid && [self originColumnOfColumn:column]) [columns addObject:@(column)];
 	}
-	return [keys count] ? keys : all;
+	return columns;
 }
 
 /**
- * The WHERE condition (without the keyword) that identifies row of the origin table oid, by MySQL's rule (see
- * -identifyingColumnsForOrigin:), with this editor's saved edits applied. Its $n parameters are appended to
- * values, numbered from [values count] + 1. Key columns are compared in their own type ("c" = $n::<type>); other
+ * The WHERE condition (without the keyword) that identifies row of the origin table oid by every result column of
+ * that table (see -identifyingColumnsForOrigin:), with this editor's saved edits applied. Its $n parameters are
+ * appended to values, numbered from [values count] + 1. Key columns are compared in their own type ("c" = $n::<type>); other
  * columns as text, with both sides through the column's type ("c"::text = ($n::<type>)::text), so types without =
  * (point, json) still identify their row and types whose output text differs from ::text (boolean, char(n), inet)
  * still match; NULL as "c" IS NULL.
@@ -355,7 +352,7 @@ static NSString *SPQueryEditAbortedMessage(void)
 	// $1 is the new value; the identifying values follow it
 	NSMutableArray *values = [NSMutableArray arrayWithObject:value];
 	NSString *where = [self whereClauseForRow:row origin:oid values:values];
-	if (![where length]) { // can't happen: the cell's own column identifies its row when nothing else does
+	if (![where length]) { // can't happen: the cell's own column is among the identifying ones
 		if (error) *error = SPPostgresMakeError(SPPostgresErrorNotEditable, NSLocalizedString(@"Field is not editable. Field has no or multiple table or database origin(s).",@"field is not editable due to no table/database"), nil);
 		return nil;
 	}
