@@ -144,10 +144,6 @@ __attribute__((visibility("default")))
 
 #pragma mark Outline
 
-/// Always nil: there is no POSTGRESQL section any more. A shim so SPConnectionController builds until
-/// Stage 13 Task 5 moves it to the one-list methods below; removed then.
-- (id)sectionNode;
-
 /// YES when the store has Postgres favorites (whether or not the outline was prepared yet).
 - (BOOL)hasPostgresFavorites;
 /**
