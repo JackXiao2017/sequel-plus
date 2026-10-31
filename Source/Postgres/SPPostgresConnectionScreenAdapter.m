@@ -19,6 +19,7 @@ static NSString * const SPPostgresScreenMySQLDefaultPort = @"3306";
 static NSString * const SPPostgresScreenMySQLHostLabel = @"MySQL Host:"; // as in ConnectionView.xib's SSH tab
 static NSString * const SPPostgresScreenPostgreSQLHostLabel = @"PostgreSQL Host:";
 static NSString * const SPPostgresScreenDatabaseImage = @"database-small"; // the MySQL favorites' icon (SPConnectionController.m)
+static NSString * const SPPostgresScreenElephantImage = @"postgres-elephant"; // the PostgreSQL elephant (postgresql.org press kit)
 
 @interface SPKeychain (SPPostgresKeychainAccess) <SPPostgresKeychainAccess>
 @end
@@ -689,6 +690,16 @@ static NSString *SPPGOrEmpty(NSString *s)
 {
 	static NSImage *image = nil;
 	if (!image) {
+		// The PostgreSQL elephant, at the MySQL favorites' icon size (16 pt, with a 2x representation)
+		NSImage *elephant = [NSImage imageNamed:SPPostgresScreenElephantImage];
+		if (elephant) {
+			image = [elephant copy];
+			NSImage *mysql = [NSImage imageNamed:SPPostgresScreenDatabaseImage];
+			[image setSize:(mysql ? [mysql size] : NSMakeSize(16, 16))];
+			return image;
+		}
+
+		// Fallback (resource missing): the MySQL favorites' icon tinted PostgreSQL blue
 		NSImage *base = [NSImage imageNamed:SPPostgresScreenDatabaseImage];
 		NSSize size = base ? [base size] : NSMakeSize(16, 16);
 		// Drawn on demand, so the tint follows the base image's 1x/2x representations

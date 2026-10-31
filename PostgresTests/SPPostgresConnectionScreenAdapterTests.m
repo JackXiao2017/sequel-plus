@@ -393,14 +393,17 @@
 	[adapter invalidate];
 }
 
-/// Postgres favorite rows get their own icon: the MySQL favorites' database icon, the same size, tinted.
-- (void)testPostgresFavoriteIconDiffersFromMySQL
+/// Postgres favorite rows get their own icon: the PostgreSQL elephant, at the MySQL favorites' icon size.
+- (void)testPostgresFavoriteIconIsTheElephant
 {
 	NSImage *mysqlIcon = [NSImage imageNamed:@"database-small"];
+	NSImage *elephant = [NSImage imageNamed:@"postgres-elephant"];
 	NSImage *postgresIcon = [SPPostgresConnectionScreenAdapter favoriteImage];
 	XCTAssertNotNil(mysqlIcon);
+	XCTAssertNotNil(elephant, @"postgres-elephant.png is in the app's resources");
 	XCTAssertNotNil(postgresIcon);
 	XCTAssertTrue(NSEqualSizes([postgresIcon size], [mysqlIcon size]));
+	XCTAssertEqualObjects([postgresIcon TIFFRepresentation], [elephant TIFFRepresentation]);
 	XCTAssertNotEqualObjects([postgresIcon TIFFRepresentation], [mysqlIcon TIFFRepresentation]);
 }
 
