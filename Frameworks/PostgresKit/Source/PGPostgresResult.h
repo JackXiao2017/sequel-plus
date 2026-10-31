@@ -106,4 +106,17 @@ PGPostgresResultRowType;
  */
 - (id)textValueAtRow:(unsigned long long)row column:(NSUInteger)column;
 
+/**
+ * The OID (a PGPostgresOid, which this public header can't name) of the table or view the field is a plain
+ * column of (PQftable), or 0 when the field is an expression,
+ * a constant or otherwise not a column of a table, or is out of range.
+ */
+- (unsigned int)tableOIDForField:(NSUInteger)field;
+
+/**
+ * The attribute number (pg_attribute.attnum) of the field's column in its table (PQftablecol), or 0 when the
+ * field is not a plain column of a table or is out of range.
+ */
+- (NSInteger)tableColumnForField:(NSUInteger)field;
+
 @end
