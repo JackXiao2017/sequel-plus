@@ -23,6 +23,7 @@
 /* End PBXAggregateTarget section */
 
 /* Begin PBXBuildFile section */
+		013135CF1D4B125EF12FA13F /* SPPostgresQueryResultEditorTests.m in Sources */ = {isa = PBXBuildFile; fileRef = B59A08CF891DCE57DAA07551 /* SPPostgresQueryResultEditorTests.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 		05ACCB30F3121089D612D0EB /* SPPostgresCopyTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 066C215977DC6BD382D6D0E2 /* SPPostgresCopyTests.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 		078D0B232803750E17FBA527 /* SPPostgresTableDataTests.m in Sources */ = {isa = PBXBuildFile; fileRef = AB811C0F7FB7BEFD427161E1 /* SPPostgresTableDataTests.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 		08CC44DC4542C7E1E4409FF7 /* SPPostgresUsersControllerTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 23AE544AAFBF8A0D1B3B351D /* SPPostgresUsersControllerTests.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
@@ -1445,6 +1446,7 @@
 		B57747DB0F7A89D0003B34F9 /* SPFavoriteTextFieldCell.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SPFavoriteTextFieldCell.m; sourceTree = "<group>"; };
 		B577483A0F7A8B57003B34F9 /* database.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = database.png; sourceTree = "<group>"; };
 		B58731270F838C9E00087794 /* PreferenceDefaults.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = PreferenceDefaults.plist; path = Plists/PreferenceDefaults.plist; sourceTree = "<group>"; };
+		B59A08CF891DCE57DAA07551 /* SPPostgresQueryResultEditorTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPPostgresQueryResultEditorTests.m; path = PostgresTests/SPPostgresQueryResultEditorTests.m; sourceTree = SOURCE_ROOT; };
 		B5E2C5F90F2353B5007446E0 /* table-property.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "table-property.png"; sourceTree = "<group>"; };
 		B5E92F180F75B2D100012500 /* English */ = {isa = PBXFileReference; lastKnownFileType = file.xib; name = English; path = English.lproj/ExportDialog.xib; sourceTree = "<group>"; };
 		B5E92F1A0F75B2E800012500 /* SPExportController.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SPExportController.h; sourceTree = "<group>"; };
@@ -3087,6 +3089,7 @@
 				0C6CE7582AAD62ED23A2A04C /* SPPostgresQueryHistoryTests.m */,
 				C43F4DC971A26CE9EA8BEA9C /* SPPostgresQueryFavoritesTests.m */,
 				3DDAB7C3594A01C57DEDB035 /* SPPostgresTestServersTests.m */,
+				B59A08CF891DCE57DAA07551 /* SPPostgresQueryResultEditorTests.m */,
 			);
 			name = PostgresTests;
 			sourceTree = "<group>";
@@ -4037,6 +4040,7 @@
 				8BFED167D1524CEFF632D02E /* SPPostgresQueryHistoryTests.m in Sources */,
 				DD413EAAACFABF63D8D9106C /* SPPostgresQueryFavoritesTests.m in Sources */,
 				0DF6C8D0D0859AD297CA6C06 /* SPPostgresTestServersTests.m in Sources */,
+				013135CF1D4B125EF12FA13F /* SPPostgresQueryResultEditorTests.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

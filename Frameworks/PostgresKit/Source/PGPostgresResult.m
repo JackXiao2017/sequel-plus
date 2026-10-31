@@ -216,6 +216,20 @@
 	return [string autorelease];
 }
 
+- (unsigned int)tableOIDForField:(NSUInteger)field
+{
+	if (!_result || field >= _numberOfFields) return 0;
+	
+	return PQftable(_result, (int)field);
+}
+
+- (NSInteger)tableColumnForField:(NSUInteger)field
+{
+	if (!_result || field >= _numberOfFields) return 0;
+	
+	return PQftablecol(_result, (int)field);
+}
+
 #pragma mark -
 #pragma mark Fast enumeration implementation
 
