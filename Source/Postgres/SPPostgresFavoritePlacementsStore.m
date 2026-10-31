@@ -21,6 +21,11 @@ NSString * const SPPostgresFavoritePlacementsDidChangeNotification = @"SPPostgre
 	return [[[self alloc] initWithFileURL:url] autorelease];
 }
 
+- (NSURL *)fileURL
+{
+	return [[fileURL retain] autorelease];
+}
+
 - (void)dealloc
 {
 	[fileURL release];

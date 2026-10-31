@@ -7,6 +7,13 @@
 #import "../Source/Postgres/SPPostgresDocument.h"
 #import "../Source/SPWindowController.h"
 
+// SPTreeNode / SPGroupNode / SPFavoriteNode are app classes without exported symbols: look them up at run time
+@interface NSObject (SPPGAdapterTestsMySQLNodes)
++ (id)groupNodeWithName:(NSString *)name;
++ (id)favoriteNodeWithDictionary:(NSMutableDictionary *)dictionary;
+- (NSString *)nodeName;
+@end
+
 @interface NSObject (SPPGConnectionControllerForTests)
 - (void)resizeTabViewToConnectionType:(NSUInteger)theType animating:(BOOL)animate;
 - (id)connectionController;
@@ -52,12 +59,21 @@
 @property (strong) NSWindow *sheetWindow;
 /// The documents handed over by -postgresReplaceConnectionTabWithDocument:.
 @property (strong) NSMutableArray<SPPostgresDocument *> *replacementDocuments;
+/// Returned by -postgresMySQLSection (the FAVORITES section node).
+@property (strong) id mysqlSection;
+/// Returned by -postgresGroupForNewFavorite (nil: the section).
+@property (strong) id groupForNewFavorite;
+/// When set, -postgresFavoritesDidChange reloads like the controller: prepare the outline, saving the layout.
+@property (weak) SPPostgresConnectionScreenAdapter *outlineAdapter;
 @end
 
 @implementation SPPGFakeConnectionScreen
+- (id)postgresMySQLSection { return self.mysqlSection; }
+- (id)postgresGroupForNewFavorite { return self.groupForNewFavorite ? self.groupForNewFavorite : self.mysqlSection; }
 - (void)postgresFavoritesDidChange
 {
 	self.favoritesChangedCount++;
+	[self.outlineAdapter prepareOutlineWithMySQLSection:self.mysqlSection savingLayout:YES];
 	if (self.onFavoritesDidChange) self.onFavoritesDidChange();
 	SPPostgresConnectionScreenAdapter *adapter = self.reselectingAdapter;
 	if (adapter && self.selectedFavoriteID) {
@@ -226,11 +242,12 @@
 	XCTAssertEqualObjects([self.keychain getPasswordForName:[favorite keychainName] account:[favorite keychainAccount]], @"secret");
 	XCTAssertTrue([[favorite keychainName] hasPrefix:@"Sequel Pro (PostgreSQL)"]);
 
-	// The new favorite shows in the POSTGRESQL section
-	NSArray *nodes = [self.adapter favoriteNodesForOutline];
-	XCTAssertEqual([nodes count], 1u);
-	XCTAssertTrue([self.adapter isPostgresNode:nodes[0]]);
-	XCTAssertEqualObjects([[self.adapter favoriteForNode:nodes[0]] favoriteID], favorite.favoriteID);
+	// The new favorite has an outline node
+	XCTAssertTrue([self.adapter hasPostgresFavorites]);
+	id node = [self.adapter nodeForFavoriteID:favorite.favoriteID];
+	XCTAssertNotNil(node);
+	XCTAssertTrue([self.adapter isPostgresNode:node]);
+	XCTAssertEqualObjects([[self.adapter favoriteForNode:node] favoriteID], favorite.favoriteID);
 	XCTAssertGreaterThan(self.screen.favoritesChangedCount, 0u);
 
 	NSData *after = [NSData dataWithContentsOfFile:mysqlFavorites];
@@ -659,7 +676,7 @@
 
 	SPPostgresFavorite *renamed = [self.adapter favoriteForNode:[self.adapter nodeForFavoriteID:favoriteID]];
 	XCTAssertEqualObjects(renamed.name, @"ZZZ adapter test");
-	XCTAssertEqualObjects([[self.adapter favoriteNodesForOutline].lastObject valueForKeyPath:@"representedObject.favorite.favoriteID"], favoriteID, @"re-sorted last");
+	XCTAssertEqualObjects([[self.store favorites].lastObject favoriteID], favoriteID, @"re-sorted last");
 	XCTAssertEqualObjects([self.keychain getPasswordForName:[renamed keychainName] account:[renamed keychainAccount]], @"pw");
 
 	// A second save keeps the items
@@ -798,7 +815,7 @@
 	adapter.keychain = self.keychain;
 	[self addTeardownBlock:^{ [adapter invalidate]; }];
 
-	XCTAssertNil([adapter sectionNode]);
+	XCTAssertFalse([adapter hasPostgresFavorites]);
 	XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet != nil; } timeout:5], @"the load error is shown");
 	[window endSheet:window.attachedSheet];
 	XCTAssertTrue([self spinUntil:^BOOL{ return window.attachedSheet == nil; } timeout:5]);
@@ -893,6 +910,337 @@
 	XCTAssertEqualObjects([[portField infoForBinding:NSValueBinding] objectForKey:NSObservedKeyPathKey], @"port");
 	[third invalidate];
 	XCTAssertNil([portField infoForBinding:NSValueBinding]);
+}
+
+
+#pragma mark - One FAVORITES list
+
+- (id)mysqlGroup:(NSString *)name children:(NSArray *)children
+{
+	NSTreeNode *node = [NSClassFromString(@"SPTreeNode") treeNodeWithRepresentedObject:[NSClassFromString(@"SPGroupNode") groupNodeWithName:name]];
+	[[node mutableChildNodes] addObjectsFromArray:children];
+	return node;
+}
+
+- (id)mysqlFavorite:(NSInteger)favoriteID
+{
+	NSMutableDictionary *dict = [@{ @"id": @(favoriteID), @"name": [NSString stringWithFormat:@"m%ld", (long)favoriteID], @"host": @"mysqlhost", @"type": @0 } mutableCopy];
+	return [NSClassFromString(@"SPTreeNode") treeNodeWithRepresentedObject:[NSClassFromString(@"SPFavoriteNode") favoriteNodeWithDictionary:dict]];
+}
+
+/// FAVORITES: m1, G (m2, Sub (m3)), m4. Returns the section; G and Sub through the out parameters.
+- (id)makeSectionWithGroup:(id *)groupOut subgroup:(id *)subOut
+{
+	id sub = [self mysqlGroup:@"Sub" children:@[[self mysqlFavorite:3]]];
+	id group = [self mysqlGroup:@"G" children:@[[self mysqlFavorite:2], sub]];
+	id section = [self mysqlGroup:@"FAVORITES" children:@[[self mysqlFavorite:1], group, [self mysqlFavorite:4]]];
+	if (groupOut) *groupOut = group;
+	if (subOut) *subOut = sub;
+	return section;
+}
+
+- (NSString *)savedFavoriteNamed:(NSString *)name
+{
+	SPPostgresFavorite *favorite = [[SPPostgresFavorite alloc] init];
+	favorite.name = name;
+	favorite.host = @"db";
+	NSError *error = nil;
+	XCTAssertTrue([self.store saveFavorite:favorite error:&error], @"%@", error);
+	return favorite.favoriteID;
+}
+
+- (NSURL *)placementsURL
+{
+	return [self.dir URLByAppendingPathComponent:@"PostgresFavoritePlacements.plist"];
+}
+
+- (NSDictionary *)placementsOnDisk
+{
+	return [NSDictionary dictionaryWithContentsOfURL:[self placementsURL]][@"Placements"];
+}
+
+- (SPPostgresConnectionScreenAdapter *)adapterWithScreen:(SPPGFakeConnectionScreen *)screen
+{
+	// setUp's adapter shares self.screen: retire it so only adapters made here talk to the screens
+	[self.adapter invalidate];
+	SPPostgresConnectionScreenAdapter *adapter = [[SPPostgresConnectionScreenAdapter alloc] initWithConnectionController:screen store:self.store];
+	adapter.keychain = self.keychain;
+	screen.outlineAdapter = adapter;
+	[self addTeardownBlock:^{ [adapter invalidate]; }];
+	return adapter;
+}
+
+- (NSArray *)namesIn:(NSArray *)nodes
+{
+	NSMutableArray *names = [NSMutableArray array];
+	for (NSTreeNode *node in nodes) [names addObject:[[node representedObject] nodeName] ?: @"?"];
+	return names;
+}
+
+- (void)testFirstLoadPutsExistingFavoritesAtTopLevelEndByName
+{
+	[self savedFavoriteNamed:@"b"];
+	[self savedFavoriteNamed:@"a"];
+	id section = [self makeSectionWithGroup:NULL subgroup:NULL];
+	self.screen.mysqlSection = section;
+	SPPostgresConnectionScreenAdapter *adapter = [self adapterWithScreen:self.screen];
+
+	XCTAssertTrue([adapter hasPostgresFavorites]);
+	[adapter prepareOutlineWithMySQLSection:section savingLayout:YES];
+	XCTAssertEqualObjects([self namesIn:[adapter displayedChildrenOfGroup:section]], (@[@"m1", @"G", @"m4", @"a", @"b"]));
+	XCTAssertEqual([adapter displayedParentOfNode:[adapter displayedChildrenOfGroup:section].lastObject], section);
+	// The next saving load records where they are
+	[adapter prepareOutlineWithMySQLSection:section savingLayout:YES];
+	XCTAssertEqual([[self placementsOnDisk] count], 2u);
+	XCTAssertEqualObjects([self namesIn:[adapter displayedChildrenOfGroup:section]], (@[@"m1", @"G", @"m4", @"a", @"b"]));
+}
+
+- (void)testMoveIsSavedAndRestoredByANewAdapter
+{
+	NSString *pid = [self savedFavoriteNamed:@"p"];
+	id group = nil;
+	id section = [self makeSectionWithGroup:&group subgroup:NULL];
+	self.screen.mysqlSection = section;
+	SPPostgresConnectionScreenAdapter *adapter = [self adapterWithScreen:self.screen];
+	[adapter prepareOutlineWithMySQLSection:section savingLayout:YES];
+
+	NSUInteger reloads = self.screen.favoritesChangedCount;
+	[adapter moveNodes:@[[adapter nodeForFavoriteID:pid]] toGroup:group displayedIndex:1];
+	XCTAssertEqual(self.screen.favoritesChangedCount, reloads, @"the adapter's own placements write doesn't reload the host");
+	XCTAssertEqualObjects([self placementsOnDisk][pid][@"Group"], (@[@{@"Name": @"G", @"Nth": @0}]));
+
+	SPPGFakeConnectionScreen *otherScreen = [[SPPGFakeConnectionScreen alloc] init];
+	otherScreen.mysqlSection = section;
+	SPPostgresConnectionScreenAdapter *other = [self adapterWithScreen:otherScreen];
+	[other prepareOutlineWithMySQLSection:section savingLayout:NO];
+	XCTAssertEqual([other displayedParentOfNode:[other nodeForFavoriteID:pid]], group);
+	XCTAssertEqualObjects([self namesIn:[other displayedChildrenOfGroup:group]], (@[@"m2", @"p", @"Sub"]));
+}
+
+- (void)testAddNewFavoriteGoesToEndOfGroupForNewFavorite
+{
+	[self savedFavoriteNamed:@"zzz"];
+	id group = nil;
+	id section = [self makeSectionWithGroup:&group subgroup:NULL];
+	self.screen.mysqlSection = section;
+	self.screen.groupForNewFavorite = group;
+	SPPostgresConnectionScreenAdapter *adapter = [self adapterWithScreen:self.screen];
+	[adapter prepareOutlineWithMySQLSection:section savingLayout:YES];
+
+	id node = [adapter addNewFavorite];
+	XCTAssertNotNil(node);
+	XCTAssertEqual([adapter displayedChildrenOfGroup:group].lastObject, node);
+	XCTAssertEqual([adapter displayedParentOfNode:node], group);
+	NSString *newID = [[adapter favoriteForNode:node] favoriteID];
+	XCTAssertEqualObjects([self placementsOnDisk][newID][@"Group"], (@[@{@"Name": @"G", @"Nth": @0}]));
+
+	// Still there for a new adapter on the same files
+	SPPGFakeConnectionScreen *otherScreen = [[SPPGFakeConnectionScreen alloc] init];
+	otherScreen.mysqlSection = section;
+	SPPostgresConnectionScreenAdapter *other = [self adapterWithScreen:otherScreen];
+	[other prepareOutlineWithMySQLSection:section savingLayout:NO];
+	XCTAssertEqual([other displayedChildrenOfGroup:group].lastObject, [other nodeForFavoriteID:newID]);
+}
+
+- (void)testAddNewFavoriteBeforeAnyOutlineGoesToTopLevelEnd
+{
+	SPPostgresConnectionScreenAdapter *adapter = [self adapterWithScreen:self.screen];
+	id node = [adapter addNewFavorite];
+	XCTAssertNotNil(node, @"no layout yet: saved without a placement");
+	XCTAssertEqual([[self.store favorites] count], 1u);
+	XCTAssertNil([self placementsOnDisk]);
+
+	id section = [self makeSectionWithGroup:NULL subgroup:NULL];
+	[adapter prepareOutlineWithMySQLSection:section savingLayout:NO];
+	XCTAssertEqual([adapter displayedChildrenOfGroup:section].lastObject, node);
+}
+
+- (void)testSaveFormAsNewFavoriteGoesToEndOfGroupForNewFavorite
+{
+	id group = nil, sub = nil;
+	id section = [self makeSectionWithGroup:&group subgroup:&sub];
+	self.screen.mysqlSection = section;
+	self.screen.groupForNewFavorite = sub;
+	SPPostgresConnectionScreenAdapter *adapter = [self adapterWithScreen:self.screen];
+	[adapter prepareOutlineWithMySQLSection:section savingLayout:YES];
+
+	[adapter setSelectedEngine:SPConnectionEnginePostgreSQL];
+	self.screen.type = SPPostgresTCPIPConnection;
+	self.screen.host = @"db.internal";
+	self.screen.name = @"From form";
+	NSError *error = nil;
+	XCTAssertTrue([adapter saveFormAsNewFavorite:&error], @"%@", error);
+	NSString *newID = [[adapter loadedFavorite] favoriteID];
+	id node = [adapter nodeForFavoriteID:newID];
+	XCTAssertNotNil(node);
+	XCTAssertEqual([adapter displayedChildrenOfGroup:sub].lastObject, node);
+	XCTAssertEqualObjects([self namesIn:[adapter displayedChildrenOfGroup:sub]], (@[@"m3", @"From form"]));
+
+	// Saving it again (not as new) keeps it where it is
+	self.screen.database = @"appdb";
+	XCTAssertTrue([adapter saveFormAsFavorite:&error], @"%@", error);
+	XCTAssertEqual([adapter displayedParentOfNode:[adapter nodeForFavoriteID:newID]], sub);
+	XCTAssertEqual([[self.store favorites] count], 1u);
+}
+
+- (void)testDuplicateIsDisplayedRightAfterOriginal
+{
+	NSString *pid = [self savedFavoriteNamed:@"p"];
+	[self savedFavoriteNamed:@"q"];
+	id group = nil;
+	id section = [self makeSectionWithGroup:&group subgroup:NULL];
+	self.screen.mysqlSection = section;
+	SPPostgresConnectionScreenAdapter *adapter = [self adapterWithScreen:self.screen];
+	[adapter prepareOutlineWithMySQLSection:section savingLayout:YES];
+	[adapter moveNodes:@[[adapter nodeForFavoriteID:pid]] toGroup:group displayedIndex:0];
+
+	id duplicate = [adapter duplicateFavoriteNode:[adapter nodeForFavoriteID:pid]];
+	XCTAssertNotNil(duplicate);
+	XCTAssertEqualObjects([self namesIn:[adapter displayedChildrenOfGroup:group]], (@[@"p", @"p Copy", @"m2", @"Sub"]));
+	XCTAssertEqual([adapter displayedChildrenOfGroup:group][1], duplicate);
+}
+
+- (void)testRemovePostgresFavoritesWithinGroup
+{
+	NSString *p1 = [self savedFavoriteNamed:@"p1"];
+	NSString *p2 = [self savedFavoriteNamed:@"p2"];
+	NSString *p3 = [self savedFavoriteNamed:@"p3"];
+	for (NSString *favoriteID in @[p1, p2, p3]) {
+		for (SPPostgresFavorite *favorite in [self.store favorites]) {
+			if ([favorite.favoriteID isEqualToString:favoriteID]) [self.keychain addPassword:@"pw" forName:[favorite keychainName] account:[favorite keychainAccount]];
+		}
+	}
+	id group = nil, sub = nil;
+	id section = [self makeSectionWithGroup:&group subgroup:&sub];
+	self.screen.mysqlSection = section;
+	SPPostgresConnectionScreenAdapter *adapter = [self adapterWithScreen:self.screen];
+	[adapter prepareOutlineWithMySQLSection:section savingLayout:YES];
+	[adapter moveNodes:@[[adapter nodeForFavoriteID:p1]] toGroup:group displayedIndex:0];
+	[adapter moveNodes:@[[adapter nodeForFavoriteID:p2]] toGroup:sub displayedIndex:0];
+
+	[adapter removePostgresFavoritesWithinGroup:group];
+
+	NSArray *remaining = [[self.store favorites] valueForKey:@"favoriteID"];
+	XCTAssertEqualObjects(remaining, @[p3]);
+	XCTAssertEqual([self.keychain.items count], 1u, @"p1's and p2's keychain items are gone");
+	XCTAssertNotNil([adapter nodeForFavoriteID:p3]);
+	XCTAssertEqual([adapter displayedParentOfNode:[adapter nodeForFavoriteID:p3]], section);
+	XCTAssertEqualObjects([[self placementsOnDisk] allKeys], @[p3], @"the removed favorites' placements are pruned");
+}
+
+- (void)testOutsideChangeDoesNotSaveStaleLayout
+{
+	NSString *pid = [self savedFavoriteNamed:@"p"];
+	id group = nil;
+	id section = [self makeSectionWithGroup:&group subgroup:NULL];
+
+	SPPGFakeConnectionScreen *screenB = [[SPPGFakeConnectionScreen alloc] init];
+	screenB.mysqlSection = section;
+	SPPostgresConnectionScreenAdapter *adapterB = [self adapterWithScreen:screenB];
+	[adapterB prepareOutlineWithMySQLSection:section savingLayout:YES];
+	XCTAssertEqual([adapterB displayedParentOfNode:[adapterB nodeForFavoriteID:pid]], section);
+
+	self.screen.mysqlSection = section;
+	SPPostgresConnectionScreenAdapter *adapterA = [self adapterWithScreen:self.screen];
+	[adapterA prepareOutlineWithMySQLSection:section savingLayout:YES];
+	NSUInteger reloadsB = screenB.favoritesChangedCount;
+	[adapterA moveNodes:@[[adapterA nodeForFavoriteID:pid]] toGroup:group displayedIndex:0];
+
+	XCTAssertGreaterThan(screenB.favoritesChangedCount, reloadsB, @"B heard of the change and reloaded (saving its layout)");
+	XCTAssertEqual([adapterB displayedParentOfNode:[adapterB nodeForFavoriteID:pid]], group);
+	[adapterB prepareOutlineWithMySQLSection:section savingLayout:YES];
+	[adapterB prepareOutlineWithMySQLSection:section savingLayout:NO];
+	XCTAssertEqual([adapterB displayedParentOfNode:[adapterB nodeForFavoriteID:pid]], group);
+	XCTAssertEqualObjects([self placementsOnDisk][pid][@"Group"], (@[@{@"Name": @"G", @"Nth": @0}]), @"the file still says G");
+}
+
+- (void)testDeletedFavoritePlacementIsPruned
+{
+	NSString *keep = [self savedFavoriteNamed:@"keep"];
+	NSString *gone = [self savedFavoriteNamed:@"gone"];
+	id section = [self makeSectionWithGroup:NULL subgroup:NULL];
+	self.screen.mysqlSection = section;
+	SPPostgresConnectionScreenAdapter *adapter = [self adapterWithScreen:self.screen];
+	[adapter prepareOutlineWithMySQLSection:section savingLayout:YES];
+	[adapter prepareOutlineWithMySQLSection:section savingLayout:YES];
+	XCTAssertEqual([[self placementsOnDisk] count], 2u);
+
+	// Removed elsewhere (another store client): the host's reload saves the layout without it
+	NSError *error = nil;
+	XCTAssertTrue([self.store removeFavoriteWithID:gone error:&error], @"%@", error);
+	XCTAssertNil([adapter nodeForFavoriteID:gone]);
+	XCTAssertEqualObjects([[self placementsOnDisk] allKeys], @[keep]);
+}
+
+- (void)testNothingWrittenWithoutChange
+{
+	[self savedFavoriteNamed:@"p"];
+	id section = [self makeSectionWithGroup:NULL subgroup:NULL];
+	self.screen.mysqlSection = section;
+	SPPostgresConnectionScreenAdapter *adapter = [self adapterWithScreen:self.screen];
+	[adapter prepareOutlineWithMySQLSection:section savingLayout:YES];
+	[adapter prepareOutlineWithMySQLSection:section savingLayout:YES];
+	XCTAssertNotNil([self placementsOnDisk]);
+
+	NSDate *past = [NSDate dateWithTimeIntervalSinceNow:-3600];
+	NSError *error = nil;
+	XCTAssertTrue([[NSFileManager defaultManager] setAttributes:@{NSFileModificationDate: past} ofItemAtPath:[[self placementsURL] path] error:&error], @"%@", error);
+	[adapter prepareOutlineWithMySQLSection:section savingLayout:YES];
+	NSDate *modified = [[NSFileManager defaultManager] attributesOfItemAtPath:[[self placementsURL] path] error:NULL][NSFileModificationDate];
+	XCTAssertEqualWithAccuracy([modified timeIntervalSinceReferenceDate], [past timeIntervalSinceReferenceDate], 1.0, @"not rewritten");
+}
+
+/// Placements other favorites' arrangement doesn't hold (e.g. written by another window for a favorite this
+/// window doesn't show yet) are kept when saving; the snapshot wins for the favorites it holds.
+- (void)testSavingMergesOverStoredPlacements
+{
+	NSString *pid = [self savedFavoriteNamed:@"p"];
+	id group = nil;
+	id section = [self makeSectionWithGroup:&group subgroup:NULL];
+	self.screen.mysqlSection = section;
+	SPPostgresConnectionScreenAdapter *adapter = [self adapterWithScreen:self.screen];
+	[adapter prepareOutlineWithMySQLSection:section savingLayout:YES];
+
+	// A favorite saved by another client after its placement was written: not yet in this adapter's arrangement
+	SPPostgresFavorite *later = [[SPPostgresFavorite alloc] init];
+	later.name = @"later";
+	NSDictionary *laterPlacement = @{@"Group": @[@{@"Name": @"G", @"Nth": @0}], @"Index": @2, @"Order": @0, @"After": @{@"GroupName": @"Sub", @"Nth": @0}};
+	NSMutableDictionary *all = [NSMutableDictionary dictionaryWithDictionary:([self placementsOnDisk] ?: @{})];
+	all[later.favoriteID] = laterPlacement;
+	NSDictionary *file = @{@"Version": @1, @"Placements": all};
+	XCTAssertTrue([file writeToURL:[self placementsURL] atomically:YES]);
+	NSError *error = nil;
+	XCTAssertTrue([self.store saveFavorite:later error:&error], @"%@", error);
+
+	XCTAssertEqual([adapter displayedChildrenOfGroup:group].lastObject, [adapter nodeForFavoriteID:later.favoriteID]);
+	[adapter moveNodes:@[[adapter nodeForFavoriteID:pid]] toGroup:group displayedIndex:0];
+	XCTAssertEqualObjects([self placementsOnDisk][later.favoriteID], laterPlacement);
+	XCTAssertEqualObjects([self placementsOnDisk][pid][@"Group"], (@[@{@"Name": @"G", @"Nth": @0}]));
+}
+
+
+/// Another window adds a favorite into G: its placement is written before the favorite is saved, and this
+/// window's reload in between must not prune it.
+- (void)testNewFavoriteFromAnotherWindowKeepsItsPlacement
+{
+	[self savedFavoriteNamed:@"p"];
+	id group = nil;
+	id section = [self makeSectionWithGroup:&group subgroup:NULL];
+
+	SPPGFakeConnectionScreen *screenB = [[SPPGFakeConnectionScreen alloc] init];
+	screenB.mysqlSection = section;
+	SPPostgresConnectionScreenAdapter *adapterB = [self adapterWithScreen:screenB];
+	[adapterB prepareOutlineWithMySQLSection:section savingLayout:YES];
+
+	self.screen.mysqlSection = section;
+	self.screen.groupForNewFavorite = group;
+	SPPostgresConnectionScreenAdapter *adapterA = [self adapterWithScreen:self.screen];
+	[adapterA prepareOutlineWithMySQLSection:section savingLayout:YES];
+	id node = [adapterA addNewFavorite];
+	NSString *newID = [[adapterA favoriteForNode:node] favoriteID];
+
+	XCTAssertEqualObjects([self placementsOnDisk][newID][@"Group"], (@[@{@"Name": @"G", @"Nth": @0}]));
+	XCTAssertEqual([adapterB displayedChildrenOfGroup:group].lastObject, [adapterB nodeForFavoriteID:newID]);
 }
 
 @end
