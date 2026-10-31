@@ -19,10 +19,10 @@
         </customObject>
         <menu title="MainMenu" systemMenu="main" id="29" userLabel="MainMenu">
             <items>
-                <menuItem title="Sequel Pro" id="56">
-                    <menu key="submenu" title="Sequel Pro" systemMenu="apple" id="57">
+                <menuItem title="Sequel Plus" id="56">
+                    <menu key="submenu" title="Sequel Plus" systemMenu="apple" id="57">
                         <items>
-                            <menuItem title="About Sequel Pro" id="58">
+                            <menuItem title="About Sequel Plus" id="58">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
                                     <action selector="openAboutPanel:" target="213" id="1037"/>
@@ -64,7 +64,7 @@
                             <menuItem isSeparatorItem="YES" id="144">
                                 <modifierMask key="keyEquivalentModifierMask" command="YES"/>
                             </menuItem>
-                            <menuItem title="Hide Sequel Pro" keyEquivalent="h" id="134">
+                            <menuItem title="Hide Sequel Plus" keyEquivalent="h" id="134">
                                 <connections>
                                     <action selector="hide:" target="-2" id="152"/>
                                 </connections>
@@ -83,7 +83,7 @@
                             <menuItem isSeparatorItem="YES" id="149">
                                 <modifierMask key="keyEquivalentModifierMask" command="YES"/>
                             </menuItem>
-                            <menuItem title="Quit Sequel Pro" keyEquivalent="q" id="136">
+                            <menuItem title="Quit Sequel Plus" keyEquivalent="q" id="136">
                                 <connections>
                                     <action selector="terminate:" target="-1" id="810"/>
                                 </connections>
@@ -998,7 +998,7 @@ CQ
                 <menuItem title="Help" tag="8" id="103">
                     <menu key="submenu" title="Help" id="106">
                         <items>
-                            <menuItem title="Sequel Pro Help" hidden="YES" keyEquivalent="?" id="111">
+                            <menuItem title="Sequel Plus Help" hidden="YES" keyEquivalent="?" id="111">
                                 <connections>
                                     <action selector="showHelp:" target="-1" id="122"/>
                                 </connections>

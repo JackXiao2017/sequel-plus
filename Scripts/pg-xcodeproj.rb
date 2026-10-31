@@ -136,7 +136,7 @@ def setup(project)
       s['PRODUCT_BUNDLE_IDENTIFIER'] = 'com.sequelpro.PostgresTests'
       s['INFOPLIST_FILE'] = 'PostgresTests/Info.plist'
       s['BUNDLE_LOADER'] = '$(TEST_HOST)'
-      s['TEST_HOST'] = '$(BUILT_PRODUCTS_DIR)/Sequel Pro.app/Contents/MacOS/Sequel Pro'
+      s['TEST_HOST'] = '$(BUILT_PRODUCTS_DIR)/Sequel Plus.app/Contents/MacOS/Sequel Pro'
       s['CLANG_ENABLE_OBJC_ARC'] = 'YES'
       s['GCC_PRECOMPILE_PREFIX_HEADER'] = 'NO'
       s['GCC_PREFIX_HEADER'] = ''

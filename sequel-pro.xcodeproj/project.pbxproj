@@ -1408,7 +1408,7 @@
 		8729EF27B072F231B1D2E746 /* SPPostgresQueryController.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPPostgresQueryController.m; path = Source/Postgres/SPPostgresQueryController.m; sourceTree = SOURCE_ROOT; };
 		8A1275193F85C0CD398DF74A /* SPPostgresDumpWriter.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPPostgresDumpWriter.m; path = Source/Postgres/SPPostgresDumpWriter.m; sourceTree = SOURCE_ROOT; };
 		8BE46C0F0FBBF466022D3C4A /* SPPostgresCSV.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; name = SPPostgresCSV.h; path = Source/Postgres/SPPostgresCSV.h; sourceTree = SOURCE_ROOT; };
-		8D15AC370486D014006FF6A4 /* Sequel Pro.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Sequel Pro.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		8D15AC370486D014006FF6A4 /* Sequel Plus.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Sequel Plus.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		8D26872BECEC3231B99A14B3 /* SPPostgresQueryFavoriteManager.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; name = SPPostgresQueryFavoriteManager.h; path = Source/Postgres/SPPostgresQueryFavoriteManager.h; sourceTree = SOURCE_ROOT; };
 		90D248E8BAB82E840BFFE41E /* SPToolbarTransferItem.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = Source/SPToolbarTransferItem.h; sourceTree = SOURCE_ROOT; };
 		92A517648838320B9BE26DB8 /* SPPostgresPaginationView.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPPostgresPaginationView.m; path = Source/Postgres/SPPostgresPaginationView.m; sourceTree = SOURCE_ROOT; };
@@ -2624,7 +2624,7 @@
 		19C28FB0FE9D524F11CA2CBB /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				8D15AC370486D014006FF6A4 /* Sequel Pro.app */,
+				8D15AC370486D014006FF6A4 /* Sequel Plus.app */,
 				380F4ED90FC0B50500B0BFD7 /* Unit Tests.xctest */,
 				58CDB3360FCE13C900F8ACA3 /* SequelProTunnelAssistant */,
 				58B906E611BD989A000826E5 /* PSMTabBar.framework */,
@@ -3328,7 +3328,7 @@
 			name = "Sequel Pro";
 			productInstallPath = "$(HOME)/Applications";
 			productName = "sequel-pro";
-			productReference = 8D15AC370486D014006FF6A4 /* Sequel Pro.app */;
+			productReference = 8D15AC370486D014006FF6A4 /* Sequel Plus.app */;
 			productType = "com.apple.product-type.application";
 		};
 		B77CED5EA7A224EB59C2C97C /* Postgres Tests */ = {
@@ -4512,7 +4512,7 @@
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_OPTIMIZATION_LEVEL = 0;
 				PRODUCT_NAME = Localize;
-				UNLOCALIZED_RESOURCES_FOLDER_PATH = "Sequel Pro.app/Contents/Resources";
+				UNLOCALIZED_RESOURCES_FOLDER_PATH = "Sequel Plus.app/Contents/Resources";
 			};
 			name = Debug;
 		};
@@ -4537,7 +4537,7 @@
 		380F4EDB0FC0B50600B0BFD7 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				BUNDLE_LOADER = "$(BUILT_PRODUCTS_DIR)/Sequel Pro.app/Contents/MacOS/Sequel Pro";
+				BUNDLE_LOADER = "$(BUILT_PRODUCTS_DIR)/Sequel Plus.app/Contents/MacOS/Sequel Pro";
 				COMBINE_HIDPI_IMAGES = YES;
 				COPY_PHASE_STRIP = NO;
 				FRAMEWORK_SEARCH_PATHS = (
@@ -4566,7 +4566,7 @@
 		380F4EDC0FC0B50600B0BFD7 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				BUNDLE_LOADER = "$(BUILT_PRODUCTS_DIR)/Sequel Pro.app/Contents/MacOS/Sequel Pro";
+				BUNDLE_LOADER = "$(BUILT_PRODUCTS_DIR)/Sequel Plus.app/Contents/MacOS/Sequel Pro";
 				COMBINE_HIDPI_IMAGES = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(SRCROOT)/Frameworks",
@@ -4592,7 +4592,7 @@
 		380F4EDD0FC0B50600B0BFD7 /* Distribution */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				BUNDLE_LOADER = "$(BUILT_PRODUCTS_DIR)/Sequel Pro.app/Contents/MacOS/Sequel Pro";
+				BUNDLE_LOADER = "$(BUILT_PRODUCTS_DIR)/Sequel Plus.app/Contents/MacOS/Sequel Pro";
 				COMBINE_HIDPI_IMAGES = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(SRCROOT)/Frameworks",
@@ -4719,6 +4719,7 @@
 			buildSettings = {
 				ARCHS = arm64;
 				COPY_PHASE_STRIP = NO;
+				EXECUTABLE_NAME = "Sequel Pro";
 				FRAMEWORK_SEARCH_PATHS = "$(SRCROOT)/Frameworks";
 				GCC_GENERATE_DEBUGGING_SYMBOLS = NO;
 				GCC_MODEL_TUNING = G5;
@@ -4730,7 +4731,7 @@
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Frameworks/zlib";
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				OTHER_LDFLAGS = "-lz";
-				PRODUCT_NAME = "Sequel Pro";
+				PRODUCT_NAME = "Sequel Plus";
 				SEPARATE_STRIP = NO;
 			};
 			name = Distribution;
@@ -4932,7 +4933,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.sequelpro.PostgresTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sequel Pro.app/Contents/MacOS/Sequel Pro";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sequel Plus.app/Contents/MacOS/Sequel Pro";
 			};
 			name = Release;
 		};
@@ -4941,6 +4942,7 @@
 			buildSettings = {
 				ARCHS = arm64;
 				COPY_PHASE_STRIP = NO;
+				EXECUTABLE_NAME = "Sequel Pro";
 				FRAMEWORK_SEARCH_PATHS = "$(SRCROOT)/Frameworks";
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_MODEL_TUNING = G5;
@@ -4952,7 +4954,7 @@
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Frameworks/zlib";
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				OTHER_LDFLAGS = "-lz";
-				PRODUCT_NAME = "Sequel Pro";
+				PRODUCT_NAME = "Sequel Plus";
 				SEPARATE_STRIP = NO;
 			};
 			name = Debug;
@@ -4963,6 +4965,7 @@
 				ARCHS = arm64;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				EXECUTABLE_NAME = "Sequel Pro";
 				FRAMEWORK_SEARCH_PATHS = "$(SRCROOT)/Frameworks";
 				GCC_GENERATE_DEBUGGING_SYMBOLS = NO;
 				GCC_MODEL_TUNING = G5;
@@ -4974,7 +4977,7 @@
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Frameworks/zlib";
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
 				OTHER_LDFLAGS = "-lz";
-				PRODUCT_NAME = "Sequel Pro";
+				PRODUCT_NAME = "Sequel Plus";
 				SEPARATE_STRIP = NO;
 			};
 			name = Release;
@@ -5120,7 +5123,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.sequelpro.PostgresTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sequel Pro.app/Contents/MacOS/Sequel Pro";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sequel Plus.app/Contents/MacOS/Sequel Pro";
 			};
 			name = Distribution;
 		};
@@ -5154,7 +5157,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.sequelpro.PostgresTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sequel Pro.app/Contents/MacOS/Sequel Pro";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sequel Plus.app/Contents/MacOS/Sequel Pro";
 			};
 			name = Debug;
 		};
