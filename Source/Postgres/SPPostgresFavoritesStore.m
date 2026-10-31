@@ -16,6 +16,11 @@ NSString * const SPPostgresFavoritesDidChangeNotification = @"SPPostgresFavorite
 	return self;
 }
 
+- (NSURL *)fileURL
+{
+	return fileURL;
+}
+
 + (instancetype)sharedStore
 {
 	static SPPostgresFavoritesStore *shared = nil;

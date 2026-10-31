@@ -15,6 +15,9 @@ __attribute__((visibility("default")))
 - (instancetype)initWithFileURL:(NSURL *)fileURL;
 + (instancetype)sharedStore;
 
+/// The favorites file this store reads and writes.
+- (NSURL *)fileURL;
+
 /// Favorites sorted by name, case-insensitive. Reloaded from disk on each call.
 - (NSArray *)favorites;
 /// Why the last -favorites call could not read the file (it then returned no favorites), or nil when the
