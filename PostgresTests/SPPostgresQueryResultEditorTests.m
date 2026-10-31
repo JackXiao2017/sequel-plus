@@ -38,7 +38,7 @@
 
 #pragma mark - Fixture
 
-/// Drops and rebuilds schema query_edit_test (items, pair, nokey, "Mixed Case", customers, orders, flags, emp, parts, base, child, items_view).
+/// Drops and rebuilds schema query_edit_test (items, pair, nokey, "Mixed Case", customers, orders, flags, emp, parts, base, child, pp, items_view).
 - (void)buildFixtureOnPort:(NSUInteger)port
 {
 	PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port];
@@ -70,6 +70,10 @@
 		@"CREATE TABLE query_edit_test.child () INHERITS (query_edit_test.base)",
 		@"INSERT INTO query_edit_test.base VALUES (1, 'a')",
 		@"INSERT INTO query_edit_test.child VALUES (2, 'c')",
+		@"CREATE TABLE query_edit_test.pp (id integer, k integer, name text, PRIMARY KEY (id, k)) PARTITION BY RANGE (k)",
+		@"CREATE TABLE query_edit_test.pp1 PARTITION OF query_edit_test.pp FOR VALUES FROM (0) TO (10)",
+		@"CREATE TABLE query_edit_test.pp2 PARTITION OF query_edit_test.pp FOR VALUES FROM (10) TO (20)",
+		@"INSERT INTO query_edit_test.pp VALUES (1, 1, 'a'), (2, 11, 'x'), (1, 12, 'x')",
 		@"CREATE VIEW query_edit_test.items_view AS SELECT id, name FROM query_edit_test.items",
 	];
 	for (NSString *sql in statements) {
@@ -732,7 +736,8 @@
 	}
 }
 
-/// Each CTE reads the previous one twice: the walk must expand each CTE once (memoised), not 2^n times.
+/// Each CTE reads the previous one twice, so expanding every CTE Scan visits 2^25 scans: the walk gives up after its
+/// budget (CheckFailed, "too complex") or, were it to finish, refuses the repeated table; either way, quickly.
 - (void)testChainedCTEsAreRefusedQuickly
 {
 	for (NSNumber *port in [SPPostgresTestServers ports]) {
@@ -743,12 +748,70 @@
 		}
 		[sql appendString:@" SELECT id, name FROM x25"];
 		NSDate *start = [NSDate date];
-		[self assertOriginRepeatedForSQL:sql row:0 column:1 port:port];
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:sql port:port];
+		NSInteger count = -2;
+		NSString *message = nil;
+		SPPostgresCellEditability status = [editor editabilityOfRow:0 column:1 matchCount:&count message:&message];
+		if (status == SPPostgresCellCheckFailed) {
+			XCTAssertEqualObjects(message, [self tooComplexMessage], @"port %@", port);
+		} else {
+			XCTAssertEqual(status, SPPostgresCellOriginRepeated, @"port %@: %@", port, message);
+		}
+		NSError *error = nil;
+		XCTAssertNil([editor saveValue:@"chief" row:0 column:1 matchCount:NULL error:&error], @"port %@", port);
+		XCTAssertEqual([error code], SPPostgresErrorNotEditable);
 		XCTAssertLessThan(-[start timeIntervalSinceNow], 20.0, @"port %@", port);
+		XCTAssertEqualObjects([self serverValue:@"SELECT name FROM query_edit_test.emp WHERE id = 2" port:port], @"worker");
+	}
+}
+
+/// Partitions of one table, each read once in its own scan inside one WITH query (a reads pp1, b reads pp2, after
+/// pruning), are two reads of pp: the result's row 1|x is a's id with b's name, and WHERE id = 1 AND name = 'x'
+/// identifies (1, 12, 'x'), a row of neither alias.
+- (void)testPartitionsReadSeparatelyInsideCTEAreRefused
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		NSString *sql = @"WITH x AS MATERIALIZED (SELECT a.id, b.name FROM query_edit_test.pp a JOIN query_edit_test.pp b "
+			"ON b.id = a.id + 1 WHERE a.k < 10 AND b.k >= 10) SELECT id, name FROM x";
+		NSString *before = [self serverValue:@"SELECT string_agg(id || ':' || k || ':' || name, ',' ORDER BY id, k) FROM query_edit_test.pp" port:port];
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:sql port:port];
+		XCTAssertEqual([editor rowCount], 1u);
+		XCTAssertEqualObjects([editor valueAtRow:0 column:1], @"x");
+		NSInteger count = -2;
+		NSString *message = nil;
+		XCTAssertEqual([editor editabilityOfRow:0 column:1 matchCount:&count message:&message], SPPostgresCellOriginRepeated, @"port %@: %@", port, message);
+		XCTAssertEqualObjects(message, [self originRepeatedMessage]);
+		NSError *error = nil;
+		XCTAssertNil([editor saveValue:@"changed" row:0 column:1 matchCount:NULL error:&error], @"port %@", port);
+		XCTAssertEqual([error code], SPPostgresErrorNotEditable);
+		XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(id || ':' || k || ':' || name, ',' ORDER BY id, k) FROM query_edit_test.pp" port:port], before);
+	}
+}
+
+/// ONLY the inheritance parent and its child, each read once inside one WITH query, are two reads of the parent's family.
+- (void)testOnlyParentAndChildInsideCTEAreRefused
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		NSString *sql = @"WITH x AS MATERIALIZED (SELECT a.id, b.v FROM ONLY query_edit_test.base a JOIN query_edit_test.child b "
+			"ON b.id = a.id + 1) SELECT id, v FROM x";
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:sql port:port];
+		XCTAssertEqual([editor rowCount], 1u);
+		NSInteger count = -2;
+		NSString *message = nil;
+		XCTAssertEqual([editor editabilityOfRow:0 column:0 matchCount:&count message:&message], SPPostgresCellOriginRepeated, @"port %@: %@", port, message);
+		NSError *error = nil;
+		XCTAssertNil([editor saveValue:@"5" row:0 column:0 matchCount:NULL error:&error], @"port %@", port);
+		XCTAssertEqual([error code], SPPostgresErrorNotEditable);
+		XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(id || ':' || v, ',' ORDER BY id) FROM query_edit_test.base" port:port], @"1:a,2:c");
 	}
 }
 
 #pragma mark - Plan walk on hand-written plans
+
+- (NSString *)tooComplexMessage
+{
+	return NSLocalizedString(@"This query is too complex to check which rows it shows.", @"Postgres query result: edit check gave up on a plan too large to walk");
+}
 
 - (NSString *)customScanMessage
 {
@@ -797,6 +860,37 @@
 		"{\"Node Type\": \"Hash\", \"Plans\": [{\"Node Type\": \"CTE Scan\", \"CTE Name\": \"x\"}]}]}}]"] error:&error];
 	XCTAssertEqual([reads count], 2u, @"%@", error);
 	XCTAssertNotEqualObjects([[reads objectAtIndex:0] objectAtIndex:2], [[reads objectAtIndex:1] objectAtIndex:2]);
+}
+
+/// Every CTE Scan expands its WITH query again: a chain of 14 WITH queries each scanning the previous one twice is
+/// 2^14 scans, past the walk's budget of 10,000 node visits, so the walk fails as too complex.
+- (void)testWalkOverBudgetFailsAsTooComplex
+{
+	NSMutableArray *nodes = [NSMutableArray arrayWithObject:@{@"Node Type": @"Seq Scan", @"Schema": @"s", @"Relation Name": @"t", @"Subplan Name": @"CTE x0", @"Parent Relationship": @"InitPlan"}];
+	for (NSUInteger level = 1; level <= 14; level++) {
+		NSString *previous = [NSString stringWithFormat:@"x%lu", (unsigned long)level - 1];
+		[nodes addObject:@{@"Node Type": @"Nested Loop", @"Subplan Name": [NSString stringWithFormat:@"CTE x%lu", (unsigned long)level], @"Parent Relationship": @"InitPlan",
+						   @"Plans": @[@{@"Node Type": @"CTE Scan", @"CTE Name": previous}, @{@"Node Type": @"CTE Scan", @"CTE Name": previous}]}];
+	}
+	[nodes addObject:@{@"Node Type": @"CTE Scan", @"CTE Name": @"x14"}];
+	NSArray *plan = @[@{@"Plan": @{@"Node Type": @"Result", @"Plans": [nodes copy]}}];
+	NSError *error = nil;
+	XCTAssertNil([SPPostgresQueryResultEditor readsInPlan:plan error:&error]);
+	XCTAssertEqualObjects([error localizedDescription], [self tooComplexMessage]);
+
+	// Within the budget (5 levels, 2^5 scans) the walk finishes: the table's reads are one per path.
+	[nodes removeAllObjects];
+	[nodes addObject:@{@"Node Type": @"Seq Scan", @"Schema": @"s", @"Relation Name": @"t", @"Subplan Name": @"CTE x0", @"Parent Relationship": @"InitPlan"}];
+	for (NSUInteger level = 1; level <= 5; level++) {
+		NSString *previous = [NSString stringWithFormat:@"x%lu", (unsigned long)level - 1];
+		[nodes addObject:@{@"Node Type": @"Nested Loop", @"Subplan Name": [NSString stringWithFormat:@"CTE x%lu", (unsigned long)level], @"Parent Relationship": @"InitPlan",
+						   @"Plans": @[@{@"Node Type": @"CTE Scan", @"CTE Name": previous}, @{@"Node Type": @"CTE Scan", @"CTE Name": previous}]}];
+	}
+	[nodes addObject:@{@"Node Type": @"CTE Scan", @"CTE Name": @"x5"}];
+	plan = @[@{@"Plan": @{@"Node Type": @"Result", @"Plans": [nodes copy]}}];
+	error = nil;
+	NSArray *reads = [SPPostgresQueryResultEditor readsInPlan:plan error:&error];
+	XCTAssertEqual([reads count], 32u, @"%@", error);
 }
 
 /// Without the statement (or with one that can't be explained) nothing can be checked, and nothing is saved.

@@ -33,14 +33,24 @@ static NSString *SPQueryEditAbortedMessage(void)
 
 static NSString * const SPQueryEditCTEPlanPrefix = @"CTE ";
 
-/// Distinct reads of a relation beyond this number make no difference, so a CTE's reads are capped at it.
-static const NSUInteger SPQueryEditReadsThatMatter = 2;
+/// Plan nodes the walk visits at most (every CTE Scan expands its WITH query's plan again, so a chain of WITH queries
+/// each scanning the previous one twice grows as 2^n); beyond it the walk gives up and the check fails.
+static const NSUInteger SPQueryEditWalkBudget = 10000;
 
 typedef struct {
 	NSDictionary *plans;             // "CTE <name>" -> its plan node (NSNull when two CTEs share the name)
-	NSMutableDictionary *reads;      // "CTE <name>" -> relation (@[schema, name]) -> distinct reads (NSNumber, capped)
 	NSMutableDictionary *relations;  // "CTE <name>" -> NSSet of the relations its plan reads
+	NSUInteger visits;               // nodes visited so far (see SPQueryEditWalkBudget)
+	BOOL overBudget;                 // set when visits passed SPQueryEditWalkBudget
 } SPQueryEditPlanContext;
+
+/// Counts a visit of a plan node; NO (and overBudget set) once the walk has visited more than its budget.
+static BOOL SPQueryEditVisit(SPQueryEditPlanContext *context)
+{
+	if (++context->visits <= SPQueryEditWalkBudget) return YES;
+	context->overBudget = YES;
+	return NO;
+}
 
 /// Whether node is a CTE's plan (an InitPlan / SubPlan named "CTE <name>").
 static BOOL SPQueryEditIsCTEPlan(NSDictionary *node)
@@ -93,12 +103,14 @@ static BOOL SPQueryEditIndexPlan(id node, NSMutableDictionary *plans)
  * Adds to relations each relation read anywhere in node's subtree, through CTEs too (stack holds the CTE plans
  * being expanded; a reference to one of them, the WorkTable Scan of a recursive CTE, adds nothing new). isRoot is
  * YES for a CTE plan being expanded; otherwise a CTE plan met in the tree is skipped, as it is read through its
- * scans. NO when a CTE Scan names a CTE whose plan isn't in the context (or is ambiguous).
+ * scans. NO when a CTE Scan names a CTE whose plan isn't in the context (or is ambiguous), or the walk is over its
+ * budget.
  */
-static BOOL SPQueryEditCollectRelations(id node, const SPQueryEditPlanContext *context, NSArray *stack, BOOL isRoot, NSMutableSet *relations)
+static BOOL SPQueryEditCollectRelations(id node, SPQueryEditPlanContext *context, NSArray *stack, BOOL isRoot, NSMutableSet *relations)
 {
 	if (![node isKindOfClass:[NSDictionary class]]) return YES;
 	if (!isRoot && SPQueryEditIsCTEPlan(node)) return YES;
+	if (!SPQueryEditVisit(context)) return NO;
 
 	NSString *cte = SPQueryEditCTEReadBy(node);
 	if (cte) {
@@ -124,67 +136,38 @@ static BOOL SPQueryEditCollectRelations(id node, const SPQueryEditPlanContext *c
 	return YES;
 }
 
-static BOOL SPQueryEditCollectReads(id node, NSArray *appendGroup, NSArray *prefix, const SPQueryEditPlanContext *context, NSArray *stack, BOOL isRoot, NSMutableArray *reads);
-
-/// What one scan of the CTE reads: relation -> distinct reads (capped at SPQueryEditReadsThatMatter), computed once
-/// per CTE. nil when the CTE's plan isn't in the context (or is ambiguous), or its plan fails the walk.
-static NSDictionary *SPQueryEditReadsOfCTE(NSString *cte, const SPQueryEditPlanContext *context, NSArray *stack)
-{
-	NSDictionary *known = [context->reads objectForKey:cte];
-	if (known) return known;
-	id plan = [context->plans objectForKey:cte];
-	if (![plan isKindOfClass:[NSDictionary class]]) return nil;
-
-	NSMutableArray *reads = [NSMutableArray array];
-	if (!SPQueryEditCollectReads(plan, nil, @[], context, [stack arrayByAddingObject:cte], YES, reads)) return nil;
-	NSMutableDictionary *groupsByRelation = [NSMutableDictionary dictionary];
-	for (NSArray *read in reads) {
-		NSArray *relation = [read subarrayWithRange:NSMakeRange(0, 2)];
-		NSMutableSet *groups = [groupsByRelation objectForKey:relation];
-		if (!groups) [groupsByRelation setObject:(groups = [NSMutableSet set]) forKey:relation];
-		[groups addObject:[read objectAtIndex:2]];
-	}
-	NSMutableDictionary *counts = [NSMutableDictionary dictionary];
-	for (NSArray *relation in groupsByRelation) {
-		[counts setObject:@(MIN([[groupsByRelation objectForKey:relation] count], SPQueryEditReadsThatMatter)) forKey:relation];
-	}
-	[context->reads setObject:counts forKey:cte];
-	return counts;
-}
-
 /**
  * Adds to reads each read of a relation in node's subtree, as @[schema, relation, group]. group identifies the read
  * (an NSArray, equal for scans of one read):
  * - a scan's group is the topmost of the Append / Merge Append nodes directly above it (a partitioned or inheritance
  *   parent's children are one read), else the scan itself, each under prefix;
- * - a CTE Scan (or WorkTable Scan) is one separate read of every relation its CTE's plan reads
- *   (SPQueryEditReadsOfCTE): as many distinct groups per relation as that plan has, under a group prefix that
- *   includes the scan node, so each scan of the CTE gives its own groups. A reference to a CTE being expanded
- *   (stack; the WorkTable Scan of a recursive CTE) is one more read of every relation of that CTE's plan.
+ * - a CTE Scan (or WorkTable Scan) is one separate read of every relation its CTE's plan reads: the CTE's plan is
+ *   expanded again for each scan, under a prefix that includes the scan node, so each scan inside it keeps its own
+ *   group (two scans of different partitions of one table inside the CTE are two reads, as outside it). A reference
+ *   to a CTE being expanded (stack; the WorkTable Scan of a recursive CTE) is one more read of every relation of that
+ *   CTE's plan.
  * A CTE's plan met in the tree (isRoot NO) is skipped: it is read only through its scans. NO when a CTE Scan names a
- * CTE whose plan isn't in the context (or is ambiguous), so the caller refuses everything.
+ * CTE whose plan isn't in the context (or is ambiguous), or the walk is over its budget, so the caller refuses
+ * everything.
  */
-static BOOL SPQueryEditCollectReads(id node, NSArray *appendGroup, NSArray *prefix, const SPQueryEditPlanContext *context, NSArray *stack, BOOL isRoot, NSMutableArray *reads)
+static BOOL SPQueryEditCollectReads(id node, NSArray *appendGroup, NSArray *prefix, SPQueryEditPlanContext *context, NSArray *stack, BOOL isRoot, NSMutableArray *reads)
 {
 	if (![node isKindOfClass:[NSDictionary class]]) return YES;
 	if (!isRoot && SPQueryEditIsCTEPlan(node)) return YES;
+	if (!SPQueryEditVisit(context)) return NO;
 
 	NSString *type = [node objectForKey:@"Node Type"];
 	NSArray *own = [prefix arrayByAddingObject:[NSValue valueWithNonretainedObject:node]];
 	NSString *cte = SPQueryEditCTEReadBy(node);
 	if (cte) {
-		if (![context->plans objectForKey:cte]) return NO;
+		id plan = [context->plans objectForKey:cte];
+		if (![plan isKindOfClass:[NSDictionary class]]) return NO;
 		if ([stack containsObject:cte]) {
 			NSMutableSet *relations = [NSMutableSet set];
-			if (!SPQueryEditCollectRelations([context->plans objectForKey:cte], context, stack, YES, relations)) return NO;
+			if (!SPQueryEditCollectRelations(plan, context, stack, YES, relations)) return NO;
 			for (NSArray *relation in relations) [reads addObject:[relation arrayByAddingObject:own]];
-		} else {
-			NSDictionary *counts = SPQueryEditReadsOfCTE(cte, context, stack);
-			if (!counts) return NO;
-			for (NSArray *relation in counts) {
-				NSUInteger count = [[counts objectForKey:relation] unsignedIntegerValue];
-				for (NSUInteger read = 0; read < count; read++) [reads addObject:[relation arrayByAddingObject:[own arrayByAddingObject:@(read)]]];
-			}
+		} else if (!SPQueryEditCollectReads(plan, nil, own, context, [stack arrayByAddingObject:cte], YES, reads)) {
+			return NO;
 		}
 	} else {
 		NSArray *relation = SPQueryEditRelationOf(node);
@@ -213,10 +196,14 @@ static BOOL SPQueryEditCollectReads(id node, NSArray *appendGroup, NSArray *pref
 			return nil;
 		}
 	}
-	SPQueryEditPlanContext context = { plans, [NSMutableDictionary dictionary], [NSMutableDictionary dictionary] };
+	SPQueryEditPlanContext context = { plans, [NSMutableDictionary dictionary], 0, NO };
 	for (id statementPlan in explained) {
 		if (![statementPlan isKindOfClass:[NSDictionary class]]) continue;
 		if (!SPQueryEditCollectReads([statementPlan objectForKey:@"Plan"], nil, @[], &context, @[], NO, reads)) {
+			if (context.overBudget) {
+				if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, NSLocalizedString(@"This query is too complex to check which rows it shows.", @"Postgres query result: edit check gave up on a plan too large to walk"), nil);
+				return nil;
+			}
 			if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, NSLocalizedString(@"The statement's plan reads a WITH query whose plan couldn't be found, so its rows can't be identified.", @"Postgres query result: edit check found a CTE Scan without its CTE's plan"), nil);
 			return nil;
 		}
@@ -289,8 +276,8 @@ static BOOL SPQueryEditCollectReads(id node, NSArray *appendGroup, NSArray *pref
  * - the statement's plan (EXPLAIN without ANALYZE: planned, not executed, but locks are taken and immutable / stable
  *   functions may be evaluated while planning), to find the origins read more than once: those whose family's reads
  *   form more than one group (see +readsInPlan:error:), counting a read through a CTE once per scan of the CTE.
- * A failure (no statement, one that can't be explained, a plan reading a CTE it doesn't contain or using an
- * extension's Custom Scan without a relation, an aborted transaction) is not cached, so the next check retries.
+ * A failure (no statement, one that can't be explained, a plan reading a CTE it doesn't contain, using an extension's
+ * Custom Scan without a relation or too large to walk, an aborted transaction) is not cached, so the next check retries.
  */
 - (BOOL)loadTables:(NSError **)error
 {
