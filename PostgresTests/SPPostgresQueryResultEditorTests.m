@@ -824,6 +824,38 @@
 }
 
 /// A CTE Scan whose CTE has no plan in the tree fails the walk; a CTE read twice gives two reads of its table.
+#pragma mark - bit(n)
+
+/// A bit(n) column is compared and set as bit(n): the cast to bit without a length would be bit(1).
+- (void)testBitColumnsIdentifyAndSave
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:@"SELECT n, b, v FROM query_edit_test.bits ORDER BY n" port:port];
+		for (NSUInteger column = 0; column < 3; column++) {
+			NSInteger count = -2;
+			NSString *message = nil;
+			XCTAssertEqual([editor editabilityOfRow:0 column:column matchCount:&count message:&message], SPPostgresCellEditable, @"port %@ column %lu: %@", port, (unsigned long)column, message);
+			XCTAssertEqual(count, 1);
+		}
+		NSError *error = nil;
+		XCTAssertEqualObjects([editor saveValue:@"010" row:0 column:1 matchCount:NULL error:&error], @"010", @"port %@: %@", port, error);
+		XCTAssertEqualObjects([editor saveValue:@"10101" row:0 column:2 matchCount:NULL error:&error], @"10101", @"port %@: %@", port, error);
+		XCTAssertEqualObjects([editor saveValue:@"3" row:0 column:0 matchCount:NULL error:&error], @"3", @"port %@: %@", port, error);
+		XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(n || ':' || b::text || ':' || v::text, ',' ORDER BY n) FROM query_edit_test.bits" port:port], @"2:011:1,3:010:10101");
+		// A value of the wrong length is the server's error, and nothing changes
+		XCTAssertNil([editor saveValue:@"1" row:0 column:1 matchCount:NULL error:&error], @"port %@", port);
+		XCTAssertEqualObjects([self serverValue:@"SELECT b::text FROM query_edit_test.bits WHERE n = 3" port:port], @"010");
+
+		SPPostgresQueryResultEditor *keyed = [self editorForSQL:@"SELECT b, t FROM query_edit_test.keyed_bits ORDER BY t" port:port];
+		NSString *message = nil;
+		XCTAssertEqual([keyed editabilityOfRow:0 column:1 matchCount:NULL message:&message], SPPostgresCellEditable, @"port %@: %@", port, message);
+		XCTAssertEqual([keyed editabilityOfRow:0 column:0 matchCount:NULL message:&message], SPPostgresCellEditable, @"port %@: %@", port, message);
+		XCTAssertEqualObjects([keyed saveValue:@"aa" row:0 column:1 matchCount:NULL error:&error], @"aa", @"port %@: %@", port, error);
+		XCTAssertEqualObjects([keyed saveValue:@"010" row:0 column:0 matchCount:NULL error:&error], @"010", @"port %@: %@", port, error);
+		XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(b::text || ':' || t, ',' ORDER BY t) FROM query_edit_test.keyed_bits" port:port], @"010:aa,011:b");
+	}
+}
+
 #pragma mark - Outer joins
 
 - (NSString *)outerJoinMessage
