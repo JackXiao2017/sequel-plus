@@ -2218,6 +2218,15 @@
 }
 
 /**
+ * Sparkle updater delegate method. Sequel Plus has no update feed of its own yet: the bundled feed is the original
+ * Sequel Pro's, whose releases would "update" Sequel Plus back to Sequel Pro. So no check (scheduled or manual) runs.
+ */
+- (BOOL)updaterMayCheckForUpdates:(SUUpdater *)updater
+{
+	return NO;
+}
+
+/**
  * Sparkle updater delegate method. Called just before the updater relaunches Sequel Pro and we need to make
  * sure that no sheets are currently open, which will prevent the app from being quit. 
  */
