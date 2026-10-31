@@ -338,6 +338,65 @@ static NSString * const SPQueryEditingSuiteName = @"SPPostgresStage12Tests";
 	}
 }
 
+#pragma mark - Values longer than the grid shows
+
+/// Sets items 1's name to 10,000 x's and a y (the grid cuts values after 10,000 characters); returns it.
+- (NSString *)storeLongNameOnPort:(NSNumber *)port
+{
+	PGPostgresConnection *other = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue];
+	XCTAssertNotNil([other execute:@"UPDATE query_edit_test.items SET name = repeat('x', 10000) || 'y' WHERE id = 1"], @"%@", other.lastError.errorPrimaryMessage);
+	[other disconnect];
+	return [[@"" stringByPaddingToLength:10000 withString:@"x" startingAtIndex:0] stringByAppendingString:@"y"];
+}
+
+/// A cell whose value the grid shows cut is never edited in the grid (its in-cell editor would start from the cut
+/// text): the field editor sheet opens with the full value, also with edit mode off.
+- (void)testLongValueOpensSheetWithFullText
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		NSString *full = [self storeLongNameOnPort:port];
+		[self openQueryOnPort:port];
+		NSMutableArray<NSDictionary *> *sheets = [self installSheetPresenter];
+		[self run:@"SELECT id, name FROM query_edit_test.items ORDER BY id"];
+		XCTAssertEqual([[self gridValueAtRow:0 column:1] length], 10000u);
+
+		XCTAssertFalse([self shouldEditRow:0 column:1], @"port %@", port);
+		XCTAssertEqual(sheets.count, 1u, @"port %@", port);
+		XCTAssertEqual([sheets[0][@"value"] length], 10001u);
+		XCTAssertEqualObjects(sheets[0][@"value"], full);
+		XCTAssertEqualObjects(sheets[0][@"editable"], @YES);
+		XCTAssertEqual(self.refusals.count, 0u);
+
+		[self completeSheet:sheets[0] with:[full stringByAppendingString:@"z"]];
+		XCTAssertEqual(self.alerts.count, 0u, @"port %@: %@", port, [self.alerts.firstObject informativeText]);
+		XCTAssertEqualObjects([self serverValue:@"SELECT name FROM query_edit_test.items WHERE id = 1" port:port], [full stringByAppendingString:@"z"]);
+
+		// A short value still edits in the grid
+		XCTAssertTrue([self shouldEditRow:1 column:1], @"port %@", port);
+		XCTAssertEqual(sheets.count, 1u);
+	}
+}
+
+/// The cut text of a longer value coming back from the grid is the unchanged value: nothing is sent.
+- (void)testCommitOfCutTextSendsNothing
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		NSString *full = [self storeLongNameOnPort:port];
+		[self openQueryOnPort:port];
+		[self run:@"SELECT id, name FROM query_edit_test.items ORDER BY id"];
+		NSString *cut = [self gridValueAtRow:0 column:1];
+		XCTAssertEqual(cut.length, 10000u);
+
+		// The result is approved (another cell's inline check), then the cut text arrives for the long cell
+		XCTAssertTrue([self shouldEditRow:1 column:1], @"port %@", port);
+		[self setValue:cut row:0 column:1];
+
+		XCTAssertEqual(self.alerts.count, 0u, @"port %@: %@", port, [self.alerts.firstObject informativeText]);
+		XCTAssertEqual(self.changes.count, 0u, @"port %@", port);
+		XCTAssertEqualObjects([self serverValue:@"SELECT name FROM query_edit_test.items WHERE id = 1" port:port], full);
+	}
+}
+
 #pragma mark - After a save
 
 - (void)testReloadAfterEditRerunsSelect

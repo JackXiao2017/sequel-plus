@@ -41,6 +41,10 @@ static void *SPPostgresQueryRunnerContext = &SPPostgresQueryRunnerContext;
 static void *SPPostgresQueryToggleContext = &SPPostgresQueryToggleContext;
 
 // The gear's items (DBView.xib): their tags
+/// The grid shows a value's first characters only, up to this many (it draws one line). A longer value is never
+/// edited in the grid, whose in-cell editor would start from the cut text: it opens the field editor sheet.
+static const NSUInteger SPPostgresQueryDisplayLimit = 10000;
+
 static const NSInteger SPPostgresGearPreviousHistoryTag = 3;
 static const NSInteger SPPostgresGearNextHistoryTag = 4;
 static const NSInteger SPPostgresGearShiftRightTag = 6;
@@ -2850,7 +2854,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 	// Very long values are cut for display (the grid draws one line)
 	NSString *string = value;
-	return [string length] > 10000 ? [string substringToIndex:10000] : string;
+	return [string length] > SPPostgresQueryDisplayLimit ? [string substringToIndex:SPPostgresQueryDisplayLimit] : string;
 }
 
 /// The end of a cell edit.
@@ -2913,8 +2917,11 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	if (!newValue) newValue = [NSNull null];
 	// The NULL placeholder means NULL where the column takes it (as the Content view)
 	if ([newValue isKindOfClass:[NSString class]] && [newValue isEqualToString:[self _nullPlaceholder]] && [cellEditor columnIsNullable:(NSUInteger)column]) newValue = [NSNull null];
-	// Unchanged: nothing to send
+	// Unchanged: nothing to send. Also the grid's cut text of a longer value (an in-cell editor seeded from it,
+	// should one ever open): the value is unchanged, not cut
 	if ([newValue isEqual:oldValue]) return;
+	if ([oldValue isKindOfClass:[NSString class]] && [oldValue length] > SPPostgresQueryDisplayLimit && [newValue isKindOfClass:[NSString class]]
+		&& [newValue isEqualToString:[oldValue substringToIndex:SPPostgresQueryDisplayLimit]]) return;
 
 	NSError *error = nil;
 	id saved = [cellEditor saveValue:newValue row:row column:(NSUInteger)column matchCount:NULL error:&error];
@@ -2985,7 +2992,8 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 /**
  * As MySQL's: nothing is edited while the runner is busy; in edit mode no cell is edited in the grid; otherwise the
  * editor checks the cell (on first use its catalog lookup and the statement's plan, synchronously), and a cell that
- * can't be edited shows why instead.
+ * can't be edited shows why instead. A value longer than the grid shows (SPPostgresQueryDisplayLimit) opens the field
+ * editor sheet with the full value, also outside edit mode.
  */
 - (BOOL)tableView:(NSTableView *)theTableView shouldEditTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
 {
@@ -2993,8 +3001,11 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	NSInteger column = [self _resultColumnOfTableColumn:tableColumn];
 	if (column < 0 || rowIndex < 0 || (NSUInteger)rowIndex >= resultRowCount) return NO;
 
-	// Edit mode (MySQL's "edit in sheet" preference): the field editor sheet, never the grid
-	if ([defaults boolForKey:SPEditInSheetEnabled]) {
+	// Edit mode (MySQL's "edit in sheet" preference): the field editor sheet, never the grid. Also a value the grid
+	// shows cut: the in-cell editor would start from the cut text, and ending the edit would save it
+	id fullValue = [resultEditor valueAtRow:(NSUInteger)rowIndex column:(NSUInteger)column];
+	BOOL cut = [fullValue isKindOfClass:[NSString class]] && [fullValue length] > SPPostgresQueryDisplayLimit;
+	if (cut || [defaults boolForKey:SPEditInSheetEnabled]) {
 		[self _editInSheetRow:rowIndex column:column];
 		return NO;
 	}
