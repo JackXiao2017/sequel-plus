@@ -176,8 +176,8 @@
 	[self reloadBundles:self];
     [self _copyDefaultThemes];
 
-	// If no documents are open, open one
-	if (![self frontDocument]) {
+	// If no documents are open, open one (skipped when hosting XCTest: the default connection reads the Keychain, which can block on a prompt)
+	if (![self frontDocument] && ![[[NSProcessInfo processInfo] environment] objectForKey:@"XCTestConfigurationFilePath"]) {
 		SPDatabaseDocument *newConnection = [self makeNewConnectionTabOrWindow];
 		
 		if (spfDict) {
@@ -2186,8 +2186,9 @@
  */
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)sender hasVisibleWindows:(BOOL)flag
 {
-	// Only create a new document (without auto-connect) when there are already no documents open.
-	if (![self frontDocument]) {
+	// Only create a new document (without auto-connect) when there are already no windows open
+	// (a window whose selected tab is not a MySQL document still counts).
+	if (![self frontController]) {
 		[self newWindow:self];
 		return NO;
 	}
@@ -2214,6 +2215,15 @@
 - (NSDictionary *)bundleKeyEquivalentsForScope:(NSString*)scope
 {
 	return [bundleKeyEquivalents objectForKey:scope];
+}
+
+/**
+ * Sparkle updater delegate method. Sequel Plus has no update feed of its own yet: the bundled feed is the original
+ * Sequel Pro's, whose releases would "update" Sequel Plus back to Sequel Pro. So no check (scheduled or manual) runs.
+ */
+- (BOOL)updaterMayCheckForUpdates:(SUUpdater *)updater
+{
+	return NO;
 }
 
 /**

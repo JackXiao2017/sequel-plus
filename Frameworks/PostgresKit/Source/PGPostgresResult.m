@@ -22,6 +22,7 @@
 #import "PGPostgresException.h"
 #import "PGPostgresConnection.h"
 #import "PGPostgresConnectionTypeHandling.h"
+#import "PGPostgresKitPrivateAPI.h"
 
 @interface PGPostgresResult ()
 
@@ -170,6 +171,63 @@
 	_row++;
 	
 	return data;
+}
+
+- (BOOL)returnsRows
+{
+	ExecStatusType status = PQresultStatus(_result);
+
+	return status == PGRES_TUPLES_OK || status == PGRES_SINGLE_TUPLE;
+}
+
+- (NSString *)commandStatus
+{
+	const char *status = PQcmdStatus(_result);
+	
+	return status ? [NSString stringWithUTF8String:status] : @"";
+}
+
+- (BOOL)copyOutputDiscarded
+{
+	return _copyOutputDiscarded;
+}
+
+- (void)_setCopyOutputDiscarded:(BOOL)discarded
+{
+	_copyOutputDiscarded = discarded;
+}
+
+- (id)textValueAtRow:(unsigned long long)row column:(NSUInteger)column
+{
+	if (![self returnsRows] || row >= (unsigned long long)PQntuples(_result) || column >= _numberOfFields) return nil;
+
+	if (PQgetisnull(_result, (int)row, (int)column)) return [NSNull null];
+
+	const char *bytes = PQgetvalue(_result, (int)row, (int)column);
+	NSUInteger length = (NSUInteger)PQgetlength(_result, (int)row, (int)column);
+
+	if (!bytes) return @"";
+
+	NSString *string = [[NSString alloc] initWithBytes:bytes length:length encoding:_stringEncoding];
+
+	// Not valid in the connection's encoding: show the bytes as Latin-1 rather than nothing
+	if (!string) string = [[NSString alloc] initWithBytes:bytes length:length encoding:NSISOLatin1StringEncoding];
+
+	return [string autorelease];
+}
+
+- (unsigned int)tableOIDForField:(NSUInteger)field
+{
+	if (!_result || field >= _numberOfFields) return 0;
+	
+	return PQftable(_result, (int)field);
+}
+
+- (NSInteger)tableColumnForField:(NSUInteger)field
+{
+	if (!_result || field >= _numberOfFields) return 0;
+	
+	return PQftablecol(_result, (int)field);
 }
 
 #pragma mark -

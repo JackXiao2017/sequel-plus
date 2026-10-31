@@ -34,7 +34,7 @@
 #import "SPFavoriteNode.h"
 #import "SPGroupNode.h"
 
-static NSString *SPDatabaseImage = @"database-small";
+static NSString *SPDatabaseImage = @"mysql-dolphin"; // favorites in the Default Favorite pop-up: the MySQL dolphin, as in the favorites list
 
 @interface SPGeneralPreferencePane ()
 

@@ -56,6 +56,7 @@
 #import "SPDatabaseContentViewDelegate.h"
 #import "SPConnectionControllerDelegateProtocol.h"
 #import "SPThreadAdditions.h"
+#import "SPWindowTabDocument.h"
 
 #import <WebKit/WebKit.h>
 #import <SPMySQL/SPMySQLConnectionDelegate.h>
@@ -63,7 +64,7 @@
 /**
  * The SPDatabaseDocument class controls the primary database view window.
  */
-@interface SPDatabaseDocument : NSObject <SPConnectionControllerDelegateProtocol, SPMySQLConnectionDelegate, NSTextFieldDelegate, NSToolbarDelegate, SPCountedObject, WebFrameLoadDelegate>
+@interface SPDatabaseDocument : NSObject <SPConnectionControllerDelegateProtocol, SPMySQLConnectionDelegate, NSTextFieldDelegate, NSToolbarDelegate, SPCountedObject, WebFrameLoadDelegate, SPWindowTabDocument>
 {
 	// IBOutlets
 	IBOutlet SPTablesList *tablesListInstance;
@@ -278,6 +279,8 @@
 	SPGotoDatabaseController *gotoDatabaseController;
 	
 	int64_t instanceId;
+
+	BOOL isBeingReplacedInTab;
 }
 
 @property (nonatomic, assign) NSTableView *dbTablesTableView;
@@ -296,6 +299,12 @@
 @property (readonly) SPTableContent <SPDatabaseContentViewDelegate> *tableContentInstance;
 
 @property (readonly) int64_t instanceId;
+
+/**
+ * YES once -[SPWindowController replaceTabDocument:withDocument:] is closing this document's tab to
+ * put another document (a PostgreSQL connection) in its place. Never set for a normal tab close.
+ */
+@property (readwrite, assign) BOOL isBeingReplacedInTab;
 
 - (SPHelpViewerClient *)helpViewerClient;
 

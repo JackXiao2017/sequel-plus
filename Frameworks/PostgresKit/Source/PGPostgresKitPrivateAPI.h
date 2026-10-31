@@ -20,6 +20,7 @@
 
 #import "PGPostgresConnection.h"
 #import "PGPostgresTimeInterval.h"
+#import "PGPostgresResult.h"
 
 @interface PGPostgresConnection ()
 
@@ -33,9 +34,15 @@
 
 @end
 
+@interface PGPostgresResult (PGPostgresResultPrivateAPI)
+
+- (void)_setCopyOutputDiscarded:(BOOL)discarded;
+
+@end
+
 @interface PGPostgresTimeInterval ()
 
-+ (id)intervalWithPGInterval:(PGinterval *)interval;
-- (id)initWithInterval:(PGinterval *)interval;
++ (id)intervalWithYears:(NSInteger)years months:(NSInteger)months days:(NSInteger)days hours:(NSInteger)hours minutes:(NSInteger)minutes seconds:(NSInteger)seconds microseconds:(NSInteger)microseconds;
+- (id)initWithYears:(NSInteger)years months:(NSInteger)months days:(NSInteger)days hours:(NSInteger)hours minutes:(NSInteger)minutes seconds:(NSInteger)seconds microseconds:(NSInteger)microseconds;
 
 @end

@@ -44,8 +44,6 @@ static PGPostgresOid PGPostgresTypeStringTypes[] =
 @interface PGPostgresTypeStringHandler ()
 
 - (id)_stringFromResult;
-- (id)_macAddressFromResult;
-- (id)_inetAddressFromResult;
 
 @end
 
@@ -90,12 +88,10 @@ static PGPostgresOid PGPostgresTypeStringTypes[] =
 		case PGPostgresOidBit:
 		case PGPostgresOidVarBit:
 		case PGPostgresOidUnknown:
-			return [self _stringFromResult];
 		case PGPostgresOidMacAddr:
-			return [self _macAddressFromResult];
 		case PGPostgresOidInetAddr:
 		case PGPostgresOidCidrAddr:
-			return [self _inetAddressFromResult];
+			return [self _stringFromResult];
 	}
 	
 	return [NSNull null];
@@ -114,50 +110,12 @@ static PGPostgresOid PGPostgresTypeStringTypes[] =
 	const void *bytes = PQgetvalue(_result, (int)_row, (int)_column);
 	NSUInteger length = PQgetlength(_result, (int)_row, (int)_column);
 		
-	if (!bytes || !length) return [NSNull null];
+	if (!bytes) return [NSNull null];
+	
+	// A genuine NULL is handled by the result before we get here, so zero length means an empty string
+	if (!length) return @"";
 	
 	return [[[NSString alloc] initWithBytes:bytes length:length encoding:[_connection stringEncoding]] autorelease];
-}
-
-/**
- * Converts a MAC address value to a string.
- *
- * @return A string representation of the MAC address.
- */
-- (id)_macAddressFromResult
-{
-	PGmacaddr address;
-	
-	if (!PQgetf(_result, (int)_row, PGPostgresResultValueMacAddr, (int)_column, &address)) return [NSNull null];
-	
-	return [NSString stringWithFormat:@"%02d:%02d:%02d:%02d:%02d:%02d", address.a, address.b, address.c, address.d, address.e, address.f];
-}
-
-/**
- * Converts a network address value to a string.
- *
- * @return A string representation of the network address.
- */
-- (id)_inetAddressFromResult
-{
-	PGinet inet;
-		
-	if (!PQgetf(_result, (int)_row, _type == PGPostgresOidInetAddr ? PGPostgresResultValueInet : PGPostgresResultValueCidr, (int)_column, &inet)) return [NSNull null];
-	
-	char ip[80];
-	struct sockaddr *sa = (struct sockaddr *)inet.sa_buf;
-	
-	int success = getnameinfo(sa, inet.sa_buf_len, ip, sizeof(ip), NULL, 0, NI_NUMERICHOST);
-	
-	if (success != 0) {
-		const char *error = gai_strerror(success);
-		
-		NSLog(@"PostgresKit: Error: Failed to convert IP address to string representation (%s)", error);
-		
-		return [NSNull null];
-	}
-	
-	return [NSString stringWithUTF8String:ip];
 }
 
 @end

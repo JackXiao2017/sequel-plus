@@ -32,7 +32,8 @@
 #pragma clang diagnostic ignored "-Wobjc-protocol-method-implementation"
 
 // Constants
-static int PGPostgresResultsAsBinary = 1;
+// Results are requested in text format and decoded by the type handlers
+static int PGPostgresResultsAsText = 0;
 
 // Internal query structure
 typedef struct 
@@ -49,6 +50,7 @@ PGQueryParamData;
 
 - (PGPostgresResult *)_execute:(NSObject *)query values:(NSArray *)values;
 - (BOOL)_queryDidError:(PGresult *)result;
+- (PGresult *)_finishCopyIfNeeded:(PGresult *)result discardedOutput:(BOOL *)discardedOutput;
 - (PGQueryParamData *)_createParameterDataStructureWithCount:(int)paramNum;
 - (void)_destroyParamDataStructure:(PGQueryParamData *)paramData;
 
@@ -149,6 +151,18 @@ PGQueryParamData;
 			continue;
 		}
 		
+		// NSString parameters are sent as text with an unspecified (0) type, so the server infers the type
+		// from the query (e.g. $1::text). The UTF-8 buffer lives as long as the current autorelease pool.
+		if ([nativeObject isKindOfClass:[NSString class]]) {
+			const char *utf8 = [(NSString *)nativeObject UTF8String];
+			paramData->paramValues[i] = utf8 ? (char *)utf8 : "";
+			paramData->paramTypes[i] = 0;
+			paramData->paramLengths[i] = 0;
+			paramData->paramFormats[i] = 0;
+			
+			continue;
+		}
+		
 		// Obtain correct handler for this class
 		id <PGPostgresTypeHandlerProtocol> typeHandler = [self typeHandlerForClass:[nativeObject class]];
 		
@@ -198,7 +212,7 @@ PGQueryParamData;
 		}
 	}	
 	
-	// Execute the command - return data in binary
+	// Execute the command - return data as text
 	PGresult *pgResult = nil;
 	
 	if ([query isKindOfClass:[NSString class]]) {
@@ -210,7 +224,7 @@ PGQueryParamData;
 								(const char **)paramData->paramValues, 
 								(const int *)paramData->paramLengths, 
 								(const int *)paramData->paramFormats, 
-								PGPostgresResultsAsBinary);
+								PGPostgresResultsAsText);
 	} 
 	else if ([query isKindOfClass:[PGPostgresStatement class]]) {
 		PGPostgresStatement *statement = (PGPostgresStatement *)query;
@@ -232,18 +246,74 @@ PGQueryParamData;
 								  (const char **)paramData->paramValues, 
 								  (const int *)paramData->paramLengths, 
 								  (const int *)paramData->paramFormats, 
-								  PGPostgresResultsAsBinary);		
+								  PGPostgresResultsAsText);		
 	}
 	
 	[self _destroyParamDataStructure:paramData];
+	
+	BOOL discardedCopyOutput = NO;
+	
+	if (pgResult) pgResult = [self _finishCopyIfNeeded:pgResult discardedOutput:&discardedCopyOutput];
 	
 	if (!pgResult || [self _queryDidError:pgResult]) return nil;
 	
 	PGPostgresResult *result = [[[PGPostgresResult alloc] initWithResult:pgResult connection:self] autorelease];
 	
+	if (discardedCopyOutput) [result _setCopyOutputDiscarded:YES];
+	
 	_lastQueryAffectedRowCount = [result numberOfRows];
 	
 	return result;
+}
+
+/**
+ * COPY ... FROM STDIN / TO STDOUT leave the connection in copy mode, where libpq refuses every other query
+ * ("another command is already in progress"). Copy data isn't supported: a COPY FROM STDIN is ended with
+ * an error (the server rolls the COPY back and reports it), the rows of a COPY TO STDOUT are discarded.
+ *
+ * @param result          The result PQexecParams/PQexecPrepared returned (taken over: cleared if replaced).
+ * @param discardedOutput Set to YES when COPY TO STDOUT rows were discarded.
+ *
+ * @return The result to use: the COPY command's final result (an error, or its "COPY n" status), the
+ *         given result if it wasn't a COPY, or NULL if the connection failed.
+ */
+- (PGresult *)_finishCopyIfNeeded:(PGresult *)result discardedOutput:(BOOL *)discardedOutput
+{
+	ExecStatusType status = PQresultStatus(result);
+	
+	if (status != PGRES_COPY_IN && status != PGRES_COPY_OUT && status != PGRES_COPY_BOTH) return result;
+	
+	PQclear(result);
+	
+	if (status == PGRES_COPY_IN || status == PGRES_COPY_BOTH) {
+		PQputCopyEnd(_connection, "COPY FROM STDIN is not supported by this client");
+	}
+	
+	if (status == PGRES_COPY_OUT || status == PGRES_COPY_BOTH) {
+		if (discardedOutput) *discardedOutput = YES;
+		
+		char *buffer = NULL;
+		
+		// > 0: a row (discarded); -1: done; -2: failed
+		while (PQgetCopyData(_connection, &buffer, 0) > 0) 
+		{
+			PQfreemem(buffer);
+			buffer = NULL;
+		}
+	}
+	
+	// The command's final result is the last one
+	PGresult *final = NULL;
+	PGresult *next = NULL;
+	
+	while ((next = PQgetResult(_connection))) 
+	{
+		if (final) PQclear(final);
+		
+		final = next;
+	}
+	
+	return final;
 }
 
 /**

@@ -61,15 +61,25 @@ static PGPostgresOid PGPostgresTypeBinaryTypes[] =
 
 - (id)objectFromResult
 {	
-	PGbytea data;
-	
 	if (!_result || !_type) return [NSNull null];
 	
-	if (!PQgetf(_result, (int)_row, PGPostgresResultValueByteA, (int)_column, &data)) return [NSNull null];
+	if (PQgetisnull(_result, (int)_row, (int)_column)) return [NSNull null];
 	
-	if (!data.data || !data.len) return [NSData data];
+	const unsigned char *escaped = (const unsigned char *)PQgetvalue(_result, (int)_row, (int)_column);
 	
-	return [NSData dataWithBytes:data.data length:data.len];
+	if (!escaped) return [NSNull null];
+	
+	// Results are requested in text format, where bytea values are escaped (hex or escape format)
+	size_t length = 0;
+	unsigned char *bytes = PQunescapeBytea(escaped, &length);
+	
+	if (!bytes) return [NSNull null];
+	
+	NSData *data = length ? [NSData dataWithBytes:bytes length:length] : [NSData data];
+	
+	PQfreemem(bytes);
+	
+	return data;
 }
 
 @end

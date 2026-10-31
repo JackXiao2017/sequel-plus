@@ -28,9 +28,13 @@
 //
 //  More info at <https://github.com/sequelpro/sequelpro>
 
+#import "SPWindowTabDocument.h"
+
 @class PSMTabBarControl;
 @class SPDatabaseDocument;
 
+// Default visibility so the app-hosted test bundle can link it despite the app hiding symbols.
+__attribute__((visibility("default")))
 @interface SPWindowController : NSWindowController <NSWindowDelegate>
 {
 	IBOutlet PSMTabBarControl *tabBar;
@@ -44,6 +48,10 @@
 
 	NSMutableArray *managedDatabaseConnections;
 	SPDatabaseDocument *selectedTableDocument;
+
+	// The selected tab's document of any engine (not retained, like selectedTableDocument).
+	// Equal to selectedTableDocument whenever the selected tab is a MySQL tab.
+	id <SPWindowTabDocument> selectedTabDocument;
 }
 
 // Database connection management
@@ -61,6 +69,29 @@
  *   Release it on the main thread again.
  */
 - (SPDatabaseDocument *)selectedTableDocument;
+
+/**
+ * The selected tab's document, whatever its engine. -selectedTableDocument is this document
+ * when it is an SPDatabaseDocument, and nil otherwise. Not retained (see above).
+ */
+- (id <SPWindowTabDocument>)selectedDocument;
+
+/**
+ * Every tab's document, of any engine, in tab order. -documents lists only the MySQL ones.
+ */
+- (NSArray *)tabDocuments;
+
+/**
+ * Hosts a document in a new tab at index (clamped to the tab count). The tab view item retains
+ * the document; the window controller does not.
+ */
+- (void)addTabDocument:(id <SPWindowTabDocument>)document atIndex:(NSInteger)index select:(BOOL)select;
+
+/**
+ * Puts newDocument in oldDocument's tab position and selects it; oldDocument's tab is closed
+ * and it receives -parentTabDidClose.
+ */
+- (void)replaceTabDocument:(id <SPWindowTabDocument>)oldDocument withDocument:(id <SPWindowTabDocument>)newDocument;
 
 - (void)updateSelectedTableDocument;
 - (void)updateAllTabTitles:(id)sender;

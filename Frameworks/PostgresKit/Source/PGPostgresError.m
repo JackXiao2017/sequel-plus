@@ -43,6 +43,7 @@
 @synthesize errorPrimaryMessage = _errorPrimaryMessage;
 @synthesize errorDetailMessage = _errorDetailMessage;
 @synthesize errorMessageHint = _errorMessageHint;
+@synthesize errorContext = _errorContext;
 @synthesize errorStatementPosition = _errorStatementPosition;
 
 #pragma mark -
@@ -64,6 +65,7 @@
 		_errorPrimaryMessage = nil;
 		_errorDetailMessage = nil;
 		_errorMessageHint = nil;
+		_errorContext = nil;
 		_errorStatementPosition = -1;
 		
 		if (result) [self _extractErrorDetailsFromResult:(const PGresult *)result];
@@ -90,11 +92,13 @@
 	// Note that we don't expose all the fields that are available.
 	// The ones we don't mostly include information internal to Postgres 
 	// that generally isn't useful to end users.
-	_errorSeverity = [self _extractErrorField:PG_DIAG_SEVERITY fromResult:result];
-	_errorStateCode = [self _extractErrorField:PG_DIAG_SQLSTATE fromResult:result];
-	_errorPrimaryMessage = [self _extractErrorField:PG_DIAG_MESSAGE_PRIMARY fromResult:result];
-	_errorDetailMessage = [self _extractErrorField:PG_DIAG_MESSAGE_DETAIL fromResult:result];
-	_errorMessageHint = [self _extractErrorField:PG_DIAG_MESSAGE_HINT fromResult:result];
+	// The extracted strings are autoreleased; the ivars own them (released in -dealloc), so retain them.
+	_errorSeverity = [[self _extractErrorField:PG_DIAG_SEVERITY fromResult:result] retain];
+	_errorStateCode = [[self _extractErrorField:PG_DIAG_SQLSTATE fromResult:result] retain];
+	_errorPrimaryMessage = [[self _extractErrorField:PG_DIAG_MESSAGE_PRIMARY fromResult:result] retain];
+	_errorDetailMessage = [[self _extractErrorField:PG_DIAG_MESSAGE_DETAIL fromResult:result] retain];
+	_errorMessageHint = [[self _extractErrorField:PG_DIAG_MESSAGE_HINT fromResult:result] retain];
+	_errorContext = [[self _extractErrorField:PG_DIAG_CONTEXT fromResult:result] retain];
 	_errorStatementPosition = [[self _extractErrorField:PG_DIAG_STATEMENT_POSITION fromResult:result] integerValue];
 }
 
@@ -104,7 +108,7 @@
  * @param field The error field to extract.
  * @param result The Postgres result to extract the field from.
  *
- * @return A string representing the error value. The caller is responsible for freeing the associated memory.
+ * @return A string representing the error value (autoreleased), or nil if the field is absent.
  */
 - (NSString *)_extractErrorField:(int)field fromResult:(const PGresult *)result
 {	
@@ -122,6 +126,7 @@
 	if (_errorPrimaryMessage) [_errorPrimaryMessage release], _errorPrimaryMessage = nil;
 	if (_errorDetailMessage) [_errorDetailMessage release], _errorDetailMessage = nil;
 	if (_errorMessageHint) [_errorMessageHint release], _errorMessageHint = nil;
+	if (_errorContext) [_errorContext release], _errorContext = nil;
 	
 	[super dealloc];
 }
