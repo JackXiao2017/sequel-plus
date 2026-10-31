@@ -9,6 +9,7 @@
 #import "SPPostgresQueryFavoriteManager.h"
 #import "SPPostgresQueryResultEditor.h"
 #import "SPPostgresErrors.h"
+#import "SPPostgresFieldEditorSheet.h"
 // MySQL's tooltip (its header declares WebKit's deprecated WebView)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -325,6 +326,8 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	void (^editRefusalPresenter)(NSString *message, NSInteger row, NSInteger column);
 	BOOL reloadPending;                        // a save's reload waits for the grid's editing to end
 	SPPostgresQueryResultEditor *approvingEditor; // the editor that last let a grid cell be edited (commits need it shown)
+	void (^fieldEditorPresenter)(NSString *value, NSString *columnName, NSString *typeName, BOOL editable, BOOL allowNull, void (^completion)(id newValue));
+	BOOL fieldEditorPending;                   // a field editor sheet is open (one at a time)
 }
 
 @synthesize editor;
@@ -361,6 +364,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 @synthesize favoritesManager;
 @synthesize resultEditor;
 @synthesize editRefusalPresenter;
+@synthesize fieldEditorPresenter;
 
 #pragma mark - Setup
 
@@ -457,6 +461,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[resultEditor release];
 	[shownStatementText release];
 	[editRefusalPresenter release];
+	[fieldEditorPresenter release];
 	[approvingEditor release];
 
 	[super dealloc];
@@ -526,6 +531,8 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	reloadPending = NO;
 	[editRefusalPresenter release];
 	editRefusalPresenter = nil;
+	[fieldEditorPresenter release];
+	fieldEditorPresenter = nil;
 }
 
 #pragma mark - The runner
@@ -2986,8 +2993,11 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	NSInteger column = [self _resultColumnOfTableColumn:tableColumn];
 	if (column < 0 || rowIndex < 0 || (NSUInteger)rowIndex >= resultRowCount) return NO;
 
-	// Edit mode (MySQL's "edit in sheet" preference): the field editor sheet's (Task 7), never the grid
-	if ([defaults boolForKey:SPEditInSheetEnabled]) return NO;
+	// Edit mode (MySQL's "edit in sheet" preference): the field editor sheet, never the grid
+	if ([defaults boolForKey:SPEditInSheetEnabled]) {
+		[self _editInSheetRow:rowIndex column:column];
+		return NO;
+	}
 
 	NSString *message = nil;
 	SPPostgresCellEditability editability = [resultEditor editabilityOfRow:(NSUInteger)rowIndex column:(NSUInteger)column matchCount:NULL message:&message];
@@ -3000,6 +3010,65 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	}
 	[self _presentEditRefusal:message row:rowIndex column:[[theTableView tableColumns] indexOfObjectIdenticalTo:tableColumn]];
 	return NO;
+}
+
+#pragma mark - Field editor sheet
+
+/**
+ * Opens the field editor sheet on a result cell (unless one is open; never while the runner is busy), editable only
+ * where the editor's check finds the cell Editable, else read-only without a tooltip (as MySQL's sheet path). Its value
+ * is committed as a grid edit to the row it was opened on, and only while the editor that approved it is still the
+ * shown one: a run, a database switch or -invalidate meanwhile drops it. Cancelled (nil) sends nothing.
+ */
+- (void)_editInSheetRow:(NSInteger)rowIndex column:(NSInteger)column
+{
+	if (invalidated || fieldEditorPending || [self _runnerBusy] || !resultEditor) return;
+	if (column < 0 || rowIndex < 0 || (NSUInteger)rowIndex >= resultRowCount) return;
+
+	SPPostgresQueryResultEditor *sheetEditor = resultEditor;
+	BOOL canEdit = [sheetEditor editabilityOfRow:(NSUInteger)rowIndex column:(NSUInteger)column matchCount:NULL message:NULL] == SPPostgresCellEditable;
+	if (canEdit && approvingEditor != sheetEditor) {
+		[approvingEditor release];
+		approvingEditor = [sheetEditor retain];
+	}
+
+	id value = [sheetEditor valueAtRow:(NSUInteger)rowIndex column:(NSUInteger)column];
+	NSString *text = [value isKindOfClass:[NSString class]] ? value : [self _nullPlaceholder];
+	NSArray *fields = [[sheetEditor result] fields];
+	id field = (NSUInteger)column < [fields count] ? [fields objectAtIndex:(NSUInteger)column] : nil;
+	NSString *columnName = [field isKindOfClass:[NSString class]] ? field : @"";
+	NSString *typeName = [sheetEditor typeNameOfColumn:(NSUInteger)column] ?: @"";
+	BOOL allowNull = [sheetEditor columnIsNullable:(NSUInteger)column];
+	fieldEditorPending = YES;
+
+	// A heap copy that keeps this controller and the editor (compared by identity) alive until it is called. It runs
+	// once and then balances its own Block_copy (deferred to the autorelease pool, as it is still running).
+	__block BOOL done = NO;
+	__block void (^once)(id) = nil;
+	once = Block_copy(^(id newValue) {
+		if (done) return;
+		done = YES;
+		fieldEditorPending = NO;
+		if (newValue && canEdit && !invalidated && sheetEditor == resultEditor) {
+			// The editor that approved the sheet is still shown, so _commitValue: accepts it as the approving one
+			if (approvingEditor != sheetEditor) {
+				[approvingEditor release];
+				approvingEditor = [sheetEditor retain];
+			}
+			[self _commitValue:newValue row:rowIndex column:column];
+		}
+		[(id)once autorelease];
+	});
+
+	if (fieldEditorPresenter) fieldEditorPresenter(text, columnName, typeName, canEdit, allowNull, once);
+	else {
+		// MySQL's field editor as a sheet on the grid's window (cancelled at once when there is none, or a sheet is up)
+		[SPPostgresFieldEditorSheet editValue:text columnName:columnName typeName:typeName editable:canEdit
+									allowNull:allowNull window:[resultsView window] completion:^(id newValue) {
+			if (!invalidated) [[resultsView window] makeFirstResponder:resultsView];
+			once(newValue);
+		}];
+	}
 }
 
 - (void)tableView:(NSTableView *)theTableView willDisplayCell:(id)cell forTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
