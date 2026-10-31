@@ -824,6 +824,104 @@
 }
 
 /// A CTE Scan whose CTE has no plan in the tree fails the walk; a CTE read twice gives two reads of its table.
+#pragma mark - Outer joins
+
+- (NSString *)outerJoinMessage
+{
+	return @"This cell may come from an outer join's missing row, so its row can't be identified.";
+}
+
+/// Bob has no order: his row's order columns are NULL-extended, and WHERE "note" IS NULL would identify order 11.
+/// With an outer join in the plan, a cell whose table's shown values are all NULL in its row is refused (also order
+/// 11's real row, which looks the same); a row with a non-NULL value of that table stays editable.
+- (void)testOuterJoinMissingRowIsRefused
+{
+	NSArray *statements = @[
+		@"SELECT c.name, o.note FROM query_edit_test.oj_customers c LEFT JOIN query_edit_test.oj_orders o ON o.customer = c.id ORDER BY c.name, o.note NULLS LAST",
+		@"SELECT c.name, o.note FROM query_edit_test.oj_orders o RIGHT JOIN query_edit_test.oj_customers c ON o.customer = c.id ORDER BY c.name, o.note NULLS LAST",
+		@"SELECT c.name, o.note FROM query_edit_test.oj_customers c FULL JOIN query_edit_test.oj_orders o ON o.customer = c.id ORDER BY c.name, o.note NULLS LAST",
+	];
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		for (NSString *sql in statements) {
+			SPQueryEditStatementRecorder *recorder = [[SPQueryEditStatementRecorder alloc] init];
+			if (!self.recorders) self.recorders = [NSMutableArray array];
+			[self.recorders addObject:recorder];
+			PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_test" delegate:recorder];
+			SPPostgresQueryResultEditor *editor = [self editorForSQL:sql connection:connection];
+			XCTAssertEqual([editor rowCount], 3u);
+			// Rows: Ann / first, Ann / NULL (order 11), Bob / NULL (no order)
+			XCTAssertEqualObjects([editor valueAtRow:2 column:0], @"Bob", @"%@", sql);
+			XCTAssertEqualObjects([editor valueAtRow:2 column:1], [NSNull null]);
+
+			NSInteger count = -2;
+			NSString *message = nil;
+			XCTAssertEqual([editor editabilityOfRow:2 column:1 matchCount:&count message:&message], SPPostgresCellOuterJoinMissingRow, @"port %@: %@: %@", port, sql, message);
+			XCTAssertEqual(count, -1);
+			XCTAssertEqualObjects(message, [self outerJoinMessage]);
+			XCTAssertEqual([editor editabilityOfRow:1 column:1 matchCount:NULL message:NULL], SPPostgresCellOuterJoinMissingRow, @"%@", sql);
+
+			// Ann's real order, and the customers' own cells, stay editable
+			message = nil;
+			XCTAssertEqual([editor editabilityOfRow:0 column:1 matchCount:&count message:&message], SPPostgresCellEditable, @"port %@: %@: %@", port, sql, message);
+			XCTAssertEqual(count, 1);
+			XCTAssertEqual([editor editabilityOfRow:2 column:0 matchCount:NULL message:&message], SPPostgresCellEditable, @"port %@: %@: %@", port, sql, message);
+
+			NSError *error = nil;
+			XCTAssertNil([editor saveValue:@"bob's" row:2 column:1 matchCount:&count error:&error], @"port %@: %@", port, sql);
+			XCTAssertEqual([error code], SPPostgresErrorNotEditable);
+			XCTAssertEqualObjects([error localizedDescription], [self outerJoinMessage]);
+			XCTAssertEqual(count, -1);
+			XCTAssertEqualObjects([editor valueAtRow:2 column:1], [NSNull null]);
+
+			NSPredicate *updates = [NSPredicate predicateWithFormat:@"SELF CONTAINS[c] 'UPDATE'"];
+			XCTAssertEqual([[recorder.statements filteredArrayUsingPredicate:updates] count], 0u, @"port %@: %@", port, recorder.statements);
+			XCTAssertEqualObjects([self serverValue:@"SELECT count(*)::text FROM query_edit_test.oj_orders WHERE note IS NULL AND id = 11" port:port], @"1");
+			XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(id::text || ':' || coalesce(note, '-'), ',' ORDER BY id) FROM query_edit_test.oj_orders" port:port], @"10:first,11:-");
+			[connection disconnect];
+		}
+
+		// Ann's real order saves through the LEFT JOIN
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:[statements firstObject] port:port];
+		NSError *error = nil;
+		XCTAssertEqualObjects([editor saveValue:@"premier" row:0 column:1 matchCount:NULL error:&error], @"premier", @"port %@: %@", port, error);
+		XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(id::text || ':' || coalesce(note, '-'), ',' ORDER BY id) FROM query_edit_test.oj_orders" port:port], @"10:premier,11:-");
+	}
+}
+
+/// Without an outer join, a real row whose shown columns are all NULL is identified as any other row.
+- (void)testAllNullRowWithoutOuterJoinIsEditable
+{
+	NSArray *statements = @[
+		@"SELECT a, b FROM query_edit_test.blank ORDER BY a NULLS FIRST",
+		@"SELECT k.a, k.b, c.name FROM query_edit_test.blank k JOIN query_edit_test.oj_customers c ON c.id = 1 ORDER BY k.a NULLS FIRST",
+	];
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		for (NSString *sql in statements) {
+			SPPostgresQueryResultEditor *editor = [self editorForSQL:sql port:port];
+			XCTAssertEqualObjects([editor valueAtRow:0 column:0], [NSNull null], @"%@", sql);
+			NSInteger count = -2;
+			NSString *message = nil;
+			XCTAssertEqual([editor editabilityOfRow:0 column:0 matchCount:&count message:&message], SPPostgresCellEditable, @"port %@: %@: %@", port, sql, message);
+			XCTAssertEqual(count, 1);
+		}
+		SPPostgresQueryResultEditor *editor = [self editorForSQL:[statements lastObject] port:port];
+		NSError *error = nil;
+		XCTAssertEqualObjects([editor saveValue:@"filled" row:0 column:1 matchCount:NULL error:&error], @"filled", @"port %@: %@", port, error);
+		XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(coalesce(a, '-') || coalesce(b, '-'), ',' ORDER BY a NULLS FIRST) FROM query_edit_test.blank" port:port], @"-filled,xy");
+	}
+}
+
+/// The outer-join flag of hand-written plans: a Left, Right or Full join anywhere (a WITH query's plan, a SubPlan).
+- (void)testOuterJoinInHandWrittenPlans
+{
+	XCTAssertFalse([SPPostgresQueryResultEditor planHasOuterJoin:[self plan:@"[{\"Plan\": {\"Node Type\": \"Hash Join\", \"Join Type\": \"Inner\", \"Plans\": [{\"Node Type\": \"Nested Loop\", \"Join Type\": \"Anti\"}, {\"Node Type\": \"Hash Join\", \"Join Type\": \"Semi\"}]}}]"]]);
+	for (NSString *type in @[@"Left", @"Right", @"Full"]) {
+		NSString *json = [NSString stringWithFormat:@"[{\"Plan\": {\"Node Type\": \"Seq Scan\", \"Plans\": [{\"Node Type\": \"Result\", \"Subplan Name\": \"CTE x\", \"Plans\": [{\"Node Type\": \"Merge Join\", \"Join Type\": \"%@\"}]}]}}]", type];
+		XCTAssertTrue([SPPostgresQueryResultEditor planHasOuterJoin:[self plan:json]], @"%@", type);
+	}
+	XCTAssertFalse([SPPostgresQueryResultEditor planHasOuterJoin:nil]);
+}
+
 - (void)testCTEWalkOnHandWrittenPlans
 {
 	NSError *error = nil;

@@ -363,6 +363,13 @@ static NSString * const SPUserSchemas = @"nspname NOT LIKE 'pg\\_%' AND nspname 
 		@"CREATE TABLE query_edit_test.pp2 PARTITION OF query_edit_test.pp FOR VALUES FROM (10) TO (20)",
 		@"INSERT INTO query_edit_test.pp VALUES (1, 1, 'a'), (2, 11, 'x'), (1, 12, 'x')",
 		@"CREATE VIEW query_edit_test.items_view AS SELECT id, name FROM query_edit_test.items",
+		// Outer joins: Bob has no order, and order 11's note is NULL (its row looks like Bob's NULL-extended one)
+		@"CREATE TABLE query_edit_test.oj_customers (id integer PRIMARY KEY, name text)",
+		@"INSERT INTO query_edit_test.oj_customers VALUES (1, 'Ann'), (2, 'Bob')",
+		@"CREATE TABLE query_edit_test.oj_orders (id integer PRIMARY KEY, customer integer, note text)",
+		@"INSERT INTO query_edit_test.oj_orders VALUES (10, 1, 'first'), (11, 1, NULL)",
+		@"CREATE TABLE query_edit_test.blank (a text, b text)",
+		@"INSERT INTO query_edit_test.blank VALUES (NULL, NULL), ('x', 'y')",
 	];
 	for (NSString *sql in statements) {
 		XCTAssertNotNil([connection execute:sql], @"%@: %@", sql, connection.lastError.errorPrimaryMessage);
