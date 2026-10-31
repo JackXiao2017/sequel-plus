@@ -24,8 +24,6 @@
     // libpq interface
     #import "libpq-fe.h"
 
-    // libpqtypes interface
-    #import "libpqtypes.h"
 
     // Framework constants
     #import "PGConstants.h"

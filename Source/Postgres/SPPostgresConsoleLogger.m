@@ -1,0 +1,128 @@
+#import "SPPostgresConsoleLogger.h"
+#import "SPQueryController.h"
+#import <objc/runtime.h>
+
+static char SPPostgresConsoleLoggerKey;
+
+@implementation SPPostgresConsoleLogger
+
+@synthesize connectionName;
+@synthesize database;
+@synthesize nextDelegate;
+@synthesize loggingCustomQueries;
+
+- (instancetype)initWithConnectionName:(NSString *)theConnectionName database:(NSString *)theDatabase
+{
+	if ((self = [super init])) {
+		connectionName = [theConnectionName copy];
+		database = [theDatabase copy];
+	}
+	return self;
+}
+
+- (void)dealloc
+{
+	[connectionName release];
+	[database release];
+	[nextDelegate release];
+	[super dealloc];
+}
+
+- (void)attachToConnection:(PGPostgresConnection *)connection
+{
+	if (!connection || [connection delegate] == self) return;
+
+	[nextDelegate release];
+	nextDelegate = [[connection delegate] retain];
+
+	// PostgresKit keeps its delegate unretained and may call it from its own threads, even after
+	// -disconnect: the connection keeps the logger alive for as long as it exists (as the connector does
+	// with its proxy). The logger retains the next delegate, which never references the logger.
+	objc_setAssociatedObject(connection, &SPPostgresConsoleLoggerKey, self, OBJC_ASSOCIATION_RETAIN);
+	[connection setDelegate:self];
+}
+
++ (SPPostgresConsoleLogger *)loggerForConnection:(PGPostgresConnection *)connection
+{
+	if (!connection) return nil;
+	id logger = objc_getAssociatedObject(connection, &SPPostgresConsoleLoggerKey);
+	return [logger isKindOfClass:[SPPostgresConsoleLogger class]] ? logger : nil;
+}
+
+/**
+ * Adds a message to the console on the main thread: at once when called there, otherwise (a background job's
+ * connection) from a later turn of the main run loop, in the order the calls were made.
+ */
+- (void)_showInConsole:(NSString *)message isError:(BOOL)isError
+{
+	if ([NSThread isMainThread]) {
+		SPQueryController *console = [SPQueryController sharedQueryController];
+		if (isError) [console showErrorInConsole:message connection:connectionName database:database];
+		else [console showMessageInConsole:message connection:connectionName database:database];
+		return;
+	}
+
+	NSString *text = [[message copy] autorelease];
+	NSString *theConnectionName = [[connectionName copy] autorelease];
+	NSString *theDatabase = [[database copy] autorelease];
+	dispatch_async(dispatch_get_main_queue(), ^{
+		SPQueryController *console = [SPQueryController sharedQueryController];
+		if (isError) [console showErrorInConsole:text connection:theConnectionName database:theDatabase];
+		else [console showMessageInConsole:text connection:theConnectionName database:theDatabase];
+	});
+}
+
+- (void)logError:(NSString *)error
+{
+	NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+	if ([error length] && [prefs boolForKey:SPConsoleEnableLogging] && [prefs boolForKey:SPConsoleEnableErrorLogging]) {
+		[self _showInConsole:error isError:YES];
+	}
+}
+
+#pragma mark - PGPostgresConnectionDelegate
+
+- (void)connection:(PGPostgresConnection *)connection willExecute:(NSObject *)query withValues:(NSArray *)values
+{
+	NSString *text = nil;
+	if ([query isKindOfClass:[NSString class]]) text = (NSString *)query;
+	else if ([query isKindOfClass:[PGPostgresStatement class]]) text = [(PGPostgresStatement *)query statement];
+
+	// The same preferences as MySQL's logging: the user's statements from the Query view as custom queries,
+	// everything else as interface queries. The console is updated on the main thread (a background job's
+	// connection calls this from its own thread).
+	NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+	NSString *kindKey = [self loggingCustomQueries] ? SPConsoleEnableCustomQueryLogging : SPConsoleEnableInterfaceLogging;
+	if ([text length] && [prefs boolForKey:SPConsoleEnableLogging] && [prefs boolForKey:kindKey]) {
+		[self _showInConsole:text isError:NO];
+	}
+
+	if ([nextDelegate respondsToSelector:@selector(connection:willExecute:withValues:)]) [nextDelegate connection:connection willExecute:query withValues:values];
+}
+
+- (void)connectionEstablished:(PGPostgresConnection *)connection
+{
+	if ([nextDelegate respondsToSelector:@selector(connectionEstablished:)]) [nextDelegate connectionEstablished:connection];
+}
+
+- (void)connectionReset:(PGPostgresConnection *)connection
+{
+	if ([nextDelegate respondsToSelector:@selector(connectionReset:)]) [nextDelegate connectionReset:connection];
+}
+
+- (void)connectionDisconnected:(PGPostgresConnection *)connection
+{
+	if ([nextDelegate respondsToSelector:@selector(connectionDisconnected:)]) [nextDelegate connectionDisconnected:connection];
+}
+
+- (void)connection:(PGPostgresConnection *)connection notice:(NSString *)notice
+{
+	if ([nextDelegate respondsToSelector:@selector(connection:notice:)]) [nextDelegate connection:connection notice:notice];
+}
+
+- (void)connectionFailed:(PGPostgresConnection *)connection
+{
+	if ([nextDelegate respondsToSelector:@selector(connectionFailed:)]) [nextDelegate connectionFailed:connection];
+}
+
+@end

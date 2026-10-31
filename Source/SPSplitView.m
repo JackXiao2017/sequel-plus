@@ -781,7 +781,8 @@ static BOOL isOSAtLeast10_7;
 	NSUInteger l = [[self subviews] count];
 	viewMinimumSizes = [[NSMutableArray alloc] initWithCapacity:l];
 	viewMaximumSizes = [[NSMutableArray alloc] initWithCapacity:l];
-	[self _ensureDefaultSubviewSizesToIndex:l-1];
+	// A split view created in code has no subviews yet (l - 1 would wrap); sizes are then added on first use
+	if (l) [self _ensureDefaultSubviewSizesToIndex:l-1];
 
 	delegate = [super delegate];
 	

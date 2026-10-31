@@ -38,12 +38,14 @@ PGPostgresResultRowType;
 	
 	NSUInteger _numberOfFields;
 	
-	NSString **_fields;
+	__unsafe_unretained NSString **_fields;
 	
 	NSStringEncoding _stringEncoding;
 	PGPostgresResultRowType _defaultRowType;
 		
 	PGPostgresConnection *_connection;
+	
+	BOOL _copyOutputDiscarded;
 }
 
 /**
@@ -79,5 +81,42 @@ PGPostgresResultRowType;
 - (NSArray *)rowAsArray;
 - (NSDictionary *)rowAsDictionary;
 - (id)rowAsType:(PGPostgresResultRowType)type;
+
+/**
+ * YES when the statement returned a row set (SELECT, SHOW, EXPLAIN, ... RETURNING), even an empty one;
+ * NO for a command (numberOfRows is then the number of rows it affected).
+ */
+- (BOOL)returnsRows;
+
+/**
+ * The server's command status, e.g. @"SELECT 3", @"UPDATE 2", @"COPY 5" (PQcmdStatus).
+ */
+- (NSString *)commandStatus;
+
+/**
+ * YES for a COPY ... TO STDOUT, whose rows were sent but discarded (copy data isn't supported); the result is
+ * then its "COPY n" status.
+ */
+- (BOOL)copyOutputDiscarded;
+
+/**
+ * The value at row, column as the server sent it (PostgreSQL's own text format for every type), as an
+ * NSString, or NSNull for NULL. nil when row or column is out of range or the result has no rows.
+ * Does not move the current row.
+ */
+- (id)textValueAtRow:(unsigned long long)row column:(NSUInteger)column;
+
+/**
+ * The OID (a PGPostgresOid, which this public header can't name) of the table or view the field is a plain
+ * column of (PQftable), or 0 when the field is an expression,
+ * a constant or otherwise not a column of a table, or is out of range.
+ */
+- (unsigned int)tableOIDForField:(NSUInteger)field;
+
+/**
+ * The attribute number (pg_attribute.attnum) of the field's column in its table (PQftablecol), or 0 when the
+ * field is not a plain column of a table or is out of range.
+ */
+- (NSInteger)tableColumnForField:(NSUInteger)field;
 
 @end

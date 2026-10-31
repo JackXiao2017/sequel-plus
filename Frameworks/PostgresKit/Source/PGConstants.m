@@ -34,25 +34,6 @@ NSString *PGPostgresParameterSuperUser        = @"is_superuser";
 NSString *PGPostgresParameterTimeZone         = @"TimeZone";
 NSString *PGPostgresParameterIntegerDateTimes = @"integer_datetimes";
 
-// Result value specifiers
-const char *PGPostgresResultValueMacAddr    = "%macaddr"; 
-const char *PGPostgresResultValueInet       = "%inet";
-const char *PGPostgresResultValueCidr       = "%cidr";
-const char *PGPostgresResultValueDate       = "%date";
-const char *PGPostgresResultValueTime       = "%time";
-const char *PGPostgresResultValueTimeTZ     = "%timetz";
-const char *PGPostgresResultValueTimestamp  = "%timestamp";
-const char *PGPostgresResultValueTimestmpTZ = "%timestamptz";
-const char *PGPostgresResultValueInterval   = "%interval";
-const char *PGPostgresResultValueNumeric    = "%numeric";
-const char *PGPostgresResultValueBool       = "%bool";
-const char *PGPostgresResultValueInt2       = "%int2";
-const char *PGPostgresResultValueInt4       = "%int4";
-const char *PGPostgresResultValueInt8       = "%int8";
-const char *PGPostgresResultValueFloat4     = "%float4";
-const char *PGPostgresResultValueFloat8     = "%float8";
-const char *PGPostgresResultValueByteA      = "%bytea";
-
 // Connection parameters
 const char *PGPostgresKitApplicationName     = "PostgresKit";
 const char *PGPostgresApplicationParam       = "application_name";
@@ -64,3 +45,13 @@ const char *PGPostgresDatabaseParam          = "dbname";
 const char *PGPostgresClientEncodingParam    = "client_encoding";
 const char *PGPostgresKeepAliveParam         = "keepalives";
 const char *PGPostgresKeepAliveIntervalParam = "keepalives_interval";
+const char *PGPostgresConnectTimeoutParam   = "connect_timeout";
+const char *PGPostgresSSLModeParam           = "sslmode";
+const char *PGPostgresSSLRootCertParam       = "sslrootcert";
+const char *PGPostgresSSLCertParam           = "sslcert";
+const char *PGPostgresSSLKeyParam            = "sslkey";
+
+// Session settings the type handlers rely on (ISO dates, 'postgres' intervals). Applied with SET once the
+// connection is established rather than through the startup "options" parameter, which connection poolers
+// such as PgBouncer reject unless configured to ignore it.
+const char *PGPostgresSessionSettingsQuery   = "SET datestyle TO 'ISO'; SET intervalstyle TO 'postgres'; SET extra_float_digits TO 1";

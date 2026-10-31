@@ -33,9 +33,11 @@ static NSString *PGTestDatabaseUser     = @"pgkit_test";
 static NSString *PGTestDatabaseName     = @"pgkit_test";
 static NSString *PGTestDatabasePassword = @"pgkit";
 
-static NSUInteger PGTestDatabasePort = 5432;
+// Port of the test server; override with the PGKIT_TEST_PORT environment variable 
+// (xcodebuild: TEST_RUNNER_PGKIT_TEST_PORT). See Scripts/pg-test-servers.sh.
+static NSUInteger PGTestDefaultDatabasePort = 55418;
 
-static double PGTestConnectionTimeout = 0.2;
+static double PGTestConnectionTimeout = 5.0;
 
 @interface PGPostgresIntegrationTestCase ()
 
@@ -52,6 +54,9 @@ static double PGTestConnectionTimeout = 0.2;
 
 - (void)setUp
 {		
+	// The expected values in the data type tests assume this time zone (see Resources/TestData.sql)
+	[NSTimeZone setDefaultTimeZone:[NSTimeZone timeZoneWithName:@"Europe/London"]];
+	
 	_connection = [[PGPostgresConnection alloc] init];
 	
 	[self _establishConnection];	
@@ -64,7 +69,9 @@ static double PGTestConnectionTimeout = 0.2;
 {		
 	[_connection setHost:PGTestDatabaseHost];
 	[_connection setUser:PGTestDatabaseUser];
-	[_connection setPort:PGTestDatabasePort];
+	const char *portString = getenv("PGKIT_TEST_PORT");
+	
+	[_connection setPort:(portString && *portString) ? (NSUInteger)strtoul(portString, NULL, 10) : PGTestDefaultDatabasePort];
 	[_connection setDatabase:PGTestDatabaseName];
 	[_connection setPassword:PGTestDatabasePassword];
 	
@@ -77,7 +84,12 @@ static double PGTestConnectionTimeout = 0.2;
     NSDate *startDate = [NSDate date];
     
 	do {
-		sleep(0.1);
+		if ([_connection connectionError]) {
+			XCTFail(@"Failed to connect to database: %@", [_connection connectionError]);
+			exit(1);
+		}
+
+		[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
         
         if([[NSDate date] timeIntervalSinceDate:startDate] > PGTestConnectionTimeout) {
             XCTFail(@"Failed to connect to database after %f seconds. Host:%@ Database:%@ User:%@ Password:%@",

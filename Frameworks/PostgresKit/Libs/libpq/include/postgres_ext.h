@@ -7,7 +7,7 @@
  *	For example, the Oid type is part of the API of libpq and other libraries.
  *
  *	   Declarations which are specific to a particular interface should
- *	go in the header file for that interface (such as libpq-fe.h).	This
+ *	go in the header file for that interface (such as libpq-fe.h).  This
  *	file is only for fundamental Postgres declarations.
  *
  *	   User-written C functions don't count as "external to Postgres."
@@ -19,9 +19,12 @@
  *
  *-------------------------------------------------------------------------
  */
+/* IWYU pragma: always_keep */
 
 #ifndef POSTGRES_EXT_H
 #define POSTGRES_EXT_H
+
+#include <stdint.h>
 
 /*
  * Object ID is a fundamental type in Postgres.
@@ -37,6 +40,12 @@ typedef unsigned int Oid;
 #define OID_MAX  UINT_MAX
 /* you will need to include <limits.h> to use the above #define */
 
+#define atooid(x) ((Oid) strtoul((x), NULL, 10))
+/* the above needs <stdlib.h> */
+
+
+/* deprecated name for int64_t, formerly used in client API declarations */
+typedef int64_t pg_int64;
 
 /*
  * Identifiers of error message fields.  Kept here to keep common
@@ -44,6 +53,7 @@ typedef unsigned int Oid;
  * applications.
  */
 #define PG_DIAG_SEVERITY		'S'
+#define PG_DIAG_SEVERITY_NONLOCALIZED 'V'
 #define PG_DIAG_SQLSTATE		'C'
 #define PG_DIAG_MESSAGE_PRIMARY 'M'
 #define PG_DIAG_MESSAGE_DETAIL	'D'
@@ -52,8 +62,13 @@ typedef unsigned int Oid;
 #define PG_DIAG_INTERNAL_POSITION 'p'
 #define PG_DIAG_INTERNAL_QUERY	'q'
 #define PG_DIAG_CONTEXT			'W'
+#define PG_DIAG_SCHEMA_NAME		's'
+#define PG_DIAG_TABLE_NAME		't'
+#define PG_DIAG_COLUMN_NAME		'c'
+#define PG_DIAG_DATATYPE_NAME	'd'
+#define PG_DIAG_CONSTRAINT_NAME 'n'
 #define PG_DIAG_SOURCE_FILE		'F'
 #define PG_DIAG_SOURCE_LINE		'L'
 #define PG_DIAG_SOURCE_FUNCTION 'R'
 
-#endif
+#endif							/* POSTGRES_EXT_H */

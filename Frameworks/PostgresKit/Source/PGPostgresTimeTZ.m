@@ -82,16 +82,20 @@
 
 - (NSString *)description
 {
+	// A fixed locale and format keep the output stable across systems and OS versions
 	NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
 	
-	[formatter setDateStyle:_hasDate ? NSDateFormatterMediumStyle : NSDateFormatterNoStyle];
-	[formatter setTimeStyle:NSDateFormatterMediumStyle];
+	[formatter setLocale:[[[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"] autorelease]];
+	[formatter setDateFormat:_hasDate ? @"d MMM yyyy HH:mm:ss" : @"HH:mm:ss"];
 	
 	NSString *output = [formatter stringFromDate:_date];
 	
 	[formatter release];
 	
-	return [NSString stringWithFormat:@"%@ %@", output, [_timeZone abbreviation]];
+	NSInteger offset = [_timeZone secondsFromGMT];
+	NSInteger absoluteOffset = offset < 0 ? -offset : offset;
+	
+	return [NSString stringWithFormat:@"%@ GMT%c%02ld:%02ld", output, offset < 0 ? '-' : '+', (long)(absoluteOffset / 3600), (long)((absoluteOffset % 3600) / 60)];
 }
 
 #pragma mark -

@@ -41,23 +41,21 @@
 
 #pragma mark -
 
-+ (id)intervalWithPGInterval:(PGinterval *)interval
++ (id)intervalWithYears:(NSInteger)years months:(NSInteger)months days:(NSInteger)days hours:(NSInteger)hours minutes:(NSInteger)minutes seconds:(NSInteger)seconds microseconds:(NSInteger)microseconds
 {
-	return [[[PGPostgresTimeInterval alloc] initWithInterval:interval] autorelease];
+	return [[[PGPostgresTimeInterval alloc] initWithYears:years months:months days:days hours:hours minutes:minutes seconds:seconds microseconds:microseconds] autorelease];
 }
 
-- (id)initWithInterval:(PGinterval *)interval
+- (id)initWithYears:(NSInteger)years months:(NSInteger)months days:(NSInteger)days hours:(NSInteger)hours minutes:(NSInteger)minutes seconds:(NSInteger)seconds microseconds:(NSInteger)microseconds
 {
 	if ((self = [super init])) {
-		if (interval) {
-			_microseconds = interval->usecs;
-			_seconds = interval->secs;
-			_minutes = interval->mins;
-			_hours = interval->hours;
-			_days = interval->days;
-			_months = interval->mons;
-			_years = interval->years;
-		}
+		_microseconds = microseconds;
+		_seconds = seconds;
+		_minutes = minutes;
+		_hours = hours;
+		_days = days;
+		_months = months;
+		_years = years;
 	}
 	
 	return self;

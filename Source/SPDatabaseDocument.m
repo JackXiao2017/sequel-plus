@@ -30,6 +30,7 @@
 //  More info at <https://github.com/sequelpro/sequelpro>
 
 #import "SPDatabaseDocument.h"
+#import "NSWindow+SPCompactChrome.h"
 #import "SPConnectionController.h"
 #import "SPTablesList.h"
 #import "SPDatabaseStructure.h"
@@ -84,6 +85,8 @@
 #import "SPSSHTunnel.h"
 #import "SPHelpViewerClient.h"
 #import "SPHelpViewerController.h"
+#import "SPToolbarTransferItem.h"
+#import "SPMainToolbar.h"
 
 #import <SPMySQL/SPMySQL.h>
 
@@ -140,6 +143,7 @@ static BOOL isOSAtLeast10_14;
 @synthesize databaseStructureRetrieval;
 @synthesize processID;
 @synthesize instanceId;
+@synthesize isBeingReplacedInTab;
 @synthesize dbTablesTableView;
 @synthesize tableDumpInstance;
 @synthesize tablesListInstance;
@@ -3945,7 +3949,7 @@ static BOOL isOSAtLeast10_14;
 	
 	if ([parentWindowController selectedTableDocument] == self) {
 		[parentWindow setTitle:windowTitle];
-		[self _applyCompactWindowTitleFont];
+		[parentWindow sp_applyCompactTitle];
 	}
 
 	// If the sender wasn't the window controller, update other tabs in this window
@@ -4041,54 +4045,6 @@ static BOOL isOSAtLeast10_14;
 #ifndef SP_CODA
 
 /**
- * Return a copy of a toolbar image drawn at a smaller size, as NSToolbar's size mode is ignored on modern macOS.
- */
-static NSImage *SPCompactToolbarImage(NSImage *image)
-{
-	NSImage *compactImage = [[image copy] autorelease];
-	[compactImage setSize:NSMakeSize(24, 24)];
-	return compactImage;
-}
-
-/**
- * Show the window title in a smaller font, centered above the toolbar. AppKit has no public API
- * for the title font and re-lays out its own title field, so hide it and show our own label in the
- * titlebar instead; if the titlebar can't be found the default title is left as is.
- */
-- (void)_applyCompactWindowTitleFont
-{
-	NSButton *closeButton = [parentWindow standardWindowButton:NSWindowCloseButton];
-	NSView *titlebarView = [closeButton superview];
-	if (!titlebarView) return;
-
-	NSTextField *titleLabel = nil;
-	for (NSView *subview in [titlebarView subviews]) {
-		if ([[subview identifier] isEqualToString:@"SPCompactWindowTitle"]) {
-			titleLabel = (NSTextField *)subview;
-			break;
-		}
-	}
-
-	if (!titleLabel) {
-		titleLabel = [NSTextField labelWithString:@""];
-		[titleLabel setIdentifier:@"SPCompactWindowTitle"];
-		[titleLabel setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize] weight:NSFontWeightMedium]];
-		[titleLabel setAlignment:NSTextAlignmentCenter];
-		[titleLabel setLineBreakMode:NSLineBreakByTruncatingMiddle];
-		[titleLabel setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
-		[titlebarView addSubview:titleLabel];
-		[parentWindow setTitleVisibility:NSWindowTitleHidden];
-	}
-
-	[titleLabel setStringValue:[parentWindow title]];
-
-	// Span the titlebar clear of the window buttons, vertically aligned with them
-	CGFloat inset = NSMaxX([[parentWindow standardWindowButton:NSWindowZoomButton] frame]) + 20;
-	CGFloat labelHeight = [titleLabel fittingSize].height;
-	[titleLabel setFrame:NSMakeRect(inset, round(NSMidY([closeButton frame]) - labelHeight / 2), [titlebarView bounds].size.width - inset * 2, labelHeight)];
-}
-
-/**
  * set up the standard toolbar
  */
 - (void)setupToolbar
@@ -4122,11 +4078,11 @@ static NSImage *SPCompactToolbarImage(NSImage *image)
  */
 - (NSToolbarItem *)toolbar:(NSToolbar *)toolbar itemForItemIdentifier:(NSString *)itemIdentifier willBeInsertedIntoToolbar:(BOOL)willBeInsertedIntoToolbar
 {
-	NSToolbarItem *toolbarItem = [[[NSToolbarItem alloc] initWithItemIdentifier:itemIdentifier] autorelease];
+	// Labels, tooltips, images and item classes are shared with PostgreSQL tabs (SPMainToolbar.m)
+	NSToolbarItem *toolbarItem = SPCreateMainToolbarItem(itemIdentifier);
+	SEL action = NULL;
 
 	if ([itemIdentifier isEqualToString:SPMainToolbarDatabaseSelection]) {
-		[toolbarItem setLabel:NSLocalizedString(@"Select Database", @"toolbar item for selecting a db")];
-		[toolbarItem setPaletteLabel:[toolbarItem label]];
 		[toolbarItem setView:chooseDatabaseButton];
 		[toolbarItem setMinSize:NSMakeSize(200,26)];
 		[toolbarItem setMaxSize:NSMakeSize(200,32)];
@@ -4135,8 +4091,6 @@ static NSImage *SPCompactToolbarImage(NSImage *image)
 		[chooseDatabaseButton setEnabled:(_isConnected && !_isWorkingLevel)];
 
 	} else if ([itemIdentifier isEqualToString:SPMainToolbarHistoryNavigation]) {
-		[toolbarItem setLabel:NSLocalizedString(@"Table History", @"toolbar item for navigation history")];
-		[toolbarItem setPaletteLabel:[toolbarItem label]];
 		// At some point after 10.9 the sizing of NSSegmentedControl changed, resulting in clipping in newer OS X versions.
 		// We can't just adjust the XIB, because then it would be wrong for older versions (possibly resulting in drawing artifacts),
 		// so we have the OS determine the proper size at runtime.
@@ -4144,103 +4098,30 @@ static NSImage *SPCompactToolbarImage(NSImage *image)
 		[toolbarItem setView:historyControl];
 
 	} else if ([itemIdentifier isEqualToString:SPMainToolbarShowConsole]) {
-		[toolbarItem setPaletteLabel:NSLocalizedString(@"Show Console", @"show console")];
-		[toolbarItem setToolTip:NSLocalizedString(@"Show the console which shows all MySQL commands performed by Sequel Pro", @"tooltip for toolbar item for show console")];
-
-		[toolbarItem setLabel:NSLocalizedString(@"Console", @"Console")];
-		[toolbarItem setImage:[NSImage imageNamed:@"hideconsole"]];
-
-		//set up the target action
-		[toolbarItem setTarget:self];
-		[toolbarItem setAction:@selector(showConsole:)];
-
+		action = @selector(showConsole:);
 	} else if ([itemIdentifier isEqualToString:SPMainToolbarClearConsole]) {
-		//set the text label to be displayed in the toolbar and customization palette 
-		[toolbarItem setLabel:NSLocalizedString(@"Clear Console", @"toolbar item for clear console")];
-		[toolbarItem setPaletteLabel:NSLocalizedString(@"Clear Console", @"toolbar item for clear console")];
-		//set up tooltip and image
-		[toolbarItem setToolTip:NSLocalizedString(@"Clear the console which shows all MySQL commands performed by Sequel Pro", @"tooltip for toolbar item for clear console")];
-		[toolbarItem setImage:[NSImage imageNamed:@"clearconsole"]];
-		//set up the target action
-		[toolbarItem setTarget:self];
-		[toolbarItem setAction:@selector(clearConsole:)];
-
+		action = @selector(clearConsole:);
 	} else if ([itemIdentifier isEqualToString:SPMainToolbarTableStructure]) {
-		[toolbarItem setLabel:NSLocalizedString(@"Structure", @"toolbar item label for switching to the Table Structure tab")];
-		[toolbarItem setPaletteLabel:NSLocalizedString(@"Edit Table Structure", @"toolbar item label for switching to the Table Structure tab")];
-		//set up tooltip and image
-		[toolbarItem setToolTip:NSLocalizedString(@"Switch to the Table Structure tab", @"tooltip for toolbar item for switching to the Table Structure tab")];
-		[toolbarItem setImage:[NSImage imageNamed:@"toolbar-switch-to-structure"]];
-		//set up the target action
-		[toolbarItem setTarget:self];
-		[toolbarItem setAction:@selector(viewStructure:)];
-
+		action = @selector(viewStructure:);
 	} else if ([itemIdentifier isEqualToString:SPMainToolbarTableContent]) {
-		[toolbarItem setLabel:NSLocalizedString(@"Content", @"toolbar item label for switching to the Table Content tab")];
-		[toolbarItem setPaletteLabel:NSLocalizedString(@"Browse & Edit Table Content", @"toolbar item label for switching to the Table Content tab")];
-		//set up tooltip and image
-		[toolbarItem setToolTip:NSLocalizedString(@"Switch to the Table Content tab", @"tooltip for toolbar item for switching to the Table Content tab")];
-		[toolbarItem setImage:[NSImage imageNamed:@"toolbar-switch-to-browse"]];
-		//set up the target action
-		[toolbarItem setTarget:self];
-		[toolbarItem setAction:@selector(viewContent:)];
-
+		action = @selector(viewContent:);
 	} else if ([itemIdentifier isEqualToString:SPMainToolbarCustomQuery]) {
-		[toolbarItem setLabel:NSLocalizedString(@"Query", @"toolbar item label for switching to the Run Query tab")];
-		[toolbarItem setPaletteLabel:NSLocalizedString(@"Run Custom Query", @"toolbar item label for switching to the Run Query tab")];
-		//set up tooltip and image
-		[toolbarItem setToolTip:NSLocalizedString(@"Switch to the Run Query tab", @"tooltip for toolbar item for switching to the Run Query tab")];
-		[toolbarItem setImage:[NSImage imageNamed:@"toolbar-switch-to-sql"]];
-		//set up the target action
-		[toolbarItem setTarget:self];
-		[toolbarItem setAction:@selector(viewQuery:)];
-
+		action = @selector(viewQuery:);
 	} else if ([itemIdentifier isEqualToString:SPMainToolbarTableInfo]) {
-		[toolbarItem setLabel:NSLocalizedString(@"Table Info", @"toolbar item label for switching to the Table Info tab")];
-		[toolbarItem setPaletteLabel:NSLocalizedString(@"Table Info", @"toolbar item label for switching to the Table Info tab")];
-		//set up tooltip and image
-		[toolbarItem setToolTip:NSLocalizedString(@"Switch to the Table Info tab", @"tooltip for toolbar item for switching to the Table Info tab")];
-		[toolbarItem setImage:[NSImage imageNamed:@"toolbar-switch-to-table-info"]];
-		//set up the target action
-		[toolbarItem setTarget:self];
-		[toolbarItem setAction:@selector(viewStatus:)];
-
+		action = @selector(viewStatus:);
 	} else if ([itemIdentifier isEqualToString:SPMainToolbarTableRelations]) {
-		[toolbarItem setLabel:NSLocalizedString(@"Relations", @"toolbar item label for switching to the Table Relations tab")];
-		[toolbarItem setPaletteLabel:NSLocalizedString(@"Table Relations", @"toolbar item label for switching to the Table Relations tab")];
-		//set up tooltip and image
-		[toolbarItem setToolTip:NSLocalizedString(@"Switch to the Table Relations tab", @"tooltip for toolbar item for switching to the Table Relations tab")];
-		[toolbarItem setImage:[NSImage imageNamed:@"toolbar-switch-to-table-relations"]];
-		//set up the target action
-		[toolbarItem setTarget:self];
-		[toolbarItem setAction:@selector(viewRelations:)];
-
+		action = @selector(viewRelations:);
 	} else if ([itemIdentifier isEqualToString:SPMainToolbarTableTriggers]) {
-		[toolbarItem setLabel:NSLocalizedString(@"Triggers", @"toolbar item label for switching to the Table Triggers tab")];
-		[toolbarItem setPaletteLabel:NSLocalizedString(@"Table Triggers", @"toolbar item label for switching to the Table Triggers tab")];
-		//set up tooltip and image
-		[toolbarItem setToolTip:NSLocalizedString(@"Switch to the Table Triggers tab", @"tooltip for toolbar item for switching to the Table Triggers tab")];
-		[toolbarItem setImage:[NSImage imageNamed:@"toolbar-switch-to-table-triggers"]];
-		//set up the target action
-		[toolbarItem setTarget:self];
-		[toolbarItem setAction:@selector(viewTriggers:)];
-		
+		action = @selector(viewTriggers:);
 	} else if ([itemIdentifier isEqualToString:SPMainToolbarUserManager]) {
-		[toolbarItem setLabel:NSLocalizedString(@"Users", @"toolbar item label for switching to the User Manager tab")];
-		[toolbarItem setPaletteLabel:NSLocalizedString(@"Users", @"toolbar item label for switching to the User Manager tab")];
-		//set up tooltip and image
-		[toolbarItem setToolTip:NSLocalizedString(@"Switch to the User Manager tab", @"tooltip for toolbar item for switching to the User Manager tab")];
-		[toolbarItem setImage:[NSImage imageNamed:NSImageNameEveryone]];
-		//set up the target action
-		[toolbarItem setTarget:self];
-		[toolbarItem setAction:@selector(showUserManager:)];
-		
-	} else {
-		//itemIdentifier refered to a toolbar item that is not provided or supported by us or cocoa
-		toolbarItem = nil;
+		action = @selector(showUserManager:);
 	}
+	// SPMainToolbarTransfer is PostgreSQL-only: always disabled on MySQL tabs (an SPDisabledToolbarItem, no action)
 
-	if ([toolbarItem image]) [toolbarItem setImage:SPCompactToolbarImage([toolbarItem image])];
+	if (action) {
+		[toolbarItem setTarget:self];
+		[toolbarItem setAction:action];
+	}
 
 	return toolbarItem;
 }
@@ -4269,23 +4150,7 @@ static NSImage *SPCompactToolbarImage(NSImage *image)
  */
 - (NSArray *)toolbarAllowedItemIdentifiers:(NSToolbar*)toolbar
 {
-	return @[
-		SPMainToolbarDatabaseSelection,
-		SPMainToolbarHistoryNavigation,
-		SPMainToolbarShowConsole,
-		SPMainToolbarClearConsole,
-		SPMainToolbarTableStructure,
-		SPMainToolbarTableContent,
-		SPMainToolbarCustomQuery,
-		SPMainToolbarTableInfo,
-		SPMainToolbarTableRelations,
-		SPMainToolbarTableTriggers,
-		SPMainToolbarUserManager,
-		NSToolbarCustomizeToolbarItemIdentifier,
-		NSToolbarFlexibleSpaceItemIdentifier,
-		NSToolbarSpaceItemIdentifier,
-		NSToolbarSeparatorItemIdentifier
-	];
+	return SPMainToolbarAllowedItemIdentifiers();
 }
 
 /**
@@ -4293,19 +4158,7 @@ static NSImage *SPCompactToolbarImage(NSImage *image)
  */
 - (NSArray *)toolbarDefaultItemIdentifiers:(NSToolbar*)toolbar
 {
-	return @[
-		SPMainToolbarDatabaseSelection,
-		SPMainToolbarTableStructure,
-		SPMainToolbarTableContent,
-		SPMainToolbarTableRelations,
-		SPMainToolbarTableTriggers,
-		SPMainToolbarTableInfo,
-		SPMainToolbarCustomQuery,
-		NSToolbarFlexibleSpaceItemIdentifier,
-		SPMainToolbarHistoryNavigation,
-		SPMainToolbarUserManager,
-		SPMainToolbarShowConsole
-	];
+	return SPMainToolbarDefaultItemIdentifiers();
 }
 
 /**
@@ -4313,15 +4166,7 @@ static NSImage *SPCompactToolbarImage(NSImage *image)
  */
 - (NSArray *)toolbarSelectableItemIdentifiers:(NSToolbar *)toolbar
 {
-	return @[
-		SPMainToolbarTableStructure,
-		SPMainToolbarTableContent,
-		SPMainToolbarCustomQuery,
-		SPMainToolbarTableInfo,
-		SPMainToolbarTableRelations,
-		SPMainToolbarTableTriggers
-	];
-
+	return SPMainToolbarSelectableItemIdentifiers();
 }
 
 /**
@@ -4332,6 +4177,9 @@ static NSImage *SPCompactToolbarImage(NSImage *image)
 	if (!_isConnected || _isWorkingLevel) return NO;
 
 	NSString *identifier = [toolbarItem itemIdentifier];
+
+	// PostgreSQL-only
+	if ([identifier isEqualToString:SPMainToolbarTransfer]) return NO;
 
 	// Show console item
 	if ([identifier isEqualToString:SPMainToolbarShowConsole]) {
@@ -4457,7 +4305,8 @@ static NSImage *SPCompactToolbarImage(NSImage *image)
 		[connectionController cancelConnection:self];
 	}
 #ifndef SP_CODA
-	if ([[[SPQueryController sharedQueryController] window] isVisible]) [self toggleConsole:self];
+	// Not when the tab is being replaced (connecting to PostgreSQL): the console would pop to the front
+	if (!isBeingReplacedInTab && [[[SPQueryController sharedQueryController] window] isVisible]) [self toggleConsole:self];
 	[createTableSyntaxWindow orderOut:nil];
 #endif
 	[[NSNotificationCenter defaultCenter] removeObserver:self];
@@ -4474,7 +4323,6 @@ static NSImage *SPCompactToolbarImage(NSImage *image)
 - (void)willResignActiveTabInWindow
 {
 	[self updateTitlebarStatusVisibilityForcingHide:YES];
-	[[NSNotificationCenter defaultCenter] removeObserver:self name:NSWindowDidResizeNotification object:parentWindow];
 
 	// Remove the task progress window
 	[parentWindow removeChildWindow:taskProgressWindow];
@@ -4492,12 +4340,11 @@ static NSImage *SPCompactToolbarImage(NSImage *image)
 	[parentWindow setToolbar:mainToolbar];
 	[[parentWindow toolbar] setVisible:toolbarVisible];
 
-	// Keep the classic layout: title on its own row above a compact toolbar
-	if (@available(macOS 11.0, *)) [parentWindow setToolbarStyle:NSWindowToolbarStyleExpanded];
+	// A layout saved before Transfer existed gets it once (the toolbar has its items once in a window)
+	SPInsertTransferToolbarItemIfNeeded(mainToolbar, prefs);
 
-	// Keep the compact title centered as the window resizes
-	[[NSNotificationCenter defaultCenter] removeObserver:self name:NSWindowDidResizeNotification object:parentWindow];
-	[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_applyCompactWindowTitleFont) name:NSWindowDidResizeNotification object:parentWindow];
+	// Compact title and toolbar layout, kept centered as the window resizes
+	[parentWindow sp_useExpandedCompactToolbar];
 
 	// Update the window's title and represented document
 	[self updateWindowTitle:self];

@@ -374,6 +374,9 @@ static PSMTabDragAssistant *sharedDragAssistant = nil;
 		//remove the tracking rects and bindings registered on the old tab
 		[[self sourceTabBar] removeTrackingRect:[[self draggedCell] closeButtonTrackingTag]];
 		[[self sourceTabBar] removeTrackingRect:[[self draggedCell] cellTrackingTag]];
+		// -removeTabForCell: removes any non-zero tags again, and AppKit raises for a tag removed twice
+		[[self draggedCell] setCloseButtonTrackingTag:0];
+		[[self draggedCell] setCellTrackingTag:0];
 		[[self sourceTabBar] removeTabForCell:[self draggedCell]];
 		
 		NSUInteger i;
@@ -468,6 +471,9 @@ static PSMTabDragAssistant *sharedDragAssistant = nil;
 				//remove the tracking rects and bindings registered on the old tab
 				[[self sourceTabBar] removeTrackingRect:[[self draggedCell] closeButtonTrackingTag]];
 				[[self sourceTabBar] removeTrackingRect:[[self draggedCell] cellTrackingTag]];
+				// -removeTabForCell: removes any non-zero tags again, and AppKit raises for a tag removed twice
+				[[self draggedCell] setCloseButtonTrackingTag:0];
+				[[self draggedCell] setCellTrackingTag:0];
 				[[self sourceTabBar] removeTabForCell:[self draggedCell]];
 				
 				//rebind the cell to the new control

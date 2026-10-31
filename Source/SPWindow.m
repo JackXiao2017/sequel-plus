@@ -145,8 +145,10 @@
 - (NSUndoManager *)undoManager
 {
 	if ([[self windowController] respondsToSelector:@selector(selectedTableDocument)]) {
-		return [[[self windowController] selectedTableDocument] undoManager];
+		id tableDocument = [[self windowController] selectedTableDocument];
 
+		// A tab that is not a MySQL document (e.g. PostgreSQL) uses the window's own undo manager
+		if (tableDocument) return [tableDocument undoManager];
 	}
 
 	return [super undoManager];
