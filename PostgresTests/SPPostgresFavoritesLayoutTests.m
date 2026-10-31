@@ -321,6 +321,176 @@
 	XCTAssertEqualObjects([record objectForKey:@"Index"], @0);
 }
 
+#pragma mark - Changes
+
+- (void)testMovePostgresBetweenMySQLFavorites
+{
+	id m1 = [self mysqlFavorite:1], m2 = [self mysqlFavorite:2];
+	id section = [self section:@[m1, m2]];
+	id p = [self pg:@"p"];
+	SPPostgresFavoritesLayout *layout = [self resolve:section nodes:@[p] placements:@{}];
+	XCTAssertEqualObjects([layout displayedChildrenOfGroup:section], (@[m1, m2, p]));
+
+	[layout moveNodes:@[p] toGroup:section displayedIndex:1];
+	XCTAssertEqualObjects([layout displayedChildrenOfGroup:section], (@[m1, p, m2]));
+	XCTAssertEqualObjects([section childNodes], (@[m1, m2]));
+	XCTAssertEqualObjects([[[layout placements] objectForKey:[self pgID:p]] objectForKey:@"After"], @{@"FavoriteID": @1});
+	XCTAssertEqual([p parentNode], self.holder);
+}
+
+- (void)testMovePostgresIntoGroup
+{
+	id g1 = [self mysqlFavorite:11];
+	id g = [self groupNamed:@"G" children:@[g1]];
+	id section = [self section:@[[self mysqlFavorite:1], g]];
+	id p = [self pg:@"p"];
+	SPPostgresFavoritesLayout *layout = [self resolve:section nodes:@[p] placements:@{}];
+
+	[layout moveNodes:@[p] toGroup:g displayedIndex:0];
+	XCTAssertEqualObjects([layout displayedChildrenOfGroup:g], (@[p, g1]));
+	XCTAssertEqual([layout displayedParentOfNode:p], g);
+	// The section no longer holds Postgres nodes: it shows its live childNodes again
+	XCTAssertEqual([layout displayedChildrenOfGroup:section], [section childNodes]);
+	XCTAssertEqualObjects([g childNodes], @[g1]);
+
+	NSDictionary *record = [[layout placements] objectForKey:[self pgID:p]];
+	XCTAssertEqualObjects([record objectForKey:@"Group"], (@[@{@"Name": @"G", @"Nth": @0}]));
+	XCTAssertNil([record objectForKey:@"After"]);
+}
+
+- (void)testMoveMySQLAcrossDisplayedPostgres
+{
+	id m1 = [self mysqlFavorite:1], m2 = [self mysqlFavorite:2];
+	id section = [self section:@[m1, m2]];
+	id p = [self pg:@"p"];
+	SPPostgresFavoritesLayout *layout = [self resolve:section nodes:@[p] placements:@{ [self pgID:p]: @{ @"Group": @[], @"Index": @0, @"Order": @0 } }];
+	XCTAssertEqualObjects([layout displayedChildrenOfGroup:section], (@[p, m1, m2]));
+
+	[layout moveNodes:@[m2] toGroup:section displayedIndex:0];
+	XCTAssertEqualObjects([layout displayedChildrenOfGroup:section], (@[m2, p, m1]));
+	XCTAssertEqualObjects([section childNodes], (@[m2, m1]));
+	XCTAssertEqual([m2 parentNode], section);
+}
+
+- (void)testMoveMixedSelection
+{
+	id m1 = [self mysqlFavorite:1];
+	id g1 = [self mysqlFavorite:11], g2 = [self mysqlFavorite:12];
+	id g = [self groupNamed:@"G" children:@[g1, g2]];
+	id section = [self section:@[m1, g]];
+	id p = [self pg:@"p"];
+	SPPostgresFavoritesLayout *layout = [self resolve:section nodes:@[p] placements:@{}];
+
+	[layout moveNodes:@[m1, p] toGroup:g displayedIndex:1];
+	XCTAssertEqualObjects([layout displayedChildrenOfGroup:g], (@[g1, m1, p, g2]));
+	XCTAssertEqualObjects([g childNodes], (@[g1, m1, g2]));
+	XCTAssertEqualObjects([section childNodes], @[g]);
+	XCTAssertEqualObjects([layout displayedChildrenOfGroup:section], @[g]);
+	XCTAssertEqual([m1 parentNode], g);
+	XCTAssertEqual([layout displayedParentOfNode:p], g);
+
+	// Within the same group, an index past a moved node shifts down by one
+	[layout moveNodes:@[g1, m1] toGroup:g displayedIndex:3];
+	XCTAssertEqualObjects([layout displayedChildrenOfGroup:g], (@[p, g1, m1, g2]));
+	XCTAssertEqualObjects([g childNodes], (@[g1, m1, g2]));
+}
+
+- (void)testMoveGroupCarriesItsPostgresNodes
+{
+	id g1 = [self mysqlFavorite:11];
+	id g = [self groupNamed:@"G" children:@[g1]];
+	id h = [self groupNamed:@"H" children:@[[self mysqlFavorite:21]]];
+	id section = [self section:@[g, h]];
+	id p = [self pg:@"p"];
+	SPPostgresFavoritesLayout *layout = [self resolve:section nodes:@[p] placements:@{ [self pgID:p]: @{ @"Group": @[@{@"Name": @"G", @"Nth": @0}], @"After": @{@"FavoriteID": @11}, @"Index": @1, @"Order": @0 } }];
+	XCTAssertEqualObjects([layout displayedChildrenOfGroup:g], (@[g1, p]));
+
+	[layout moveNodes:@[g] toGroup:h displayedIndex:0];
+	XCTAssertEqualObjects([section childNodes], @[h]);
+	XCTAssertEqual([g parentNode], h);
+	XCTAssertEqualObjects([layout displayedChildrenOfGroup:g], (@[g1, p]));
+	XCTAssertEqual([layout displayedParentOfNode:p], g);
+	NSDictionary *record = [[layout placements] objectForKey:[self pgID:p]];
+	XCTAssertEqualObjects([record objectForKey:@"Group"], (@[@{@"Name": @"H", @"Nth": @0}, @{@"Name": @"G", @"Nth": @0}]));
+}
+
+- (void)testSetDisplayedChildrenSortsTogether
+{
+	id mb = [self mysqlFavorite:2];
+	id section = [self section:@[mb]];
+	id pc = [self pg:@"c"], pa = [self pg:@"a"];
+	SPPostgresFavoritesLayout *layout = [self resolve:section nodes:@[pa, pc] placements:@{}];
+
+	NSArray *sorted = @[pa, mb, pc];
+	[layout setDisplayedChildren:sorted ofGroup:section];
+	XCTAssertEqualObjects([layout displayedChildrenOfGroup:section], sorted);
+	XCTAssertEqualObjects([section childNodes], @[mb]);
+
+	SPPostgresFavoritesLayout *again = [self resolve:section nodes:@[pa, pc] placements:[layout placements]];
+	XCTAssertEqualObjects([again displayedChildrenOfGroup:section], sorted);
+}
+
+- (void)testAppendAndInsertAfter
+{
+	id m1 = [self mysqlFavorite:1];
+	id e = [self groupNamed:@"E" children:@[]];
+	id section = [self section:@[m1, e]];
+	id p1 = [self pg:@"p1"], p2 = [self pg:@"p2"];
+	SPPostgresFavoritesLayout *layout = [self resolve:section nodes:@[p1, p2] placements:@{}];
+	XCTAssertEqualObjects([layout displayedChildrenOfGroup:section], (@[m1, e, p1, p2]));
+
+	id appended = [self pg:@"appended"];
+	[layout appendPostgresNode:appended toGroup:e];
+	XCTAssertEqualObjects([layout displayedChildrenOfGroup:e], @[appended]);
+	XCTAssertEqual([layout displayedParentOfNode:appended], e);
+	XCTAssertEqualObjects([e childNodes], @[]);
+
+	// "zz" sorts after p2 by name, so only its Order can place it between p1 and p2
+	id inserted = [self pg:@"zz"];
+	[layout insertPostgresNode:inserted afterNode:p1];
+	NSArray *expected = @[m1, e, p1, inserted, p2];
+	XCTAssertEqualObjects([layout displayedChildrenOfGroup:section], expected);
+	XCTAssertEqual([layout displayedParentOfNode:inserted], section);
+
+	NSDictionary *snapshot = [layout placements];
+	XCTAssertEqualObjects([[snapshot objectForKey:[self pgID:inserted]] objectForKey:@"Order"], @1);
+	SPPostgresFavoritesLayout *again = [self resolve:section nodes:@[appended, inserted, p1, p2] placements:snapshot];
+	XCTAssertEqualObjects([again displayedChildrenOfGroup:section], expected);
+	XCTAssertEqualObjects([again displayedChildrenOfGroup:e], @[appended]);
+}
+
+- (void)assertNoPostgresNodeUnder:(NSTreeNode *)node
+{
+	for (NSTreeNode *child in [node childNodes]) {
+		XCTAssertFalse([[child representedObject] isKindOfClass:[SPPostgresFavoriteNode class]]);
+		[self assertNoPostgresNodeUnder:child];
+	}
+}
+
+- (void)testNoPostgresNodeEverEntersMySQLTree
+{
+	id m1 = [self mysqlFavorite:1], m2 = [self mysqlFavorite:2];
+	id h = [self groupNamed:@"H" children:@[[self mysqlFavorite:21]]];
+	id g = [self groupNamed:@"G" children:@[[self mysqlFavorite:11]]];
+	id section = [self section:@[m1, m2, g, h]];
+	id p = [self pg:@"p"], q = [self pg:@"q"];
+	SPPostgresFavoritesLayout *layout = [self resolve:section nodes:@[p, q] placements:@{}];
+
+	[layout moveNodes:@[p] toGroup:section displayedIndex:1];
+	[layout moveNodes:@[m2] toGroup:section displayedIndex:0];
+	[layout moveNodes:@[q] toGroup:g displayedIndex:0];
+	[layout moveNodes:@[m1, p] toGroup:g displayedIndex:1];
+	[layout moveNodes:@[g] toGroup:h displayedIndex:0];
+	[layout setDisplayedChildren:[[[layout displayedChildrenOfGroup:g] reverseObjectEnumerator] allObjects] ofGroup:g];
+	id r = [self pg:@"r"], s = [self pg:@"s"];
+	[layout appendPostgresNode:r toGroup:h];
+	[layout insertPostgresNode:s afterNode:q];
+
+	[self assertNoPostgresNodeUnder:section];
+	XCTAssertEqual([[layout postgresNodesWithinGroup:section] count], 4u);
+	for (NSTreeNode *node in @[p, q, r, s]) XCTAssertEqual([node parentNode], self.holder);
+}
+
 #pragma mark - Queries
 
 - (void)testPostgresNodesWithinGroupIsRecursive
