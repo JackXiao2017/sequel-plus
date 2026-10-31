@@ -732,6 +732,73 @@
 	}
 }
 
+/// Each CTE reads the previous one twice: the walk must expand each CTE once (memoised), not 2^n times.
+- (void)testChainedCTEsAreRefusedQuickly
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		NSMutableString *sql = [NSMutableString stringWithString:@"WITH x0 AS MATERIALIZED (SELECT * FROM query_edit_test.emp)"];
+		for (NSUInteger level = 1; level <= 25; level++) {
+			// WHERE a.id keeps the row estimate at 1: without it the costs reach 1e100 at level 25, which no JSON parser reads
+			[sql appendFormat:@", x%lu AS MATERIALIZED (SELECT a.* FROM x%lu a JOIN x%lu b ON b.id = a.id WHERE a.id = 2)", (unsigned long)level, (unsigned long)level - 1, (unsigned long)level - 1];
+		}
+		[sql appendString:@" SELECT id, name FROM x25"];
+		NSDate *start = [NSDate date];
+		[self assertOriginRepeatedForSQL:sql row:0 column:1 port:port];
+		XCTAssertLessThan(-[start timeIntervalSinceNow], 20.0, @"port %@", port);
+	}
+}
+
+#pragma mark - Plan walk on hand-written plans
+
+- (NSString *)customScanMessage
+{
+	return NSLocalizedString(@"The query's plan uses an extension's scan, so its rows can't be identified.", @"Postgres query result: edit check found a Custom Scan without a relation");
+}
+
+- (id)plan:(NSString *)json
+{
+	id plan = [NSJSONSerialization JSONObjectWithData:[json dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];
+	XCTAssertNotNil(plan, @"%@", json);
+	return plan;
+}
+
+/// An extension's Custom Scan without "Relation Name" (Citus plans a multi-shard self-join as one) can hide reads
+/// while PQftable still reports the table, so the check fails; one naming its relation counts as a read.
+- (void)testCustomScanWithoutRelationFailsTheWalk
+{
+	NSError *error = nil;
+	XCTAssertNil([SPPostgresQueryResultEditor readsInPlan:[self plan:@"[{\"Plan\": {\"Node Type\": \"Custom Scan\", \"Custom Plan Provider\": \"Citus Adaptive\", \"Plans\": []}}]"] error:&error]);
+	XCTAssertEqualObjects([error localizedDescription], [self customScanMessage]);
+
+	// Inside a CTE's plan
+	error = nil;
+	XCTAssertNil([SPPostgresQueryResultEditor readsInPlan:[self plan:@"[{\"Plan\": {\"Node Type\": \"Hash Join\", \"Plans\": ["
+		"{\"Node Type\": \"Custom Scan\", \"Subplan Name\": \"CTE x\", \"Parent Relationship\": \"InitPlan\"},"
+		"{\"Node Type\": \"CTE Scan\", \"CTE Name\": \"x\"}]}}]"] error:&error]);
+	XCTAssertEqualObjects([error localizedDescription], [self customScanMessage]);
+
+	// With a relation: one read
+	error = nil;
+	NSArray *reads = [SPPostgresQueryResultEditor readsInPlan:[self plan:@"[{\"Plan\": {\"Node Type\": \"Custom Scan\", \"Schema\": \"s\", \"Relation Name\": \"t\"}}]"] error:&error];
+	XCTAssertEqual([reads count], 1u, @"%@", error);
+	XCTAssertEqualObjects([[reads firstObject] subarrayWithRange:NSMakeRange(0, 2)], (@[@"s", @"t"]));
+}
+
+/// A CTE Scan whose CTE has no plan in the tree fails the walk; a CTE read twice gives two reads of its table.
+- (void)testCTEWalkOnHandWrittenPlans
+{
+	NSError *error = nil;
+	XCTAssertNil([SPPostgresQueryResultEditor readsInPlan:[self plan:@"[{\"Plan\": {\"Node Type\": \"CTE Scan\", \"CTE Name\": \"x\"}}]"] error:&error]);
+	XCTAssertGreaterThan([[error localizedDescription] length], 0u);
+
+	NSArray *reads = [SPPostgresQueryResultEditor readsInPlan:[self plan:@"[{\"Plan\": {\"Node Type\": \"Hash Join\", \"Plans\": ["
+		"{\"Node Type\": \"Seq Scan\", \"Schema\": \"s\", \"Relation Name\": \"emp\", \"Subplan Name\": \"CTE x\", \"Parent Relationship\": \"InitPlan\"},"
+		"{\"Node Type\": \"CTE Scan\", \"CTE Name\": \"x\"},"
+		"{\"Node Type\": \"Hash\", \"Plans\": [{\"Node Type\": \"CTE Scan\", \"CTE Name\": \"x\"}]}]}}]"] error:&error];
+	XCTAssertEqual([reads count], 2u, @"%@", error);
+	XCTAssertNotEqualObjects([[reads objectAtIndex:0] objectAtIndex:2], [[reads objectAtIndex:1] objectAtIndex:2]);
+}
+
 /// Without the statement (or with one that can't be explained) nothing can be checked, and nothing is saved.
 - (void)testMissingOrUnexplainableStatementFailsCheck
 {

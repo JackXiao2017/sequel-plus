@@ -33,9 +33,10 @@ typedef NS_ENUM(NSInteger, SPPostgresCellEditability) {
  * that, and also refuses an edit once another shown column of its row has changed.
  *
  * The origin tables' columns, their partitions/children and the statement's plan are read once per editor (a failed
- * lookup, including a plan whose WITH query can't be found, is SPPostgresCellCheckFailed and retried on the next
- * check). Reads run through SPPostgresRunGuardedRead, so inside the user's open transaction a failure leaves it open.
- * Identifiers are quoted and values sent as parameters.
+ * lookup, including a plan whose WITH query can't be found or that uses an extension's Custom Scan naming no relation,
+ * which may hide reads, is SPPostgresCellCheckFailed and retried on the next check). Reads run through
+ * SPPostgresRunGuardedRead, so inside the user's open transaction a failure leaves it open. Identifiers are quoted and
+ * values sent as parameters.
  */
 __attribute__((visibility("default")))
 @interface SPPostgresQueryResultEditor : NSObject
@@ -52,6 +53,12 @@ __attribute__((visibility("default")))
 - (instancetype)initWithResult:(PGPostgresResult *)result connection:(PGPostgresConnection *)connection statement:(NSString *)statement;
 
 @property (readonly) PGPostgresResult *result;
+
+/// The reads of relations in a parsed EXPLAIN (FORMAT JSON) plan (the array NSJSONSerialization gives), each
+/// @[schema, relation, group]: scans with equal groups are one read (the children of one Append; see the class
+/// comment for reads through a WITH query). nil with error when the plan reads a WITH query it doesn't contain, or
+/// uses an extension's Custom Scan that names no relation (which may hide reads). Used by the check; exposed for tests.
++ (NSArray *)readsInPlan:(id)explained error:(NSError **)error;
 
 - (NSUInteger)rowCount;
 - (NSUInteger)columnCount;
