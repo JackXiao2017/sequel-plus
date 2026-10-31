@@ -7,6 +7,13 @@
 #import "SPPostgresSQLTokenizer.h"
 #import "SPPostgresQueryStore.h"
 #import "SPPostgresQueryFavoriteManager.h"
+#import "SPPostgresQueryResultEditor.h"
+#import "SPPostgresErrors.h"
+// MySQL's tooltip (its header declares WebKit's deprecated WebView)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#import "SPTooltip.h"
+#pragma clang diagnostic pop
 #import "SPTextViewAdditions.h"
 #import "SPTableView.h"
 #import "SPButtonBar.h"
@@ -311,6 +318,12 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 	/// Test seam: called on the runner's thread before each statement runs (see the tests' SPPostgresQueryController (Testing))
 	void (^statementWillRunHook)(NSString *statement);
+
+	// Editing the result
+	SPPostgresQueryResultEditor *resultEditor; // the shown result's (nil: none)
+	NSString *shownStatementText;              // the statement that produced the shown result
+	void (^editRefusalPresenter)(NSString *message, NSInteger row, NSInteger column);
+	BOOL reloadPending;                        // a save's reload waits for the grid's editing to end
 }
 
 @synthesize editor;
@@ -345,6 +358,8 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 @synthesize favoriteNameSaveButton;
 @synthesize favoriteNameCancelButton;
 @synthesize favoritesManager;
+@synthesize resultEditor;
+@synthesize editRefusalPresenter;
 
 #pragma mark - Setup
 
@@ -438,6 +453,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[favoriteNameSaveButton release];
 	[favoriteNameCancelButton release];
 	[favoritesManager release];
+	[resultEditor release];
+	[shownStatementText release];
+	[editRefusalPresenter release];
 
 	[super dealloc];
 }
@@ -496,6 +514,12 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	exportResultHandler = nil;
 	[helpHandler release];
 	helpHandler = nil;
+	// The shown result's editor (its connection is the tab's) and a save's pending reload
+	[resultEditor release];
+	resultEditor = nil;
+	reloadPending = NO;
+	[editRefusalPresenter release];
+	editRefusalPresenter = nil;
 }
 
 #pragma mark - The runner
@@ -2550,6 +2574,15 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
  */
 - (void)_runStatements:(NSArray *)statements
 {
+	[self _runStatements:statements reload:NO];
+}
+
+/**
+ * The run of -_runStatements:. A reload (the shown statement run again after a saved edit, see -_reloadIfPending)
+ * adds no history entry, keeps lastRunQueryText, and gives the grid back its selected rows and scroll position.
+ */
+- (void)_runStatements:(NSArray *)statements reload:(BOOL)reload
+{
 	if (invalidated || ![statements count]) return;
 	// A run while the runner is busy (a key equivalent the task display's blocker doesn't stop) is refused
 	if (running || [taskRunner isBusy] || [taskRunner isInvalidated]) {
@@ -2565,6 +2598,13 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	SPPostgresConsoleLogger *logger = [SPPostgresConsoleLogger loggerForConnection:[runner connection]];
 
 	running = YES;
+	// This run's result replaces the shown one: a save's reload still waiting is no longer needed
+	reloadPending = NO;
+
+	// What a reload gives back to the grid
+	NSIndexSet *restoredSelection = reload ? [[[resultsView selectedRowIndexes] copy] autorelease] : nil;
+	NSClipView *clipView = [[resultsView enclosingScrollView] contentView];
+	NSPoint restoredScroll = clipView ? [clipView bounds].origin : NSZeroPoint;
 
 	// Everything the work needs, so it never reads this controller
 	NSArray *theStatements = [[statements copy] autorelease];
@@ -2625,10 +2665,26 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 				[[run errors] setString:cancelText];
 			}
 		}
-		[self _showResult:[run rowsResult]];
+		NSUInteger shown = [run shownStatement];
+		NSString *shownStatement = (shown && shown <= [[run ranStatements] count]) ? [[run ranStatements] objectAtIndex:shown - 1] : nil;
+		[self _showResult:[run rowsResult] statement:shownStatement];
+		if (reload && [run rowsResult]) {
+			// As MySQL's storeCurrentResultViewForRestoration: the rows selected before, and the scroll position
+			NSMutableIndexSet *selection = [NSMutableIndexSet indexSet];
+			[restoredSelection enumerateIndexesUsingBlock:^(NSUInteger index, BOOL *stop) {
+				if (index < resultRowCount) [selection addIndex:index];
+			}];
+			[resultsView selectRowIndexes:selection byExtendingSelection:NO];
+			NSScrollView *scrollView = [resultsView enclosingScrollView];
+			if (scrollView) {
+				[[scrollView contentView] scrollToPoint:[[scrollView contentView] constrainBoundsRect:(NSRect){restoredScroll, [[scrollView contentView] bounds].size}].origin];
+				[scrollView reflectScrolledClipView:[scrollView contentView]];
+			}
+		}
 		lastRunTransactionStatus = [run transactionStatus];
-		// As MySQL's usedQuery, recorded (and added to the history) only when a statement was sent
-		if ([[run ranStatements] count]) {
+		// As MySQL's usedQuery, recorded (and added to the history) only when a statement was sent; a reload is
+		// neither
+		if (!reload && [[run ranStatements] count]) {
 			NSString *usedQuery = [[run ranStatements] componentsJoinedByString:@";\n"];
 			[self setLastRunQueryText:usedQuery];
 			[self _addHistoryEntry:usedQuery];
@@ -2649,14 +2705,20 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 #pragma mark - Results
 
-/// Shows theResult's rows (nil: an empty grid without columns).
-- (void)_showResult:(PGPostgresResult *)theResult
+/// Shows theResult's rows (nil: an empty grid without columns), with a new editor on statement, the SQL that
+/// produced it (see resultEditor).
+- (void)_showResult:(PGPostgresResult *)theResult statement:(NSString *)statement
 {
 	if (theResult != result) {
 		[result release];
 		result = [theResult retain];
 	}
 	resultRowCount = result ? (NSUInteger)[result numberOfRows] : 0;
+
+	[resultEditor release];
+	resultEditor = result ? [[SPPostgresQueryResultEditor alloc] initWithResult:result connection:connection statement:statement] : nil;
+	[shownStatementText release];
+	shownStatementText = result ? [statement copy] : nil;
 
 	while ([[resultsView tableColumns] count]) [resultsView removeTableColumn:[[resultsView tableColumns] lastObject]];
 
@@ -2676,12 +2738,13 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 		NSTableColumn *tableColumn = [[[NSTableColumn alloc] initWithIdentifier:[NSString stringWithFormat:@"%lu", (unsigned long)index]] autorelease];
 		[[tableColumn headerCell] setStringValue:name];
 		[tableColumn setHeaderToolTip:name];
-		[tableColumn setEditable:NO];
+		// Editable: whether a cell can be edited is decided when its editing starts (shouldEditTableColumn)
+		[tableColumn setEditable:YES];
 		[tableColumn setResizingMask:NSTableColumnUserResizingMask];
 		[tableColumn setMinWidth:SPPostgresQueryMinColumnWidth];
 
 		NSTextFieldCell *cell = [[[NSTextFieldCell alloc] initTextCell:@""] autorelease];
-		[cell setEditable:NO];
+		[cell setEditable:YES];
 		[cell setLineBreakMode:NSLineBreakByTruncatingTail];
 		[cell setFont:font];
 		[tableColumn setDataCell:cell];
@@ -2706,12 +2769,20 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[self _updateExportItem];
 }
 
+/// The cell's value (NSString, or NSNull for NULL) with the editor's saved edits, or nil when it has none.
 - (id)_valueAtRow:(NSInteger)rowIndex tableColumn:(NSTableColumn *)tableColumn
 {
-	if (!result || rowIndex < 0 || (NSUInteger)rowIndex >= resultRowCount) return nil;
+	NSInteger column = [self _resultColumnOfTableColumn:tableColumn];
+	if (!resultEditor || rowIndex < 0 || (NSUInteger)rowIndex >= resultRowCount || column < 0) return nil;
+	return [resultEditor valueAtRow:(NSUInteger)rowIndex column:(NSUInteger)column];
+}
+
+/// The result column a grid column shows (-1: none).
+- (NSInteger)_resultColumnOfTableColumn:(NSTableColumn *)tableColumn
+{
+	if (!tableColumn || !resultEditor) return -1;
 	NSInteger column = [[tableColumn identifier] integerValue];
-	if (column < 0) return nil;
-	return [result textValueAtRow:(unsigned long long)rowIndex column:(NSUInteger)column];
+	return (column >= 0 && (NSUInteger)column < [resultEditor columnCount]) ? column : -1;
 }
 
 - (NSArray *)lastResultColumnNames
@@ -2735,7 +2806,8 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	for (NSUInteger row = 0; row < resultRowCount; row++) {
 		NSMutableArray *values = [NSMutableArray arrayWithCapacity:columnCount];
 		for (NSUInteger column = 0; column < columnCount; column++) {
-			id value = [result textValueAtRow:row column:column];
+			// With the edits saved since the run
+			id value = resultEditor ? [resultEditor valueAtRow:row column:column] : [result textValueAtRow:row column:column];
 			[values addObject:[value isKindOfClass:[NSString class]] ? value : [NSNull null]];
 		}
 		[rows addObject:values];
@@ -2761,10 +2833,146 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	return [string length] > 10000 ? [string substringToIndex:10000] : string;
 }
 
+/// The end of a cell edit.
+- (void)tableView:(NSTableView *)theTableView setObjectValue:(id)object forTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
+{
+	[self _commitValue:object row:rowIndex column:[self _resultColumnOfTableColumn:tableColumn]];
+}
+
+#pragma mark - Editing the result
+
+/// The runner is running something (this controller's run or another task on the tab's connection).
+- (BOOL)_runnerBusy
+{
+	return running || [taskRunner isBusy] || [taskRunner isInvalidated];
+}
+
+/// Shows why the grid's cell (row, column: the table column's index in the grid) can't be edited.
+- (void)_presentEditRefusal:(NSString *)message row:(NSInteger)row column:(NSInteger)column
+{
+	if (editRefusalPresenter) {
+		editRefusalPresenter(message, row, column);
+		return;
+	}
+	// As MySQL's -control:textShouldBeginEditing:: a beep, and the message in a tooltip under the cell
+	NSBeep();
+	NSWindow *window = [resultsView window];
+	if (!window || ![message length]) return;
+	NSPoint position = [window convertPointToScreen:[resultsView convertPoint:[resultsView frameOfCellAtColumn:column row:row].origin toView:nil]];
+	position.y -= 20;
+	[SPTooltip showWithObject:message atLocation:position ofType:@"text"];
+}
+
+/**
+ * A cell's new value (from the grid; the field editor sheet's too): saved through the editor to the one row the
+ * cell's values identify. A failure shows MySQL's "Error" alert, and the grid shows the old value again. After a save,
+ * the tab is told the data changed and the shown statement may run again (see -_scheduleReload).
+ */
+- (void)_commitValue:(id)object row:(NSInteger)rowIndex column:(NSInteger)column
+{
+	if (invalidated || !resultEditor || column < 0 || rowIndex < 0 || (NSUInteger)rowIndex >= resultRowCount) return;
+	// An edit ending while something runs is not sent (nor is the editor's check run): the grid keeps the old value
+	if ([self _runnerBusy]) {
+		NSBeep();
+		[resultsView setNeedsDisplay:YES];
+		return;
+	}
+
+	SPPostgresQueryResultEditor *cellEditor = [[resultEditor retain] autorelease];
+	NSUInteger row = (NSUInteger)rowIndex;
+	id oldValue = [cellEditor valueAtRow:row column:(NSUInteger)column];
+
+	id newValue = [object isKindOfClass:[NSString class]] ? object : ([object respondsToSelector:@selector(stringValue)] ? [object stringValue] : nil);
+	if (!newValue) newValue = [NSNull null];
+	// The NULL placeholder means NULL where the column takes it (as the Content view)
+	if ([newValue isKindOfClass:[NSString class]] && [newValue isEqualToString:[self _nullPlaceholder]] && [cellEditor columnIsNullable:(NSUInteger)column]) newValue = [NSNull null];
+	// Unchanged: nothing to send
+	if ([newValue isEqual:oldValue]) return;
+
+	NSError *error = nil;
+	id saved = [cellEditor saveValue:newValue row:row column:(NSUInteger)column matchCount:NULL error:&error];
+	if (!saved) {
+		NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+		[alert setMessageText:NSLocalizedString(@"Error", @"error")];
+		if ([[error domain] isEqualToString:SPPostgresErrorDomain] && [error code] == SPPostgresErrorRowChanged) {
+			[alert setInformativeText:[error localizedDescription]];
+		}
+		else {
+			[alert setInformativeText:[NSString stringWithFormat:NSLocalizedString(@"Couldn't write field.\nPostgreSQL said: %@", @"Postgres query result: saving a cell failed (the server's message)"), [error localizedDescription] ?: @""]];
+		}
+		[self _presentAlert:alert];
+		if (!invalidated) [resultsView setNeedsDisplay:YES];
+		return;
+	}
+
+	// As MySQL's Query tab after a write: the tab reloads what shows the table's rows
+	if (runDidChangeDatabase) runDidChangeDatabase(NO, YES);
+	if (invalidated || cellEditor != resultEditor) return;
+
+	if ([defaults boolForKey:SPReloadAfterEditingRow] && [shownStatementText length]
+		&& ![SPPostgresQueryController statementMayChangeData:shownStatementText]
+		&& ![SPPostgresQueryController statementMayChangeSchema:shownStatementText]) {
+		[self _scheduleReload];
+	}
+	else {
+		// The saved value as the server returned it (also in the row's other columns of the same origin column)
+		[resultsView setNeedsDisplayInRect:[resultsView rectOfRow:rowIndex]];
+	}
+}
+
+/// The reload after a save: now, unless a cell is being edited (the commit happens inside the grid's editing, and
+/// a run would end it again, or Tab started the next one); then when that edit ends (-controlTextDidEndEditing:).
+- (void)_scheduleReload
+{
+	reloadPending = YES;
+	if (![resultsView currentEditor] && [resultsView editedRow] < 0) {
+		[self _reloadIfPending];
+		return;
+	}
+	dispatch_async(dispatch_get_main_queue(), ^{
+		[self _reloadIfPending];
+	});
+}
+
+/// The pending reload of a save, unless a cell is being edited (it then runs when that edit ends). Dropped when
+/// something else is running: its result replaces the shown one anyway, or the grid keeps the saved value.
+- (void)_reloadIfPending
+{
+	if (invalidated || !reloadPending || [resultsView currentEditor]) return;
+	reloadPending = NO;
+	if ([self _runnerBusy] || ![shownStatementText length]) return;
+	[self _runStatements:@[[[shownStatementText copy] autorelease]] reload:YES];
+}
+
+/// The grid's editing ended (NSTableView, as an NSControl, tells its delegate).
+- (void)controlTextDidEndEditing:(NSNotification *)notification
+{
+	if (!reloadPending || [notification object] != resultsView) return;
+	dispatch_async(dispatch_get_main_queue(), ^{
+		[self _reloadIfPending];
+	});
+}
+
 #pragma mark - Table view delegate
 
+/**
+ * As MySQL's: nothing is edited while the runner is busy; in edit mode no cell is edited in the grid; otherwise the
+ * editor checks the cell (on first use its catalog lookup and the statement's plan, synchronously), and a cell that
+ * can't be edited shows why instead.
+ */
 - (BOOL)tableView:(NSTableView *)theTableView shouldEditTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
 {
+	if (invalidated || [self _runnerBusy] || !resultEditor) return NO;
+	NSInteger column = [self _resultColumnOfTableColumn:tableColumn];
+	if (column < 0 || rowIndex < 0 || (NSUInteger)rowIndex >= resultRowCount) return NO;
+
+	// Edit mode (MySQL's "edit in sheet" preference): the field editor sheet's (Task 7), never the grid
+	if ([defaults boolForKey:SPEditInSheetEnabled]) return NO;
+
+	NSString *message = nil;
+	SPPostgresCellEditability editability = [resultEditor editabilityOfRow:(NSUInteger)rowIndex column:(NSUInteger)column matchCount:NULL message:&message];
+	if (editability == SPPostgresCellEditable) return YES;
+	[self _presentEditRefusal:message row:rowIndex column:[[theTableView tableColumns] indexOfObjectIdenticalTo:tableColumn]];
 	return NO;
 }
 

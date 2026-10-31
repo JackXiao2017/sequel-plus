@@ -7,6 +7,7 @@
 @class SPSplitView;
 @class SPPostgresQueryStore;
 @class SPPostgresQueryFavoriteManager;
+@class SPPostgresQueryResultEditor;
 
 /**
  * The Query view of a PostgreSQL tab, laid out as MySQL's Query tab (DBView.xib): an outer SPSplitView holding
@@ -278,6 +279,30 @@ __attribute__((visibility("default")))
 
 /// How many rows the grid shows (0 when it shows none), without copying them.
 - (NSUInteger)lastResultRowCount;
+
+#pragma mark - Editing the result (MySQL's SPCustomQuery)
+
+/**
+ * The editor of the shown result (nil when none): each run that shows a row set makes a new one, on the statement
+ * that produced it (the run's shown statement), and -invalidate (also a database switch, which replaces this
+ * controller) drops it. The grid's cells and -lastResultRows (so an export) read their values from it, edits included.
+ *
+ * As MySQL's Query tab, a cell is edited in the grid (double-click or Return): the editor's check runs when editing
+ * starts (on the main thread, only while the runner is idle: nothing is edited while it is busy). A cell that can't
+ * be edited beeps and shows why (editRefusalPresenter, MySQL's messages and the editor's own). A new value goes to the
+ * server (the NULL placeholder is NULL where the column is nullable; an unchanged value sends nothing); a failure
+ * shows MySQL's "Error" alert (alertPresenter) and the grid keeps the old value. After a save runDidChangeDatabase
+ * gets (NO, YES); then, with MySQL's "ReloadAfterEditingRow" (read from defaults) and when the shown statement may
+ * change neither data nor schema, that statement alone is run again through the runner, adding no history entry,
+ * keeping lastRunQueryText, the selected rows and the scroll position, and never while a cell is being edited (it
+ * waits for that edit to end). Otherwise the grid shows the saved value. In edit mode (MySQL's "EditInSheetEnabled")
+ * no cell is edited in the grid.
+ */
+@property (readonly) SPPostgresQueryResultEditor *resultEditor;
+
+/// Test seam: shows why a cell can't be edited (default: NSBeep and an SPTooltip under the cell, as MySQL's). row is
+/// the grid's row, column the table column's index in the grid.
+@property (copy) void (^editRefusalPresenter)(NSString *message, NSInteger row, NSInteger column);
 
 /// The status line (see the class comment): @"" before the first run and while a run runs.
 @property (readonly, copy) NSString *statusText;
