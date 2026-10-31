@@ -40,11 +40,11 @@ static const NSUInteger SPPostgresQueryRunButtonSmallLineOffset = 15;
 static void *SPPostgresQueryRunnerContext = &SPPostgresQueryRunnerContext;
 static void *SPPostgresQueryToggleContext = &SPPostgresQueryToggleContext;
 
-// The gear's items (DBView.xib): their tags
 /// The grid shows a value's first characters only, up to this many (it draws one line). A longer value is never
 /// edited in the grid, whose in-cell editor would start from the cut text: it opens the field editor sheet.
 static const NSUInteger SPPostgresQueryDisplayLimit = 10000;
 
+// The gear's items (DBView.xib): their tags
 static const NSInteger SPPostgresGearPreviousHistoryTag = 3;
 static const NSInteger SPPostgresGearNextHistoryTag = 4;
 static const NSInteger SPPostgresGearShiftRightTag = 6;
