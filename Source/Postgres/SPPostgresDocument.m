@@ -3697,6 +3697,13 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
  * items: those (tabs, New Tab, Close Tab) stay enabled, and so do this tab's own actions. Everything
  * else (the MySQL-only items) is disabled.
  */
+/// View > Filter Tables (⌃⌥⌘F), as on MySQL tabs: the table list's filter field takes the keyboard.
+- (IBAction)makeTableListFilterHaveFocus:(id)sender
+{
+	if (tornDown) return;
+	[sidebar focusFilterField];
+}
+
 - (BOOL)validateMenuItem:(NSMenuItem *)item
 {
 	SEL action = [item action];
@@ -3725,6 +3732,11 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	if (action == @selector(import:)) return [self _canImportExport];
 	if (action == @selector(showTransfer:)) return [self _canShowTransfer];
 	if (action == @selector(showInstallExtensionSheet:)) return !isProcessing && SPPostgresFeatureIsAvailable(SPPostgresFeatureExtensions);
+	// View > Filter Tables: the table list's filter field (MySQL tabs word it so with more than 20 tables)
+	if (action == @selector(makeTableListFilterHaveFocus:)) {
+		[item setTitle:NSLocalizedString(@"Filter Tables", @"filter tables menu item")];
+		return [[sidebar filterField] window] != nil;
+	}
 
 	// View > Back/Forward In History (tags 0 and 1), as MySQL's
 	if (action == @selector(backForwardInHistory:)) {
