@@ -44,10 +44,8 @@ static NSString * const SPScopeTransfer = @"TransferToolbarItemIdentifier";
 @end
 
 /**
- * The 2.0.0-RC2 scope of a PostgreSQL tab (SPPostgresFeatureScope): Content, Query, Console, Structure, Relations,
- * Triggers, Table Info and Import/Export (plus the table list, Duplicate Table and the database picker) can be used;
- * Sequences, Extensions, Users, Transfer, Table History and Create Syntax are shown disabled or hidden, and never reached.
- * Every other test runs with the full scope (SPTestPrefsGuard); these set the release scope in -setUp.
+ * The 2.0.0-RC3 scope of a PostgreSQL tab (SPPostgresFeatureScope): every feature can be used. Every other test runs
+ * with the full scope (SPTestPrefsGuard); these set the release scope in -setUp, so they check what the app ships.
  */
 @interface SPPostgresFeatureScopeTests : XCTestCase
 @property (strong) SPWindowController *controller;
@@ -151,27 +149,20 @@ static NSString * const SPScopeTransfer = @"TransferToolbarItemIdentifier";
 
 #pragma mark - The switch
 
-- (void)testReleaseScopeHasTheRC2Features
+- (void)testReleaseScopeHasEveryFeature
 {
 	XCTAssertFalse(SPPostgresFeatureScopeIsFullScopeForTesting());
-	SPPostgresFeature shipped[] = {SPPostgresFeatureContent, SPPostgresFeatureQuery, SPPostgresFeatureConsole, SPPostgresFeatureStructure,
-		SPPostgresFeatureRelations, SPPostgresFeatureTriggers, SPPostgresFeatureTableInfo, SPPostgresFeatureImportExport};
-	for (size_t i = 0; i < sizeof(shipped) / sizeof(shipped[0]); i++) XCTAssertTrue(SPPostgresFeatureIsAvailable(shipped[i]), @"feature %ld", (long)shipped[i]);
-	SPPostgresFeature heldBack[] = {SPPostgresFeatureSequences, SPPostgresFeatureExtensions, SPPostgresFeatureUsers,
-		SPPostgresFeatureTransfer, SPPostgresFeatureTableHistory, SPPostgresFeatureCreateSyntax};
-	for (size_t i = 0; i < sizeof(heldBack) / sizeof(heldBack[0]); i++) XCTAssertFalse(SPPostgresFeatureIsAvailable(heldBack[i]), @"feature %ld", (long)heldBack[i]);
-
-	// The test override: every feature
-	SPPostgresFeatureScopeSetFullScopeForTesting(YES);
-	for (size_t i = 0; i < sizeof(heldBack) / sizeof(heldBack[0]); i++) XCTAssertTrue(SPPostgresFeatureIsAvailable(heldBack[i]));
-	SPPostgresFeatureScopeSetFullScopeForTesting(NO);
+	SPPostgresFeature all[] = {SPPostgresFeatureContent, SPPostgresFeatureQuery, SPPostgresFeatureConsole, SPPostgresFeatureStructure,
+		SPPostgresFeatureRelations, SPPostgresFeatureTriggers, SPPostgresFeatureTableInfo, SPPostgresFeatureSequences,
+		SPPostgresFeatureExtensions, SPPostgresFeatureUsers, SPPostgresFeatureImportExport, SPPostgresFeatureTransfer,
+		SPPostgresFeatureTableHistory, SPPostgresFeatureCreateSyntax};
+	for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) XCTAssertTrue(SPPostgresFeatureIsAvailable(all[i]), @"feature %ld", (long)all[i]);
 }
 
 #pragma mark - Toolbar
 
-- (void)testToolbarShowsEveryItemButOnlyTheRC2PanesConsoleAndDatabaseAreEnabled
+- (void)testToolbarItemsAreEnabled
 {
-	// Every item a MySQL tab has is still served (all icons visible)
 	NSArray *defaults = [self.document toolbarDefaultItemIdentifiers:[self.document toolbar]];
 	for (NSString *identifier in @[SPScopeDatabase, SPScopeHistory, SPScopeShowConsole, SPScopeStructure, SPScopeContent, SPScopeRelations,
 								   SPScopeTriggers, SPScopeTableInfo, SPScopeQuery, SPScopeUsers]) {
@@ -180,99 +171,50 @@ static NSString * const SPScopeTransfer = @"TransferToolbarItemIdentifier";
 	XCTAssertTrue([[self.document toolbarAllowedItemIdentifiers:[self.document toolbar]] containsObject:SPScopeTransfer]);
 
 	[self selectTable:@"customers"];
-	XCTAssertTrue([self.document.sidebar selectionIsTable]);
-
-	for (NSString *identifier in @[SPScopeContent, SPScopeQuery, SPScopeShowConsole, SPScopeDatabase, SPScopeStructure, SPScopeRelations, SPScopeTriggers, SPScopeTableInfo]) {
+	for (NSString *identifier in @[SPScopeContent, SPScopeQuery, SPScopeShowConsole, SPScopeDatabase, SPScopeStructure, SPScopeRelations,
+								   SPScopeTriggers, SPScopeTableInfo, SPScopeUsers, SPScopeTransfer, SPScopeHistory]) {
 		XCTAssertTrue([self.document validateToolbarItem:[self toolbarItem:identifier]], @"%@ is enabled", identifier);
-	}
-	for (NSString *identifier in @[SPScopeUsers, SPScopeTransfer, SPScopeHistory, SPScopeClearConsole]) {
-		XCTAssertFalse([self.document validateToolbarItem:[self toolbarItem:identifier]], @"%@ is disabled", identifier);
-	}
-
-	// The same items in the toolbar the tab installs
-	for (NSToolbarItem *item in [[self.document toolbar] items]) {
-		NSString *identifier = [item itemIdentifier];
-		if ([@[SPScopeUsers, SPScopeTransfer] containsObject:identifier]) {
-			XCTAssertFalse([self.document validateToolbarItem:item], @"%@", identifier);
-		}
-		if ([@[SPScopeStructure, SPScopeRelations, SPScopeTriggers, SPScopeTableInfo] containsObject:identifier]) {
-			XCTAssertTrue([self.document validateToolbarItem:item], @"%@", identifier);
-		}
 	}
 }
 
-- (void)testHistoryControlStaysDisabled
+- (void)testHistoryGoesBack
 {
 	[self selectTable:@"customers"];
 	[self.document viewQuery:nil];
 	[self.document viewContent:nil];
-	XCTAssertTrue([self.document.history canGoBack], @"entries are still recorded");
+	XCTAssertTrue([self.document.history canGoBack]);
 
 	NSSegmentedControl *control = [self.document valueForKey:@"historyControl"];
 	XCTAssertTrue([control isKindOfClass:[NSSegmentedControl class]]);
-	XCTAssertFalse([control isEnabledForSegment:0]);
-	XCTAssertFalse([control isEnabledForSegment:1]);
+	XCTAssertTrue([control isEnabledForSegment:0]);
+	XCTAssertTrue([self menuItemEnabled:@selector(backForwardInHistory:) tag:0]);
 
-	// View > Back In History does nothing
+	// View > Back In History
 	NSMenuItem *back = [[NSMenuItem alloc] initWithTitle:@"Back" action:@selector(backForwardInHistory:) keyEquivalent:@""];
 	[back setTag:0];
 	[self.document backForwardInHistory:back];
-	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneContent);
-	XCTAssertTrue([self.document.history canGoBack]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneQuery);
 }
 
 #pragma mark - Menus
 
-- (void)testMenuValidationDisablesHeldBackFeatures
+- (void)testMenuItemsAreEnabled
 {
 	[self selectTable:@"customers"];
 
-	XCTAssertFalse([self menuItemEnabled:@selector(showUserManager:) tag:0]);
-	XCTAssertFalse([self menuItemEnabled:@selector(showTransfer:) tag:0]);
-	XCTAssertFalse([self menuItemEnabled:@selector(showInstallExtensionSheet:) tag:0]);
-	XCTAssertFalse([self menuItemEnabled:@selector(backForwardInHistory:) tag:0]);
-	XCTAssertFalse([self menuItemEnabled:@selector(backForwardInHistory:) tag:1]);
-
-	// Shipped: the RC1 views, and since RC2 Structure, Relations, Triggers, Table Info and Import/Export
-	XCTAssertTrue([self menuItemEnabled:@selector(viewContent:) tag:0]);
-	XCTAssertTrue([self menuItemEnabled:@selector(viewQuery:) tag:0]);
-	XCTAssertTrue([self menuItemEnabled:@selector(toggleConsole:) tag:0]);
-	XCTAssertTrue([self menuItemEnabled:@selector(viewStructure:) tag:0]);
-	XCTAssertTrue([self menuItemEnabled:@selector(viewRelations:) tag:0]);
-	XCTAssertTrue([self menuItemEnabled:@selector(viewTriggers:) tag:0]);
-	XCTAssertTrue([self menuItemEnabled:@selector(viewStatus:) tag:0]);
-	XCTAssertTrue([self menuItemEnabled:@selector(import:) tag:0]);
-	XCTAssertTrue([self menuItemEnabled:@selector(export:) tag:0]);
-	XCTAssertTrue([self menuItemEnabled:@selector(exportQueryResult:) tag:0]);
-}
-
-- (void)testHeldBackActionsDoNothing
-{
-	[self selectTable:@"customers"];
-	NSWindow *window = [self.controller window];
-
-	[self.document showUserManager:nil];
-	XCTAssertNil(self.document.usersController);
-	[self.document showTransfer:nil];
-	XCTAssertNil(self.document.transferController);
-	[self.document showInstallExtensionSheet:nil];
-	XCTAssertNil(window.attachedSheet);
+	for (NSString *selectorName in @[@"import:", @"export:", @"exportQueryResult:", @"showUserManager:", @"showTransfer:", @"showInstallExtensionSheet:",
+									 @"viewContent:", @"viewQuery:", @"toggleConsole:", @"viewStructure:", @"viewRelations:", @"viewTriggers:", @"viewStatus:"]) {
+		XCTAssertTrue([self menuItemEnabled:NSSelectorFromString(selectorName) tag:0], @"%@", selectorName);
+	}
 }
 
 #pragma mark - Panes
 
-- (void)testHeldBackPanesFallBackToContent
+- (void)testEveryTablePaneIsShown
 {
 	[self selectTable:@"customers"];
 
-	for (NSString *pane in @[SPPostgresPaneSequence, SPPostgresPaneExtension]) {
-		[self.document showPane:SPPostgresPaneQuery];
-		XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneQuery);
-		[self.document showPane:pane];
-		XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneContent, @"%@ shows Content", pane);
-	}
-
-	// The shipped panes are shown, also from the View menu's actions (and their ⌘ shortcuts)
 	for (NSString *pane in @[SPPostgresPaneStructure, SPPostgresPaneRelations, SPPostgresPaneTriggers, SPPostgresPaneInfo, SPPostgresPaneContent, SPPostgresPaneQuery]) {
 		[self.document showPane:pane];
 		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
@@ -288,63 +230,23 @@ static NSString * const SPScopeTransfer = @"TransferToolbarItemIdentifier";
 	}
 }
 
-- (void)testHistoryEntryAndOpenRelationKeepAShippedPane
-{
-	[self.document viewQuery:nil];
-	// A table's history entry on a shipped pane (Structure, since RC2) shows that pane
-	[self.document _applyHistoryEntry:@{@"database": @"pgkit_test", @"schema": @"public", @"table": @"customers", @"pane": SPPostgresPaneStructure}];
-	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
-	XCTAssertEqualObjects(self.document.sidebar.selectedTableName, @"customers");
-	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneStructure);
-
-	// As a new tab opened on a table from a tab showing Triggers (shipped since RC2)
-	[self.document viewQuery:nil];
-	[self.document selectRelationAfterLoad:@"customers" inSchema:@"public" pane:SPPostgresPaneTriggers];
-	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
-	XCTAssertEqualObjects(self.document.currentPane, SPPostgresPaneTriggers);
-}
-
 #pragma mark - Table list
 
-- (void)testSidebarHidesSequencesAndExtensions
+- (void)testSidebarShowsSequencesAndExtensions
 {
 	SPPostgresSidebarController *sidebar = self.document.sidebar;
-	XCTAssertEqualObjects([sidebar sectionTitles], (@[@"TABLES", @"VIEWS"]));
+	XCTAssertEqualObjects([sidebar sectionTitles], (@[@"TABLES", @"VIEWS", @"SEQUENCES", @"EXTENSIONS"]));
 
-	// The outline's group rows
-	NSOutlineView *outline = nil;
-	NSMutableArray *queue = [NSMutableArray arrayWithObject:[sidebar view]];
-	while (queue.count) {
-		NSView *v = queue.firstObject; [queue removeObjectAtIndex:0];
-		if ([v isKindOfClass:[NSOutlineView class]]) outline = (NSOutlineView *)v;
-		[queue addObjectsFromArray:v.subviews];
-	}
-	XCTAssertNotNil(outline);
-	NSMutableArray *groups = [NSMutableArray array];
-	for (NSInteger row = 0; row < outline.numberOfRows; row++) {
-		id item = [outline itemAtRow:row];
-		if ([outline.delegate outlineView:outline isGroupItem:item]) [groups addObject:[item valueForKey:@"title"]];
-	}
-	XCTAssertEqualObjects(groups, (@[@"TABLES", @"VIEWS"]));
-
-	// Their items can't be selected, and empty space gets the table menu (no Install Extension…)
-	NSString *extension = [[sidebar itemTitlesInSection:@"EXTENSIONS"] firstObject];
-	if (extension) XCTAssertFalse([sidebar selectExtensionNamed:extension]);
 	NSString *sequence = [[sidebar itemTitlesInSection:@"SEQUENCES"] firstObject];
-	if (sequence) XCTAssertFalse([sidebar selectSequenceNamed:sequence]);
-	XCTAssertNil(sidebar.selectedExtensionName);
-	XCTAssertNil(sidebar.selectedSequenceName);
-	XCTAssertEqual([sidebar menuForRow:-1], sidebar.tableMenu);
-
-	for (NSMenuItem *item in [sidebar.extensionMenu itemArray]) {
-		if ([item action]) XCTAssertFalse([sidebar validateMenuItem:item], @"%@", [item title]);
+	if (sequence) {
+		XCTAssertTrue([sidebar selectSequenceNamed:sequence]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+		XCTAssertEqualObjects(sidebar.selectedSequenceName, sequence);
 	}
-	for (NSMenuItem *item in [sidebar.sequenceMenu itemArray]) {
-		if ([item action]) XCTAssertFalse([sidebar validateMenuItem:item], @"%@", [item title]);
-	}
+	XCTAssertNotEqual([sidebar menuForRow:-1], nil);
 }
 
-- (void)testGearMenuKeepsTableListItemsAndDisablesHeldBackOnes
+- (void)testGearMenuItemsAreEnabled
 {
 	[self selectTable:@"customers"];
 	SPPostgresSidebarController *sidebar = self.document.sidebar;
@@ -360,17 +262,10 @@ static NSString * const SPScopeTransfer = @"TransferToolbarItemIdentifier";
 		enabled[NSStringFromSelector([item action])] = @([sidebar validateMenuItem:item]);
 	}
 
-	for (NSString *action in @[@"renameTable:", @"duplicateTable:", @"truncateTables:", @"removeRelations:", @"openRelationInNewTab:", @"openRelationInNewWindow:", @"exportRelations:"]) {
+	for (NSString *action in @[@"renameTable:", @"duplicateTable:", @"truncateTables:", @"removeRelations:", @"openRelationInNewTab:",
+							   @"openRelationInNewWindow:", @"exportRelations:", @"showCreateSyntax:", @"copyCreateSyntax:"]) {
 		XCTAssertEqualObjects(enabled[action], @YES, @"%@", action);
 	}
-	for (NSString *action in @[@"showCreateSyntax:", @"copyCreateSyntax:"]) {
-		XCTAssertEqualObjects(enabled[action], @NO, @"%@", action);
-	}
-
-	// The bottom bar's buttons stay
-	XCTAssertTrue([sidebar.addButton isEnabled]);
-	XCTAssertTrue([sidebar.refreshButton isEnabled]);
-	XCTAssertTrue([sidebar.infoToggleButton isEnabled]);
 }
 
 - (void)testQueryExportResultIsEnabled
