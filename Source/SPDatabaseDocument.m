@@ -2809,7 +2809,7 @@ static BOOL isOSAtLeast10_14;
 		return NSLocalizedString(@"Connecting…", @"window title string indicating that sp is connecting");
 	}
 	
-	if ([self getConnection] == nil) return [NSString stringWithFormat:@"%@%@", pathName, @"Sequel Pro"];
+	if ([self getConnection] == nil) return [NSString stringWithFormat:@"%@%@", pathName, @"Sequel Plus"];
 
 	tabTitle = [NSMutableString string];
 
@@ -3897,7 +3897,7 @@ static BOOL isOSAtLeast10_14;
 		tabTitle = windowTitle;
 	}
 	else if (!_isConnected) {
-		windowTitle = [NSMutableString stringWithFormat:@"%@%@", pathName, @"Sequel Pro"];
+		windowTitle = [NSMutableString stringWithFormat:@"%@%@", pathName, @"Sequel Plus"];
 		tabTitle = windowTitle;
 	} 
 	else {
@@ -4490,7 +4490,7 @@ static BOOL isOSAtLeast10_14;
 - (NSString *)displayName
 {
 	if (!_isConnected) {
-		return [NSString stringWithFormat:@"%@%@", ([[[self fileURL] path] length] && ![self isUntitled]) ? [NSString stringWithFormat:@"%@ — ",[[[self fileURL] path] lastPathComponent]] : @"", @"Sequel Pro"];
+		return [NSString stringWithFormat:@"%@%@", ([[[self fileURL] path] length] && ![self isUntitled]) ? [NSString stringWithFormat:@"%@ — ",[[[self fileURL] path] lastPathComponent]] : @"", @"Sequel Plus"];
 	} 
 	return [[[self fileURL] path] lastPathComponent];
 }
