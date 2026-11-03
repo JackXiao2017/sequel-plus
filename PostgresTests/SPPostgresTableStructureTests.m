@@ -658,6 +658,46 @@
 	}
 }
 
+- (void)testTableOwner
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPStructureStatementRecorder *recorder = nil;
+		PGPostgresConnection *connection = [self connectOn:port recorder:&recorder];
+		[connection execute:@"DROP ROLE IF EXISTS \"sp Struct Owner\""];
+		XCTAssertNotNil([connection execute:@"CREATE ROLE \"sp Struct Owner\" NOLOGIN"], @"%@", connection.lastError.errorPrimaryMessage);
+		SPPostgresTableStructure *structure = [self structureOn:connection table:@"t"];
+		NSError *error = nil;
+
+		XCTAssertEqualObjects([structure tableOwner:&error], @"pgkit_test", @"%@", error);
+		NSArray *roles = [structure roleNames:&error];
+		XCTAssertTrue([roles containsObject:@"sp Struct Owner"] && [roles containsObject:@"pgkit_test"], @"%@ %@", roles, error);
+		XCTAssertFalse([roles containsObject:@"pg_monitor"]);
+
+		[recorder.statements removeAllObjects];
+		XCTAssertTrue([structure setTableOwner:@"sp Struct Owner" error:&error], @"%@", error);
+		XCTAssertTrue([recorder.statements containsObject:@"ALTER TABLE \"structure_test\".\"t\" OWNER TO \"sp Struct Owner\""], @"%@", recorder.statements);
+		XCTAssertEqualObjects([structure tableOwner:&error], @"sp Struct Owner");
+
+		XCTAssertFalse([structure setTableOwner:@"" error:&error], @"no owner: refused before anything is sent");
+		XCTAssertFalse([structure setTableOwner:@"sp_no_such_role" error:&error]);
+		XCTAssertTrue([error.localizedDescription containsString:@"does not exist"], @"%@", error);
+
+		// A view: ALTER VIEW
+		SPPostgresTableStructure *view = [self structureOn:connection table:@"t_view"];
+		XCTAssertTrue([view setTableOwner:@"sp Struct Owner" error:&error], @"%@", error);
+		XCTAssertEqualObjects([view tableOwner:&error], @"sp Struct Owner");
+
+		// The relation gone: the read fails
+		SPPostgresTableStructure *gone = [self structureOn:connection table:@"no_such_table"];
+		XCTAssertNil([gone tableOwner:&error]);
+		XCTAssertNotNil(error);
+
+		XCTAssertTrue([structure setTableOwner:@"pgkit_test" error:&error], @"%@", error);
+		XCTAssertTrue([view setTableOwner:@"pgkit_test" error:&error], @"%@", error);
+		XCTAssertNotNil([connection execute:@"DROP ROLE \"sp Struct Owner\""], @"%@", connection.lastError.errorPrimaryMessage);
+	}
+}
+
 - (void)testRenameTableAndTableComment
 {
 	for (NSNumber *port in [SPPostgresTestServers ports]) {

@@ -236,6 +236,10 @@ __attribute__((visibility("default")))
 - (NSArray *)constraints:(NSError **)error;
 /// The comment, or nil (with *error unset) when there is none; nil with *error set on failure.
 - (NSString *)tableComment:(NSError **)error;
+/// The owning role's name; nil on failure.
+- (NSString *)tableOwner:(NSError **)error;
+/// The roles (logins and groups) the table can be given to, without the built-in pg_* roles, sorted; nil on failure.
+- (NSArray *)roleNames:(NSError **)error;
 /// @"table", @"partitioned table", @"view", @"materialized view" or @"foreign table"; nil on failure.
 - (NSString *)relationKind:(NSError **)error;
 /**
@@ -299,6 +303,9 @@ __attribute__((visibility("default")))
 - (BOOL)setTrigger:(NSString *)name enabled:(BOOL)enabled error:(NSError **)error;
 
 - (BOOL)renameTableTo:(NSString *)newName error:(NSError **)error;
+/// ALTER TABLE (VIEW, MATERIALIZED VIEW, FOREIGN TABLE) … OWNER TO owner: the server allows it to the owner when a
+/// member of the new owner (with CREATE on the schema), and to superusers. Its sequences and indexes follow.
+- (BOOL)setTableOwner:(NSString *)owner error:(NSError **)error;
 /// nil or empty removes the comment.
 - (BOOL)setTableComment:(NSString *)comment error:(NSError **)error;
 

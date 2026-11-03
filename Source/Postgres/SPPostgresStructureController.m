@@ -58,6 +58,10 @@ static NSString * const SPPostgresStructureComment = @"comment";
 	NSButton *addConstraintButton;
 	NSButton *removeConstraintButton;
 	NSTextField *noticeField;
+	/// The table's owner (Owner: pop-up, the server's roles), and the owner it was read with
+	NSTextField *ownerLabel;
+	NSPopUpButton *ownerPopup;
+	NSString *owner;
 
 	/// A sheet this controller put on the window (USING, add index or constraint), ended by -invalidate
 	NSWindow *activeSheet;
@@ -123,6 +127,9 @@ static NSString * const SPPostgresStructureComment = @"comment";
 	[addConstraintButton release];
 	[removeConstraintButton release];
 	[noticeField release];
+	[ownerLabel release];
+	[ownerPopup release];
+	[owner release];
 	[activeSheet release];
 	[usingField release];
 
@@ -143,7 +150,7 @@ static NSString * const SPPostgresStructureComment = @"comment";
 	}
 
 	for (NSControl *control in @[addColumnButton, removeColumnButton, refreshButton, addIndexButton, removeIndexButton,
-								 addConstraintButton, removeConstraintButton]) {
+								 addConstraintButton, removeConstraintButton, ownerPopup]) {
 		[control setTarget:nil];
 	}
 
@@ -319,10 +326,23 @@ static NSString * const SPPostgresStructureComment = @"comment";
 	addColumnButton = [self _newBarButtonWithImage:@"button_add" toolTip:NSLocalizedString(@"Add a new column", @"Postgres structure: add column tooltip") action:@selector(addColumn:) x:-1];
 	removeColumnButton = [self _newBarButtonWithImage:@"button_remove" toolTip:NSLocalizedString(@"Delete the selected column", @"Postgres structure: delete column tooltip") action:@selector(removeColumn:) x:30];
 	refreshButton = [self _newBarButtonWithImage:@"button_refresh" toolTip:NSLocalizedString(@"Refresh the structure", @"Postgres structure: refresh tooltip") action:@selector(refresh:) x:61];
-	noticeField = [[self _labelWithFrame:NSMakeRect(100, 4, width - 108, 14)] retain];
+	noticeField = [[self _labelWithFrame:NSMakeRect(100, 4, width - 108 - 240, 14)] retain];
 	[noticeField setTextColor:[NSColor secondaryLabelColor]];
 	[noticeField setAutoresizingMask:NSViewWidthSizable];
-	for (NSView *subview in @[addColumnButton, removeColumnButton, refreshButton, noticeField]) [bar addSubview:subview];
+	// The table's owner, at the right of the bar
+	ownerLabel = [[self _labelWithFrame:NSMakeRect(width - 232, 4, 50, 14)] retain];
+	[ownerLabel setStringValue:NSLocalizedString(@"Owner:", @"Postgres structure: owner label")];
+	[ownerLabel setAlignment:NSTextAlignmentRight];
+	[ownerLabel setAutoresizingMask:NSViewMinXMargin];
+	ownerPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(width - 178, 0, 170, 22) pullsDown:NO];
+	[ownerPopup setControlSize:NSControlSizeSmall];
+	[ownerPopup setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+	[ownerPopup setBezelStyle:NSBezelStyleRoundRect];
+	[ownerPopup setToolTip:NSLocalizedString(@"The role that owns the table", @"Postgres structure: owner tooltip")];
+	[ownerPopup setTarget:self];
+	[ownerPopup setAction:@selector(changeOwner:)];
+	[ownerPopup setAutoresizingMask:NSViewMinXMargin];
+	for (NSView *subview in @[addColumnButton, removeColumnButton, refreshButton, noticeField, ownerLabel, ownerPopup]) [bar addSubview:subview];
 	[split addSubview:columnsSection];
 
 	// Indexes
@@ -457,7 +477,7 @@ static NSString * const SPPostgresStructureComment = @"comment";
 
 #pragma mark - Loading
 
-/// The runner's thread: the relation's kind, columns, indexes and constraints, read through structure alone (nil,
+/// The runner's thread: the relation's kind, columns, indexes, constraints, owner and the server's roles, read through structure alone (nil,
 /// with *error, if any of them can't be read).
 static NSDictionary *SPPostgresStructureRead(SPPostgresTableStructure *structure, NSError **error)
 {
@@ -469,7 +489,12 @@ static NSDictionary *SPPostgresStructureRead(SPPostgresTableStructure *structure
 	if (!theIndexes) return nil;
 	NSArray *theConstraints = [structure constraints:error];
 	if (!theConstraints) return nil;
-	return @{@"kind" : kind, @"columns" : theColumns, @"indexes" : theIndexes, @"constraints" : theConstraints};
+	NSString *theOwner = [structure tableOwner:error];
+	if (!theOwner) return nil;
+	NSArray *theRoles = [structure roleNames:error];
+	if (!theRoles) return nil;
+	return @{@"kind" : kind, @"columns" : theColumns, @"indexes" : theIndexes, @"constraints" : theConstraints,
+			 @"owner" : theOwner, @"roles" : theRoles};
 }
 
 // A load (a switch, -reload, Refresh) ends the cell edit first (so a change it commits is sent while the runner is
@@ -600,6 +625,17 @@ static NSDictionary *SPPostgresStructureRead(SPPostgresTableStructure *structure
 	[self setNoticeText:notice];
 	[noticeField setStringValue:notice];
 
+	// The owner pop-up: the server's roles, the owner selected (added when it isn't listed)
+	[owner release];
+	owner = [[result objectForKey:@"owner"] copy];
+	[ownerPopup removeAllItems];
+	if ([owner length]) {
+		NSMutableArray *roles = [NSMutableArray arrayWithArray:[result objectForKey:@"roles"] ?: @[]];
+		if (![roles containsObject:owner]) [roles insertObject:owner atIndex:0];
+		[ownerPopup addItemsWithTitles:roles];
+		[ownerPopup selectItemWithTitle:owner];
+	}
+
 	for (NSTableView *grid in @[columnsView, indexesView, constraintsView]) [self _reloadGridKeepingSelection:grid];
 	[self _updateButtons];
 
@@ -630,6 +666,7 @@ static NSDictionary *SPPostgresStructureRead(SPPostgresTableStructure *structure
 	[removeIndexButton setEnabled:canChange && [indexesView selectedRow] >= 0];
 	[addConstraintButton setEnabled:canChange];
 	[removeConstraintButton setEnabled:canChange && [constraintsView selectedRow] >= 0];
+	[ownerPopup setEnabled:canChange && [owner length] > 0];
 }
 
 /// A change succeeded: the grids show the server's structure, and the tab hears of it.
@@ -667,6 +704,38 @@ static NSDictionary *SPPostgresStructureRead(SPPostgresTableStructure *structure
 {
 	if (invalidated || ![self _endEditing]) return;
 	[self _loadSwitching:NO];
+}
+
+#pragma mark - Owner
+
+- (NSString *)owner
+{
+	return [[owner retain] autorelease];
+}
+
+- (NSPopUpButton *)ownerPopup
+{
+	return ownerPopup;
+}
+
+/// The Owner: pop-up: ALTER TABLE … OWNER TO the chosen role, then the structure is read again (the pop-up shows the
+/// owner the server has). Refused while the runner is busy (the pop-up goes back to the owner).
+- (IBAction)changeOwner:(id)sender
+{
+	NSString *chosen = [ownerPopup titleOfSelectedItem];
+	if (invalidated || !structure || !editable || ![chosen length] || [chosen isEqualToString:owner]) return;
+	if ([self _refuseChangeWhileBusy] || ![self _endEditing]) {
+		if ([owner length]) [ownerPopup selectItemWithTitle:owner];
+		return;
+	}
+
+	NSError *error = nil;
+	if ([structure setTableOwner:chosen error:&error]) {
+		[self _didChange:NO];
+		return;
+	}
+	[self _presentError:error title:[NSString stringWithFormat:NSLocalizedString(@"Could not change the owner of “%@”", @"Postgres structure: change owner failed"), table]];
+	[self _load];
 }
 
 #pragma mark - Columns
