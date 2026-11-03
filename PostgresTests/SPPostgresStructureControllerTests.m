@@ -1078,4 +1078,65 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
 }
 
+#pragma mark - Owner
+
+- (void)testOwnerPopupChangesTheTablesOwner
+{
+	XCTAssertNotNil([self.other execute:@"DROP ROLE IF EXISTS sp_struct_owner"]);
+	XCTAssertNotNil([self.other execute:@"CREATE ROLE sp_struct_owner NOLOGIN"], @"%@", self.other.lastError.errorPrimaryMessage);
+	NSString *ownerQuery = @"SELECT pg_get_userbyid(relowner)::text AS n FROM pg_class WHERE oid = 'structure_test.t'::regclass";
+	NSString *(^serverOwner)(void) = ^NSString *{
+		NSString *found = nil;
+		for (NSDictionary *row in [self.other execute:ownerQuery]) found = row[@"n"];
+		return found;
+	};
+
+	[self showStructureOf:@"t"];
+	SPPostgresStructureController *structure = self.structure;
+	NSPopUpButton *popup = structure.ownerPopup;
+	XCTAssertEqualObjects(structure.owner, @"pgkit_test");
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"pgkit_test");
+	XCTAssertTrue(popup.isEnabled);
+	XCTAssertTrue([popup.itemTitles containsObject:@"sp_struct_owner"], @"%@", popup.itemTitles);
+	XCTAssertFalse([popup.itemTitles containsObject:@"pg_monitor"], @"no built-in pg_* roles");
+	XCTAssertNotNil(popup.superview, @"in the columns bar");
+
+	// Choosing a role changes the owner at once; the pop-up shows the server's owner
+	[popup selectItemWithTitle:@"sp_struct_owner"];
+	[structure changeOwner:popup];
+	XCTAssertEqualObjects(serverOwner(), @"sp_struct_owner");
+	XCTAssertEqualObjects(structure.owner, @"sp_struct_owner");
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"sp_struct_owner");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts valueForKey:@"informativeText"]);
+
+	// A role that is gone: the server's error, and the pop-up back on the owner
+	[popup addItemWithTitle:@"sp_struct_no_such_role"];
+	[popup selectItemWithTitle:@"sp_struct_no_such_role"];
+	[structure changeOwner:popup];
+	XCTAssertEqual(self.alerts.count, 1u);
+	XCTAssertTrue([self.alerts.firstObject.messageText containsString:@"Could not change the owner"], @"%@", self.alerts.firstObject.messageText);
+	XCTAssertTrue([self.alerts.firstObject.informativeText containsString:@"does not exist"], @"%@", self.alerts.firstObject.informativeText);
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"sp_struct_owner");
+	XCTAssertEqualObjects(serverOwner(), @"sp_struct_owner");
+
+	// Not while the runner is busy: refused, the pop-up goes back
+	[SPPostgresTestServers queueSleep:1 onRunner:self.document.taskRunner];
+	[popup selectItemWithTitle:@"pgkit_test"];
+	[structure changeOwner:popup];
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"sp_struct_owner");
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:10]);
+	XCTAssertEqualObjects(serverOwner(), @"sp_struct_owner");
+
+	// Back to pgkit_test, so the role can go
+	[popup selectItemWithTitle:@"pgkit_test"];
+	[structure changeOwner:popup];
+	XCTAssertEqualObjects(serverOwner(), @"pgkit_test");
+	XCTAssertNotNil([self.other execute:@"DROP ROLE sp_struct_owner"], @"%@", self.other.lastError.errorPrimaryMessage);
+
+	// A view's owner isn't changed here (its structure is read-only)
+	[self showStructureOf:@"t_view"];
+	XCTAssertEqualObjects(self.structure.owner, @"pgkit_test");
+	XCTAssertFalse(self.structure.ownerPopup.isEnabled);
+}
+
 @end
