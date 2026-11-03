@@ -325,6 +325,8 @@ static NSMutableArray *SPSequenceTestPaneLog = nil;
 		}
 	}
 	XCTAssertNotNil(outline);
+	// Sections start collapsed: expanded to see their rows
+	for (NSString *section in @[@"TABLES", @"VIEWS", @"SEQUENCES", @"EXTENSIONS"]) XCTAssertTrue([sidebar setSection:section collapsed:NO]);
 	NSMutableArray *groupTitles = [NSMutableArray array];
 	NSInteger sequencesRow = -1, firstSequenceRow = -1, tableRow = -1;
 	for (NSInteger row = 0; row < outline.numberOfRows; row++) {

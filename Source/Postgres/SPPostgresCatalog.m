@@ -119,23 +119,157 @@
 	return [self relationNamesInSchema:schema kinds:@"'S'" error:error];
 }
 
+- (NSDictionary<NSString *, NSArray<NSString *> *> *)columnNamesByRelationInSchema:(NSString *)schema error:(NSError **)error
+{
+	PGPostgresResult *result = [self run:@"SELECT c.relname::text AS r, a.attname::text AS n FROM pg_catalog.pg_attribute a "
+										  "JOIN pg_catalog.pg_class c ON c.oid = a.attrelid "
+										  "JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace "
+										  "WHERE ns.nspname = $1::text AND c.relkind IN ('r', 'p', 'v', 'm', 'f') "
+										  "AND a.attnum > 0 AND NOT a.attisdropped "
+										  "ORDER BY c.relname COLLATE \"C\", a.attnum"
+								  values:@[schema ?: @""] error:error];
+	if (!result) return nil;
+
+	NSMutableDictionary *columns = [NSMutableDictionary dictionary];
+	for (NSDictionary *row in result) {
+		id relation = [row objectForKey:@"r"];
+		id column = [row objectForKey:@"n"];
+		if (![relation isKindOfClass:[NSString class]] || ![column isKindOfClass:[NSString class]]) continue;
+		NSMutableArray *list = [columns objectForKey:relation];
+		if (!list) [columns setObject:(list = [NSMutableArray array]) forKey:relation];
+		[list addObject:column];
+	}
+	return columns;
+}
+
+/// A new database name the server takes as it is: not empty, at most NAMEDATALEN - 1 (63) bytes in UTF-8 (a longer
+/// one would be silently truncated). NO with *error (SPPostgresErrorInvalidSettings) otherwise.
+static BOOL SPPostgresCheckDatabaseName(NSString *name, NSError **error)
+{
+	NSUInteger bytes = [name lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+	if (bytes && bytes <= 63) return YES;
+	if (error) {
+		NSString *message = bytes
+			? NSLocalizedString(@"A database name can be at most 63 bytes long.", @"Postgres new database: name too long")
+			: NSLocalizedString(@"Enter a name for the new database.", @"Postgres new database: empty name");
+		*error = SPPostgresMakeError(SPPostgresErrorInvalidSettings, message, nil);
+	}
+	return NO;
+}
+
 - (BOOL)createDatabase:(NSString *)name error:(NSError **)error
 {
-	// The server's identifier limit (NAMEDATALEN - 1): a longer name would be silently truncated
-	NSUInteger bytes = [name lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
-	if (!bytes || bytes > 63) {
-		if (error) {
-			NSString *message = bytes
-				? NSLocalizedString(@"A database name can be at most 63 bytes long.", @"Postgres new database: name too long")
-				: NSLocalizedString(@"Enter a name for the new database.", @"Postgres new database: empty name");
-			*error = SPPostgresMakeError(SPPostgresErrorInvalidSettings, message, nil);
-		}
-		return NO;
-	}
+	if (!SPPostgresCheckDatabaseName(name, error)) return NO;
 
-	// The only CREATE DATABASE in the app: the connected user owns it, with the server's default template and encoding
+	// The connected user owns it, with the server's default template and encoding
 	NSString *sql = [@"CREATE DATABASE " stringByAppendingString:SPPostgresQuoteIdentifier(name)];
 	return SPPostgresExecuteWithDetails(_connection, sql, nil, error) != nil;
+}
+
+- (BOOL)copyDatabase:(NSString *)source toName:(NSString *)name error:(NSError **)error
+{
+	if (!SPPostgresCheckDatabaseName(name, error)) return NO;
+	NSString *sql = [NSString stringWithFormat:@"CREATE DATABASE %@ TEMPLATE %@", SPPostgresQuoteIdentifier(name), SPPostgresQuoteIdentifier(source ?: @"")];
+	return SPPostgresExecuteWithDetails(_connection, sql, nil, error) != nil;
+}
+
+- (BOOL)renameDatabase:(NSString *)name toName:(NSString *)newName error:(NSError **)error
+{
+	if (!SPPostgresCheckDatabaseName(newName, error)) return NO;
+	NSString *sql = [NSString stringWithFormat:@"ALTER DATABASE %@ RENAME TO %@", SPPostgresQuoteIdentifier(name ?: @""), SPPostgresQuoteIdentifier(newName)];
+	return SPPostgresExecuteWithDetails(_connection, sql, nil, error) != nil;
+}
+
+- (BOOL)dropDatabase:(NSString *)name error:(NSError **)error
+{
+	if (![name length]) {
+		if (error) *error = SPPostgresMakeError(SPPostgresErrorInvalidSettings, NSLocalizedString(@"No database was named.", @"Postgres drop database: no name"), nil);
+		return NO;
+	}
+	// The only DROP DATABASE in the app (Database ▸ Delete Database…, confirmed by typing the name)
+	NSString *sql = [@"DROP DATABASE " stringByAppendingString:SPPostgresQuoteIdentifier(name)];
+	return SPPostgresExecuteWithDetails(_connection, sql, nil, error) != nil;
+}
+
+- (NSDictionary<NSString *, NSString *> *)databaseDetails:(NSString *)name error:(NSError **)error
+{
+	PGPostgresResult *result = [self run:@"SELECT pg_get_userbyid(d.datdba)::text AS owner, coalesce(shobj_description(d.oid, 'pg_database'), '')::text AS comment "
+										  "FROM pg_catalog.pg_database d WHERE d.datname = $1::text"
+								  values:@[name ?: @""] error:error];
+	if (!result) return nil;
+	for (NSDictionary *row in result) {
+		id owner = [row objectForKey:@"owner"];
+		id comment = [row objectForKey:@"comment"];
+		return @{@"owner": [owner isKindOfClass:[NSString class]] ? owner : @"", @"comment": [comment isKindOfClass:[NSString class]] ? comment : @""};
+	}
+	if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, [NSString stringWithFormat:NSLocalizedString(@"The database “%@” doesn't exist any more.", @"Postgres alter database: database gone"), name], nil);
+	return nil;
+}
+
+- (NSArray<NSString *> *)roleNames:(NSError **)error
+{
+	return [self firstColumnOf:@"SELECT rolname::text AS n FROM pg_catalog.pg_roles WHERE rolname !~ '^pg_' ORDER BY rolname COLLATE \"C\""
+						values:nil error:error];
+}
+
+- (BOOL)setOwner:(NSString *)owner ofDatabase:(NSString *)name error:(NSError **)error
+{
+	NSString *sql = [NSString stringWithFormat:@"ALTER DATABASE %@ OWNER TO %@", SPPostgresQuoteIdentifier(name ?: @""), SPPostgresQuoteIdentifier(owner ?: @"")];
+	return SPPostgresExecuteWithDetails(_connection, sql, nil, error) != nil;
+}
+
+- (BOOL)setComment:(NSString *)comment ofDatabase:(NSString *)name error:(NSError **)error
+{
+	NSString *value = [comment length] ? SPPostgresQuoteLiteral(comment) : @"NULL";
+	NSString *sql = [NSString stringWithFormat:@"COMMENT ON DATABASE %@ IS %@", SPPostgresQuoteIdentifier(name ?: @""), value];
+	return SPPostgresExecuteWithDetails(_connection, sql, nil, error) != nil;
+}
+
+/// The rows of a query as dictionaries of strings (NULL: @""), keyed by the given column names.
+- (NSArray<NSDictionary *> *)rowsOf:(NSString *)sql keys:(NSArray *)keys error:(NSError **)error
+{
+	PGPostgresResult *result = [self run:sql values:nil error:error];
+	if (!result) return nil;
+	NSMutableArray *rows = [NSMutableArray array];
+	for (NSDictionary *row in result) {
+		NSMutableDictionary *strings = [NSMutableDictionary dictionaryWithCapacity:[keys count]];
+		for (NSString *key in keys) {
+			id value = [row objectForKey:key];
+			[strings setObject:([value isKindOfClass:[NSString class]] ? value : @"") forKey:key];
+		}
+		[rows addObject:strings];
+	}
+	return rows;
+}
+
+- (NSArray<NSDictionary *> *)serverSettings:(NSError **)error
+{
+	return [self rowsOf:@"SELECT name::text AS name, setting::text AS setting, coalesce(unit, '')::text AS unit, "
+						 "category::text AS category, coalesce(short_desc, '')::text AS description "
+						 "FROM pg_catalog.pg_settings ORDER BY name COLLATE \"C\""
+				   keys:@[@"name", @"setting", @"unit", @"category", @"description"] error:error];
+}
+
+- (NSArray<NSDictionary *> *)serverProcesses:(NSError **)error
+{
+	return [self rowsOf:@"SELECT pid::text AS pid, coalesce(usename::text, '') AS \"user\", coalesce(datname::text, '') AS database, "
+						 "coalesce(host(client_addr), CASE WHEN client_port = -1 THEN 'local' ELSE '' END) AS client, "
+						 "coalesce(application_name, '')::text AS application, coalesce(state, '')::text AS state, "
+						 "coalesce(to_char(query_start, 'YYYY-MM-DD HH24:MI:SS'), '') AS started, "
+						 "coalesce(backend_type, '')::text AS type, coalesce(query, '')::text AS query, "
+						 "(pid = pg_backend_pid())::text AS own "
+						 "FROM pg_catalog.pg_stat_activity ORDER BY pid"
+				   keys:@[@"pid", @"user", @"database", @"client", @"application", @"state", @"started", @"type", @"query", @"own"] error:error];
+}
+
+- (BOOL)signalProcess:(NSInteger)pid terminate:(BOOL)terminate error:(NSError **)error
+{
+	NSString *sql = terminate ? @"SELECT pg_terminate_backend($1::int)::text AS n" : @"SELECT pg_cancel_backend($1::int)::text AS n";
+	NSArray *rows = [self firstColumnOf:sql values:@[[NSString stringWithFormat:@"%ld", (long)pid]] error:error];
+	if (!rows) return NO;
+	if ([[rows firstObject] isEqualToString:@"true"]) return YES;
+	if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, NSLocalizedString(@"The server did not signal the process (it may have ended already).", @"Postgres process list: signal not sent"), nil);
+	return NO;
 }
 
 - (NSArray *)installedExtensions:(NSError **)error

@@ -142,8 +142,8 @@ __attribute__((visibility("default")))
 - (NSArray *)displayedItemTitlesInSection:(NSString *)sectionTitle;
 
 /**
- * TABLES, VIEWS, SEQUENCES and EXTENSIONS collapse and expand with their headers' disclosure buttons. A section stays
- * collapsed (for this tab) across reloads and schema changes. Collapsing a section with a selected row is a selection
+ * TABLES, VIEWS, SEQUENCES and EXTENSIONS collapse and expand with the disclosure button at the front of their headers,
+ * always shown. Every section starts collapsed; each keeps its state (for this tab) across reloads and schema changes. Collapsing a section with a selected row is a selection
  * change: the delegate is asked first, and refusing keeps it expanded. Selecting an item by name (-selectTableNamed:
  * and the like) makes it visible first: its section expands, and the filter is cleared if the item doesn't match it.
  */
@@ -208,6 +208,9 @@ __attribute__((visibility("default")))
 - (NSMenu *)menuForRow:(NSInteger)row;
 
 @property (readonly) NSString *selectedSchema;
+/// The shown schema's column names by table and view (each in column order), read with its lists on every reload of
+/// them (the Query editor's completion); nil when not read. Settable to columns read afresh for the same schema.
+@property (copy) NSDictionary<NSString *, NSArray<NSString *> *> *relationColumns;
 /// The schemas the schema pop-up lists (as last loaded), in its order; empty before the first load.
 @property (readonly) NSArray<NSString *> *schemaNames;
 /// The schema a schema reload (-reloadSchema:…) has been asked for and not yet completed, nil when none is queued: the

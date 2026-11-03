@@ -27,9 +27,10 @@ __attribute__((visibility("default")))
 
 /**
  * The names completion offers besides the buffer's words, the keywords and the function names, under the keys
- * @"databases", @"schemas", @"tables", @"views" and @"columns" (a key may be missing). Called on the main thread each
- * time completion opens; it must return at once, from lists the tab already holds (never a query: the tab's runner may
- * be using the connection). nil: no names.
+ * @"databases", @"schemas", @"tables", @"views" and @"columns" (arrays), @"schema" (the shown schema) and
+ * @"relationColumns" (the shown schema's column names by table or view); a key may be missing. Called on the main
+ * thread each time completion opens; it must return at once, from lists the tab already holds (never a query: the
+ * tab's runner may be using the connection). nil: no names.
  */
 @property (copy) NSDictionary<NSString *, NSArray<NSString *> *> * (^completionNamesProvider)(void);
 
@@ -37,9 +38,14 @@ __attribute__((visibility("default")))
  * SPTextView's completion items (SPNarrowDownCompletion dictionaries: "display", "image", "match" when what is inserted
  * differs; never "isRef", which SPNarrowDownCompletion would backtick-quote): the buffer's words (its identifier and
  * keyword tokens) starting with currentWord (as SPTextView, not in browse mode), SPPostgresSQLTokenizer's keywords (uppercased) and
- * function names, then the provider's databases, schemas, tables, views and columns. A name that is not an all-lowercase
- * identifier, or is a reserved or type_func_name keyword (+[SPPostgresSQLTokenizer reservedKeywords]), is inserted double-quoted ("match": "Order Items" → "\"Order Items\""). In browse mode
- * (after "name.") only the tables, views and columns.
+ * function names, then the provider's databases, schemas, tables and views, then the columns of the tables and views
+ * the current statement names (from relationColumns) and the provider's columns. A name that is not an all-lowercase
+ * identifier, or is a reserved or type_func_name keyword (+[SPPostgresSQLTokenizer reservedKeywords]), is inserted
+ * double-quoted ("match": "Order Items" → "\"Order Items\"").
+ *
+ * In browse mode (after "aTableName."): the columns of the table or view the current statement aliases as aTableName
+ * (FROM orders o, JOIN items AS i, also schema.table alias in the shown schema), else of the table or view named
+ * aTableName; after the shown schema's name, its tables and views; otherwise nothing (never the table list).
  */
 - (NSArray *)suggestionsForSQLCompletionWith:(NSString *)currentWord dictMode:(BOOL)isDictMode browseMode:(BOOL)dbBrowseMode withTableName:(NSString *)aTableName withDbName:(NSString *)aDbName;
 
