@@ -32,6 +32,8 @@ static const NSUInteger SPSidebarFilterTestPort = 55418;
 @interface SPPostgresSidebarFilterTests : XCTestCase
 @property (strong) SPWindowController *controller;
 @property (strong) SPPostgresDocument *document;
+/// Each section header's expanded state and disclosure button state when the tab opened, before -setUp expands them
+@property (strong) NSDictionary<NSString *, NSArray *> *initialSections;
 @end
 
 @implementation SPPostgresSidebarFilterTests
@@ -102,6 +104,18 @@ static const NSUInteger SPSidebarFilterTestPort = 55418;
 	[self.controller addTabDocument:self.document atIndex:0 select:YES];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects(self.document.sidebar.selectedSchema, @"public");
+
+	// As the tab opened, then every section expanded for the tests
+	NSMutableDictionary *initial = [NSMutableDictionary dictionary];
+	for (NSString *title in @[@"TABLES", @"VIEWS", @"SEQUENCES", @"EXTENSIONS"]) {
+		id section = [self sectionItemNamed:title];
+		NSButton *disclosure = [self disclosureOfSection:title];
+		initial[title] = @[@([[self outline] isItemExpanded:section]), @([self.sidebar isSectionCollapsed:title]),
+						   @(disclosure != nil ? disclosure.state : -1), @(disclosure != nil ? NSMinX(disclosure.frame) : -1),
+						   @(NSMinX([[[disclosure superview] viewWithTag:3] frame]))];
+		XCTAssertTrue([self.sidebar setSection:title collapsed:NO], @"%@", title);
+	}
+	self.initialSections = initial;
 }
 
 - (void)tearDown
@@ -145,6 +159,18 @@ static const NSUInteger SPSidebarFilterTestPort = 55418;
 	for (NSInteger row = 0; row < outline.numberOfRows; row++) {
 		id item = [outline itemAtRow:row];
 		if ([self.sidebar outlineView:outline isGroupItem:item] && [[item valueForKey:@"title"] isEqualToString:title]) return item;
+	}
+	return nil;
+}
+
+/// The disclosure button of a section header's (shown) cell.
+- (NSButton *)disclosureOfSection:(NSString *)title
+{
+	NSInteger row = [[self outline] rowForItem:[self sectionItemNamed:title]];
+	if (row < 0) return nil;
+	NSView *cell = [[self outline] viewAtColumn:0 row:row makeIfNecessary:YES];
+	for (NSView *subview in cell.subviews) {
+		if ([subview isKindOfClass:[NSButton class]]) return (NSButton *)subview;
 	}
 	return nil;
 }
@@ -285,14 +311,43 @@ static const NSUInteger SPSidebarFilterTestPort = 55418;
 
 #pragma mark - Collapsible sections
 
-- (void)testSectionsShowDisclosureButtons
+- (void)testSectionsStartCollapsedWithDisclosureAtFront
 {
 	for (NSString *title in @[@"TABLES", @"VIEWS", @"SEQUENCES", @"EXTENSIONS"]) {
+		NSArray *initial = self.initialSections[title];
+		XCTAssertEqualObjects(initial[0], @NO, @"%@ starts collapsed", title);
+		XCTAssertEqualObjects(initial[1], @YES, @"%@", title);
+		XCTAssertEqualObjects(initial[2], @(NSControlStateValueOff), @"%@'s button shows collapsed", title);
+		// The button is in front of the title
+		XCTAssertLessThan([initial[3] doubleValue], [initial[4] doubleValue], @"%@", title);
+
+		// The source list's hover-only Show/Hide is not used; the button is always shown
 		id section = [self sectionItemNamed:title];
-		XCTAssertNotNil(section, @"%@", title);
-		XCTAssertTrue([self.sidebar outlineView:[self outline] shouldShowOutlineCellForItem:section], @"%@", title);
-		XCTAssertTrue([[self outline] isItemExpanded:section], @"%@ starts expanded", title);
+		XCTAssertTrue(NSIsEmptyRect([[self outline] frameOfOutlineCellAtRow:[[self outline] rowForItem:section]]), @"%@", title);
+		NSButton *disclosure = [self disclosureOfSection:title];
+		XCTAssertFalse(disclosure.hidden, @"%@", title);
+		XCTAssertEqual(disclosure.bezelStyle, NSBezelStyleDisclosure);
+		XCTAssertEqual(disclosure.state, NSControlStateValueOn, @"%@'s button shows expanded", title);
 	}
+}
+
+- (void)testDisclosureButtonTogglesTheSection
+{
+	NSButton *disclosure = [self disclosureOfSection:@"TABLES"];
+	[disclosure performClick:nil];
+	XCTAssertTrue([self.sidebar isSectionCollapsed:@"TABLES"]);
+	XCTAssertFalse([[self rowTitles] containsObject:@"spf_alpha"]);
+	disclosure = [self disclosureOfSection:@"TABLES"];
+	XCTAssertEqual(disclosure.state, NSControlStateValueOff);
+
+	[disclosure performClick:nil];
+	XCTAssertFalse([self.sidebar isSectionCollapsed:@"TABLES"]);
+	XCTAssertTrue([[self rowTitles] containsObject:@"spf_alpha"]);
+	XCTAssertEqual([self disclosureOfSection:@"TABLES"].state, NSControlStateValueOn);
+
+	// Collapsing in code updates the button too
+	XCTAssertTrue([self.sidebar setSection:@"VIEWS" collapsed:YES]);
+	XCTAssertEqual([self disclosureOfSection:@"VIEWS"].state, NSControlStateValueOff);
 }
 
 - (void)testCollapseAndExpandSections
