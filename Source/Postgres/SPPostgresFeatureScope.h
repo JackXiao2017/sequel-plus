@@ -9,16 +9,18 @@
  * A later release re-enables a feature by editing SPPostgresFeatureIsAvailable() only.
  */
 typedef NS_ENUM(NSInteger, SPPostgresFeature) {
-	// Always shipped (RC1's scope): listed so every pane maps to a feature
+	// Shipped since 2.0.0-RC1: listed so every pane maps to a feature
 	SPPostgresFeatureContent = 0,
 	SPPostgresFeatureQuery,
 	SPPostgresFeatureConsole,
 
-	// Held back in 2.0.0-RC1
+	// Shipped since 2.0.0-RC2 (Import/Export is listed below)
 	SPPostgresFeatureStructure,     // Stage 3: the Structure pane (toolbar, View ▸ Structure ⌘1)
 	SPPostgresFeatureRelations,     // Stage 3: the Relations pane
 	SPPostgresFeatureTriggers,      // Stage 3: the Triggers pane
 	SPPostgresFeatureTableInfo,     // Stage 3: the Table Info pane
+
+	// Held back in 2.0.0-RC2 (except Import/Export, shipped since RC2)
 	SPPostgresFeatureSequences,     // Stage 3: the sidebar's SEQUENCES section and the Sequence pane
 	SPPostgresFeatureExtensions,    // Stage 5: the sidebar's EXTENSIONS section and the Extension pane
 	SPPostgresFeatureUsers,         // Stage 4: the Users sheet
