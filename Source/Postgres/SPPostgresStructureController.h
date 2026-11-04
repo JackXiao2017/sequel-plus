@@ -7,8 +7,8 @@
 /**
  * The Structure view of a PostgreSQL tab, laid out as MySQL's Structure tab: the columns grid on top (Name, Type,
  * Nullable, Default, Auto, Comment) with a bottom bar (+ / − for columns, refresh), and below it the Indexes grid
- * (Name, Columns, Unique, Method) and the Constraints grid (Name, Type, Definition), each with + / −. The columns bar
- * also holds the table's Owner: pop-up. Built in code.
+ * (Name, Columns, Unique, Method) and the Constraints grid (Name, Type, Definition), each with + / −. A bar above the
+ * columns grid holds the table's Owner: pop-up, at its left. Built in code.
  * Use on the main thread.
  *
  * Every edited cell runs its one change at once (rename, type, nullable, default, comment) through
@@ -65,7 +65,7 @@ __attribute__((visibility("default")))
 - (IBAction)changeOwner:(id)sender;
 
 @property (readonly) NSTableView *columnsView, *indexesView, *constraintsView;
-/// At the right of the columns bar: the server's roles (built-in pg_* roles left out), the table's owner selected.
+/// At the left of the bar above the columns grid: the server's roles (built-in pg_* roles left out), the table's owner selected.
 /// Enabled for a table or partitioned table.
 @property (readonly) NSPopUpButton *ownerPopup;
 /// The owner as last read (nil before a table is loaded).

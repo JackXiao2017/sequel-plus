@@ -10,6 +10,10 @@
 
 // MySQL's Structure tab (DBView.xib): 23 pt button bars, 32 x 25 textured buttons
 static const CGFloat SPPostgresStructureBarHeight = 23;
+/// KVO context: the runner's busy (the columns grid draws its cells disabled while it is busy)
+static void *SPPostgresStructureRunnerContext = &SPPostgresStructureRunnerContext;
+/// The bar above the columns grid (the table's owner)
+static const CGFloat SPPostgresStructureTopBarHeight = 26;
 static const CGFloat SPPostgresStructureButtonWidth = 32;
 
 static NSString * const SPPostgresStructureName = @"name";
@@ -68,6 +72,9 @@ static NSString * const SPPostgresStructureComment = @"comment";
 	/// The default USING sheet's field, and its completion until it is answered
 	NSTextField *usingField;
 	void (^usingCompletion)(NSString *);
+
+	/// The runner observed (busy), so the grid is drawn again when it goes idle
+	SPPostgresTaskRunner *observedRunner;
 
 	BOOL invalidated;
 }
@@ -141,6 +148,7 @@ static NSString * const SPPostgresStructureComment = @"comment";
 	if (invalidated) return;
 	invalidated = YES;
 	[loader invalidate];
+	[self _observeRunner:nil];
 
 	// An edit in progress must not call back into a controller that is going away
 	for (NSTableView *grid in @[columnsView, indexesView, constraintsView]) {
@@ -298,6 +306,14 @@ static NSString * const SPPostgresStructureComment = @"comment";
 	// Columns
 	SPButtonBar *bar = nil;
 	NSView *columnsSection = [self _sectionWithFrame:NSMakeRect(0, 0, width, 280) grid:&columnsView bar:&bar];
+	// A bar above the columns grid, for the table itself: its owner, at the left
+	NSScrollView *columnsScroll = [columnsView enclosingScrollView];
+	NSRect gridFrame = [columnsScroll frame];
+	gridFrame.size.height -= SPPostgresStructureTopBarHeight;
+	[columnsScroll setFrame:gridFrame];
+	SPButtonBar *topBar = [[[SPButtonBar alloc] initWithFrame:NSMakeRect(0, NSMaxY(gridFrame), width, SPPostgresStructureTopBarHeight)] autorelease];
+	[topBar setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+	[columnsSection addSubview:topBar];
 	[self _addColumn:SPPostgresStructureName title:NSLocalizedString(@"Name", @"Postgres structure: name column") width:150 cell:nil to:columnsView];
 
 	NSComboBoxCell *typeCell = [[[NSComboBoxCell alloc] initTextCell:@""] autorelease];
@@ -326,23 +342,23 @@ static NSString * const SPPostgresStructureComment = @"comment";
 	addColumnButton = [self _newBarButtonWithImage:@"button_add" toolTip:NSLocalizedString(@"Add a new column", @"Postgres structure: add column tooltip") action:@selector(addColumn:) x:-1];
 	removeColumnButton = [self _newBarButtonWithImage:@"button_remove" toolTip:NSLocalizedString(@"Delete the selected column", @"Postgres structure: delete column tooltip") action:@selector(removeColumn:) x:30];
 	refreshButton = [self _newBarButtonWithImage:@"button_refresh" toolTip:NSLocalizedString(@"Refresh the structure", @"Postgres structure: refresh tooltip") action:@selector(refresh:) x:61];
-	noticeField = [[self _labelWithFrame:NSMakeRect(100, 4, width - 108 - 240, 14)] retain];
+	noticeField = [[self _labelWithFrame:NSMakeRect(100, 4, width - 108, 14)] retain];
 	[noticeField setTextColor:[NSColor secondaryLabelColor]];
 	[noticeField setAutoresizingMask:NSViewWidthSizable];
-	// The table's owner, at the right of the bar
-	ownerLabel = [[self _labelWithFrame:NSMakeRect(width - 232, 4, 50, 14)] retain];
+	for (NSView *subview in @[addColumnButton, removeColumnButton, refreshButton, noticeField]) [bar addSubview:subview];
+	// The table's owner, at the left of the top bar
+	ownerLabel = [[self _labelWithFrame:NSMakeRect(8, 6, 46, 14)] retain];
 	[ownerLabel setStringValue:NSLocalizedString(@"Owner:", @"Postgres structure: owner label")];
-	[ownerLabel setAlignment:NSTextAlignmentRight];
-	[ownerLabel setAutoresizingMask:NSViewMinXMargin];
-	ownerPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(width - 178, 0, 170, 22) pullsDown:NO];
+	[ownerLabel setAutoresizingMask:NSViewMaxXMargin];
+	ownerPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(56, 2, 190, 22) pullsDown:NO];
 	[ownerPopup setControlSize:NSControlSizeSmall];
 	[ownerPopup setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
 	[ownerPopup setBezelStyle:NSBezelStyleRoundRect];
 	[ownerPopup setToolTip:NSLocalizedString(@"The role that owns the table", @"Postgres structure: owner tooltip")];
 	[ownerPopup setTarget:self];
 	[ownerPopup setAction:@selector(changeOwner:)];
-	[ownerPopup setAutoresizingMask:NSViewMinXMargin];
-	for (NSView *subview in @[addColumnButton, removeColumnButton, refreshButton, noticeField, ownerLabel, ownerPopup]) [bar addSubview:subview];
+	[ownerPopup setAutoresizingMask:NSViewMaxXMargin];
+	for (NSView *subview in @[ownerLabel, ownerPopup]) [topBar addSubview:subview];
 	[split addSubview:columnsSection];
 
 	// Indexes
@@ -510,6 +526,33 @@ static NSDictionary *SPPostgresStructureRead(SPPostgresTableStructure *structure
 - (void)setTaskRunner:(SPPostgresTaskRunner *)runner
 {
 	[loader setTaskRunner:runner];
+	[self _observeRunner:invalidated ? nil : runner];
+}
+
+/// Watches runner's busy (nil: stops watching).
+- (void)_observeRunner:(SPPostgresTaskRunner *)runner
+{
+	if (runner == observedRunner) return;
+	[observedRunner removeObserver:self forKeyPath:@"busy" context:SPPostgresStructureRunnerContext];
+	[observedRunner release];
+	observedRunner = [runner retain];
+	[observedRunner addObserver:self forKeyPath:@"busy" options:0 context:SPPostgresStructureRunnerContext];
+}
+
+/**
+ * The columns grid draws its cells as disabled while the runner is busy (they can't be edited then). The structure is
+ * often shown while it is still busy (a table switch also loads the tab's other panes), so the grid is drawn again
+ * when it goes idle; without that the cells stayed grey until something else redrew them.
+ */
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context
+{
+	if (context != SPPostgresStructureRunnerContext) {
+		[super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+		return;
+	}
+	if (invalidated || object != observedRunner) return;
+	[columnsView setNeedsDisplay:YES];
+	[self _updateButtons];
 }
 
 - (BOOL)isStale
