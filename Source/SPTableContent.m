@@ -59,6 +59,7 @@
 #import "SPRuleFilterController.h"
 #import "SPFilterTableController.h"
 
+#import "SPPostgresDateTimePicker.h"
 #import <pthread.h>
 #import <SPMySQL/SPMySQL.h>
 #include <stdlib.h>
@@ -4124,7 +4125,7 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 		// Nothing is editable while the field editor is running.
 		// This guards against a special case where accessibility services might
 		// check if a table field is editable while the sheet is running.
-		if (fieldEditor) return NO;
+		if (fieldEditor || datePickerOpen) return NO;
 
 		// Ensure that row is editable since it could contain "(not loaded)" columns together with
 		// issue that the table has no primary key
@@ -4238,10 +4239,66 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 			return NO;
 		}
 
+		// A date or time cell: the date / time picker on the cell instead of the in-cell editor
+		SPPostgresTemporalKind kind = [SPPostgresDateTimePicker kindOfMySQLTypeName:[columnDefinition objectForKey:@"type"]];
+		if (!datePickerHandoff && kind != SPPostgresTemporalNone && [self _canEditInDatePickerTableColumn:tableColumn row:rowIndex]) {
+			BOOL allowNULL = [columnDefinition objectForKey:@"null"] ? ![[columnDefinition objectForKey:@"null"] integerValue] : YES;
+			[self _editInDatePickerTableColumn:tableColumn row:rowIndex kind:kind allowNull:allowNULL];
+			return NO;
+		}
+
 		return YES;
 	}
 
 	return YES;
+}
+
+#pragma mark -
+#pragma mark Date / time picker
+
+/**
+ * Whether a date or time cell's value can be edited in place now; where it can't, the in-cell editor is left to show
+ * why, as for any cell.
+ */
+- (BOOL)_canEditInDatePickerTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
+{
+	if (rowIndex < 0 || (NSUInteger)rowIndex >= [tableValues count]) return NO;
+	if (![tableContentView isCellEditingMode]) return YES;
+	NSInteger gridColumn = [tableContentView columnWithIdentifier:[tableColumn identifier]];
+	if (gridColumn < 0) return NO;
+	NSArray *editStatus = [self fieldEditStatusForRow:rowIndex andColumn:gridColumn];
+	return [[editStatus objectAtIndex:0] integerValue] == 1;
+}
+
+/**
+ * Opens the date / time picker as a popover on a date or time cell. Its value is not saved: Set (or NULL, as the NULL
+ * placeholder) puts it into the cell's in-place editor, on the same table, row and value it was opened on, and the
+ * cell stays being edited until it is saved or cancelled as any in-cell edit. Cancel leaves the cell as it was.
+ */
+- (void)_editInDatePickerTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex kind:(SPPostgresTemporalKind)kind allowNull:(BOOL)allowNull
+{
+	NSUInteger dataColumn = (NSUInteger)[[tableColumn identifier] integerValue];
+	id value = [tableValues cellDataAtRow:(NSUInteger)rowIndex column:dataColumn];
+	NSString *table = [[selectedTable copy] autorelease];
+	datePickerOpen = YES;
+	[self retain]; // until the picker answers
+
+	SPPostgresDateTimePicker *picker = [[[SPPostgresDateTimePicker alloc] initWithValue:value kind:kind allowNull:allowNull completion:^(id newValue) {
+		datePickerOpen = NO;
+		[[tableContentView window] makeFirstResponder:tableContentView];
+		BOOL unchanged = newValue && ![tableDocumentInstance isWorking] && [selectedTable isEqualToString:table]
+			&& (NSUInteger)rowIndex < [tableValues count] && dataColumn < [tableValues columnCount]
+			&& [[tableValues cellDataAtRow:(NSUInteger)rowIndex column:dataColumn] isEqual:value];
+		if (unchanged) {
+			NSString *text = [newValue isKindOfClass:[NSString class]] ? newValue : [prefs objectForKey:SPNullValue];
+			datePickerHandoff = YES;
+			[SPPostgresDateTimePicker continueEditingColumn:[tableContentView columnWithIdentifier:[tableColumn identifier]] row:rowIndex ofTableView:tableContentView withText:text];
+			datePickerHandoff = NO;
+		}
+		[self autorelease];
+	}] autorelease];
+	NSInteger gridColumn = [tableContentView columnWithIdentifier:[tableColumn identifier]];
+	[picker showRelativeToRect:[tableContentView frameOfCellAtColumn:gridColumn row:rowIndex] ofView:tableContentView];
 }
 
 /**
