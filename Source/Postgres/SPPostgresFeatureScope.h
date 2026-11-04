@@ -14,13 +14,13 @@ typedef NS_ENUM(NSInteger, SPPostgresFeature) {
 	SPPostgresFeatureQuery,
 	SPPostgresFeatureConsole,
 
-	// Shipped since 2.0.0-RC2 (Import/Export is listed below)
+	// Shipped since 2.0.0-RC2 (and Import/Export)
 	SPPostgresFeatureStructure,     // Stage 3: the Structure pane (toolbar, View ▸ Structure ⌘1)
 	SPPostgresFeatureRelations,     // Stage 3: the Relations pane
 	SPPostgresFeatureTriggers,      // Stage 3: the Triggers pane
 	SPPostgresFeatureTableInfo,     // Stage 3: the Table Info pane
 
-	// Held back in 2.0.0-RC2 (except Import/Export, shipped since RC2)
+	// Shipped since 2.0.0-RC3 (except Import/Export, since RC2)
 	SPPostgresFeatureSequences,     // Stage 3: the sidebar's SEQUENCES section and the Sequence pane
 	SPPostgresFeatureExtensions,    // Stage 5: the sidebar's EXTENSIONS section and the Extension pane
 	SPPostgresFeatureUsers,         // Stage 4: the Users sheet

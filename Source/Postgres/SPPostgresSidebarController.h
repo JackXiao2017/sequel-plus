@@ -116,7 +116,7 @@ __attribute__((visibility("default")))
 - (void)reloadKeepingSelection:(void (^)(BOOL loaded))completion;
 
 /// @[@"TABLES", @"VIEWS", @"SEQUENCES", @"EXTENSIONS"]: Extensions is always last. The sections the outline shows: SEQUENCES
-/// and EXTENSIONS only while the build's scope has them (SPPostgresFeatureScope; 2.0.0-RC2: @[@"TABLES", @"VIEWS"]).
+/// and EXTENSIONS only while the build's scope has them (SPPostgresFeatureScope; 2.0.0-RC3 has both).
 - (NSArray *)sectionTitles;
 
 /// Names listed under a section (tables, views, sequences or extension names), in display order (also for a section

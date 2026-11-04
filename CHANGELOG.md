@@ -1,5 +1,56 @@
 # Changelog
 
+## Sequel Plus 2.0.0-RC3
+
+Upgrading from 2.0.0-RC2. Every PostgreSQL feature is now available. These buttons, menu items and table list sections were disabled or hidden in RC2.
+
+### New for PostgreSQL connections
+
+#### Transfer
+- Copies selected tables, or a whole database, from the current server to another PostgreSQL server. The target is usually a saved favorite and can use its own SSH tunnel.
+- You choose one of two modes:
+  - **Empty the target database first.** This removes everything inside the target database: all schemas (including `public`), tables, views, functions, types and extensions. You confirm by typing the target database's name. Other databases on that server are never touched.
+  - **Overwrite tables that already exist.** Copied tables that already exist on the target are replaced, and the target's other tables are left alone. If replacing a table would break something on the target, such as a view or a foreign key from a table not being copied, Transfer stops before changing anything and lists what's in the way.
+- Indexes, constraints, defaults and owned sequences are copied with the tables.
+
+#### Users
+- Manages roles the PostgreSQL way: logins and groups in one list. You can add, remove and duplicate roles.
+- **General:** name, password, valid-until, connection limit, and the LOGIN, INHERIT, SUPERUSER, CREATEDB, CREATEROLE, REPLICATION and BYPASSRLS attributes.
+- **Membership:** the roles this role belongs to (optionally WITH ADMIN OPTION), and the roles that belong to it.
+- **Privileges:** pick a database and schema, then grant or revoke per object:
+  - databases: CONNECT, CREATE, TEMP
+  - schemas: USAGE, CREATE
+  - tables: SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+  - sequences: USAGE, SELECT
+  - functions: EXECUTE
+- You can also set default privileges for objects created later in the schema.
+- Changes are applied together with **Apply**, as in the MySQL User Manager.
+
+#### Sequences
+- The table list shows a **SEQUENCES** section.
+- Select a sequence to edit its name, type, start, increment, minimum, maximum, cache, cycle, owning column and comment. Its owner and current value are also shown.
+- **Set Value…** sets the current value.
+- **Add Sequence** and **Delete Sequence** are in the right-click and gear menus.
+
+#### Extensions
+- The table list shows an **EXTENSIONS** section with the extensions installed in the current database.
+- You can install one of the server's available extensions, change an installed extension's version, or drop an extension.
+
+#### Table history
+- The toolbar's **Back/Forward** buttons and **View ▸ Back/Forward In History** move between the tables and views you've visited, as they do for MySQL. This also works across databases.
+
+#### Create Syntax
+- **Show Create Table Syntax…** and **Copy Create Table Syntax** in the table list's right-click and gear menus.
+
+### App
+- Version **2.0.0-RC3**.
+
+### Unchanged
+- **MySQL:** no changes to MySQL connections.
+- **Your data:** favorites, saved settings and data are kept from RC2.
+- **Bundle ID and data folder:** the app keeps the same bundle ID and the same `~/Library/Application Support/Sequel Pro` folder.
+- **Updates:** checking for updates stays off.
+
 ## Sequel Plus 2.0.0-RC2
 
 Upgrading from 2.0.0-RC1.
