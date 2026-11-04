@@ -66,6 +66,7 @@
 
 #import <pthread.h>
 #import <SPMySQL/SPMySQL.h>
+#import "SPPostgresDateTimePicker.h"
 
 #include <libkern/OSAtomic.h>
 
@@ -2504,7 +2505,7 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
 		// Nothing is editable while the field editor is running.
 		// This guards against a special case where accessibility services might
 		// check if a table field is editable while the sheet is running.
-		if (fieldEditor) return NO;
+		if (fieldEditor || datePickerOpen) return NO;
 		
 		NSDictionary *columnDefinition = [cqColumnDefinition objectAtIndex:[[aTableColumn identifier] integerValue]];
 
@@ -2576,11 +2577,55 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
 			return NO;
 		}
 
+		// A date or time cell that can be edited: the date / time picker on the cell instead of the in-cell editor
+		// (where it can't, the in-cell editor shows why, as for any cell)
+		SPPostgresTemporalKind kind = [SPPostgresDateTimePicker kindOfMySQLTypeName:[columnDefinition objectForKey:@"type"]];
+		if (!datePickerHandoff && kind != SPPostgresTemporalNone && rowIndex >= 0 && (NSUInteger)rowIndex < [resultData count]
+			&& [customQueryView columnWithIdentifier:[aTableColumn identifier]] >= 0
+			&& [[[self fieldEditStatusForRow:rowIndex andColumn:[customQueryView columnWithIdentifier:[aTableColumn identifier]]] objectAtIndex:0] integerValue] == 1) {
+			BOOL allowNULL = [columnDefinition objectForKey:@"null"] ? ![[columnDefinition objectForKey:@"null"] integerValue] : YES;
+			[self _editInDatePickerTableColumn:aTableColumn row:rowIndex kind:kind allowNull:allowNULL];
+			return NO;
+		}
+
 		return YES;
 	} 
 	else {
 		return YES;
 	}
+}
+
+/**
+ * Opens the date / time picker as a popover on a date or time result cell. Its value is not saved: Set (or NULL, as
+ * the NULL placeholder) puts it into the cell's in-place editor, on the same result, row and value it was opened on,
+ * and the cell stays being edited until it is saved or cancelled as any in-cell edit. Cancel leaves the cell as it was.
+ */
+- (void)_editInDatePickerTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex kind:(SPPostgresTemporalKind)kind allowNull:(BOOL)allowNull
+{
+	NSUInteger dataColumn = (NSUInteger)[[tableColumn identifier] integerValue];
+	SPDataStorage *data = resultData;
+	id value = [data cellDataAtRow:(NSUInteger)rowIndex column:dataColumn];
+	datePickerOpen = YES;
+	[self retain]; // until the picker answers
+	[data retain];
+
+	SPPostgresDateTimePicker *picker = [[[SPPostgresDateTimePicker alloc] initWithValue:value kind:kind allowNull:allowNull completion:^(id newValue) {
+		datePickerOpen = NO;
+		[[customQueryView window] makeFirstResponder:customQueryView];
+		BOOL unchanged = newValue && ![tableDocumentInstance isWorking] && data == resultData
+			&& (NSUInteger)rowIndex < [resultData count] && dataColumn < [resultData columnCount]
+			&& [[resultData cellDataAtRow:(NSUInteger)rowIndex column:dataColumn] isEqual:value];
+		if (unchanged) {
+			NSString *text = [newValue isKindOfClass:[NSString class]] ? newValue : [prefs objectForKey:SPNullValue];
+			datePickerHandoff = YES;
+			[SPPostgresDateTimePicker continueEditingColumn:[customQueryView columnWithIdentifier:[tableColumn identifier]] row:rowIndex ofTableView:customQueryView withText:text];
+			datePickerHandoff = NO;
+		}
+		[data release];
+		[self autorelease];
+	}] autorelease];
+	NSInteger gridColumn = [customQueryView columnWithIdentifier:[tableColumn identifier]];
+	[picker showRelativeToRect:[customQueryView frameOfCellAtColumn:gridColumn row:rowIndex] ofView:customQueryView];
 }
 
 /**

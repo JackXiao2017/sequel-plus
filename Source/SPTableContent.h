@@ -162,6 +162,8 @@ typedef NS_ENUM(NSInteger, SPTableContentFilterSource) {
 	NSColor *binhexHighlightColor;
 
 	SPFieldEditorController *fieldEditor;
+	BOOL datePickerOpen;    // the date / time picker is open on a cell
+	BOOL datePickerHandoff; // the picker's value is going into the cell's in-place editor
 
 	// this represents the visible area of the whole content view at runtime.
 	// we use it as a positioning aide for the other two views below

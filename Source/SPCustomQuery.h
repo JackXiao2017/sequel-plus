@@ -118,6 +118,8 @@
 	IBOutlet SPSplitView *queryEditorSplitView;
 
 	SPFieldEditorController *fieldEditor;
+	BOOL datePickerOpen;    // the date / time picker is open on a cell
+	BOOL datePickerHandoff; // the picker's value is going into the cell's in-place editor
 	SPQueryFavoriteManager *favoritesManager;
 
 	NSUserDefaults *prefs;

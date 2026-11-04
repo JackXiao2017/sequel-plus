@@ -11,6 +11,7 @@
 #import "SPPostgresQueryResultEditor.h"
 #import "SPPostgresErrors.h"
 #import "SPPostgresFieldEditorSheet.h"
+#import "SPPostgresDateTimePicker.h"
 // MySQL's tooltip (its header declares WebKit's deprecated WebView)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -333,6 +334,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	SPPostgresQueryResultEditor *approvingEditor; // the editor that last let a grid cell be edited (commits need it shown)
 	void (^fieldEditorPresenter)(NSString *value, NSString *columnName, NSString *typeName, BOOL editable, BOOL allowNull, void (^completion)(id newValue));
 	BOOL fieldEditorPending;                   // a field editor sheet is open (one at a time)
+	BOOL pickerHandoff;                        // the picker's value is going into the cell's in-place editor
 }
 
 @synthesize editor;
@@ -538,6 +540,8 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	editRefusalPresenter = nil;
 	[fieldEditorPresenter release];
 	fieldEditorPresenter = nil;
+	// A date / time picker this view opened (its completion sees invalidated)
+	if (fieldEditorPending) [[SPPostgresDateTimePicker currentPicker] cancel:nil];
 }
 
 #pragma mark - The runner
@@ -3020,6 +3024,11 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 			[approvingEditor release];
 			approvingEditor = [resultEditor retain];
 		}
+		// A date or time cell: the date / time picker on the cell instead of the in-cell editor
+		if (!pickerHandoff && [SPPostgresDateTimePicker kindOfTypeName:[resultEditor typeNameOfColumn:(NSUInteger)column]] != SPPostgresTemporalNone) {
+			[self _editInDatePickerRow:rowIndex column:column];
+			return NO;
+		}
 		return YES;
 	}
 	[self _presentEditRefusal:message row:rowIndex column:[[theTableView tableColumns] indexOfObjectIdenticalTo:tableColumn]];
@@ -3083,6 +3092,59 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 			once(newValue);
 		}];
 	}
+}
+
+#pragma mark - Date / time picker
+
+/**
+ * Opens the date / time picker as a popover on an editable date or time result cell (unless a picker or the field
+ * editor sheet is open). Its value is not saved: Set (or NULL, as the NULL placeholder) puts it into the cell's
+ * in-place editor, only while the editor that approved the cell is still the shown one, and the cell stays being
+ * edited until Return saves it (or Escape drops it), as any in-cell edit. Cancel leaves the cell as it was.
+ */
+- (void)_editInDatePickerRow:(NSInteger)rowIndex column:(NSInteger)column
+{
+	if (invalidated || fieldEditorPending || [self _runnerBusy] || !resultEditor) return;
+	if (column < 0 || rowIndex < 0 || (NSUInteger)rowIndex >= resultRowCount) return;
+
+	SPPostgresQueryResultEditor *pickerEditor = resultEditor;
+	id value = [pickerEditor valueAtRow:(NSUInteger)rowIndex column:(NSUInteger)column];
+	NSString *typeName = [pickerEditor typeNameOfColumn:(NSUInteger)column] ?: @"";
+	BOOL allowNull = [pickerEditor columnIsNullable:(NSUInteger)column];
+	fieldEditorPending = YES;
+	[self retain]; // until the picker answers
+	[pickerEditor retain];
+
+	// The cell's grid column (result columns map to the grid's columns in order)
+	NSInteger gridColumn = -1;
+	NSArray *tableColumns = [resultsView tableColumns];
+	for (NSUInteger index = 0; index < [tableColumns count]; index++) {
+		if ([self _resultColumnOfTableColumn:[tableColumns objectAtIndex:index]] == column) gridColumn = (NSInteger)index;
+	}
+
+	SPPostgresDateTimePicker *picker = [[[SPPostgresDateTimePicker alloc] initWithValue:value typeName:typeName allowNull:allowNull completion:^(id newValue) {
+		fieldEditorPending = NO;
+		if (!invalidated) [[resultsView window] makeFirstResponder:resultsView];
+		if (newValue && !invalidated && pickerEditor == resultEditor && ![self _runnerBusy] && gridColumn >= 0 && (NSUInteger)rowIndex < resultRowCount) {
+			// The in-place editor's commit needs the editor that approved the cell
+			if (approvingEditor != pickerEditor) {
+				[approvingEditor release];
+				approvingEditor = [pickerEditor retain];
+			}
+			NSString *text = [newValue isKindOfClass:[NSString class]] ? newValue : [self _nullPlaceholder];
+			pickerHandoff = YES;
+			[resultsView editColumn:gridColumn row:rowIndex withEvent:nil select:YES];
+			pickerHandoff = NO;
+			NSText *editor = [resultsView currentEditor];
+			[editor setString:text];
+			[editor setSelectedRange:NSMakeRange([text length], 0)];
+		}
+		[pickerEditor release];
+		[self autorelease];
+	}] autorelease];
+
+	NSRect cell = gridColumn >= 0 ? [resultsView frameOfCellAtColumn:gridColumn row:rowIndex] : [resultsView rectOfRow:rowIndex];
+	[picker showRelativeToRect:cell ofView:resultsView];
 }
 
 - (void)tableView:(NSTableView *)theTableView willDisplayCell:(id)cell forTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
