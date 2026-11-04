@@ -4,9 +4,9 @@
 static BOOL SPPostgresFeatureFullScope = NO;
 
 /**
- * The release's Postgres scope: THE place to change it. 2.0.0-RC2 ships favorites, the Postgres UI, the table list
- * (and its bottom bar, with Duplicate Table), the Content, Query and Console views (RC1), and the Structure, Relations,
- * Triggers and Table Info views and Import/Export (RC2); every other feature stays in the code, unreachable.
+ * The release's Postgres scope: THE place to change it. 2.0.0-RC3 ships every Postgres feature (RC1: Content, Query,
+ * Console; RC2: Structure, Relations, Triggers, Table Info, Import/Export; RC3: Transfer, Users, Sequences, Extensions,
+ * Table History, Create Syntax). A later release holds a feature back by returning NO for it here.
  */
 BOOL SPPostgresFeatureIsAvailable(SPPostgresFeature feature)
 {
@@ -21,15 +21,13 @@ BOOL SPPostgresFeatureIsAvailable(SPPostgresFeature feature)
 		case SPPostgresFeatureTriggers:
 		case SPPostgresFeatureTableInfo:
 		case SPPostgresFeatureImportExport:
-			return YES;
-
 		case SPPostgresFeatureSequences:
 		case SPPostgresFeatureExtensions:
 		case SPPostgresFeatureUsers:
 		case SPPostgresFeatureTransfer:
 		case SPPostgresFeatureTableHistory:
 		case SPPostgresFeatureCreateSyntax:
-			return NO;
+			return YES;
 	}
 	return NO;
 }
