@@ -65,9 +65,28 @@
 @property (strong) id groupForNewFavorite;
 /// When set, -postgresFavoritesDidChange reloads like the controller: prepare the outline, saving the layout.
 @property (weak) SPPostgresConnectionScreenAdapter *outlineAdapter;
+/// Returned by -postgresSelectedOutlineItem.
+@property (strong) id selectedItem;
+/// Saved MySQL favorites (-postgresItemIsSavedMySQLFavorite:) and the one just added with "+".
+@property (strong) NSMutableArray *mysqlFavoriteItems;
+@property (strong) id justAddedMySQLItem;
+/// What -postgresRemoveMySQLFavorite: and -selectQuickConnectItem were asked to do.
+@property (strong) NSMutableArray *removedMySQLItems;
+@property (assign) NSUInteger quickConnectSelections;
 @end
 
 @implementation SPPGFakeConnectionScreen
+- (id)postgresSelectedOutlineItem { return self.selectedItem; }
+- (BOOL)postgresItemIsSavedMySQLFavorite:(id)item { return item && [self.mysqlFavoriteItems containsObject:item]; }
+- (BOOL)postgresItemIsNewMySQLFavorite:(id)item { return item && item == self.justAddedMySQLItem && item == self.selectedItem; }
+- (void)postgresRemoveMySQLFavorite:(id)item
+{
+	if (!self.removedMySQLItems) self.removedMySQLItems = [NSMutableArray array];
+	[self.removedMySQLItems addObject:item];
+	[self.mysqlFavoriteItems removeObject:item];
+	if (self.selectedItem == item) self.selectedItem = nil;
+}
+- (void)selectQuickConnectItem { self.quickConnectSelections++; self.selectedItem = nil; }
 - (id)postgresMySQLSection { return self.mysqlSection; }
 - (id)postgresGroupForNewFavorite { return self.groupForNewFavorite ? self.groupForNewFavorite : self.mysqlSection; }
 - (void)postgresFavoritesDidChange
@@ -779,6 +798,81 @@
 	[control setSelectedSegment:SPConnectionEngineMySQL];
 	[control sendAction:[control action] to:[control target]];
 	XCTAssertEqualObjects(self.screen.port, @"3306");
+}
+
+#pragma mark - Switching a MySQL favorite to PostgreSQL
+
+/// The MySQL favorite just added with "+" and filled in, selected, with the MySQL engine.
+- (id)selectNewMySQLFavoriteInForm
+{
+	id item = [NSClassFromString(@"SPFavoriteNode") favoriteNodeWithDictionary:[@{@"name": @"New Favorite"} mutableCopy]];
+	self.screen.mysqlFavoriteItems = [NSMutableArray arrayWithObject:item];
+	self.screen.justAddedMySQLItem = item;
+	self.screen.selectedItem = item;
+	self.screen.reselectingAdapter = self.adapter;
+	[self.adapter setSelectedEngine:SPConnectionEngineMySQL];
+	self.screen.type = SPPostgresTCPIPConnection;
+	self.screen.name = @"Staging";
+	self.screen.host = @"";
+	self.screen.user = @"carol";
+	self.screen.password = @"s3cret";
+	self.screen.port = @"3306";
+	return item;
+}
+
+- (void)switchEngineTo:(SPConnectionEngine)newEngine
+{
+	NSSegmentedControl *control = [self.adapter engineControl];
+	[control setSelectedSegment:newEngine];
+	[control sendAction:[control action] to:[control target]];
+}
+
+- (void)testNewMySQLFavoriteSwitchedToPostgreSQLBecomesPostgresFavorite
+{
+	id item = [self selectNewMySQLFavoriteInForm];
+
+	[self switchEngineTo:SPConnectionEnginePostgreSQL];
+
+	XCTAssertEqual([self.adapter selectedEngine], SPConnectionEnginePostgreSQL);
+	XCTAssertEqual(self.screen.quickConnectSelections, 0u, @"not moved to Quick Connect");
+	XCTAssertEqualObjects(self.screen.removedMySQLItems, @[item], @"the MySQL favorite is replaced");
+
+	// Saved without validation (no host yet), with the form's details and PostgreSQL's default port
+	XCTAssertEqual([[self.store favorites] count], 1u);
+	SPPostgresFavorite *saved = [[self.store favorites] firstObject];
+	XCTAssertEqualObjects(saved.name, @"Staging");
+	XCTAssertEqualObjects(saved.user, @"carol");
+	XCTAssertNil(saved.host);
+	XCTAssertEqual(saved.port, 5432u);
+	XCTAssertEqualObjects([self.keychain getPasswordForName:[saved keychainName] account:[saved keychainAccount]], @"s3cret");
+
+	// It is the selected favorite, loaded in the form for editing
+	XCTAssertEqualObjects(self.screen.selectedFavoriteID, saved.favoriteID);
+	XCTAssertEqualObjects([[self.adapter loadedFavorite] favoriteID], saved.favoriteID);
+	XCTAssertEqualObjects(self.screen.name, @"Staging");
+	XCTAssertEqualObjects(self.screen.password, @"s3cret");
+
+	// Editing then saves to the same favorite
+	self.screen.host = @"db.staging";
+	NSError *error = nil;
+	XCTAssertTrue([self.adapter saveFormAsFavorite:&error], @"%@", error);
+	XCTAssertEqual([[self.store favorites] count], 1u);
+	XCTAssertEqualObjects([[[self.store favorites] firstObject] host], @"db.staging");
+}
+
+- (void)testOtherSavedMySQLFavoriteSwitchedToPostgreSQLGoesToQuickConnect
+{
+	id item = [self selectNewMySQLFavoriteInForm];
+	self.screen.justAddedMySQLItem = nil; // an older favorite, not the one just added
+
+	[self switchEngineTo:SPConnectionEnginePostgreSQL];
+
+	XCTAssertEqual(self.screen.quickConnectSelections, 1u);
+	XCTAssertNil(self.screen.removedMySQLItems);
+	XCTAssertEqualObjects(self.screen.mysqlFavoriteItems, @[item]);
+	XCTAssertEqual([[self.store favorites] count], 0u);
+	XCTAssertEqual([self.adapter selectedEngine], SPConnectionEnginePostgreSQL);
+	XCTAssertEqualObjects(self.screen.name, @"Staging", @"the details stay in the form");
 }
 
 #pragma mark - Unreadable favorites file

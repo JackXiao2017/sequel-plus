@@ -118,6 +118,24 @@
 	}
 }
 
+- (void)testEmptyDatabaseConnectsToPostgres
+{
+	// libpq's own default would be a database named after the user (pgkit_test exists on the test servers)
+	for (NSString *database in @[@"", [NSNull null]]) {
+		SPPostgresFavorite *favorite = [self favoriteOnPort:55418];
+		favorite.database = ([database isKindOfClass:[NSString class]] ? (NSString *)database : nil);
+		SPPostgresConnector *connector = [[SPPostgresConnector alloc] initWithFavorite:favorite password:@"pgkit" sshPassword:nil parentWindow:nil];
+		SPPGConnectOutcome *outcome = [self connect:connector timeout:15];
+
+		XCTAssertNil(outcome.error);
+		PGPostgresResult *result = [outcome.connection execute:@"SELECT current_database()"];
+		XCTAssertEqualObjects([[result.rowAsArray firstObject] description], @"postgres", @"database %@", database);
+		XCTAssertEqualObjects(outcome.connection.database, @"postgres");
+		XCTAssertNil(favorite.database.length ? favorite.database : nil, @"the favorite itself is unchanged");
+		[connector disconnect];
+	}
+}
+
 #pragma mark - Password required
 
 - (void)testMissingPasswordReportsPasswordRequired

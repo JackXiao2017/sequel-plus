@@ -19,6 +19,8 @@
 #import "SPPostgresSequences.h"
 #import "SPPostgresTableStructure.h"
 #import "SPPostgresQueryController.h"
+#import "SPQueryScriptStore.h"
+#import "SPPostgresFavoritesStore.h"
 #import "SPPostgresTextView.h"
 #import "SPPostgresHelp.h"
 #import "SPPostgresHistory.h"
@@ -98,6 +100,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 - (void)_dropExtension:(NSString *)name;
 - (void)_extensionInstalled:(NSString *)name;
 - (void)_installQueryController;
+- (NSString *)_queryScriptKey;
 - (NSDictionary *)_completionNames;
 - (void)_showHelpFor:(NSString *)searchString autoHelp:(BOOL)autoHelp;
 - (void)_closeHelpViewer;
@@ -173,6 +176,9 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	SPPostgresSequenceController *sequenceController;
 	SPPostgresExtensionController *extensionController;
 	SPPostgresQueryController *queryController;
+	// Saves the Query editor's text for this connection (see -_installQueryController)
+	SPQueryScriptAutosaver *queryScriptAutosaver;
+	NSString *queryScriptKey;
 	SPPostgresHistory *history;
 	/// The pane shown in the right pane (an SPPostgresPane… name)
 	NSString *currentPane;
@@ -385,6 +391,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[sequenceController release];
 	[extensionController release];
 	[queryController release];
+	[queryScriptAutosaver release];
+	[queryScriptKey release];
 	[history release];
 	[currentPane release];
 	[paneBeforeSequence release];
@@ -904,6 +912,10 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	NSView *pane = [self _rightPane];
 	if (!pane) return;
 
+	// An edit not saved yet goes to this connection's script before the editor goes
+	[queryScriptAutosaver invalidate];
+	[queryScriptAutosaver release], queryScriptAutosaver = nil;
+
 	NSString *text = [[[[queryController editor] string] copy] autorelease];
 
 	if (queryController) {
@@ -915,6 +927,10 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	queryController = [[SPPostgresQueryController alloc] initWithConnection:connection];
 	[queryController setTaskRunner:taskRunner]; // the tab's, as Content's
 	if ([text length]) [[queryController editor] setString:text];
+
+	// The editor's text is saved for this connection as it is edited; a new tab's empty editor gets what was saved
+	queryScriptAutosaver = [[SPQueryScriptAutosaver alloc] initWithTextView:[queryController editor] store:[SPQueryScriptStore sharedStore] key:[self _queryScriptKey]];
+	if (![text length]) [queryScriptAutosaver loadIntoEmptyEditorUsing:nil];
 
 	// Unretained, as the Content controller's presenter: -invalidate (on replace or teardown) drops the block
 	__block SPPostgresDocument *document = self;
@@ -937,6 +953,33 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[queryView setFrame:[pane bounds]];
 	[queryView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 	if ([currentPane isEqualToString:SPPostgresPaneQuery]) [pane addSubview:queryView];
+}
+
+/**
+ * This connection's key for its saved Query editor text: its saved favorite's, else (Quick Connect) its server
+ * details. Fixed for the tab's life, so moving to another database keeps the same script.
+ */
+- (NSString *)_queryScriptKey
+{
+	if (queryScriptKey) return queryScriptKey;
+
+	NSString *favoriteID = [favorite favoriteID];
+	BOOL saved = NO;
+	if ([favoriteID length]) {
+		for (SPPostgresFavorite *each in [[SPPostgresFavoritesStore sharedStore] favorites]) {
+			if ([[each favoriteID] isEqualToString:favoriteID]) { saved = YES; break; }
+		}
+	}
+
+	if (saved) {
+		queryScriptKey = [[SPQueryScriptStore keyForEngine:SPQueryScriptEnginePostgreSQL favoriteID:favoriteID] copy];
+	}
+	else {
+		queryScriptKey = [[SPQueryScriptStore keyForEngine:SPQueryScriptEnginePostgreSQL type:[favorite type] host:[favorite host]
+		                                              port:[NSString stringWithFormat:@"%lu", (unsigned long)[favorite port]] user:[favorite user]
+		                                            socket:[favorite socketPath] sshHost:[favorite sshHost] sshUser:[favorite sshUser]] copy];
+	}
+	return queryScriptKey;
 }
 
 #pragma mark - Help
@@ -1944,6 +1987,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	[infoController invalidate];
 	[sequenceController invalidate]; // ends a Set Value sheet still up
 	[extensionController invalidate];
+	[queryScriptAutosaver invalidate]; // saves an edit not saved yet
 	[queryController invalidate];
 	[self _closeHelpViewer];
 	[splitView setDelegate:nil];

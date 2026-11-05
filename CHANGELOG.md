@@ -1,5 +1,31 @@
 # Changelog
 
+## Sequel Plus 2.0.0
+
+Upgrading from 2.0.0-RC4.
+
+### New for MySQL and PostgreSQL connections
+
+#### Query editor keeps its SQL
+- The Query editor's text is saved for each connection as you type (about a second after you stop), when the tab closes and when the app quits.
+- Connecting again fills an empty Query editor with that connection's saved text. Text from an `.spf` file or **Open in New Tab** is never replaced.
+- A saved favorite has its own text, kept when the favorite is renamed or edited. A Quick Connect is matched by its host, port and user (and socket or SSH host).
+- Emptying the editor deletes the saved text. Two tabs on the same connection share it: the last one saved wins.
+- The texts are kept in `~/Library/Application Support/Sequel Pro/Data/Query Scripts/`, one `.sql` file per connection.
+
+### PostgreSQL connections
+- With the **Database** field empty, a connection opens the `postgres` database. Before, it tried a database named after the user, which often doesn't exist.
+- Fixed: a favorite just added with the favorites **+** button, switched to PostgreSQL in the form, moved to Quick Connect. It now becomes a PostgreSQL favorite, stays selected and keeps what was typed. Other saved MySQL favorites still move their details to Quick Connect when switched.
+
+### App
+- Version **2.0.0**.
+
+### Unchanged
+- **MySQL:** apart from the Query editor keeping its SQL, no changes to MySQL connections.
+- **Your data:** favorites, saved settings and data are kept from RC4.
+- **Bundle ID and data folder:** the app keeps the same bundle ID and the same `~/Library/Application Support/Sequel Pro` folder.
+- **Updates:** checking for updates stays off.
+
 ## Sequel Plus 2.0.0-RC4
 
 Upgrading from 2.0.0-RC3.

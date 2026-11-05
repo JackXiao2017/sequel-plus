@@ -49,7 +49,8 @@ static NSString *SPPGOrEmpty(NSString *s)
 - (BOOL)_removeFavorite:(SPPostgresFavorite *)favorite error:(NSError **)error;
 - (NSWindow *)_sheetWindow;
 - (void)_showError:(NSError *)error;
-- (BOOL)_saveFormAsNew:(BOOL)asNew error:(NSError **)error;
+- (BOOL)_saveFormAsNew:(BOOL)asNew validate:(BOOL)validate error:(NSError **)error;
+- (void)_convertNewMySQLFavorite:(id)mysqlItem;
 - (void)_storePassword:(NSString *)thePassword sshPassword:(NSString *)theSSHPassword forFavorite:(SPPostgresFavorite *)favorite previous:(SPPostgresFavorite *)previous;
 - (void)_rollBackPasswordsOf:(SPPostgresFavorite *)favorite to:(SPPostgresFavorite *)previous password:(NSString *)oldPassword sshPassword:(NSString *)oldSSHPassword;
 - (void)_applyPortPlaceholders;
@@ -363,6 +364,16 @@ static NSString *SPPGOrEmpty(NSString *s)
 	SPConnectionEngine newEngine = ([engineControl selectedSegment] == SPConnectionEnginePostgreSQL) ? SPConnectionEnginePostgreSQL : SPConnectionEngineMySQL;
 	if (newEngine == engine) return;
 
+	id selectedItem = [host respondsToSelector:@selector(postgresSelectedOutlineItem)] ? [host postgresSelectedOutlineItem] : nil;
+
+	// The MySQL favorite just added with "+" becomes a PostgreSQL favorite: it stays selected for editing
+	if (newEngine == SPConnectionEnginePostgreSQL && selectedItem
+		&& [host respondsToSelector:@selector(postgresItemIsNewMySQLFavorite:)] && [host postgresItemIsNewMySQLFavorite:selectedItem]
+		&& [host respondsToSelector:@selector(postgresRemoveMySQLFavorite:)]) {
+		[self _convertNewMySQLFavorite:selectedItem];
+		return;
+	}
+
 	// A saved favorite of the other engine can't change engine: move to Quick Connect, keeping the
 	// details in the form so they can be connected or saved as the new engine.
 	id item = [host respondsToSelector:@selector(postgresSelectedOutlineItem)] ? [host postgresSelectedOutlineItem] : nil;
@@ -396,6 +407,32 @@ static NSString *SPPGOrEmpty(NSString *s)
 	if (![port length] || [port isEqualToString:previousDefault]) [host setPort:nil];
 
 	[self setSelectedEngine:newEngine];
+}
+
+/**
+ * Replaces `mysqlItem` (the MySQL favorite just added with "+") by a PostgreSQL favorite with the form's
+ * details, in the same group, and selects it. The details aren't validated: the favorite is still being
+ * filled in. If the Postgres favorite can't be saved, the MySQL one is kept and the engine stays MySQL.
+ */
+- (void)_convertNewMySQLFavorite:(id)mysqlItem
+{
+	// MySQL's default port (or none) means "the default": PostgreSQL's then applies
+	NSString *port = [[host port] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	if (![port length] || [port isEqualToString:SPPostgresScreenMySQLDefaultPort]) [host setPort:nil];
+
+	[self setSelectedEngine:SPConnectionEnginePostgreSQL];
+	[loadedFavorite release], loadedFavorite = nil;
+
+	NSError *error = nil;
+	if (![self _saveFormAsNew:YES validate:NO error:&error]) {
+		[self setSelectedEngine:SPConnectionEngineMySQL];
+		if (error) [self _showError:error];
+		return;
+	}
+
+	id node = [self nodeForFavoriteID:[loadedFavorite favoriteID]];
+	[host postgresRemoveMySQLFavorite:mysqlItem];
+	if (node && [host respondsToSelector:@selector(postgresSelectOutlineItem:)]) [host postgresSelectOutlineItem:node];
 }
 
 #pragma mark - Outline
@@ -889,17 +926,17 @@ static NSString *SPPGOrEmpty(NSString *s)
 
 - (BOOL)saveFormAsFavorite:(NSError **)error
 {
-	return [self _saveFormAsNew:NO error:error];
+	return [self _saveFormAsNew:NO validate:YES error:error];
 }
 
 - (BOOL)saveFormAsNewFavorite:(NSError **)error
 {
-	return [self _saveFormAsNew:YES error:error];
+	return [self _saveFormAsNew:YES validate:YES error:error];
 }
 
-- (BOOL)_saveFormAsNew:(BOOL)asNew error:(NSError **)error
+- (BOOL)_saveFormAsNew:(BOOL)asNew validate:(BOOL)validate error:(NSError **)error
 {
-	NSError *validationError = [self validationErrorForForm];
+	NSError *validationError = validate ? [self validationErrorForForm] : nil;
 	if (validationError) {
 		if (error) *error = validationError;
 		return NO;
@@ -1009,7 +1046,7 @@ static NSString *SPPGOrEmpty(NSString *s)
 - (BOOL)saveFormShowingErrors:(BOOL)asNew
 {
 	NSError *error = nil;
-	if ([self _saveFormAsNew:asNew error:&error]) return YES;
+	if ([self _saveFormAsNew:asNew validate:YES error:&error]) return YES;
 	if (error) [self _showError:error];
 	return NO;
 }
@@ -1078,7 +1115,7 @@ static NSString *SPPGOrEmpty(NSString *s)
 	NSString *thePassword = [keychain getPasswordForName:[original keychainName] account:[original keychainAccount]];
 	NSString *theSSHPassword = [keychain getPasswordForName:[original sshKeychainName] account:[original sshKeychainAccount]];
 
-	// Keychain first (see -_saveFormAsNew:error:)
+	// Keychain first (see -_saveFormAsNew:validate:error:)
 	[self _storePassword:thePassword sshPassword:theSSHPassword forFavorite:duplicate previous:nil];
 
 	[self _displayNewFavorite:duplicate afterNode:outlineItem];
@@ -1107,7 +1144,7 @@ static NSString *SPPGOrEmpty(NSString *s)
 	NSString *thePassword = [keychain getPasswordForName:[original keychainName] account:[original keychainAccount]];
 	NSString *theSSHPassword = [keychain getPasswordForName:[original sshKeychainName] account:[original sshKeychainAccount]];
 
-	// Keychain first (see -_saveFormAsNew:error:)
+	// Keychain first (see -_saveFormAsNew:validate:error:)
 	[self _storePassword:thePassword sshPassword:theSSHPassword forFavorite:renamed previous:original];
 
 	NSError *error = nil;
