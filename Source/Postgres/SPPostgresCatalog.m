@@ -173,6 +173,22 @@ static BOOL SPPostgresCheckDatabaseName(NSString *name, NSError **error)
 	return SPPostgresExecuteWithDetails(_connection, sql, nil, error) != nil;
 }
 
+- (BOOL)createSchema:(NSString *)name error:(NSError **)error
+{
+	NSUInteger bytes = [name lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+	if (!bytes || bytes > 63) {
+		if (error) {
+			NSString *message = bytes
+				? NSLocalizedString(@"A schema name can be at most 63 bytes long.", @"Postgres new schema: name too long")
+				: NSLocalizedString(@"Enter a name for the new schema.", @"Postgres new schema: empty name");
+			*error = SPPostgresMakeError(SPPostgresErrorInvalidSettings, message, nil);
+		}
+		return NO;
+	}
+	NSString *sql = [@"CREATE SCHEMA " stringByAppendingString:SPPostgresQuoteIdentifier(name)];
+	return SPPostgresExecuteWithDetails(_connection, sql, nil, error) != nil;
+}
+
 - (BOOL)renameDatabase:(NSString *)name toName:(NSString *)newName error:(NSError **)error
 {
 	if (!SPPostgresCheckDatabaseName(newName, error)) return NO;

@@ -47,6 +47,8 @@
 - (void)sidebarRefresh:(SPPostgresSidebarController *)sidebar;
 /// The bar's Add button ("Add new table"): the Add Table sheet for the selected schema.
 - (void)sidebarAddTable:(SPPostgresSidebarController *)sidebar;
+/// The + after the schema pop-up ("Add a new schema"): ask for a name and create the schema.
+- (void)sidebarAddSchema:(SPPostgresSidebarController *)sidebar;
 @end
 
 /**
@@ -287,6 +289,12 @@ __attribute__((visibility("default")))
 - (IBAction)toggleInfoPane:(id)sender;
 /// Add: the delegate's -sidebarAddTable:.
 - (IBAction)addTable:(id)sender;
+
+/// The + right of the schema pop-up ("Add a new schema"): -addSchema:, enabled while actionsEnabled and the delegate
+/// implements -sidebarAddSchema:.
+@property (readonly) NSButton *addSchemaButton;
+/// The +: the delegate's -sidebarAddSchema:.
+- (IBAction)addSchema:(id)sender;
 
 /// Detaches the outline and popup from this controller, and drops the reloads still to come (no completion is called
 /// after this). Called by the window on close; also on dealloc.
