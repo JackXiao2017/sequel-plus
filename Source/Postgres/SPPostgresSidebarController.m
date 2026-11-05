@@ -16,10 +16,16 @@ static NSString * const SPPostgresSidebarGroupCell = @"SPPostgresSidebarGroupCel
 static NSString * const SPPostgresSidebarItemCell = @"SPPostgresSidebarItemCell";
 
 static const CGFloat SPPostgresSidebarSchemaBarHeight = 32;
+/// The filter field's bar, below the schema bar (MySQL's table list filter, DBView.xib)
+static const CGFloat SPPostgresSidebarFilterBarHeight = 26;
 /// MySQL's table list bar and information pane (DBView.xib)
 static const CGFloat SPPostgresSidebarButtonBarHeight = 23;
 static const CGFloat SPPostgresSidebarInfoPaneHeight = 166;
 static const NSInteger SPPostgresSidebarDetailTag = 1;
+/// The disclosure button at the front of a section header
+static const NSInteger SPPostgresSidebarDisclosureTag = 2;
+/// A section header's title (not the cell's textField, which the source list lays out at the cell's leading edge)
+static const NSInteger SPPostgresSidebarSectionTitleTag = 3;
 
 /// What a reload reads (on the runner's thread) before it is applied (on the main thread).
 typedef NS_ENUM(NSInteger, SPPostgresSidebarReloadKind) {
@@ -76,6 +82,10 @@ static NSDictionary *SPPostgresSidebarRead(PGPostgresConnection *connection, SPP
 		NSArray *sequences = [catalog sequenceNamesInSchema:schema error:&error];
 		if (sequences) [read setObject:sequences forKey:@"sequences"];
 		else [failures addObject:error ?: (id)[NSNull null]];
+
+		// The Query editor's completion columns: not a list, so a failure isn't reported (completion goes without)
+		NSDictionary *columns = [catalog columnNamesByRelationInSchema:schema error:NULL];
+		if (columns) [read setObject:columns forKey:@"relationColumns"];
 	}
 
 	[read setObject:failures forKey:@"failures"];
@@ -137,6 +147,36 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 @class SPPostgresSidebarController;
 
 /// The outline, whose right-click menu depends on the row (see -[SPPostgresSidebarController menuForRow:]).
+/// A section header's cell: the disclosure button at the front, then the title (laid out here, after AppKit's own layout
+/// of a source list's group row, which would move the title to the leading edge).
+@interface SPPostgresSidebarSectionCellView : NSTableCellView
+@end
+
+@implementation SPPostgresSidebarSectionCellView
+
+- (void)_layoutHeader
+{
+	NSRect bounds = [self bounds];
+	NSView *disclosure = [self viewWithTag:SPPostgresSidebarDisclosureTag];
+	NSView *title = [self viewWithTag:SPPostgresSidebarSectionTitleTag];
+	[disclosure setFrame:NSMakeRect(1, round((NSHeight(bounds) - 13) / 2), 13, 13)];
+	[title setFrame:NSMakeRect(17, round((NSHeight(bounds) - 16) / 2), MAX(0, NSWidth(bounds) - 19), 16)];
+}
+
+- (void)layout
+{
+	[super layout];
+	[self _layoutHeader];
+}
+
+- (void)resizeSubviewsWithOldSize:(NSSize)oldSize
+{
+	[super resizeSubviewsWithOldSize:oldSize];
+	[self _layoutHeader];
+}
+
+@end
+
 @interface SPPostgresSidebarOutlineView : NSOutlineView
 @property (assign) SPPostgresSidebarController *menuSource;
 @end
@@ -186,7 +226,16 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 	NSView *view;
 	NSPopUpButton *schemaPopup;
+	NSSearchField *filterField;
 	SPPostgresSidebarOutlineView *outlineView;
+
+	/// The applied filter text (@"": none), and each section's children that match it (built when first asked for)
+	NSString *filterString;
+	NSMutableDictionary *displayedChildren;
+	/// The shown schema's column names by table and view, read with its lists (nil: not read)
+	NSDictionary *relationColumns;
+	/// The titles of the sections the user collapsed
+	NSMutableSet *collapsedSections;
 	NSMenu *tableMenu;
 	NSMenu *sequenceMenu;
 	NSMenuItem *deleteSequenceItem; // not retained; sequenceMenu's
@@ -200,6 +249,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 	// The bottom bar and the information pane (see -_buildButtonBarInView:)
 	NSButton *addButton;
+	NSButton *addSchemaButton;
 	NSPopUpButton *gearButton;
 	NSButton *refreshButton;
 	NSButton *infoToggleButton;
@@ -235,6 +285,18 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 }
 
 @synthesize selectedSchema;
+
+- (NSDictionary *)relationColumns
+{
+	return [[relationColumns retain] autorelease];
+}
+
+- (void)setRelationColumns:(NSDictionary *)columns
+{
+	if (columns == relationColumns) return;
+	[relationColumns release];
+	relationColumns = [columns copy];
+}
 @synthesize selectedTableName;
 @synthesize selectedRelationNames;
 @synthesize selectedSequenceName;
@@ -246,6 +308,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 @synthesize tableMenu;
 @synthesize taskRunner;
 @synthesize addButton;
+@synthesize addSchemaButton;
 @synthesize gearButton;
 @synthesize refreshButton;
 @synthesize infoToggleButton;
@@ -265,6 +328,10 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 		              [SPPostgresSidebarItem itemWithTitle:SPPostgresSidebarExtensions detail:nil kind:SPPostgresSidebarSection]] retain];
 		schemas = [@[] retain];
 		selectedRelationNames = [@[] retain];
+		filterString = @"";
+		displayedChildren = [[NSMutableDictionary alloc] init];
+		// Every section starts collapsed (selecting an item by name expands its section)
+		collapsedSections = [[NSMutableSet alloc] initWithObjects:SPPostgresSidebarTables, SPPostgresSidebarViews, SPPostgresSidebarSequences, SPPostgresSidebarExtensions, nil];
 		defaults = [[NSUserDefaults standardUserDefaults] retain];
 		actionsEnabled = YES;
 
@@ -288,6 +355,10 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[sections release];
 	[view release];
 	[schemaPopup release];
+	[filterField release];
+	[filterString release];
+	[displayedChildren release];
+	[collapsedSections release];
 	[outlineView release];
 	[tableMenu release];
 	[sequenceMenu release];
@@ -296,6 +367,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[gearSequenceMenu release];
 	[gearExtensionMenu release];
 	[addButton release];
+	[addSchemaButton release];
 	[gearButton release];
 	[refreshButton release];
 	[infoToggleButton release];
@@ -305,6 +377,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[infoPane release];
 	[defaults release];
 	[selectedSchema release];
+	[relationColumns release];
 	[pendingSchema release];
 	[selectedTableName release];
 	[selectedRelationNames release];
@@ -332,6 +405,7 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	[outlineView setDataSource:nil];
 	[outlineView setMenuSource:nil];
 	[schemaPopup setTarget:nil];
+	[filterField setTarget:nil];
 	SPPostgresSidebarClearMenuTargets(tableMenu);
 	SPPostgresSidebarClearMenuTargets(sequenceMenu);
 	SPPostgresSidebarClearMenuTargets(extensionMenu);
@@ -339,6 +413,7 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	SPPostgresSidebarClearMenuTargets(gearSequenceMenu);
 	SPPostgresSidebarClearMenuTargets(gearExtensionMenu);
 	[addButton setTarget:nil];
+	[addSchemaButton setTarget:nil];
 	[gearButton setTarget:nil];
 	[refreshButton setTarget:nil];
 	[infoToggleButton setTarget:nil];
@@ -375,7 +450,9 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	[container addSubview:schemaLabel];
 
 	CGFloat popupX = NSMaxX([schemaLabel frame]) + 6;
-	schemaPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(popupX, barY + 5, NSWidth(frame) - popupX - 8, 22) pullsDown:NO];
+	// The + after the pop-up adds a schema
+	CGFloat addSchemaSize = 22;
+	schemaPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(popupX, barY + 5, NSWidth(frame) - popupX - 8 - addSchemaSize - 2, 22) pullsDown:NO];
 	[schemaPopup setControlSize:NSControlSizeSmall];
 	[schemaPopup setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
 	[schemaPopup setBezelStyle:NSBezelStyleRounded];
@@ -386,8 +463,35 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	[schemaPopup setToolTip:NSLocalizedString(@"Choose the schema whose tables and views are listed", @"PostgreSQL sidebar: schema picker tooltip")];
 	[container addSubview:schemaPopup];
 
+	addSchemaButton = [[NSButton alloc] initWithFrame:NSMakeRect(NSMaxX([schemaPopup frame]) + 2, barY + 5, addSchemaSize, 22)];
+	[addSchemaButton setBezelStyle:NSBezelStyleRegularSquare];
+	[addSchemaButton setBordered:NO];
+	[addSchemaButton setButtonType:NSButtonTypeMomentaryChange];
+	[addSchemaButton setImage:[NSImage imageNamed:NSImageNameAddTemplate]];
+	[addSchemaButton setImagePosition:NSImageOnly];
+	[addSchemaButton setTitle:@""];
+	[addSchemaButton setToolTip:NSLocalizedString(@"Add a new schema", @"PostgreSQL sidebar: add schema button tooltip")];
+	[addSchemaButton setTarget:self];
+	[addSchemaButton setAction:@selector(addSchema:)];
+	[addSchemaButton setAutoresizingMask:NSViewMinXMargin | NSViewMinYMargin];
+	[container addSubview:addSchemaButton];
+
+	// The filter field below it (MySQL's table list filter)
+	CGFloat filterY = barY - SPPostgresSidebarFilterBarHeight;
+	filterField = [[NSSearchField alloc] initWithFrame:NSMakeRect(8, filterY + 4, NSWidth(frame) - 16, 19)];
+	[filterField setControlSize:NSControlSizeSmall];
+	[filterField setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+	[[filterField cell] setPlaceholderString:NSLocalizedString(@"Filter", @"filter label")];
+	[filterField setSendsSearchStringImmediately:YES];
+	[filterField setSendsWholeSearchString:NO];
+	[filterField setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+	[filterField setTarget:self];
+	[filterField setAction:@selector(updateFilter:)];
+	[filterField setToolTip:NSLocalizedString(@"List only the tables, views, sequences and extensions whose names contain this text", @"PostgreSQL sidebar: filter field tooltip")];
+	[container addSubview:filterField];
+
 	// Outline below, over the information pane (infoSplitView), over the bottom bar
-	CGFloat splitHeight = barY - SPPostgresSidebarButtonBarHeight;
+	CGFloat splitHeight = filterY - SPPostgresSidebarButtonBarHeight;
 	infoSplitView = [[SPSplitView alloc] initWithFrame:NSMakeRect(0, SPPostgresSidebarButtonBarHeight, NSWidth(frame), splitHeight)];
 	[infoSplitView setVertical:NO];
 	[infoSplitView setDividerStyle:NSSplitViewDividerStyleThin];
@@ -563,6 +667,7 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 - (void)_updateBarButtons
 {
 	[addButton setEnabled:actionsEnabled && [delegate respondsToSelector:@selector(sidebarAddTable:)]];
+	[addSchemaButton setEnabled:actionsEnabled && [delegate respondsToSelector:@selector(sidebarAddSchema:)]];
 	[gearButton setEnabled:actionsEnabled];
 	[refreshButton setEnabled:actionsEnabled];
 	[infoToggleButton setEnabled:YES];
@@ -588,6 +693,12 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 {
 	if (!actionsEnabled) return;
 	if ([delegate respondsToSelector:@selector(sidebarAddTable:)]) [delegate sidebarAddTable:self];
+}
+
+- (IBAction)addSchema:(id)sender
+{
+	if (!actionsEnabled || invalidated) return;
+	if ([delegate respondsToSelector:@selector(sidebarAddSchema:)]) [delegate sidebarAddSchema:self];
 }
 
 - (IBAction)refreshTables:(id)sender
@@ -956,6 +1067,8 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 		[[tables children] removeAllObjects];
 		[[views children] removeAllObjects];
 		[[sequences children] removeAllObjects];
+		[relationColumns release];
+		relationColumns = [[read objectForKey:@"relationColumns"] copy];
 
 		for (NSString *name in tableNames) {
 			[[tables children] addObject:[SPPostgresSidebarItem itemWithTitle:name detail:nil kind:SPPostgresSidebarTable]];
@@ -983,6 +1096,7 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 		// Keep the schema, lists and selection that were shown; the popup goes back to the shown schema
 		[self _reloadSchemaPopup];
 		// A catalog reload may have reloaded the extensions: show them, leaving the table selection
+		[displayedChildren removeObjectForKey:SPPostgresSidebarExtensions];
 		[outlineView reloadItem:[self _sectionNamed:SPPostgresSidebarExtensions] reloadChildren:YES];
 		// Its rows are new: a selected extension still listed stays selected; one that is gone leaves nothing selected
 		if (selectedExtensionName && ![self selectExtensionNamed:selectedExtensionName]) {
@@ -1049,10 +1163,176 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 - (void)_reloadOutline
 {
 	reloading = YES;
+	[displayedChildren removeAllObjects];
 	[outlineView deselectAll:nil];
 	[outlineView reloadData];
-	for (SPPostgresSidebarItem *section in [self _visibleSections]) [outlineView expandItem:section];
+	[self _applySectionExpansion];
 	reloading = NO;
+}
+
+/// Expands the shown sections, but for those the user collapsed. Callers set `reloading`.
+- (void)_applySectionExpansion
+{
+	for (SPPostgresSidebarItem *section in [self _visibleSections]) {
+		if ([collapsedSections containsObject:[section title]]) [outlineView collapseItem:section];
+		else [outlineView expandItem:section];
+	}
+}
+
+#pragma mark - Filter
+
+- (NSSearchField *)filterField
+{
+	return filterField;
+}
+
+- (NSString *)filterString
+{
+	return [[filterString retain] autorelease];
+}
+
+- (void)setFilterString:(NSString *)theFilter
+{
+	[filterField setStringValue:theFilter ?: @""];
+	[self updateFilter:filterField];
+}
+
+- (IBAction)updateFilter:(id)sender
+{
+	[self _applyFilter:[filterField stringValue] askingDelegate:YES];
+}
+
+- (void)focusFilterField
+{
+	NSWindow *window = [filterField window];
+	if (window) [window makeFirstResponder:filterField];
+}
+
+/// Whether `title` is listed with `filter`: it contains it, ignoring case (any title, with no filter).
+static BOOL SPPostgresSidebarTitleMatchesFilter(NSString *title, NSString *filter)
+{
+	if (![filter length]) return YES;
+	return [title rangeOfString:filter options:NSCaseInsensitiveSearch].location != NSNotFound;
+}
+
+/// The children of `section` the outline lists: those matching the filter.
+- (NSArray *)_displayedChildrenOfSection:(SPPostgresSidebarItem *)section
+{
+	if (![filterString length]) return [section children];
+
+	NSArray *matching = [displayedChildren objectForKey:[section title]];
+	if (!matching) {
+		NSMutableArray *built = [NSMutableArray arrayWithCapacity:[[section children] count]];
+		for (SPPostgresSidebarItem *item in [section children]) {
+			if (SPPostgresSidebarTitleMatchesFilter([item title], filterString)) [built addObject:item];
+		}
+		matching = built;
+		[displayedChildren setObject:matching forKey:[section title]];
+	}
+	return matching;
+}
+
+- (NSArray *)displayedItemTitlesInSection:(NSString *)sectionTitle
+{
+	SPPostgresSidebarItem *section = [self _sectionNamed:sectionTitle];
+	return section ? [[self _displayedChildrenOfSection:section] valueForKey:@"title"] : nil;
+}
+
+/**
+ * Lists the rows matching `filter`, keeping the selected rows it still lists selected. If it hides a selected row and
+ * `ask`, the delegate is asked first: refused, the field goes back to the applied filter (NSBeep) and NO is returned.
+ */
+- (BOOL)_applyFilter:(NSString *)filter askingDelegate:(BOOL)ask
+{
+	filter = filter ?: @"";
+	if ([filter isEqualToString:filterString]) return YES;
+
+	NSMutableArray *kept = [NSMutableArray array];
+	__block BOOL hidesSelection = NO;
+	[[outlineView selectedRowIndexes] enumerateIndexesUsingBlock:^(NSUInteger row, BOOL *stop) {
+		SPPostgresSidebarItem *item = [outlineView itemAtRow:(NSInteger)row];
+		if (SPPostgresSidebarTitleMatchesFilter([item title], filter)) [kept addObject:item];
+		else hidesSelection = YES;
+	}];
+
+	if (hidesSelection && ask && ![self _delegateAllowsSelectionChange]) {
+		NSBeep();
+		[filterField setStringValue:filterString];
+		return NO;
+	}
+
+	[filterString release];
+	filterString = [filter copy];
+	if (![[filterField stringValue] isEqualToString:filter]) [filterField setStringValue:filter];
+
+	reloading = YES;
+	[displayedChildren removeAllObjects];
+	[outlineView reloadData];
+	[self _applySectionExpansion];
+	NSMutableIndexSet *rows = [NSMutableIndexSet indexSet];
+	for (SPPostgresSidebarItem *item in kept) {
+		NSInteger row = [outlineView rowForItem:item];
+		if (row >= 0) [rows addIndex:(NSUInteger)row];
+	}
+	[outlineView selectRowIndexes:rows byExtendingSelection:NO];
+	reloading = NO;
+
+	if (hidesSelection) [self _updateSelectionFromOutline];
+	return YES;
+}
+
+#pragma mark - Collapsible sections
+
+- (BOOL)isSectionCollapsed:(NSString *)sectionTitle
+{
+	return [collapsedSections containsObject:sectionTitle];
+}
+
+- (BOOL)setSection:(NSString *)sectionTitle collapsed:(BOOL)collapsed
+{
+	SPPostgresSidebarItem *section = [self _sectionNamed:sectionTitle];
+	if (!section || ![[self _visibleSections] containsObject:section]) return NO;
+
+	if (collapsed) {
+		if ([outlineView isItemExpanded:section] && ![self outlineView:outlineView shouldCollapseItem:section]) return NO;
+		[outlineView collapseItem:section];
+	}
+	else {
+		[outlineView expandItem:section];
+	}
+	return [outlineView isItemExpanded:section] != collapsed;
+}
+
+/// YES if a selected row is one of `section`'s.
+- (BOOL)_selectionIsInSection:(SPPostgresSidebarItem *)section
+{
+	__block BOOL inSection = NO;
+	[[outlineView selectedRowIndexes] enumerateIndexesUsingBlock:^(NSUInteger row, BOOL *stop) {
+		if ([outlineView parentForItem:[outlineView itemAtRow:(NSInteger)row]] == section) inSection = *stop = YES;
+	}];
+	return inSection;
+}
+
+/**
+ * The row of `item`, one of `section`'s children, first making it visible: the section is expanded, and the filter is
+ * cleared if the item doesn't match it (as MySQL's table list clears its filter to select a table it hides). -1 if it
+ * still has none (e.g. a section the scope hides).
+ */
+- (NSInteger)_rowRevealingItem:(SPPostgresSidebarItem *)item inSection:(SPPostgresSidebarItem *)section
+{
+	NSInteger row = [outlineView rowForItem:item];
+	if (row >= 0) return row;
+
+	// The caller replaces the selection: no need to ask the delegate about hiding it
+	if (!SPPostgresSidebarTitleMatchesFilter([item title], filterString)) [self _applyFilter:@"" askingDelegate:NO];
+	if ([collapsedSections containsObject:[section title]] && [[self _visibleSections] containsObject:section]) {
+		BOOL wasReloading = reloading;
+		reloading = YES;
+		[collapsedSections removeObject:[section title]];
+		[outlineView expandItem:section];
+		reloading = wasReloading;
+	}
+	return [outlineView rowForItem:item];
 }
 
 /// Records the first failure of the current reload (a failed query without an NSError still counts).
@@ -1119,10 +1399,11 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	}
 
 	for (NSString *sectionTitle in @[SPPostgresSidebarTables, SPPostgresSidebarViews]) {
-		for (SPPostgresSidebarItem *item in [[self _sectionNamed:sectionTitle] children]) {
+		SPPostgresSidebarItem *section = [self _sectionNamed:sectionTitle];
+		for (SPPostgresSidebarItem *item in [section children]) {
 			if (![[item title] isEqualToString:name]) continue;
 
-			NSInteger row = [outlineView rowForItem:item];
+			NSInteger row = [self _rowRevealingItem:item inSection:section];
 			if (row < 0) return NO;
 			[outlineView selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
 			[outlineView scrollRowToVisible:row];
@@ -1137,6 +1418,8 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 {
 	if (![names count]) return [self selectTableNamed:nil];
 
+	// Made visible first (which can reload the outline), then their rows
+	for (NSString *name in names) [self _rowOfRelationNamed:name];
 	NSMutableIndexSet *rows = [NSMutableIndexSet indexSet];
 	for (NSString *name in names) {
 		NSInteger row = [self _rowOfRelationNamed:name];
@@ -1150,12 +1433,13 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	return [rows count] == [names count];
 }
 
-/// The outline row of a table or view of the selected schema, or -1.
+/// The outline row of a table or view of the selected schema, made visible (see -_rowRevealingItem:inSection:), or -1.
 - (NSInteger)_rowOfRelationNamed:(NSString *)name
 {
 	for (NSString *sectionTitle in @[SPPostgresSidebarTables, SPPostgresSidebarViews]) {
-		for (SPPostgresSidebarItem *item in [[self _sectionNamed:sectionTitle] children]) {
-			if ([[item title] isEqualToString:name]) return [outlineView rowForItem:item];
+		SPPostgresSidebarItem *section = [self _sectionNamed:sectionTitle];
+		for (SPPostgresSidebarItem *item in [section children]) {
+			if ([[item title] isEqualToString:name]) return [self _rowRevealingItem:item inSection:section];
 		}
 	}
 	return -1;
@@ -1199,10 +1483,11 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 /// Selects the row of a section's item; NO if it isn't listed.
 - (BOOL)_selectItemNamed:(NSString *)name inSection:(NSString *)sectionTitle
 {
-	for (SPPostgresSidebarItem *item in [[self _sectionNamed:sectionTitle] children]) {
+	SPPostgresSidebarItem *section = [self _sectionNamed:sectionTitle];
+	for (SPPostgresSidebarItem *item in [section children]) {
 		if (![[item title] isEqualToString:name]) continue;
 
-		NSInteger row = [outlineView rowForItem:item];
+		NSInteger row = [self _rowRevealingItem:item inSection:section];
 		if (row < 0) return NO;
 		[outlineView selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
 		[outlineView scrollRowToVisible:row];
@@ -1637,12 +1922,12 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 
 - (NSInteger)outlineView:(NSOutlineView *)theOutlineView numberOfChildrenOfItem:(id)item
 {
-	return item ? (NSInteger)[[(SPPostgresSidebarItem *)item children] count] : (NSInteger)[[self _visibleSections] count];
+	return item ? (NSInteger)[[self _displayedChildrenOfSection:item] count] : (NSInteger)[[self _visibleSections] count];
 }
 
 - (id)outlineView:(NSOutlineView *)theOutlineView child:(NSInteger)index ofItem:(id)item
 {
-	NSArray *children = item ? [(SPPostgresSidebarItem *)item children] : [self _visibleSections];
+	NSArray *children = item ? [self _displayedChildrenOfSection:item] : [self _visibleSections];
 	return [children objectAtIndex:(NSUInteger)index];
 }
 
@@ -1665,13 +1950,58 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 
 - (BOOL)outlineView:(NSOutlineView *)theOutlineView shouldShowOutlineCellForItem:(id)item
 {
-	// Sections are always expanded, as in the MySQL table list
-	return NO;
+	// Sections are collapsible (AppKit collapses only items with an outline cell); the outline view hides that cell,
+	// and the disclosure button at the front of the header is shown instead (see -toggleSection:)
+	return [(SPPostgresSidebarItem *)item kind] == SPPostgresSidebarSection;
+}
+
+/// A section header's disclosure button: collapses or expands its section (a refused collapse leaves it as it was).
+- (IBAction)toggleSection:(id)sender
+{
+	NSInteger row = [outlineView rowForView:sender];
+	SPPostgresSidebarItem *section = (row >= 0) ? [outlineView itemAtRow:row] : nil;
+	if ([section kind] != SPPostgresSidebarSection) return;
+	[self setSection:[section title] collapsed:[outlineView isItemExpanded:section]];
+	[self _updateDisclosureOfSection:section];
+}
+
+/// Sets the header's disclosure button to the section's state.
+- (void)_updateDisclosureOfSection:(SPPostgresSidebarItem *)section
+{
+	NSInteger row = [outlineView rowForItem:section];
+	if (row < 0) return;
+	NSTableCellView *cell = [outlineView viewAtColumn:0 row:row makeIfNecessary:NO];
+	NSButton *disclosure = [cell viewWithTag:SPPostgresSidebarDisclosureTag];
+	BOOL expanded = [outlineView isItemExpanded:section];
+	[disclosure setState:expanded ? NSControlStateValueOn : NSControlStateValueOff];
+	[disclosure setToolTip:expanded ? NSLocalizedString(@"Collapse", @"PostgreSQL sidebar: collapse section tooltip") : NSLocalizedString(@"Expand", @"PostgreSQL sidebar: expand section tooltip")];
 }
 
 - (BOOL)outlineView:(NSOutlineView *)theOutlineView shouldCollapseItem:(id)item
 {
-	return NO;
+	if (reloading) return YES;
+	// Collapsing hides its selected rows: a selection change, which the delegate is asked about first
+	if ([self _selectionIsInSection:item] && ![self _delegateAllowsSelectionChange]) return NO;
+	return YES;
+}
+
+- (void)outlineViewItemDidCollapse:(NSNotification *)notification
+{
+	SPPostgresSidebarItem *section = [[notification userInfo] objectForKey:@"NSObject"];
+	if ([section kind] != SPPostgresSidebarSection) return;
+	[self _updateDisclosureOfSection:section];
+	if (reloading) return;
+	[collapsedSections addObject:[section title]];
+	// Its selected rows are gone
+	[self _updateSelectionFromOutline];
+}
+
+- (void)outlineViewItemDidExpand:(NSNotification *)notification
+{
+	SPPostgresSidebarItem *section = [[notification userInfo] objectForKey:@"NSObject"];
+	if ([section kind] != SPPostgresSidebarSection) return;
+	[self _updateDisclosureOfSection:section];
+	if (!reloading) [collapsedSections removeObject:[section title]];
 }
 
 - (NSView *)outlineView:(NSOutlineView *)theOutlineView viewForTableColumn:(NSTableColumn *)tableColumn item:(id)theItem
@@ -1683,21 +2013,36 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 	NSTableCellView *cell = [theOutlineView makeViewWithIdentifier:identifier owner:self];
 	if (!cell) {
 		CGFloat width = [tableColumn width];
-		cell = [[[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, width, 18)] autorelease];
+		Class cellClass = isSection ? [SPPostgresSidebarSectionCellView class] : [NSTableCellView class];
+		cell = [[[cellClass alloc] initWithFrame:NSMakeRect(0, 0, width, 18)] autorelease];
 		[cell setIdentifier:identifier];
 
 		NSTextField *textField = [NSTextField labelWithString:@""];
 		[textField setLineBreakMode:NSLineBreakByTruncatingTail];
 		[textField setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin | NSViewMaxYMargin];
 		[cell addSubview:textField];
-		[cell setTextField:textField];
 
 		if (isSection) {
+			[textField setTag:SPPostgresSidebarSectionTitleTag];
+
+			// Always shown at the front of the title (in place of the source list's hover-only Show/Hide)
+			NSButton *disclosure = [[[NSButton alloc] initWithFrame:NSMakeRect(1, 2, 13, 13)] autorelease];
+			[disclosure setBezelStyle:NSBezelStyleDisclosure];
+			[disclosure setButtonType:NSButtonTypeOnOff];
+			[disclosure setTitle:@""];
+			[disclosure setTag:SPPostgresSidebarDisclosureTag];
+			[disclosure setTarget:self];
+			[disclosure setAction:@selector(toggleSection:)];
+			[disclosure setAutoresizingMask:NSViewMinYMargin | NSViewMaxYMargin];
+			[cell addSubview:disclosure];
+
 			[textField setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize] weight:NSFontWeightSemibold]];
 			[textField setTextColor:[NSColor secondaryLabelColor]];
-			[textField setFrame:NSMakeRect(2, 1, width - 4, 16)];
+			[textField setFrame:NSMakeRect(17, 1, width - 19, 16)];
 		}
 		else {
+			[cell setTextField:textField];
+
 			NSImageView *imageView = [[[NSImageView alloc] initWithFrame:NSMakeRect(4, 1, 16, 16)] autorelease];
 			[imageView setImageScaling:NSImageScaleProportionallyDown];
 			[imageView setAutoresizingMask:NSViewMinYMargin | NSViewMaxYMargin];
@@ -1719,7 +2064,14 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 		}
 	}
 
-	[[cell textField] setStringValue:[item title] ?: @""];
+	NSTextField *titleField = isSection ? [cell viewWithTag:SPPostgresSidebarSectionTitleTag] : [cell textField];
+	[titleField setStringValue:[item title] ?: @""];
+
+	if (isSection) {
+		NSButton *disclosure = [cell viewWithTag:SPPostgresSidebarDisclosureTag];
+		[disclosure setState:[theOutlineView isItemExpanded:item] ? NSControlStateValueOn : NSControlStateValueOff];
+		[disclosure setToolTip:[theOutlineView isItemExpanded:item] ? NSLocalizedString(@"Collapse", @"PostgreSQL sidebar: collapse section tooltip") : NSLocalizedString(@"Expand", @"PostgreSQL sidebar: expand section tooltip")];
+	}
 
 	if (!isSection) {
 		NSImage *image = nil;
@@ -1808,6 +2160,23 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 @implementation SPPostgresSidebarOutlineView
 
 @synthesize menuSource;
+
+/// The source list's own outline cell (a group row's hover-only Show/Hide) is never shown or given room: the section
+/// headers have their own disclosure button.
+- (NSRect)frameOfOutlineCellAtRow:(NSInteger)row
+{
+	return NSZeroRect;
+}
+
+- (NSView *)makeViewWithIdentifier:(NSUserInterfaceItemIdentifier)identifier owner:(id)owner
+{
+	NSView *made = [super makeViewWithIdentifier:identifier owner:owner];
+	if ([identifier isEqualToString:NSOutlineViewShowHideButtonKey] || [identifier isEqualToString:NSOutlineViewDisclosureButtonKey]) {
+		[made setHidden:YES];
+		[made setAlphaValue:0];
+	}
+	return made;
+}
 
 /// The menu for the row under the pointer (a sequence's, an extension's, or a table's), as the menu source picks it.
 - (NSMenu *)menuForEvent:(NSEvent *)event

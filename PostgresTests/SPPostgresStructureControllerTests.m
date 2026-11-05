@@ -1,3 +1,4 @@
+#import <objc/runtime.h>
 #import <XCTest/XCTest.h>
 #import <PostgresKit/PostgresKit.h>
 #import "SPPostgresTestServers.h"
@@ -1076,6 +1077,123 @@ static NSString * const SPStructureTestUsing = @"nullif(regexp_replace(\"qty\", 
 	XCTAssertNil([columns currentEditor]);
 	XCTAssertEqualObjects([self serverValue:@"SELECT col_description('structure_test.t'::regclass, 2)"], @"typed while busy");
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", self.alerts.firstObject.informativeText);
+}
+
+#pragma mark - Owner
+
+- (void)testOwnerPopupChangesTheTablesOwner
+{
+	XCTAssertNotNil([self.other execute:@"DROP ROLE IF EXISTS sp_struct_owner"]);
+	XCTAssertNotNil([self.other execute:@"CREATE ROLE sp_struct_owner NOLOGIN"], @"%@", self.other.lastError.errorPrimaryMessage);
+	NSString *ownerQuery = @"SELECT pg_get_userbyid(relowner)::text AS n FROM pg_class WHERE oid = 'structure_test.t'::regclass";
+	NSString *(^serverOwner)(void) = ^NSString *{
+		NSString *found = nil;
+		for (NSDictionary *row in [self.other execute:ownerQuery]) found = row[@"n"];
+		return found;
+	};
+
+	[self showStructureOf:@"t"];
+	SPPostgresStructureController *structure = self.structure;
+	NSPopUpButton *popup = structure.ownerPopup;
+	XCTAssertEqualObjects(structure.owner, @"pgkit_test");
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"pgkit_test");
+	XCTAssertTrue(popup.isEnabled);
+	XCTAssertTrue([popup.itemTitles containsObject:@"sp_struct_owner"], @"%@", popup.itemTitles);
+	XCTAssertFalse([popup.itemTitles containsObject:@"pg_monitor"], @"no built-in pg_* roles");
+	// In the bar above the columns grid, at its left
+	NSScrollView *grid = structure.columnsView.enclosingScrollView;
+	NSRect popupFrame = [popup convertRect:popup.bounds toView:grid.superview];
+	XCTAssertGreaterThanOrEqual(NSMinY(popupFrame), NSMaxY(grid.frame) - 1, @"above the grid: %@ vs %@", NSStringFromRect(popupFrame), NSStringFromRect(grid.frame));
+	XCTAssertLessThan(NSMinX(popupFrame), 80.0, @"at the left");
+
+	// Choosing a role changes the owner at once; the pop-up shows the server's owner
+	[popup selectItemWithTitle:@"sp_struct_owner"];
+	[structure changeOwner:popup];
+	XCTAssertEqualObjects(serverOwner(), @"sp_struct_owner");
+	XCTAssertEqualObjects(structure.owner, @"sp_struct_owner");
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"sp_struct_owner");
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts valueForKey:@"informativeText"]);
+
+	// A role that is gone: the server's error, and the pop-up back on the owner
+	[popup addItemWithTitle:@"sp_struct_no_such_role"];
+	[popup selectItemWithTitle:@"sp_struct_no_such_role"];
+	[structure changeOwner:popup];
+	XCTAssertEqual(self.alerts.count, 1u);
+	XCTAssertTrue([self.alerts.firstObject.messageText containsString:@"Could not change the owner"], @"%@", self.alerts.firstObject.messageText);
+	XCTAssertTrue([self.alerts.firstObject.informativeText containsString:@"does not exist"], @"%@", self.alerts.firstObject.informativeText);
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"sp_struct_owner");
+	XCTAssertEqualObjects(serverOwner(), @"sp_struct_owner");
+
+	// Not while the runner is busy: refused, the pop-up goes back
+	[SPPostgresTestServers queueSleep:1 onRunner:self.document.taskRunner];
+	[popup selectItemWithTitle:@"pgkit_test"];
+	[structure changeOwner:popup];
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"sp_struct_owner");
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:10]);
+	XCTAssertEqualObjects(serverOwner(), @"sp_struct_owner");
+
+	// Back to pgkit_test, so the role can go
+	[popup selectItemWithTitle:@"pgkit_test"];
+	[structure changeOwner:popup];
+	XCTAssertEqualObjects(serverOwner(), @"pgkit_test");
+	XCTAssertNotNil([self.other execute:@"DROP ROLE sp_struct_owner"], @"%@", self.other.lastError.errorPrimaryMessage);
+
+	// A view's owner isn't changed here (its structure is read-only)
+	[self showStructureOf:@"t_view"];
+	XCTAssertEqualObjects(self.structure.owner, @"pgkit_test");
+	XCTAssertFalse(self.structure.ownerPopup.isEnabled);
+}
+
+#pragma mark - Redraw after a busy runner
+
+/// Counts -setNeedsDisplay:YES sent to one view while installed (an off-screen test window keeps needsDisplay set, so
+/// the flag can't show whether a view asked to be drawn again).
+static __unsafe_unretained NSView *SPRedrawWatchedView = nil;
+static NSUInteger SPRedrawRequests = 0;
+static IMP SPRedrawOriginal = NULL;
+static void SPRedrawCountingSetNeedsDisplay(id view, SEL _cmd, BOOL flag)
+{
+	if (flag && view == SPRedrawWatchedView) SPRedrawRequests++;
+	((void (*)(id, SEL, BOOL))SPRedrawOriginal)(view, _cmd, flag);
+}
+
+/// The columns grid draws its cells disabled while the runner is busy. The structure is often shown while the runner is
+/// still busy (a table switch also loads the tab's other panes), so the grid is drawn again once it is idle, with its
+/// cells enabled; before, they stayed grey after choosing another table. (On a background runner the tab's task display
+/// doesn't watch, whose own redraws would hide the bug.)
+- (void)testColumnsGridRedrawnWhenRunnerGoesIdle
+{
+	[self showStructureOf:@"t"];
+	SPPostgresStructureController *structure = self.structure;
+	SPPostgresTaskRunner *runner = [[SPPostgresTaskRunner alloc] initWithConnection:[structure valueForKey:@"connection"]];
+	structure.taskRunner = runner;
+	[self addTeardownBlock:^{
+		[runner invalidateWithCompletion:nil];
+	}];
+	NSTableView *columns = structure.columnsView;
+	NSTableColumn *nullable = [self column:@"nullable" of:columns];
+	NSButtonCell *cell = (NSButtonCell *)[nullable dataCellForRow:1];
+
+	// Another table, with the runner kept busy after its load
+	[structure showTable:@"child" inSchema:@"structure_test"];
+	[SPPostgresTestServers queueSleep:0.4 onRunner:runner];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [columns numberOfRows] > 0; } timeout:10]);
+	XCTAssertTrue(runner.isBusy, @"measured while busy");
+	[(id<NSTableViewDelegate>)columns.delegate tableView:columns willDisplayCell:cell forTableColumn:nullable row:0];
+	XCTAssertFalse(cell.isEnabled, @"drawn disabled while busy");
+
+	// Count the grid's redraw requests while the runner goes idle
+	Method method = class_getInstanceMethod([NSView class], @selector(setNeedsDisplay:));
+	SPRedrawOriginal = method_setImplementation(method, (IMP)SPRedrawCountingSetNeedsDisplay);
+	SPRedrawWatchedView = columns;
+	SPRedrawRequests = 0;
+	BOOL idle = [SPPostgresTestServers waitForRunner:runner timeout:10];
+	method_setImplementation(method, SPRedrawOriginal);
+	SPRedrawWatchedView = nil;
+	XCTAssertTrue(idle);
+	XCTAssertGreaterThan(SPRedrawRequests, 0u, @"drawn again once the runner is idle");
+	[(id<NSTableViewDelegate>)columns.delegate tableView:columns willDisplayCell:cell forTableColumn:nullable row:0];
+	XCTAssertTrue(cell.isEnabled, @"enabled when drawn again");
 }
 
 @end

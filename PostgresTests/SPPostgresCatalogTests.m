@@ -137,6 +137,23 @@
 	}
 }
 
+- (void)testColumnNamesByRelation
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresCatalog *catalog = [self catalogOnPort:port.unsignedIntegerValue database:@"pgkit_test"];
+		NSError *error = nil;
+		NSDictionary *columns = [catalog columnNamesByRelationInSchema:@"public" error:&error];
+		XCTAssertNotNil(columns, @"%@", error);
+		XCTAssertTrue([columns[@"customers"] count] > 0, @"%@", columns);
+		XCTAssertNotNil(columns[@"v_customers"], @"views too");
+		for (NSString *name in columns[@"customers"]) XCTAssertFalse(([@[@"ctid", @"xmin", @"tableoid"] containsObject:name]), @"no system columns");
+		// A table in an oddly named schema
+		columns = [catalog columnNamesByRelationInSchema:@"Sales Data" error:&error];
+		XCTAssertNotNil(columns[@"Orders 2026"], @"%@ %@", columns, error);
+		XCTAssertEqualObjects([catalog columnNamesByRelationInSchema:@"no such schema" error:&error], @{});
+	}
+}
+
 - (void)testExtensionsIncludeVersion
 {
 	for (NSNumber *port in [SPPostgresTestServers ports]) {

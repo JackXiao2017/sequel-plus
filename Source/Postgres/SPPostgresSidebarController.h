@@ -47,6 +47,8 @@
 - (void)sidebarRefresh:(SPPostgresSidebarController *)sidebar;
 /// The bar's Add button ("Add new table"): the Add Table sheet for the selected schema.
 - (void)sidebarAddTable:(SPPostgresSidebarController *)sidebar;
+/// The + after the schema pop-up ("Add a new schema"): ask for a name and create the schema.
+- (void)sidebarAddSchema:(SPPostgresSidebarController *)sidebar;
 @end
 
 /**
@@ -123,6 +125,34 @@ __attribute__((visibility("default")))
 /// the scope hides: its list is still loaded, but never shown or selectable).
 - (NSArray *)itemTitlesInSection:(NSString *)sectionTitle;
 
+#pragma mark - Filter and collapsible sections
+
+/**
+ * The filter field between the schema bar and the list, as MySQL's table list filter ("Filter"): it lists only the
+ * names that contain its text, ignoring case, in every section (the section headers stay). It keeps its text across
+ * reloads and schema changes. Hiding a selected row is a selection change: the delegate is asked first
+ * (-sidebarShouldChangeSelection:); if it refuses, the filter keeps its previous text (NSBeep).
+ */
+@property (readonly) NSSearchField *filterField;
+/// The applied filter text (@"" for none). Setting it sets the field's text and filters as typing does.
+@property (nonatomic, copy) NSString *filterString;
+/// The filter field's action.
+- (IBAction)updateFilter:(id)sender;
+/// Makes the filter field the window's first responder (View ▸ Filter Tables).
+- (void)focusFilterField;
+/// The names the outline lists under a section: -itemTitlesInSection: that match the filter (whether or not the section is collapsed).
+- (NSArray *)displayedItemTitlesInSection:(NSString *)sectionTitle;
+
+/**
+ * TABLES, VIEWS, SEQUENCES and EXTENSIONS collapse and expand with the disclosure button at the front of their headers,
+ * always shown. Every section starts collapsed; each keeps its state (for this tab) across reloads and schema changes. Collapsing a section with a selected row is a selection
+ * change: the delegate is asked first, and refusing keeps it expanded. Selecting an item by name (-selectTableNamed:
+ * and the like) makes it visible first: its section expands, and the filter is cleared if the item doesn't match it.
+ */
+- (BOOL)isSectionCollapsed:(NSString *)sectionTitle;
+/// As clicking the section's disclosure button (collapsing asks the delegate as above); NO if refused or not shown.
+- (BOOL)setSection:(NSString *)sectionTitle collapsed:(BOOL)collapsed;
+
 /// Selects a table or view of the selected schema in the outline; NO if it is not listed. nil clears the selection.
 - (BOOL)selectTableNamed:(NSString *)name;
 
@@ -180,6 +210,9 @@ __attribute__((visibility("default")))
 - (NSMenu *)menuForRow:(NSInteger)row;
 
 @property (readonly) NSString *selectedSchema;
+/// The shown schema's column names by table and view (each in column order), read with its lists on every reload of
+/// them (the Query editor's completion); nil when not read. Settable to columns read afresh for the same schema.
+@property (copy) NSDictionary<NSString *, NSArray<NSString *> *> *relationColumns;
 /// The schemas the schema pop-up lists (as last loaded), in its order; empty before the first load.
 @property (readonly) NSArray<NSString *> *schemaNames;
 /// The schema a schema reload (-reloadSchema:…) has been asked for and not yet completed, nil when none is queued: the
@@ -256,6 +289,12 @@ __attribute__((visibility("default")))
 - (IBAction)toggleInfoPane:(id)sender;
 /// Add: the delegate's -sidebarAddTable:.
 - (IBAction)addTable:(id)sender;
+
+/// The + right of the schema pop-up ("Add a new schema"): -addSchema:, enabled while actionsEnabled and the delegate
+/// implements -sidebarAddSchema:.
+@property (readonly) NSButton *addSchemaButton;
+/// The +: the delegate's -sidebarAddSchema:.
+- (IBAction)addSchema:(id)sender;
 
 /// Detaches the outline and popup from this controller, and drops the reloads still to come (no completion is called
 /// after this). Called by the window on close; also on dealloc.

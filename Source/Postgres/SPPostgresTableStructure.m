@@ -683,6 +683,26 @@ static void SPPostgresTriggerParse(NSString *definition, NSString *quotedName, N
 	return SPPostgresStructureText(rows[0][0]);
 }
 
+- (NSString *)tableOwner:(NSError **)error
+{
+	NSArray *rows = [self rows:@"SELECT pg_catalog.pg_get_userbyid(c.relowner)::text FROM rel JOIN pg_catalog.pg_class c ON c.oid = rel.oid" values:nil error:error];
+	if (!rows) return nil;
+	return SPPostgresStructureText(rows[0][0]) ?: @"";
+}
+
+- (NSArray *)roleNames:(NSError **)error
+{
+	// Through -rows: so a missing relation is reported as with the other reads
+	NSArray *rows = [self rows:@"SELECT r.rolname::text FROM pg_catalog.pg_roles r, rel WHERE r.rolname !~ '^pg_' ORDER BY r.rolname COLLATE \"C\"" values:nil error:error];
+	if (!rows) return nil;
+	NSMutableArray *names = [NSMutableArray arrayWithCapacity:[rows count]];
+	for (NSArray *row in rows) {
+		NSString *name = SPPostgresStructureText(row[0]);
+		if ([name length]) [names addObject:name];
+	}
+	return names;
+}
+
 #pragma mark - Columns
 
 - (BOOL)addColumn:(SPPostgresColumnDefinition *)definition error:(NSError **)error
@@ -1057,6 +1077,16 @@ static void SPPostgresTriggerParse(NSString *definition, NSString *quotedName, N
 		[self didChangeValueForKey:@"table"];
 	}
 	return renamed;
+}
+
+- (BOOL)setTableOwner:(NSString *)owner error:(NSError **)error
+{
+	if (![owner length]) return SPPostgresStructureRefuse(NSLocalizedString(@"Choose the table's new owner.", @"Postgres structure: empty owner"), error);
+	return [self change:^BOOL(NSError **bodyError) {
+		NSString *keyword = [self objectKeyword:bodyError];
+		if (!keyword) return NO;
+		return [self run:[NSString stringWithFormat:@"ALTER %@ %@ OWNER TO %@", keyword, [self qualifiedName], SPPostgresQuoteIdentifier(owner)] error:bodyError];
+	} error:error];
 }
 
 - (BOOL)setTableComment:(NSString *)comment error:(NSError **)error

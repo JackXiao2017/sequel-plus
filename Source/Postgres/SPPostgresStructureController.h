@@ -7,7 +7,8 @@
 /**
  * The Structure view of a PostgreSQL tab, laid out as MySQL's Structure tab: the columns grid on top (Name, Type,
  * Nullable, Default, Auto, Comment) with a bottom bar (+ / − for columns, refresh), and below it the Indexes grid
- * (Name, Columns, Unique, Method) and the Constraints grid (Name, Type, Definition), each with + / −. Built in code.
+ * (Name, Columns, Unique, Method) and the Constraints grid (Name, Type, Definition), each with + / −. A bar above the
+ * columns grid holds the table's Owner: pop-up, at its left. Built in code.
  * Use on the main thread.
  *
  * Every edited cell runs its one change at once (rename, type, nullable, default, comment) through
@@ -60,8 +61,15 @@ __attribute__((visibility("default")))
 - (IBAction)removeIndex:(id)sender;
 - (IBAction)addConstraint:(id)sender;
 - (IBAction)removeConstraint:(id)sender;
+/// The Owner: pop-up's action: ALTER TABLE … OWNER TO its selected role (an error is shown, and the pop-up goes back).
+- (IBAction)changeOwner:(id)sender;
 
 @property (readonly) NSTableView *columnsView, *indexesView, *constraintsView;
+/// At the left of the bar above the columns grid: the server's roles (built-in pg_* roles left out), the table's owner selected.
+/// Enabled for a table or partitioned table.
+@property (readonly) NSPopUpButton *ownerPopup;
+/// The owner as last read (nil before a table is loaded).
+@property (readonly, copy) NSString *owner;
 @property (readonly, copy) NSString *schema;
 @property (readonly, copy) NSString *table;
 /// The shown relation is a table or partitioned table (its structure can be changed here).

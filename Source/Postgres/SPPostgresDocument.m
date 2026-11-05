@@ -29,6 +29,10 @@
 #import "SPPostgresFeatureScope.h"
 #import "SPPostgresConsoleLogger.h"
 #import "SPPostgresCatalog.h"
+#import "SPPostgresNameSheet.h"
+#import "SPPostgresAlterDatabaseSheet.h"
+#import "SPPostgresServerListSheet.h"
+#import "SPGotoDatabaseController.h"
 #import "SPPostgresConnector.h"
 #import "SPPostgresFavorite.h"
 #import "SPPostgresErrors.h"
@@ -99,6 +103,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 - (void)_closeHelpViewer;
 - (void)_queryRunChangedSchema:(BOOL)schemaChanged data:(BOOL)dataChanged;
 - (void)_structureDidChange:(BOOL)columnsChanged;
+- (void)_rereadCompletionColumns;
 - (void)_reloadSidebarKeepingSelection;
 - (void)_reloadSidebarKeepingSelection:(void (^)(void))then;
 - (void (^)(BOOL))_quietSidebarCompletion:(void (^)(BOOL loaded))completion;
@@ -188,8 +193,11 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	SPPostgresHelpViewerController *helpViewerController;
 	SPPostgresHelpDataSource *helpDataSource;
 
-	/// A database switch in progress (see -switchToDatabase:)
+	/// A database switch in progress (see -switchToDatabase:), and what to call when it is done (-_switchToDatabase:then:)
 	SPPostgresConnector *pendingConnector;
+	void (^pendingSwitchCompletion)(BOOL switched);
+	/// What runs once the tab is no longer processing (-_whenIdle:), in order
+	NSMutableArray *idleActions;
 	/// An Open Table in New Tab or Window connecting (see -openRelation:inSchema:inNewWindow:), and what makes its
 	/// connector
 	SPPostgresConnector *pendingOpenConnector;
@@ -409,6 +417,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[historyControl release];
 	[pendingAlert release];
 	[pendingConfirmation release];
+	[idleActions release];
+	[pendingSwitchCompletion release];
 	[alertPresenter release];
 	[confirmationPresenter release];
 	[connectionProvider release];
@@ -520,6 +530,26 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 	// A Truncate or Remove question, or the New Table sheet, waiting for the tab to be idle (see -_presentWhenIdle:)
 	if (!processing && pendingConfirmation) [self performSelector:@selector(_presentPendingConfirmation) withObject:nil afterDelay:0];
+	// The Database menu's next steps (a switch once a change is made)
+	if (!processing && [idleActions count]) [self performSelector:@selector(_runIdleActions) withObject:nil afterDelay:0];
+}
+
+/// Runs action once the tab isn't processing: now when it isn't, else on the run loop turn after processing ends.
+- (void)_whenIdle:(void (^)(void))action
+{
+	if (tornDown || !action) return;
+	if (!idleActions) idleActions = [[NSMutableArray alloc] init];
+	[idleActions addObject:[[action copy] autorelease]];
+	if (!isProcessing) [self performSelector:@selector(_runIdleActions) withObject:nil afterDelay:0];
+}
+
+- (void)_runIdleActions
+{
+	while (!tornDown && !isProcessing && [idleActions count]) {
+		void (^action)(void) = [[[idleActions objectAtIndex:0] retain] autorelease];
+		[idleActions removeObjectAtIndex:0];
+		action();
+	}
 }
 
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context
@@ -956,13 +986,34 @@ NSString * const SPPostgresPaneExtension = @"extension";
 }
 
 /**
+ * Reads the shown schema's column names again for completion (after a column change the sidebar's lists don't
+ * follow), on the tab's runner, silently; applied if the sidebar still shows that schema. A failure keeps the old ones.
+ */
+- (void)_rereadCompletionColumns
+{
+	NSString *schema = [[[sidebar selectedSchema] copy] autorelease];
+	if (tornDown || !taskRunner || ![schema length]) return;
+
+	[taskRunner runTaskWithDescription:nil cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		SPPostgresCatalog *reader = [[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease];
+		return [reader columnNamesByRelationInSchema:schema error:error];
+	} completion:^(id result, NSError *error, BOOL cancelled) {
+		if (tornDown || ![result isKindOfClass:[NSDictionary class]] || ![[sidebar selectedSchema] isEqualToString:schema]) return;
+		[sidebar setRelationColumns:result];
+	}];
+}
+
+/**
  * The Query editor's completion names, from the lists the tab holds (read on the main thread, at once): the databases
- * of the database pop-up, the schemas of the sidebar's schema pop-up, the shown schema's tables and views, and the
- * columns the Content view loaded for the selected table (none while it shows another table or has not loaded them).
+ * of the database pop-up, the schemas of the sidebar's schema pop-up, the shown schema (@"schema") and its tables and
+ * views, the columns the Content view loaded for the selected table (none while it shows another table or has not
+ * loaded them), and (@"relationColumns") the shown schema's columns by table or view, as the sidebar read them with
+ * its lists.
  */
 - (NSDictionary *)_completionNames
 {
 	if (tornDown) return @{};
+
 
 	NSMutableArray *databases = [NSMutableArray array];
 	for (NSMenuItem *item in [databasePopup itemArray]) {
@@ -978,6 +1029,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 
 	return @{@"databases": databases,
 			 @"schemas": [sidebar schemaNames] ?: @[],
+			 @"schema": [sidebar selectedSchema] ?: @"",
+			 @"relationColumns": [sidebar relationColumns] ?: @{},
 			 @"tables": [sidebar itemTitlesInSection:@"TABLES"] ?: @[],
 			 @"views": [sidebar itemTitlesInSection:@"VIEWS"] ?: @[],
 			 @"columns": columns ?: @[]};
@@ -1243,6 +1296,8 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	if (tornDown) return;
 	if (columnsChanged) contentNeedsReset = YES;
 	else contentNeedsReload = YES;
+	// The sidebar's completion columns (its lists, and so its columns, aren't reloaded for a column change)
+	if (columnsChanged) [self _rereadCompletionColumns];
 	relationsNeedReset = YES;
 	triggersNeedReset = YES;
 	infoNeedsReset = YES;
@@ -1809,6 +1864,17 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	sidebarReloadDeferred = NO;
 	[deferredReloadSchema release];
 	deferredReloadSchema = nil;
+
+	// The Database menu's waiting steps, and a switch's completion (both retain self)
+	[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(_runIdleActions) object:nil];
+	[idleActions release];
+	idleActions = nil;
+	[pendingSwitchCompletion release];
+	pendingSwitchCompletion = nil;
+	// The Database menu's sheets on this window (their blocks retain self)
+	if ([[[SPPostgresNameSheet currentSheet] sheet] sheetParent] == parentWindow) [[SPPostgresNameSheet currentSheet] cancel:nil];
+	if ([[[SPPostgresAlterDatabaseSheet currentSheet] sheet] sheetParent] == parentWindow) [[SPPostgresAlterDatabaseSheet currentSheet] cancel:nil];
+	if ([[[SPPostgresServerListSheet currentSheet] sheet] sheetParent] == parentWindow) [[SPPostgresServerListSheet currentSheet] close:nil];
 
 	// A pending database switch completes (cancelled) and lets go of its block, which retains self
 	SPPostgresConnector *pending = pendingConnector;
@@ -2545,7 +2611,14 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 
 - (void)openRelation:(NSString *)name inSchema:(NSString *)schema inNewWindow:(BOOL)newWindow
 {
-	if (tornDown || ![name length]) return;
+	if (![name length]) return;
+	[self _openInNewTabRelation:name inSchema:schema inNewWindow:newWindow];
+}
+
+/// -openRelation:inSchema:inNewWindow:, or (name nil) the database alone: the new tab shows the same pane and schema.
+- (void)_openInNewTabRelation:(NSString *)name inSchema:(NSString *)schema inNewWindow:(BOOL)newWindow
+{
+	if (tornDown) return;
 	// Also while one is connecting already (isProcessing)
 	if (isProcessing) {
 		NSBeep();
@@ -2598,7 +2671,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 			[alert setAlertStyle:NSAlertStyleWarning];
 			[alert setMessageText:[NSString stringWithFormat:(newWindow
 				? NSLocalizedString(@"Could not open “%@” in a new window", @"PostgreSQL open table in new window failed (table)")
-				: NSLocalizedString(@"Could not open “%@” in a new tab", @"PostgreSQL open table in new tab failed (table)")), name]];
+				: NSLocalizedString(@"Could not open “%@” in a new tab", @"PostgreSQL open table in new tab failed (table)")), name ?: [theFavorite database]]];
 			[alert setInformativeText:[error localizedDescription] ?: @""];
 			[self _presentAlert:alert];
 		}
@@ -2637,7 +2710,25 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	}
 
 	if ([queryText length]) [[[document queryController] editor] setString:queryText];
-	[document selectRelationAfterLoad:name inSchema:schema pane:pane];
+	if ([name length]) [document selectRelationAfterLoad:name inSchema:schema pane:pane];
+	else [document showSchemaAfterLoad:schema pane:pane];
+}
+
+/// The new tab of Open Database in New Tab: the schema (when given) and the pane (Query, or a table's pane, which shows
+/// nothing until a table is selected), once the lists are loaded.
+- (void)showSchemaAfterLoad:(NSString *)schema pane:(NSString *)pane
+{
+	if (tornDown) return;
+	NSString *thePane = [@[SPPostgresPaneStructure, SPPostgresPaneContent, SPPostgresPaneRelations, SPPostgresPaneTriggers, SPPostgresPaneInfo, SPPostgresPaneQuery] containsObject:pane] ? [[pane copy] autorelease] : nil;
+	void (^show)(BOOL) = ^(BOOL loaded) {
+		if (!thePane || [thePane isEqualToString:currentPane]) return;
+		BOOL wasRestoring = restoringHistory;
+		restoringHistory = YES;
+		[self showPane:thePane];
+		restoringHistory = wasRestoring;
+	};
+	if ([schema length]) [sidebar reloadSchema:schema completion:[self _quietSidebarCompletion:show]];
+	else show(YES);
 }
 
 - (void)selectRelationAfterLoad:(NSString *)name inSchema:(NSString *)schema
@@ -2975,7 +3066,11 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	NSString *thePassword = [connector password] ?: [connection password];
 	SPPostgresConnector *newConnector = [[SPPostgresConnector alloc] initWithFavorite:target password:thePassword sshPassword:[connector sshPassword] parentWindow:parentWindow];
 
-	// Only the latest request counts: an earlier pending one is abandoned (its completion is then ignored)
+	// Only the latest request counts: an earlier pending one is abandoned (its completion is then ignored, and what
+	// asked for it is told it didn't happen)
+	void (^abandoned)(BOOL) = [pendingSwitchCompletion autorelease];
+	pendingSwitchCompletion = nil;
+	if (abandoned) [self _whenIdle:^{ abandoned(NO); }];
 	SPPostgresConnector *previous = pendingConnector;
 	pendingConnector = newConnector;
 	[previous cancel];
@@ -3001,9 +3096,14 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	pendingConnector = nil;
 	[self _updateIsProcessing]; // the pop-up follows
 
+	// What asked for this switch (-_switchToDatabase:then:)
+	void (^switched)(BOOL) = [pendingSwitchCompletion autorelease];
+	pendingSwitchCompletion = nil;
+
 	if (!newConnection) {
 		[newConnector release];
 		if ([databasePopup indexOfItemWithTitle:currentDatabase] >= 0) [databasePopup selectItemWithTitle:currentDatabase];
+		if (switched) [self _whenIdle:^{ switched(NO); }];
 
 		// A history move to that database didn't happen: back where it was, so it can be tried again
 		if (pendingHistoryEntry) [self _abandonHistoryRestore];
@@ -3067,6 +3167,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 
 		[self updateWindowTitle:self];
 		[self _updateHistoryControl];
+		if (switched) [self _whenIdle:^{ switched(YES); }];
 	};
 	[self _installSidebarRunner];
 	// Not cancellable (database switches keep their Stage 2 flow), and none of the previous database's lists stays
@@ -3518,6 +3619,50 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	}]];
 }
 
+#pragma mark - Add Schema
+
+/**
+ * The + after the schema pop-up: the shown pane's edits are saved, a sheet asks for the name, CREATE SCHEMA is sent,
+ * and the table list then lists and shows the new schema. A server error (e.g. the schema exists) is shown.
+ */
+- (void)sidebarAddSchema:(SPPostgresSidebarController *)theSidebar
+{
+	if (tornDown || !parentWindow || isProcessing || [parentWindow attachedSheet]) return;
+	if (![self _endPaneEditing]) return;
+	[SPPostgresNameSheet beginOnWindow:parentWindow
+								 title:NSLocalizedString(@"Add Schema", @"PostgreSQL add schema sheet title")
+							   message:[NSString stringWithFormat:NSLocalizedString(@"Enter the name of the new schema in database “%@”:", @"PostgreSQL add schema sheet message"), currentDatabase ?: @""]
+						   initialName:@""
+						   buttonTitle:NSLocalizedString(@"Add", @"add button")
+						  requiredText:nil
+							completion:^(NSString *name) {
+		if (name && !tornDown) [self _createSchema:name];
+	}];
+}
+
+- (void)_createSchema:(NSString *)name
+{
+	if ([self _refuseWriteWhileBusy]) return;
+	NSString *theName = [[name copy] autorelease];
+	[taskRunner runTaskWithDescription:NSLocalizedString(@"Adding schema...", @"PostgreSQL add schema task") cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		SPPostgresCatalog *writer = [[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease];
+		return [writer createSchema:theName error:error] ? @YES : nil;
+	} completion:^(id result, NSError *error, BOOL cancelled) {
+		if (tornDown || cancelled) return;
+		if (!result) {
+			[self _alertTitle:[NSString stringWithFormat:NSLocalizedString(@"Could not add the schema “%@”", @"PostgreSQL add schema failed"), theName] error:error];
+			return;
+		}
+		// The schema list is read again (with the new schema), then the new schema is shown
+		[self _whenIdle:^{
+			[sidebar reloadKeepingSelection:^(BOOL loaded) {
+				if (tornDown) return;
+				[self _whenIdle:^{ [sidebar reloadSchema:theName]; }];
+			}];
+		}];
+	}];
+}
+
 #pragma mark - Add Table
 
 /**
@@ -3697,6 +3842,13 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
  * items: those (tabs, New Tab, Close Tab) stay enabled, and so do this tab's own actions. Everything
  * else (the MySQL-only items) is disabled.
  */
+/// View > Filter Tables (⌃⌥⌘F), as on MySQL tabs: the table list's filter field takes the keyboard.
+- (IBAction)makeTableListFilterHaveFocus:(id)sender
+{
+	if (tornDown) return;
+	[sidebar focusFilterField];
+}
+
 - (BOOL)validateMenuItem:(NSMenuItem *)item
 {
 	SEL action = [item action];
@@ -3721,10 +3873,24 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	if (action == @selector(viewQuery:)) return [self _canSwitchToPane:SPPostgresPaneQuery];
 
 	if (action == @selector(showUserManager:)) return [self _canShowUsers];
+	// The Database menu (Flush Privileges, View Using Encoding and Shutdown Server have no PostgreSQL equivalent: not
+	// implemented, so disabled)
+	if (action == @selector(refreshTables:) || action == @selector(setDatabases:)) return !isProcessing && [connection isConnected];
+	if (action == @selector(showGotoDatabase:) || action == @selector(addDatabase:) || action == @selector(renameDatabase:)
+		|| action == @selector(copyDatabase:) || action == @selector(removeDatabase:) || action == @selector(openDatabaseInNewTab:)
+		|| action == @selector(alterDatabase:)
+		|| action == @selector(showServerVariables:) || action == @selector(showServerProcesses:)) {
+		return [self _canRunDatabaseAction];
+	}
 	if (action == @selector(export:) || action == @selector(exportQueryResult:)) return [self _canImportExport];
 	if (action == @selector(import:)) return [self _canImportExport];
 	if (action == @selector(showTransfer:)) return [self _canShowTransfer];
 	if (action == @selector(showInstallExtensionSheet:)) return !isProcessing && SPPostgresFeatureIsAvailable(SPPostgresFeatureExtensions);
+	// View > Filter Tables: the table list's filter field (MySQL tabs word it so with more than 20 tables)
+	if (action == @selector(makeTableListFilterHaveFocus:)) {
+		[item setTitle:NSLocalizedString(@"Filter Tables", @"filter tables menu item")];
+		return [[sidebar filterField] window] != nil;
+	}
 
 	// View > Back/Forward In History (tags 0 and 1), as MySQL's
 	if (action == @selector(backForwardInHistory:)) {
@@ -3938,6 +4104,432 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 - (IBAction)viewQuery:(id)sender
 {
 	[self _viewPane:SPPostgresPaneQuery];
+}
+
+#pragma mark - Database menu
+
+/// The databases the pop-up lists (before its separator and "Refresh Databases").
+- (NSArray<NSString *> *)_listedDatabaseNames
+{
+	NSMutableArray *names = [NSMutableArray array];
+	for (NSMenuItem *item in [databasePopup itemArray]) {
+		if ([item isSeparatorItem]) break;
+		[names addObject:[item title]];
+	}
+	return names;
+}
+
+/// A Database menu action can start: connected to a database, not processing, no sheet up, no switch being confirmed.
+- (BOOL)_canRunDatabaseAction
+{
+	return !tornDown && !isProcessing && !confirmingSwitch && [connection isConnected] && [currentDatabase length] && parentWindow && ![parentWindow attachedSheet];
+}
+
+/// Shows an alert titled title with error's message.
+- (void)_alertTitle:(NSString *)title error:(NSError *)error
+{
+	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+	[alert setAlertStyle:NSAlertStyleWarning];
+	[alert setMessageText:title];
+	[alert setInformativeText:[error localizedDescription] ?: @""];
+	[self _presentAlert:alert];
+}
+
+/**
+ * Switches the tab to database as the pop-up does (an edit is saved first; an open transaction is confirmed), then
+ * calls then (on a later run loop turn, once the tab is idle) with whether the tab is now on it; YES at once when it
+ * is already.
+ */
+- (void)_switchToDatabase:(NSString *)database then:(void (^)(BOOL switched))then
+{
+	void (^done)(BOOL) = [[then copy] autorelease];
+	if ([database isEqualToString:currentDatabase] && !pendingConnector) {
+		[self _whenIdle:^{ done(YES); }];
+		return;
+	}
+	if (tornDown || isProcessing || confirmingSwitch || ![database length] || ![self _endPaneEditing]) {
+		done(NO);
+		return;
+	}
+	[self _confirmLeavingSession:^(BOOL proceed) {
+		if (!proceed || tornDown) {
+			[self _selectCurrentDatabaseInPopup];
+			done(NO);
+			return;
+		}
+		[self _switchToDatabase:database forHistory:NO];
+		if (!pendingConnector) {
+			done([database isEqualToString:currentDatabase]);
+			return;
+		}
+		[pendingSwitchCompletion release];
+		pendingSwitchCompletion = [done copy];
+	}];
+}
+
+/// Database ▸ Refresh Tables (⌘R): the table list, as its Refresh button.
+- (IBAction)refreshTables:(id)sender
+{
+	if (tornDown || isProcessing) return;
+	[self sidebarRefresh:sidebar];
+}
+
+/// Database ▸ Refresh Databases (⇧⌘R): the database pop-up.
+- (IBAction)setDatabases:(id)sender
+{
+	if (tornDown || isProcessing) return;
+	[self refreshDatabases:sender];
+}
+
+/// Database ▸ Go to Database… (⇧⌘D): MySQL's dialog on the listed databases; the chosen one is switched to.
+- (IBAction)showGotoDatabase:(id)sender
+{
+	if (![self _canRunDatabaseAction]) return;
+	SPGotoDatabaseController *controller = [[[SPGotoDatabaseController alloc] init] autorelease];
+	[controller setDatabaseList:[[[self _listedDatabaseNames] mutableCopy] autorelease]];
+	if (![controller runModal]) return;
+	NSString *database = [controller selectedDatabase];
+	if ([database length] && ![database isEqualToString:currentDatabase]) [self switchToDatabase:database];
+}
+
+/// Database ▸ Add Database…: asks for the name, sends CREATE DATABASE, then switches to the new database.
+- (IBAction)addDatabase:(id)sender
+{
+	if (![self _canRunDatabaseAction] || ![self _endPaneEditing]) return;
+	[SPPostgresNameSheet beginOnWindow:parentWindow
+								 title:NSLocalizedString(@"Add Database", @"PostgreSQL add database sheet title")
+							   message:NSLocalizedString(@"Enter the name of the new database:", @"PostgreSQL add database sheet message")
+						   initialName:@""
+						   buttonTitle:NSLocalizedString(@"Add", @"add button")
+						  requiredText:nil
+							completion:^(NSString *name) {
+		if (name && !tornDown) [self _createDatabase:name];
+	}];
+}
+
+- (void)_createDatabase:(NSString *)name
+{
+	if ([self _refuseWriteWhileBusy]) return;
+	NSString *theName = [[name copy] autorelease];
+	[taskRunner runTaskWithDescription:NSLocalizedString(@"Adding database...", @"PostgreSQL add database task") cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		SPPostgresCatalog *writer = [[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease];
+		return [writer createDatabase:theName error:error] ? @YES : nil;
+	} completion:^(id result, NSError *error, BOOL cancelled) {
+		if (tornDown || cancelled) return;
+		if (!result) {
+			[self _alertTitle:[NSString stringWithFormat:NSLocalizedString(@"Could not add the database “%@”", @"PostgreSQL add database failed"), theName] error:error];
+			return;
+		}
+		// The switch reloads the pop-up (with the new database) once the tab is idle
+		[self _whenIdle:^{ [self _switchToDatabase:theName then:^(BOOL switched) { if (!switched) [self _reloadDatabasePopup]; }]; }];
+	}];
+}
+
+/// A database the tab can be on while `database` is renamed, copied or dropped (the server refuses while a session is
+/// connected to it): postgres, else the first other listed one; nil when there is none.
+- (NSString *)_databaseAwayFrom:(NSString *)database
+{
+	NSArray *names = [self _listedDatabaseNames];
+	if (![database isEqualToString:@"postgres"] && [names containsObject:@"postgres"]) return @"postgres";
+	for (NSString *name in names) {
+		if (![name isEqualToString:database]) return name;
+	}
+	return nil;
+}
+
+/**
+ * Runs change (on the tab's runner, with a catalog on the tab's connection) with the tab on another database than
+ * `database` (the server refuses to rename, copy or drop a database a session is connected to). Then the tab goes to
+ * openOnSuccess (nil: it stays where it is) or, when the change failed, back to `database`, after the server's message.
+ */
+- (void)_changeDatabase:(NSString *)database description:(NSString *)description failureTitle:(NSString *)failureTitle change:(BOOL (^)(SPPostgresCatalog *writer, NSError **error))change openOnSuccess:(NSString *)openOnSuccess
+{
+	NSString *away = [self _databaseAwayFrom:database];
+	if (!away) {
+		NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+		[alert setAlertStyle:NSAlertStyleWarning];
+		[alert setMessageText:failureTitle];
+		[alert setInformativeText:[NSString stringWithFormat:NSLocalizedString(@"PostgreSQL can't change “%@” while this window is connected to it, and there is no other database to connect to meanwhile.", @"PostgreSQL database change: no other database"), database]];
+		[self _presentAlert:alert];
+		return;
+	}
+
+	BOOL (^theChange)(SPPostgresCatalog *, NSError **) = [[change copy] autorelease];
+	NSString *theDatabase = [[database copy] autorelease];
+	NSString *theTarget = [[openOnSuccess copy] autorelease];
+	NSString *theDescription = [[description copy] autorelease];
+	NSString *theTitle = [[failureTitle copy] autorelease];
+	[self _switchToDatabase:away then:^(BOOL switched) {
+		if (!switched || tornDown) return;
+		[taskRunner runTaskWithDescription:theDescription cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
+			SPPostgresCatalog *writer = [[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease];
+			return theChange(writer, error) ? @YES : nil;
+		} completion:^(id result, NSError *error, BOOL cancelled) {
+			if (tornDown) return;
+			NSString *next = result ? theTarget : theDatabase;
+			if (!result && !cancelled) [self _alertTitle:theTitle error:error];
+			[self _whenIdle:^{
+				if (next) [self _switchToDatabase:next then:^(BOOL done) { if (!done) [self _reloadDatabasePopup]; }];
+				else [self _reloadDatabasePopup];
+			}];
+		}];
+	}];
+}
+
+/// Database ▸ Rename Database…: the tab's database, renamed (ALTER DATABASE … RENAME TO) from another database.
+- (IBAction)renameDatabase:(id)sender
+{
+	if (![self _canRunDatabaseAction] || ![self _endPaneEditing]) return;
+	NSString *database = [[currentDatabase copy] autorelease];
+	[SPPostgresNameSheet beginOnWindow:parentWindow
+								 title:NSLocalizedString(@"Rename Database", @"PostgreSQL rename database sheet title")
+							   message:[NSString stringWithFormat:NSLocalizedString(@"Rename database “%@” to:\n\nThis window connects to another database while it is renamed. PostgreSQL refuses while other sessions are connected to it.", @"PostgreSQL rename database sheet message"), database]
+						   initialName:database
+						   buttonTitle:NSLocalizedString(@"Rename", @"rename button")
+						  requiredText:nil
+							completion:^(NSString *name) {
+		if (!name || tornDown) return;
+		[self _changeDatabase:database
+				  description:NSLocalizedString(@"Renaming database...", @"PostgreSQL rename database task")
+				 failureTitle:[NSString stringWithFormat:NSLocalizedString(@"Could not rename the database “%@”", @"PostgreSQL rename database failed"), database]
+					   change:^BOOL(SPPostgresCatalog *writer, NSError **error) { return [writer renameDatabase:database toName:name error:error]; }
+				openOnSuccess:name];
+	}];
+}
+
+/// Database ▸ Duplicate Database…: a copy of the tab's database (CREATE DATABASE … TEMPLATE), made from another database.
+- (IBAction)copyDatabase:(id)sender
+{
+	if (![self _canRunDatabaseAction] || ![self _endPaneEditing]) return;
+	NSString *database = [[currentDatabase copy] autorelease];
+	[SPPostgresNameSheet beginOnWindow:parentWindow
+								 title:NSLocalizedString(@"Duplicate Database", @"PostgreSQL duplicate database sheet title")
+							   message:[NSString stringWithFormat:NSLocalizedString(@"Duplicate database “%@” to:\n\nThis window connects to another database while it is copied. PostgreSQL refuses while other sessions are connected to it.", @"PostgreSQL duplicate database sheet message"), database]
+						   initialName:[database stringByAppendingString:@"_copy"]
+						   buttonTitle:NSLocalizedString(@"Duplicate", @"duplicate button")
+						  requiredText:nil
+							completion:^(NSString *name) {
+		if (!name || tornDown) return;
+		[self _changeDatabase:database
+				  description:NSLocalizedString(@"Duplicating database...", @"PostgreSQL duplicate database task")
+				 failureTitle:[NSString stringWithFormat:NSLocalizedString(@"Could not duplicate the database “%@”", @"PostgreSQL duplicate database failed"), database]
+					   change:^BOOL(SPPostgresCatalog *writer, NSError **error) { return [writer copyDatabase:database toName:name error:error]; }
+				openOnSuccess:name];
+	}];
+}
+
+/// Database ▸ Delete Database…: the tab's database, dropped (DROP DATABASE) from another database once its name is typed.
+- (IBAction)removeDatabase:(id)sender
+{
+	if (![self _canRunDatabaseAction] || ![self _endPaneEditing]) return;
+	NSString *database = [[currentDatabase copy] autorelease];
+	[SPPostgresNameSheet beginOnWindow:parentWindow
+								 title:NSLocalizedString(@"Delete Database", @"PostgreSQL delete database sheet title")
+							   message:[NSString stringWithFormat:NSLocalizedString(@"Delete database “%@”? Everything in it is permanently deleted. This can't be undone.\n\nType the database's name to confirm:", @"PostgreSQL delete database sheet message"), database]
+						   initialName:@""
+						   buttonTitle:NSLocalizedString(@"Delete", @"delete button")
+						  requiredText:database
+							completion:^(NSString *name) {
+		if (![name isEqualToString:database] || tornDown) return;
+		[self _changeDatabase:database
+				  description:NSLocalizedString(@"Deleting database...", @"PostgreSQL delete database task")
+				 failureTitle:[NSString stringWithFormat:NSLocalizedString(@"Could not delete the database “%@”", @"PostgreSQL delete database failed"), database]
+					   change:^BOOL(SPPostgresCatalog *writer, NSError **error) { return [writer dropDatabase:database error:error]; }
+				openOnSuccess:nil];
+	}];
+}
+
+/**
+ * Database ▸ Alter Database…: the tab's database's name, owner and comment (read on the tab's runner, with the server's
+ * roles). Owner and comment are changed on this connection (ALTER DATABASE … OWNER TO, COMMENT ON DATABASE); a new
+ * name then goes through Rename Database's flow (from another database). The first failure is shown and stops the rest.
+ */
+- (IBAction)alterDatabase:(id)sender
+{
+	if (![self _canRunDatabaseAction] || ![self _endPaneEditing]) return;
+	NSString *database = [[currentDatabase copy] autorelease];
+	[taskRunner runTaskWithDescription:NSLocalizedString(@"Loading...", @"PostgreSQL alter database: loading task") cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		SPPostgresCatalog *reader = [[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease];
+		NSDictionary *details = [reader databaseDetails:database error:error];
+		if (!details) return nil;
+		NSArray *roles = [reader roleNames:error];
+		if (!roles) return nil;
+		return @{@"details": details, @"roles": roles};
+	} completion:^(id result, NSError *error, BOOL cancelled) {
+		if (tornDown || cancelled) return;
+		if (!result) {
+			[self _alertTitle:[NSString stringWithFormat:NSLocalizedString(@"Could not read the database “%@”", @"PostgreSQL alter database: read failed"), database] error:error];
+			return;
+		}
+		NSDictionary *details = result[@"details"];
+		[self _whenIdle:^{
+			if (tornDown || !parentWindow || [parentWindow attachedSheet] || ![database isEqualToString:currentDatabase]) return;
+			[SPPostgresAlterDatabaseSheet beginOnWindow:parentWindow database:database owner:details[@"owner"] comment:details[@"comment"] roles:result[@"roles"] completion:^(NSDictionary *values) {
+				if (values && !tornDown) [self _alterDatabase:database from:details to:values];
+			}];
+		}];
+	}];
+}
+
+- (void)_alterDatabase:(NSString *)database from:(NSDictionary *)details to:(NSDictionary *)values
+{
+	if ([self _refuseWriteWhileBusy]) return;
+	NSString *owner = values[@"owner"];
+	NSString *comment = values[@"comment"];
+	NSString *newName = values[@"name"];
+	BOOL ownerChanged = [owner length] && ![owner isEqualToString:details[@"owner"]];
+	BOOL commentChanged = ![comment isEqualToString:details[@"comment"]];
+
+	void (^rename)(void) = ^{
+		if ([newName length] && ![newName isEqualToString:database]) {
+			[self _changeDatabase:database
+					  description:NSLocalizedString(@"Renaming database...", @"PostgreSQL rename database task")
+					 failureTitle:[NSString stringWithFormat:NSLocalizedString(@"Could not rename the database “%@”", @"PostgreSQL rename database failed"), database]
+						   change:^BOOL(SPPostgresCatalog *writer, NSError **error) { return [writer renameDatabase:database toName:newName error:error]; }
+					openOnSuccess:newName];
+		}
+	};
+	if (!ownerChanged && !commentChanged) {
+		rename();
+		return;
+	}
+
+	void (^then)(void) = [[rename copy] autorelease];
+	[taskRunner runTaskWithDescription:NSLocalizedString(@"Altering database...", @"PostgreSQL alter database task") cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		SPPostgresCatalog *writer = [[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease];
+		if (ownerChanged && ![writer setOwner:owner ofDatabase:database error:error]) return nil;
+		if (commentChanged && ![writer setComment:comment ofDatabase:database error:error]) return nil;
+		return @YES;
+	} completion:^(id result, NSError *error, BOOL cancelled) {
+		if (tornDown || cancelled) return;
+		if (!result) {
+			[self _alertTitle:[NSString stringWithFormat:NSLocalizedString(@"Could not alter the database “%@”", @"PostgreSQL alter database failed"), database] error:error];
+			return;
+		}
+		[self _whenIdle:then];
+	}];
+}
+
+/// Database ▸ Open Database in New Tab: this database (its shown schema and pane, and the Query text) in a new tab.
+- (IBAction)openDatabaseInNewTab:(id)sender
+{
+	if (![self _canRunDatabaseAction]) return;
+	[self _openInNewTabRelation:nil inSchema:[sidebar selectedSchema] inNewWindow:NO];
+}
+
+/// Database ▸ Show Server Variables… (⇧⌘V): pg_settings, read on the tab's runner.
+- (IBAction)showServerVariables:(id)sender
+{
+	if (![self _canRunDatabaseAction] || ![self _endPaneEditing]) return;
+	[taskRunner runTaskWithDescription:NSLocalizedString(@"Loading...", @"Postgres server variables: loading task") cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		return [[[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease] serverSettings:error];
+	} completion:^(id rows, NSError *error, BOOL cancelled) {
+		if (tornDown || cancelled) return;
+		if (!rows) {
+			[self _alertTitle:NSLocalizedString(@"Could not read the server variables", @"Postgres server variables failed") error:error];
+			return;
+		}
+		[self _whenIdle:^{
+			if (!parentWindow || [parentWindow attachedSheet]) return;
+			[SPPostgresServerListSheet beginOnWindow:parentWindow
+											   title:NSLocalizedString(@"Server Variables", @"Postgres server variables sheet title")
+											 columns:@[@{@"key": @"name", @"title": NSLocalizedString(@"Variable Name", @"Postgres server variables: name column"), @"width": @220},
+													   @{@"key": @"setting", @"title": NSLocalizedString(@"Value", @"Postgres server variables: value column"), @"width": @160},
+													   @{@"key": @"unit", @"title": NSLocalizedString(@"Unit", @"Postgres server variables: unit column"), @"width": @50},
+													   @{@"key": @"category", @"title": NSLocalizedString(@"Category", @"Postgres server variables: category column"), @"width": @180},
+													   @{@"key": @"description", @"title": NSLocalizedString(@"Description", @"Postgres server variables: description column"), @"width": @300}]
+												rows:rows refresh:nil processAction:nil completion:nil];
+		}];
+	}];
+}
+
+/// Reads pg_stat_activity on the tab's runner into the open process list.
+- (void)_reloadServerProcesses:(SPPostgresServerListSheet *)list
+{
+	if (tornDown || !list) return;
+	[taskRunner runTaskWithDescription:nil cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		return [[[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease] serverProcesses:error];
+	} completion:^(id rows, NSError *error, BOOL cancelled) {
+		if (tornDown || cancelled || [SPPostgresServerListSheet currentSheet] != list) return;
+		if (rows) [list setRows:rows];
+		else NSBeep();
+	}];
+}
+
+/// Asks, then cancels the process's query or ends its connection, and reloads the list.
+- (void)_signalServerProcess:(NSDictionary *)row terminate:(BOOL)terminate list:(SPPostgresServerListSheet *)list
+{
+	NSInteger pid = [[row objectForKey:@"pid"] integerValue];
+	if (tornDown || pid <= 0) return;
+
+	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+	[alert setAlertStyle:NSAlertStyleWarning];
+	[alert setMessageText:[NSString stringWithFormat:(terminate
+		? NSLocalizedString(@"Kill the connection of process %ld?", @"Postgres process list: kill connection question")
+		: NSLocalizedString(@"Cancel the query of process %ld?", @"Postgres process list: cancel query question")), (long)pid]];
+	[alert setInformativeText:terminate
+		? NSLocalizedString(@"The session is ended (pg_terminate_backend); an open transaction is rolled back.", @"Postgres process list: kill connection detail")
+		: NSLocalizedString(@"The statement it is running is cancelled (pg_cancel_backend).", @"Postgres process list: cancel query detail")];
+	[alert addButtonWithTitle:terminate ? NSLocalizedString(@"Kill Connection", @"Postgres process list: kill connection button") : NSLocalizedString(@"Cancel Query", @"Postgres process list: cancel query button")];
+	[alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"cancel button")];
+	[alert beginSheetModalForWindow:[list sheet] completionHandler:^(NSModalResponse response) {
+		if (response != NSAlertFirstButtonReturn || tornDown || [SPPostgresServerListSheet currentSheet] != list) return;
+		[self _signalProcess:pid terminate:terminate list:list];
+	}];
+}
+
+/// Sends the signal (no question), then reloads the list; a refusal is shown on the list's sheet.
+- (void)_signalProcess:(NSInteger)pid terminate:(BOOL)terminate list:(SPPostgresServerListSheet *)list
+{
+	if (tornDown) return;
+	[taskRunner runTaskWithDescription:nil cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		return [[[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease] signalProcess:pid terminate:terminate error:error] ? @YES : nil;
+	} completion:^(id result, NSError *error, BOOL cancelled) {
+		if (tornDown || cancelled || [SPPostgresServerListSheet currentSheet] != list) return;
+		if (!result) {
+			NSAlert *failure = [[[NSAlert alloc] init] autorelease];
+			[failure setAlertStyle:NSAlertStyleWarning];
+			[failure setMessageText:[NSString stringWithFormat:NSLocalizedString(@"Could not signal process %ld", @"Postgres process list: signal failed"), (long)pid]];
+			[failure setInformativeText:[error localizedDescription] ?: @""];
+			if (alertPresenter) alertPresenter(failure);
+			else [failure beginSheetModalForWindow:[list sheet] completionHandler:nil];
+		}
+		[self _reloadServerProcesses:list];
+	}];
+}
+
+/// Database ▸ Show Server Processes… (⌥⌘P): pg_stat_activity, with Refresh, Cancel Query and Kill Connection.
+- (IBAction)showServerProcesses:(id)sender
+{
+	if (![self _canRunDatabaseAction] || ![self _endPaneEditing]) return;
+	[taskRunner runTaskWithDescription:NSLocalizedString(@"Loading...", @"Postgres server processes: loading task") cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		return [[[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease] serverProcesses:error];
+	} completion:^(id rows, NSError *error, BOOL cancelled) {
+		if (tornDown || cancelled) return;
+		if (!rows) {
+			[self _alertTitle:NSLocalizedString(@"Could not read the server processes", @"Postgres server processes failed") error:error];
+			return;
+		}
+		[self _whenIdle:^{
+			if (!parentWindow || [parentWindow attachedSheet]) return;
+			// The sheet is set once it exists (its blocks only run while it is up)
+			__block SPPostgresServerListSheet *list = nil;
+			list = [SPPostgresServerListSheet beginOnWindow:parentWindow
+													  title:NSLocalizedString(@"Server Processes", @"Postgres server processes sheet title")
+													columns:@[@{@"key": @"pid", @"title": NSLocalizedString(@"PID", @"Postgres server processes: pid column"), @"width": @60},
+															  @{@"key": @"user", @"title": NSLocalizedString(@"User", @"Postgres server processes: user column"), @"width": @90},
+															  @{@"key": @"database", @"title": NSLocalizedString(@"Database", @"Postgres server processes: database column"), @"width": @100},
+															  @{@"key": @"client", @"title": NSLocalizedString(@"Client", @"Postgres server processes: client column"), @"width": @90},
+															  @{@"key": @"application", @"title": NSLocalizedString(@"Application", @"Postgres server processes: application column"), @"width": @110},
+															  @{@"key": @"state", @"title": NSLocalizedString(@"State", @"Postgres server processes: state column"), @"width": @80},
+															  @{@"key": @"started", @"title": NSLocalizedString(@"Query Start", @"Postgres server processes: query start column"), @"width": @130},
+															  @{@"key": @"query", @"title": NSLocalizedString(@"Query", @"Postgres server processes: query column"), @"width": @300}]
+													   rows:rows
+													refresh:^{ [self _reloadServerProcesses:list]; }
+											  processAction:^(NSDictionary *row, BOOL terminate) { [self _signalServerProcess:row terminate:terminate list:list]; }
+												 completion:nil];
+		}];
+	}];
 }
 
 #pragma mark - Users
