@@ -58,6 +58,10 @@ typedef NS_ENUM(NSInteger, SPConnectionEngine) {
 - (id)postgresSelectedOutlineItem;
 /// YES for a saved MySQL favorite leaf (not Quick Connect, not a group).
 - (BOOL)postgresItemIsSavedMySQLFavorite:(id)item;
+/// YES for the MySQL favorite just added with the favorites "+" button, while it is still the one selected.
+- (BOOL)postgresItemIsNewMySQLFavorite:(id)item;
+/// Removes a MySQL favorite from the MySQL favorites (the host's own removal, as its "-" button does).
+- (void)postgresRemoveMySQLFavorite:(id)item;
 - (void)selectQuickConnectItem;
 /// The Postgres favorites changed: reload the outline, keeping the selection.
 - (void)postgresFavoritesDidChange;

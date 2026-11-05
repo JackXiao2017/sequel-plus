@@ -1,5 +1,6 @@
 #import "SPTestPrefsGuard.h"
 #import "../Source/Postgres/SPPostgresQueryStore.h"
+#import "../Source/Postgres/SPQueryScriptStore.h"
 #import "../Source/Postgres/SPPostgresFeatureScope.h"
 #import <objc/runtime.h>
 #import <XCTest/XCTest.h>
@@ -40,6 +41,10 @@ static const void *SPRequestedAutosaveNameKey = &SPRequestedAutosaveNameKey;
  *   Support: every query a test runs through a Query view is recorded in the shared history unless the test injects
  *   its own store. Their files are removed after every test (so no test sees another's history), and the folder at
  *   the end of the run.
+ *
+ * - The Query editors' saved scripts (+[SPQueryScriptStore sharedStore], MySQL and PostgreSQL tabs) are in a folder of
+ *   this run's temporary directory, never the real "Query Scripts" folder under Application Support. Its files are
+ *   removed after every test.
  *
  * - Sparkle's automatic update checks are off (SUEnableAutomaticChecks reads NO from the volatile argument
  *   domain, and a check already scheduled is dropped), so no check runs in the middle of a test.
@@ -115,6 +120,10 @@ static NSString *SPTestQueryStoreDirectory = nil;
 							 imp_implementationWithBlock(^id(id me) { return historyStore; }));
 	method_setImplementation(class_getClassMethod([SPPostgresQueryStore class], @selector(sharedFavoritesStore)),
 							 imp_implementationWithBlock(^id(id me) { return favoritesStore; }));
+	// The Query editors' saved scripts: in the same temporary directory
+	SPQueryScriptStore *scriptStore = [[SPQueryScriptStore alloc] initWithDirectoryURL:[NSURL fileURLWithPath:[storeDirectory stringByAppendingPathComponent:@"Query Scripts"] isDirectory:YES]];
+	method_setImplementation(class_getClassMethod([SPQueryScriptStore class], @selector(sharedStore)),
+							 imp_implementationWithBlock(^id(id me) { return scriptStore; }));
 	// Emptied after every test, removed at the end of the run
 	static SPTestPrefsGuard *observer = nil;
 	observer = [[SPTestPrefsGuard alloc] init];
@@ -157,6 +166,7 @@ static NSString *SPTestQueryStoreDirectory = nil;
 	NSFileManager *manager = [NSFileManager defaultManager];
 	[manager removeItemAtURL:[[SPPostgresQueryStore sharedHistoryStore] fileURL] error:NULL];
 	[manager removeItemAtURL:[[SPPostgresQueryStore sharedFavoritesStore] fileURL] error:NULL];
+	[manager removeItemAtURL:[[SPQueryScriptStore sharedStore] directoryURL] error:NULL];
 }
 
 - (void)testBundleDidFinish:(NSBundle *)testBundle

@@ -14,6 +14,7 @@
 #import "../Source/Postgres/SPPostgresQueryController.h"
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
+#import "../Source/Postgres/SPQueryScriptStore.h"
 #import "../Source/Postgres/SPPostgresExtensionController.h"
 #import "../Source/Postgres/SPPostgresInstallExtensionSheet.h"
 #import "../Source/Postgres/SPPostgresTaskRunner.h"
@@ -240,6 +241,41 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	[self.controller addTabDocument:document atIndex:1 select:select];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:document.taskRunner timeout:30]);
 	return document;
+}
+
+- (void)testQueryEditorTextIsSavedPerConnectionAndReloaded
+{
+	// Typed in this tab's Query editor, then the tab closes
+	NSTextView *editor = [self.document.queryController editor];
+	[editor setSelectedRange:NSMakeRange(0, 0)];
+	[editor insertText:@"SELECT 42 AS answer;" replacementRange:NSMakeRange(0, 0)];
+	[self.document parentTabDidClose];
+	NSString *key = [SPQueryScriptStore keyForEngine:SPQueryScriptEnginePostgreSQL type:SPPostgresTCPIPConnection host:@"127.0.0.1"
+	                                             port:[NSString stringWithFormat:@"%lu", (unsigned long)SPPostgresDocumentTestPort]
+	                                             user:@"pgkit_test" socket:nil sshHost:nil sshUser:nil];
+	XCTAssertEqualObjects([[SPQueryScriptStore sharedStore] scriptForKey:key], @"SELECT 42 AS answer;", @"saved for the server (no saved favorite)");
+
+	// A new tab on the same connection (another database too) opens with it
+	SPPostgresDocument *again = [self addNamesakeOnDatabase:@"postgres" select:YES];
+	XCTAssertEqualObjects([[again.queryController editor] string], @"SELECT 42 AS answer;");
+
+	// Moving to another database keeps the editor and the connection's script
+	NSTextView *againEditor = [again.queryController editor];
+	[againEditor insertText:@" -- more" replacementRange:NSMakeRange([[againEditor string] length], 0)];
+	[again switchToDatabase:@"pgkit_test"];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [again.queryController editor] != againEditor; } timeout:30], @"the Query editor is replaced on the new connection");
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:again.taskRunner timeout:30]);
+	XCTAssertEqualObjects([[SPQueryScriptStore sharedStore] scriptForKey:key], @"SELECT 42 AS answer; -- more", @"the old editor's edit saved as it was replaced");
+	XCTAssertEqualObjects([[again.queryController editor] string], @"SELECT 42 AS answer; -- more");
+
+	// Another user on the same server: its own (empty) script
+	SPPostgresFavorite *otherUser = [self.favorite copy];
+	otherUser.user = @"postgres";
+	NSString *otherKey = [SPQueryScriptStore keyForEngine:SPQueryScriptEnginePostgreSQL type:SPPostgresTCPIPConnection host:@"127.0.0.1"
+	                                                  port:[NSString stringWithFormat:@"%lu", (unsigned long)SPPostgresDocumentTestPort]
+	                                                  user:@"postgres" socket:nil sshHost:nil sshUser:nil];
+	XCTAssertNotEqualObjects(otherKey, key);
+	XCTAssertNil([[SPQueryScriptStore sharedStore] scriptForKey:otherKey]);
 }
 
 - (void)testTabLabelsAddDatabaseForNamesakes
