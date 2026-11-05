@@ -1,5 +1,6 @@
 #import "SPPostgresTextView.h"
 #import "SPPostgresSQLTokenizer.h"
+#import "SPPostgresStatementSplitter.h"
 #import "SPNarrowDownCompletion.h"
 #import "SPConstants.h"
 
@@ -185,6 +186,34 @@ static NSDictionary *SPPostgresCompletionNameItem(NSString *name, NSString *imag
 static BOOL SPPostgresIsIdentifierCharacter(unichar c)
 {
 	return c == '_' || c == '$' || [[NSCharacterSet alphanumericCharacterSet] characterIsMember:c];
+}
+
+/// A name token's name: an unquoted identifier or keyword lowercased (as the server folds it), a quoted one unquoted;
+/// nil for any other token.
+static NSString *SPPostgresTokenName(NSString *text, SPPostgresSQLToken *token)
+{
+	NSString *string = [text substringWithRange:[token range]];
+	switch ([token kind]) {
+		case SPPostgresTokenIdentifier:
+		case SPPostgresTokenKeyword:
+			return [string lowercaseString];
+		case SPPostgresTokenQuotedIdentifier:
+			if ([string length] < 2 || ![string hasSuffix:@"\""]) return nil;
+			return [[string substringWithRange:NSMakeRange(1, [string length] - 2)] stringByReplacingOccurrencesOfString:@"\"\"" withString:@"\""];
+		default:
+			return nil;
+	}
+}
+
+/// The key of relations under name: name itself, else the one equal to it ignoring case; nil if none.
+static NSString *SPPostgresRelationKey(NSDictionary *relations, NSString *name)
+{
+	if (![name length]) return nil;
+	if ([relations objectForKey:name]) return name;
+	for (NSString *key in relations) {
+		if ([key caseInsensitiveCompare:name] == NSOrderedSame) return key;
+	}
+	return nil;
 }
 
 @implementation SPPostgresTextView
@@ -423,6 +452,77 @@ static BOOL SPPostgresIsIdentifierCharacter(unichar c)
 	return [list isKindOfClass:[NSArray class]] ? list : @[];
 }
 
+/**
+ * The relations (keys of relationColumns) the statement at location names, and the aliases it gives them: every
+ * name, or schema.name in the shown schema, that is a key of relationColumns, followed by [AS] alias (a name that is
+ * not a reserved keyword), as in FROM, JOIN, UPDATE or DELETE FROM. aliases maps the alias (folded, as the server
+ * folds it) to the relation's key.
+ */
+- (NSArray<NSString *> *)_relationsInStatementAt:(NSUInteger)location relationColumns:(NSDictionary *)relationColumns schema:(NSString *)schema aliases:(NSDictionary **)outAliases
+{
+	NSMutableArray *relations = [NSMutableArray array];
+	NSMutableDictionary *aliases = [NSMutableDictionary dictionary];
+	if (outAliases) *outAliases = aliases;
+
+	NSString *text = [self string];
+	if (![relationColumns count] || ![text length] || [text length] >= 1000000) return relations;
+	NSRange range = [SPPostgresStatementSplitter rangeOfStatementAtLocation:location inSQL:text];
+	if (range.location == NSNotFound) return relations;
+
+	// The statement's tokens without whitespace and comments
+	NSMutableArray *tokens = [NSMutableArray array];
+	for (SPPostgresSQLToken *token in [SPPostgresSQLTokenizer tokensInString:text range:range]) {
+		if ([token kind] != SPPostgresTokenWhitespace && [token kind] != SPPostgresTokenComment) [tokens addObject:token];
+	}
+	NSSet *reserved = [SPPostgresSQLTokenizer reservedKeywords];
+	NSUInteger count = [tokens count];
+	BOOL (^isDot)(NSUInteger) = ^BOOL(NSUInteger i) {
+		return i < count && [[tokens objectAtIndex:i] kind] == SPPostgresTokenOther && [[text substringWithRange:[[tokens objectAtIndex:i] range]] isEqualToString:@"."];
+	};
+
+	for (NSUInteger i = 0; i < count; i++) {
+		// A name that is not itself qualified (x in y.x is a column)
+		if (i > 0 && isDot(i - 1)) continue;
+		NSString *name = SPPostgresTokenName(text, [tokens objectAtIndex:i]);
+		if (!name) continue;
+		NSUInteger next = i + 1;
+		if (isDot(next) && next + 1 < count) {
+			// schema.relation: only the shown schema's relations are known
+			NSString *relationName = SPPostgresTokenName(text, [tokens objectAtIndex:next + 1]);
+			if (!relationName || !schema || [name caseInsensitiveCompare:schema] != NSOrderedSame) continue;
+			name = relationName;
+			next += 2;
+			if (isDot(next)) continue; // schema.relation.column
+		}
+		NSString *relation = SPPostgresRelationKey(relationColumns, name);
+		if (!relation) continue;
+		if (![relations containsObject:relation]) [relations addObject:relation];
+
+		// [AS] alias
+		if (next < count && [[tokens objectAtIndex:next] kind] == SPPostgresTokenKeyword && [SPPostgresTokenName(text, [tokens objectAtIndex:next]) isEqualToString:@"as"]) next++;
+		if (next >= count || isDot(next + 1)) continue;
+		SPPostgresSQLToken *aliasToken = [tokens objectAtIndex:next];
+		NSString *alias = SPPostgresTokenName(text, aliasToken);
+		if (!alias || ([aliasToken kind] != SPPostgresTokenQuotedIdentifier && [reserved containsObject:alias])) continue;
+		[aliases setObject:relation forKey:alias];
+	}
+	return relations;
+}
+
+/**
+ * The columns completion offers after "qualifier." (the qualifier as typed, unquoted): those of the relation the
+ * current statement aliases as qualifier, else of the relation named qualifier; nil if the qualifier is neither.
+ */
+- (NSArray<NSString *> *)_columnsForQualifier:(NSString *)qualifier relationColumns:(NSDictionary *)relationColumns schema:(NSString *)schema
+{
+	if (![qualifier length] || ![relationColumns count]) return nil;
+	NSDictionary *aliases = nil;
+	[self _relationsInStatementAt:NSMaxRange([self selectedRange]) relationColumns:relationColumns schema:schema aliases:&aliases];
+	NSString *relation = [aliases objectForKey:qualifier] ?: [aliases objectForKey:[qualifier lowercaseString]];
+	if (!relation) relation = SPPostgresRelationKey(relationColumns, qualifier);
+	return relation ? [relationColumns objectForKey:relation] : nil;
+}
+
 - (NSArray *)suggestionsForSQLCompletionWith:(NSString *)currentWord dictMode:(BOOL)isDictMode browseMode:(BOOL)dbBrowseMode withTableName:(NSString *)aTableName withDbName:(NSString *)aDbName
 {
 	NSMutableArray *items = [NSMutableArray array];
@@ -458,13 +558,47 @@ static BOOL SPPostgresIsIdentifierCharacter(unichar c)
 	if (isDictMode) return items;
 
 	NSDictionary *names = completionNamesProvider ? completionNamesProvider() : nil;
-	if (!dbBrowseMode) {
-		for (NSString *name in [self _completionNames:names forKey:@"databases"]) [items addObject:SPPostgresCompletionNameItem(name, @"database-small")];
-		for (NSString *name in [self _completionNames:names forKey:@"schemas"]) [items addObject:SPPostgresCompletionNameItem(name, @"database-small")];
+	id relationColumns = [names objectForKey:@"relationColumns"];
+	if (![relationColumns isKindOfClass:[NSDictionary class]]) relationColumns = nil;
+	id schema = [names objectForKey:@"schema"];
+	if (![schema isKindOfClass:[NSString class]] || ![schema length]) schema = nil;
+
+	if (dbBrowseMode) {
+		// "alias." or "table.": that relation's columns
+		NSArray *columns = [self _columnsForQualifier:aTableName relationColumns:relationColumns schema:schema];
+		if (columns) {
+			for (NSString *name in columns) [items addObject:SPPostgresCompletionNameItem(name, @"field-small-square")];
+			return items;
+		}
+		// "schema.": the shown schema's tables and views (another schema's are not held)
+		BOOL isSchema = NO;
+		for (NSString *name in [self _completionNames:names forKey:@"schemas"]) {
+			if ([name isEqualToString:aTableName] || [name isEqualToString:[aTableName lowercaseString]]) isSchema = YES;
+		}
+		if (isSchema) {
+			if (schema && ([schema isEqualToString:aTableName] || [schema isEqualToString:[aTableName lowercaseString]])) {
+				for (NSString *name in [self _completionNames:names forKey:@"tables"]) [items addObject:SPPostgresCompletionNameItem(name, @"table-small-square")];
+				for (NSString *name in [self _completionNames:names forKey:@"views"]) [items addObject:SPPostgresCompletionNameItem(name, @"table-view-small-square")];
+			}
+			return items;
+		}
+		// Anything else (a subquery's or CTE's alias, another schema's table, columns not read yet): nothing, never the
+		// table list
+		return items;
 	}
+
+	for (NSString *name in [self _completionNames:names forKey:@"databases"]) [items addObject:SPPostgresCompletionNameItem(name, @"database-small")];
+	for (NSString *name in [self _completionNames:names forKey:@"schemas"]) [items addObject:SPPostgresCompletionNameItem(name, @"database-small")];
 	for (NSString *name in [self _completionNames:names forKey:@"tables"]) [items addObject:SPPostgresCompletionNameItem(name, @"table-small-square")];
 	for (NSString *name in [self _completionNames:names forKey:@"views"]) [items addObject:SPPostgresCompletionNameItem(name, @"table-view-small-square")];
-	for (NSString *name in [self _completionNames:names forKey:@"columns"]) [items addObject:SPPostgresCompletionNameItem(name, @"field-small-square")];
+
+	// The columns of the relations the current statement names (then the Content view's table's), once each
+	NSMutableOrderedSet *columns = [NSMutableOrderedSet orderedSet];
+	for (NSString *relation in [self _relationsInStatementAt:NSMaxRange([self selectedRange]) relationColumns:relationColumns schema:schema aliases:NULL]) {
+		[columns addObjectsFromArray:[relationColumns objectForKey:relation]];
+	}
+	[columns addObjectsFromArray:[self _completionNames:names forKey:@"columns"]];
+	for (NSString *name in columns) [items addObject:SPPostgresCompletionNameItem(name, @"field-small-square")];
 
 	return items;
 }
@@ -496,7 +630,7 @@ static BOOL SPPostgresIsIdentifierCharacter(unichar c)
 /**
  * SPTextView's completion (Esc, ⌃Esc, auto-completion) for PostgreSQL identifiers, in SPPostgresNarrowDownCompletion:
  * the word is the identifier at the caret, or a "quoted identifier opened before the caret on its line (its closing "
- * replaced too); after "name." only the tables, views and columns are offered. The spelling dictionary mode (F5, or
+ * replaced too); after "qualifier." the columns of the table or view it names or aliases are offered. The spelling dictionary mode (F5, or
  * auto-completion in a string) is SPTextView's.
  */
 - (void)doCompletionByUsingSpellChecker:(BOOL)isDictMode fuzzyMode:(BOOL)fuzzySearch autoCompleteMode:(BOOL)autoCompleteMode

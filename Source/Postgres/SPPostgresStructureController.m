@@ -10,6 +10,10 @@
 
 // MySQL's Structure tab (DBView.xib): 23 pt button bars, 32 x 25 textured buttons
 static const CGFloat SPPostgresStructureBarHeight = 23;
+/// KVO context: the runner's busy (the columns grid draws its cells disabled while it is busy)
+static void *SPPostgresStructureRunnerContext = &SPPostgresStructureRunnerContext;
+/// The bar above the columns grid (the table's owner)
+static const CGFloat SPPostgresStructureTopBarHeight = 26;
 static const CGFloat SPPostgresStructureButtonWidth = 32;
 
 static NSString * const SPPostgresStructureName = @"name";
@@ -58,12 +62,19 @@ static NSString * const SPPostgresStructureComment = @"comment";
 	NSButton *addConstraintButton;
 	NSButton *removeConstraintButton;
 	NSTextField *noticeField;
+	/// The table's owner (Owner: pop-up, the server's roles), and the owner it was read with
+	NSTextField *ownerLabel;
+	NSPopUpButton *ownerPopup;
+	NSString *owner;
 
 	/// A sheet this controller put on the window (USING, add index or constraint), ended by -invalidate
 	NSWindow *activeSheet;
 	/// The default USING sheet's field, and its completion until it is answered
 	NSTextField *usingField;
 	void (^usingCompletion)(NSString *);
+
+	/// The runner observed (busy), so the grid is drawn again when it goes idle
+	SPPostgresTaskRunner *observedRunner;
 
 	BOOL invalidated;
 }
@@ -123,6 +134,9 @@ static NSString * const SPPostgresStructureComment = @"comment";
 	[addConstraintButton release];
 	[removeConstraintButton release];
 	[noticeField release];
+	[ownerLabel release];
+	[ownerPopup release];
+	[owner release];
 	[activeSheet release];
 	[usingField release];
 
@@ -134,6 +148,7 @@ static NSString * const SPPostgresStructureComment = @"comment";
 	if (invalidated) return;
 	invalidated = YES;
 	[loader invalidate];
+	[self _observeRunner:nil];
 
 	// An edit in progress must not call back into a controller that is going away
 	for (NSTableView *grid in @[columnsView, indexesView, constraintsView]) {
@@ -143,7 +158,7 @@ static NSString * const SPPostgresStructureComment = @"comment";
 	}
 
 	for (NSControl *control in @[addColumnButton, removeColumnButton, refreshButton, addIndexButton, removeIndexButton,
-								 addConstraintButton, removeConstraintButton]) {
+								 addConstraintButton, removeConstraintButton, ownerPopup]) {
 		[control setTarget:nil];
 	}
 
@@ -291,6 +306,14 @@ static NSString * const SPPostgresStructureComment = @"comment";
 	// Columns
 	SPButtonBar *bar = nil;
 	NSView *columnsSection = [self _sectionWithFrame:NSMakeRect(0, 0, width, 280) grid:&columnsView bar:&bar];
+	// A bar above the columns grid, for the table itself: its owner, at the left
+	NSScrollView *columnsScroll = [columnsView enclosingScrollView];
+	NSRect gridFrame = [columnsScroll frame];
+	gridFrame.size.height -= SPPostgresStructureTopBarHeight;
+	[columnsScroll setFrame:gridFrame];
+	SPButtonBar *topBar = [[[SPButtonBar alloc] initWithFrame:NSMakeRect(0, NSMaxY(gridFrame), width, SPPostgresStructureTopBarHeight)] autorelease];
+	[topBar setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+	[columnsSection addSubview:topBar];
 	[self _addColumn:SPPostgresStructureName title:NSLocalizedString(@"Name", @"Postgres structure: name column") width:150 cell:nil to:columnsView];
 
 	NSComboBoxCell *typeCell = [[[NSComboBoxCell alloc] initTextCell:@""] autorelease];
@@ -323,6 +346,19 @@ static NSString * const SPPostgresStructureComment = @"comment";
 	[noticeField setTextColor:[NSColor secondaryLabelColor]];
 	[noticeField setAutoresizingMask:NSViewWidthSizable];
 	for (NSView *subview in @[addColumnButton, removeColumnButton, refreshButton, noticeField]) [bar addSubview:subview];
+	// The table's owner, at the left of the top bar
+	ownerLabel = [[self _labelWithFrame:NSMakeRect(8, 6, 46, 14)] retain];
+	[ownerLabel setStringValue:NSLocalizedString(@"Owner:", @"Postgres structure: owner label")];
+	[ownerLabel setAutoresizingMask:NSViewMaxXMargin];
+	ownerPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(56, 2, 190, 22) pullsDown:NO];
+	[ownerPopup setControlSize:NSControlSizeSmall];
+	[ownerPopup setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+	[ownerPopup setBezelStyle:NSBezelStyleRoundRect];
+	[ownerPopup setToolTip:NSLocalizedString(@"The role that owns the table", @"Postgres structure: owner tooltip")];
+	[ownerPopup setTarget:self];
+	[ownerPopup setAction:@selector(changeOwner:)];
+	[ownerPopup setAutoresizingMask:NSViewMaxXMargin];
+	for (NSView *subview in @[ownerLabel, ownerPopup]) [topBar addSubview:subview];
 	[split addSubview:columnsSection];
 
 	// Indexes
@@ -457,7 +493,7 @@ static NSString * const SPPostgresStructureComment = @"comment";
 
 #pragma mark - Loading
 
-/// The runner's thread: the relation's kind, columns, indexes and constraints, read through structure alone (nil,
+/// The runner's thread: the relation's kind, columns, indexes, constraints, owner and the server's roles, read through structure alone (nil,
 /// with *error, if any of them can't be read).
 static NSDictionary *SPPostgresStructureRead(SPPostgresTableStructure *structure, NSError **error)
 {
@@ -469,7 +505,12 @@ static NSDictionary *SPPostgresStructureRead(SPPostgresTableStructure *structure
 	if (!theIndexes) return nil;
 	NSArray *theConstraints = [structure constraints:error];
 	if (!theConstraints) return nil;
-	return @{@"kind" : kind, @"columns" : theColumns, @"indexes" : theIndexes, @"constraints" : theConstraints};
+	NSString *theOwner = [structure tableOwner:error];
+	if (!theOwner) return nil;
+	NSArray *theRoles = [structure roleNames:error];
+	if (!theRoles) return nil;
+	return @{@"kind" : kind, @"columns" : theColumns, @"indexes" : theIndexes, @"constraints" : theConstraints,
+			 @"owner" : theOwner, @"roles" : theRoles};
 }
 
 // A load (a switch, -reload, Refresh) ends the cell edit first (so a change it commits is sent while the runner is
@@ -485,6 +526,33 @@ static NSDictionary *SPPostgresStructureRead(SPPostgresTableStructure *structure
 - (void)setTaskRunner:(SPPostgresTaskRunner *)runner
 {
 	[loader setTaskRunner:runner];
+	[self _observeRunner:invalidated ? nil : runner];
+}
+
+/// Watches runner's busy (nil: stops watching).
+- (void)_observeRunner:(SPPostgresTaskRunner *)runner
+{
+	if (runner == observedRunner) return;
+	[observedRunner removeObserver:self forKeyPath:@"busy" context:SPPostgresStructureRunnerContext];
+	[observedRunner release];
+	observedRunner = [runner retain];
+	[observedRunner addObserver:self forKeyPath:@"busy" options:0 context:SPPostgresStructureRunnerContext];
+}
+
+/**
+ * The columns grid draws its cells as disabled while the runner is busy (they can't be edited then). The structure is
+ * often shown while it is still busy (a table switch also loads the tab's other panes), so the grid is drawn again
+ * when it goes idle; without that the cells stayed grey until something else redrew them.
+ */
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context
+{
+	if (context != SPPostgresStructureRunnerContext) {
+		[super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+		return;
+	}
+	if (invalidated || object != observedRunner) return;
+	[columnsView setNeedsDisplay:YES];
+	[self _updateButtons];
 }
 
 - (BOOL)isStale
@@ -600,6 +668,17 @@ static NSDictionary *SPPostgresStructureRead(SPPostgresTableStructure *structure
 	[self setNoticeText:notice];
 	[noticeField setStringValue:notice];
 
+	// The owner pop-up: the server's roles, the owner selected (added when it isn't listed)
+	[owner release];
+	owner = [[result objectForKey:@"owner"] copy];
+	[ownerPopup removeAllItems];
+	if ([owner length]) {
+		NSMutableArray *roles = [NSMutableArray arrayWithArray:[result objectForKey:@"roles"] ?: @[]];
+		if (![roles containsObject:owner]) [roles insertObject:owner atIndex:0];
+		[ownerPopup addItemsWithTitles:roles];
+		[ownerPopup selectItemWithTitle:owner];
+	}
+
 	for (NSTableView *grid in @[columnsView, indexesView, constraintsView]) [self _reloadGridKeepingSelection:grid];
 	[self _updateButtons];
 
@@ -630,6 +709,7 @@ static NSDictionary *SPPostgresStructureRead(SPPostgresTableStructure *structure
 	[removeIndexButton setEnabled:canChange && [indexesView selectedRow] >= 0];
 	[addConstraintButton setEnabled:canChange];
 	[removeConstraintButton setEnabled:canChange && [constraintsView selectedRow] >= 0];
+	[ownerPopup setEnabled:canChange && [owner length] > 0];
 }
 
 /// A change succeeded: the grids show the server's structure, and the tab hears of it.
@@ -667,6 +747,38 @@ static NSDictionary *SPPostgresStructureRead(SPPostgresTableStructure *structure
 {
 	if (invalidated || ![self _endEditing]) return;
 	[self _loadSwitching:NO];
+}
+
+#pragma mark - Owner
+
+- (NSString *)owner
+{
+	return [[owner retain] autorelease];
+}
+
+- (NSPopUpButton *)ownerPopup
+{
+	return ownerPopup;
+}
+
+/// The Owner: pop-up: ALTER TABLE … OWNER TO the chosen role, then the structure is read again (the pop-up shows the
+/// owner the server has). Refused while the runner is busy (the pop-up goes back to the owner).
+- (IBAction)changeOwner:(id)sender
+{
+	NSString *chosen = [ownerPopup titleOfSelectedItem];
+	if (invalidated || !structure || !editable || ![chosen length] || [chosen isEqualToString:owner]) return;
+	if ([self _refuseChangeWhileBusy] || ![self _endEditing]) {
+		if ([owner length]) [ownerPopup selectItemWithTitle:owner];
+		return;
+	}
+
+	NSError *error = nil;
+	if ([structure setTableOwner:chosen error:&error]) {
+		[self _didChange:NO];
+		return;
+	}
+	[self _presentError:error title:[NSString stringWithFormat:NSLocalizedString(@"Could not change the owner of “%@”", @"Postgres structure: change owner failed"), table]];
+	[self _load];
 }
 
 #pragma mark - Columns

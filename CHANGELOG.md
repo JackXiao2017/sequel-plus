@@ -1,5 +1,62 @@
 # Changelog
 
+## Sequel Plus 2.0.0-RC4
+
+Upgrading from 2.0.0-RC3.
+
+### New for PostgreSQL connections
+
+#### Table list
+- A **+** button after the schema pop-up adds a schema: enter its name and it's created in the open database, then shown. If the server refuses (for example, the schema already exists), its message is shown.
+- A **Filter** field under the schema pop-up shows only the tables, views, sequences and extensions whose names contain what you type. **Table ▸ Filter Tables** moves the cursor to it.
+- **TABLES**, **VIEWS**, **SEQUENCES** and **EXTENSIONS** can be collapsed and expanded. Each heading has its arrow at the front, always shown.
+- Every section starts collapsed when a schema opens. Selecting a table from elsewhere (history, Open Table in New Tab) opens its section.
+
+#### Database menu
+The Database menu now works for PostgreSQL connections:
+- **Go to Database…**, **Refresh Tables**, **Refresh Databases** and **Open Database in New Tab**.
+- **Add Database…** creates a database, then opens it.
+- **Rename Database…** and **Duplicate Database…** work on the open database.
+- **Delete Database…** permanently deletes the open database. You confirm by typing its name.
+- **Alter Database…** changes the open database's name, owner and comment.
+- **Show Server Variables…** lists the server's settings, with a filter.
+- **Show Server Processes…** lists the server's sessions. **Cancel Query** stops a session's running statement and **Kill Connection** ends the session; your own session can't be stopped.
+- PostgreSQL won't rename, copy or delete a database while anyone is connected to it. For those three, the window first moves to another database (`postgres` when it can), then makes the change. If another session is connected, the server refuses and its message is shown.
+- **Flush Privileges**, **View Using Encoding** and **Shutdown Server** stay disabled: PostgreSQL has nothing equivalent.
+
+#### Structure
+- A new bar above the columns list holds an **Owner** pop-up, at its left, that changes the table's owner. It lists the server's roles.
+- Fixed: after choosing another table, its columns could stay greyed out, as if they couldn't be edited, until something else redrew the list.
+
+#### Date and time picker
+- Editing a `date`, `time`, `timetz`, `timestamp` or `timestamptz` cell in Content or in a Query result opens a picker on the cell: a calendar for the date, a time stepper for the time, and a text field with the value.
+- Picking writes the value into the text field; you can still type there (for `infinity`, fractions of a second, another offset, …). **Today** or **Now** fills in the current date or time.
+- **Set** doesn't save to the database: it puts the value into the cell, which stays in edit mode. Press Return to save it or Escape to drop it, as with any cell edit. **NULL** (when the column allows it) puts NULL in the cell the same way. **Cancel** or Escape in the picker leaves the cell as it was.
+- A value with a time zone keeps its offset, such as `+08:00`.
+
+#### Query editor completion
+- After `alias.` the editor suggests the columns of the table or view that alias stands for, as in `FROM orders a`, `JOIN items AS i` or `FROM public.orders o`. Before, it listed every table.
+- After a table's name (`orders.`) it suggests that table's columns. After the shown schema's name (`public.`) it suggests its tables and views.
+- Plain suggestions also include the columns of every table the current statement names.
+
+### New for MySQL connections
+
+#### Date and time picker
+- Double-clicking a `DATE`, `TIME`, `DATETIME` or `TIMESTAMP` cell in Content or in a Custom Query result opens the same picker as for PostgreSQL. `YEAR` cells still edit as text.
+- **Set** puts the value into the cell, which stays in edit mode; it is saved the way any cell edit is. **NULL** appears when the column allows NULL.
+- Values the picker can't read, such as `0000-00-00` or a `TIME` over 24 hours, stay as they are in the text field.
+- A cell that can't be edited (for example a Custom Query row that doesn't match exactly one row) opens no picker and behaves as before. Edit-in-sheet mode still uses the field editor sheet for every cell.
+
+### App
+- Version **2.0.0-RC4**.
+
+### Unchanged
+- **MySQL:** apart from the date and time picker, no changes to MySQL connections.
+- **Your data:** favorites, saved settings and data are kept from RC3.
+- **App icon:** the same as RC3.
+- **Bundle ID and data folder:** the app keeps the same bundle ID and the same `~/Library/Application Support/Sequel Pro` folder.
+- **Updates:** checking for updates stays off.
+
 ## Sequel Plus 2.0.0-RC3
 
 Upgrading from 2.0.0-RC2. Every PostgreSQL feature is now available. These buttons, menu items and table list sections were disabled or hidden in RC2.

@@ -6,6 +6,7 @@
 #import "SPButtonBar.h"
 #import "SPConstants.h"
 #import "SPPostgresFieldEditorSheet.h"
+#import "SPPostgresDateTimePicker.h"
 #import "SPPostgresPaginationView.h"
 
 // MySQL's Content tab (DBView.xib): 23 pt button bar, 32 x 25 textured buttons
@@ -130,6 +131,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	BOOL observingRunner;           // observing taskRunner's busy (the bar is disabled while it is)
 	BOOL observingDefaults;         // observing defaults' SPEditInSheetEnabled (editModeButton follows it)
 	BOOL fieldEditorPending;        // a field editor sheet is open (one at a time)
+	BOOL pickerHandoff;             // the picker's value is going into the cell's in-place editor
 	BOOL invalidated;
 }
 
@@ -263,6 +265,8 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	confirmationPresenter = nil;
 	[fieldEditorPresenter release];
 	fieldEditorPresenter = nil;
+	// A date / time picker this view opened (its completion sees invalidated)
+	if (fieldEditorPending) [[SPPostgresDateTimePicker currentPicker] cancel:nil];
 }
 
 #pragma mark - The runner
@@ -1438,7 +1442,8 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 
 #pragma mark - Table view delegate
 
-/// In edit mode every cell opens the field editor sheet (read-only where the cell can't be edited) instead. While the
+/// In edit mode every cell opens the field editor sheet (read-only where the cell can't be edited) instead. A date or
+/// time cell that can be edited opens the date / time picker on the cell instead of the in-cell editor. While the
 /// runner is busy nothing is edited and no sheet opens (MySQL: NO while the document is working).
 - (BOOL)tableView:(NSTableView *)theTableView shouldEditTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
 {
@@ -1447,7 +1452,57 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 		[self _editInSheetTableColumn:tableColumn row:rowIndex];
 		return NO;
 	}
-	return [self _canEditTableColumn:tableColumn row:rowIndex];
+	if (![self _canEditTableColumn:tableColumn row:rowIndex]) return NO;
+	SPPostgresColumn *column = [self _columnForTableColumn:tableColumn];
+	if (!pickerHandoff && [SPPostgresDateTimePicker kindOfTypeName:[column typeName]] != SPPostgresTemporalNone) {
+		[self _editInDatePickerTableColumn:tableColumn row:rowIndex];
+		return NO;
+	}
+	return YES;
+}
+
+#pragma mark - Date / time picker
+
+/**
+ * Opens the date / time picker as a popover on a date or time cell (unless a picker or the field editor sheet is
+ * open). Its value is not saved: Set (or NULL, as the NULL placeholder) puts it into the cell's in-place editor, on
+ * this table only and on the row it was opened on where that row now is, and the cell stays being edited until Return
+ * saves it (or Escape drops it), as any in-cell edit. Cancel leaves the cell as it was, not being edited.
+ */
+- (void)_editInDatePickerTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
+{
+	if (invalidated || fieldEditorPending || [taskRunner isBusy]) return;
+	if (rowIndex < 0 || (NSUInteger)rowIndex >= [rows count]) return;
+	SPPostgresColumn *column = [self _columnForTableColumn:tableColumn];
+	if (!column) return;
+
+	NSArray *row = [rows objectAtIndex:(NSUInteger)rowIndex];
+	id value = [row objectAtIndex:(NSUInteger)[[tableColumn identifier] integerValue]];
+	SPPostgresTableData *data = tableData;
+	fieldEditorPending = YES;
+	[self retain]; // until the picker answers
+
+	SPPostgresDateTimePicker *picker = [[[SPPostgresDateTimePicker alloc] initWithValue:value typeName:[column typeName] allowNull:[column nullable] completion:^(id newValue) {
+		fieldEditorPending = NO;
+		if (!invalidated) [[tableView window] makeFirstResponder:tableView];
+		if (newValue && !invalidated && data == tableData && ![taskRunner isBusy]) {
+			NSUInteger index = (NSUInteger)rowIndex;
+			if (index >= [rows count] || ![[rows objectAtIndex:index] isEqual:row]) index = [rows indexOfObject:row];
+			NSInteger gridColumn = [tableView columnWithIdentifier:[tableColumn identifier]];
+			if (index != NSNotFound && gridColumn >= 0) {
+				NSString *text = [newValue isKindOfClass:[NSString class]] ? newValue : [self _nullPlaceholder];
+				pickerHandoff = YES;
+				[tableView editColumn:gridColumn row:(NSInteger)index withEvent:nil select:YES];
+				pickerHandoff = NO;
+				NSText *editor = [tableView currentEditor];
+				[editor setString:text];
+				[editor setSelectedRange:NSMakeRange([text length], 0)];
+			}
+		}
+		[self autorelease];
+	}] autorelease];
+	NSInteger columnIndex = [tableView columnWithIdentifier:[tableColumn identifier]];
+	[picker showRelativeToRect:[tableView frameOfCellAtColumn:columnIndex row:rowIndex] ofView:tableView];
 }
 
 /// Whether the cell can be edited now (never opens the sheet).

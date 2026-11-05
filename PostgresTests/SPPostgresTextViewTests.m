@@ -510,6 +510,79 @@ static const NSUInteger SPTextViewTestPort = 55418;
 	XCTAssertNotNil([self item:@"name" inSuggestions:suggestions]);
 }
 
+/// The names a provider gives for the alias tests: two tables and a view in the shown schema "public", with columns.
+- (void)useRelationColumnsProvider
+{
+	[self editor].completionNamesProvider = ^NSDictionary *{
+		return @{@"schemas": @[@"public", @"other"], @"schema": @"public",
+				 @"tables": @[@"orders", @"Order Items"], @"views": @[@"order_totals"],
+				 @"columns": @[@"content_col"],
+				 @"relationColumns": @{@"orders": @[@"id", @"customer", @"placed_at"],
+									   @"Order Items": @[@"order_id", @"sku", @"Qty"],
+									   @"order_totals": @[@"order_id", @"total"]}};
+	};
+}
+
+/// Browse-mode suggestions with the caret at the end of text, after qualifier.
+- (NSArray<NSString *> *)browseDisplaysFor:(NSString *)text qualifier:(NSString *)qualifier
+{
+	[[self editor] setString:text];
+	[[self editor] setSelectedRange:NSMakeRange([text length], 0)];
+	return [self displaysOf:[[self editor] suggestionsForSQLCompletionWith:@"" dictMode:NO browseMode:YES withTableName:qualifier withDbName:nil]];
+}
+
+- (void)testAliasDotCompletesTheAliasedTablesColumns
+{
+	[self useRelationColumnsProvider];
+	NSArray *orders = @[@"id", @"customer", @"placed_at"];
+
+	// The reported case: an alias in FROM, never the table list
+	XCTAssertEqualObjects([self browseDisplaysFor:@"SELECT * FROM orders a WHERE a." qualifier:@"a"], orders);
+	XCTAssertEqualObjects([self browseDisplaysFor:@"select * from orders a where a." qualifier:@"a"], orders);
+	// The alias defined after the caret (the select list is typed first); AS; upper-case use of the alias
+	XCTAssertEqualObjects([self browseDisplaysFor:@"SELECT A." qualifier:@"A"], (@[]), @"no FROM yet: nothing");
+	[[self editor] setString:@"SELECT o. FROM orders AS o"];
+	[[self editor] setSelectedRange:NSMakeRange(9, 0)];
+	XCTAssertEqualObjects([self displaysOf:[[self editor] suggestionsForSQLCompletionWith:@"" dictMode:NO browseMode:YES withTableName:@"O" withDbName:nil]], orders);
+	// JOIN, a quoted table name, a schema-qualified table
+	XCTAssertEqualObjects([self browseDisplaysFor:@"SELECT * FROM orders o JOIN \"Order Items\" i ON i." qualifier:@"i"], (@[@"order_id", @"sku", @"Qty"]));
+	XCTAssertEqualObjects([self browseDisplaysFor:@"SELECT * FROM orders o JOIN \"Order Items\" i ON o." qualifier:@"o"], orders);
+	XCTAssertEqualObjects([self browseDisplaysFor:@"SELECT * FROM public.order_totals t WHERE t." qualifier:@"t"], (@[@"order_id", @"total"]));
+	// The table's own name
+	XCTAssertEqualObjects([self browseDisplaysFor:@"SELECT orders." qualifier:@"orders"], orders);
+	XCTAssertEqualObjects([self browseDisplaysFor:@"SELECT \"Order Items\"." qualifier:@"Order Items"], (@[@"order_id", @"sku", @"Qty"]));
+	// Only the current statement's aliases
+	XCTAssertEqualObjects([self browseDisplaysFor:@"SELECT * FROM orders a;\nSELECT * FROM order_totals a WHERE a." qualifier:@"a"], (@[@"order_id", @"total"]));
+	// A keyword after the table is not an alias
+	XCTAssertEqualObjects([self browseDisplaysFor:@"SELECT * FROM orders WHERE where." qualifier:@"where"], (@[]));
+
+	// Unknown (a subquery's alias): nothing, never the tables
+	XCTAssertEqualObjects([self browseDisplaysFor:@"SELECT * FROM (SELECT 1 AS n) s WHERE s." qualifier:@"s"], (@[]));
+	// The shown schema: its tables and views; another schema: nothing held
+	XCTAssertEqualObjects([self browseDisplaysFor:@"SELECT * FROM public." qualifier:@"public"], (@[@"orders", @"Order Items", @"order_totals"]));
+	XCTAssertEqualObjects([self browseDisplaysFor:@"SELECT * FROM other." qualifier:@"other"], (@[]));
+
+	// The pop-up after "a." (Esc), inserting the column
+	[[self editor] setString:@"SELECT a. FROM orders a"];
+	[[self editor] setSelectedRange:NSMakeRange(9, 0)];
+	[[self editor] doCompletionByUsingSpellChecker:NO fuzzyMode:NO autoCompleteMode:NO];
+	NSWindow *popup = [self popupOfEditor:[self editor]];
+	XCTAssertNotNil(popup);
+	XCTAssertEqualObjects([self displaysOf:[popup valueForKey:@"suggestions"]], orders);
+	[self closePopup:popup];
+}
+
+- (void)testSuggestionsIncludeTheStatementsColumns
+{
+	[self useRelationColumnsProvider];
+	[[self editor] setString:@"SELECT * FROM orders o JOIN order_totals t ON t.order_id = o.id WHERE "];
+	[[self editor] setSelectedRange:NSMakeRange([[[self editor] string] length], 0)];
+	NSArray *displays = [self displaysOf:[self suggestionsFor:@""]];
+	for (NSString *column in @[@"customer", @"placed_at", @"total", @"content_col"]) XCTAssertTrue([displays containsObject:column], @"%@ in %@", column, displays);
+	XCTAssertFalse([displays containsObject:@"sku"], @"a table the statement doesn't name");
+	XCTAssertEqual([[displays filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"SELF == 'order_id'"]] count], 1u, @"once");
+}
+
 - (void)testCompletionListKinds
 {
 	[self editor].completionNamesProvider = ^NSDictionary *{
@@ -604,6 +677,20 @@ static const NSUInteger SPTextViewTestPort = 55418;
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	NSArray *columns = provider()[@"columns"];
 	XCTAssertTrue(columns.count == 0 || [columns isEqualToArray:(@[@"x", @"y"])], @"%@", columns);
+
+	// The shown schema's columns by table and view, read once the Query view is shown
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	names = provider();
+	XCTAssertEqualObjects(names[@"schema"], [self.document.sidebar selectedSchema]);
+	NSDictionary *relationColumns = names[@"relationColumns"];
+	XCTAssertEqualObjects(relationColumns[@"no_pk"], (@[@"x", @"y"]), @"%@", relationColumns);
+	XCTAssertTrue([relationColumns[@"items"] containsObject:@"name"], @"%@", relationColumns[@"items"]);
+	XCTAssertNotNil(relationColumns[@"items_view"], @"views too");
+	// Completion after an alias, in the tab
+	SPPostgresTextView *editor = [self documentEditor];
+	[editor setString:@"SELECT * FROM no_pk n WHERE n."];
+	[editor setSelectedRange:NSMakeRange([[editor string] length], 0)];
+	XCTAssertEqualObjects([self displaysOf:[editor suggestionsForSQLCompletionWith:@"" dictMode:NO browseMode:YES withTableName:@"n" withDbName:nil]], (@[@"x", @"y"]));
 
 	// Dropped with the controller
 	[self.document.queryController invalidate];
