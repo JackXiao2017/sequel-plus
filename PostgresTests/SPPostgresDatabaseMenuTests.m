@@ -9,6 +9,7 @@
 #import "../Source/Postgres/SPPostgresCatalog.h"
 #import "../Source/Postgres/SPPostgresErrors.h"
 #import "../Source/Postgres/SPPostgresNameSheet.h"
+#import "../Source/Postgres/SPPostgresSchemaSheet.h"
 #import "../Source/Postgres/SPPostgresServerListSheet.h"
 #import "../Source/Postgres/SPPostgresAlterDatabaseSheet.h"
 #import "../Source/Postgres/SPPostgresTaskRunner.h"
@@ -64,10 +65,12 @@ static const NSUInteger SPDatabaseMenuTestPort = 55418;
 		[self spinUntil:^BOOL{ return NO; } timeout:0.2];
 		[admin execute:[@"DROP DATABASE IF EXISTS " stringByAppendingString:[NSString stringWithFormat:@"\"%@\"", name]]];
 	}
-	// The role Alter Database's test gives a database to (it owns nothing once the databases are gone)
+	// The schemas the + by the schema pop-up adds (empty), before the role that may own them
+	PGPostgresConnection *testDatabase = [SPPostgresTestServers connectedConnectionOnPort:port database:@"pgkit_test"];
+	[testDatabase execute:@"DROP SCHEMA IF EXISTS sp_dbm_schema"];
+	[testDatabase execute:@"DROP SCHEMA IF EXISTS sp_dbm_owned"];
+	// The role Alter Database's and the schema owner tests give a database or schema to (it owns nothing by now)
 	[admin execute:@"DROP ROLE IF EXISTS sp_dbm_owner"];
-	// The schema the + by the schema pop-up adds (empty)
-	[[SPPostgresTestServers connectedConnectionOnPort:port database:@"pgkit_test"] execute:@"DROP SCHEMA IF EXISTS sp_dbm_schema"];
 }
 
 - (void)setUp
@@ -390,6 +393,41 @@ static const NSUInteger SPDatabaseMenuTestPort = 55418;
 	error = nil;
 	XCTAssertFalse([catalog createSchema:@"sp_dbm_schema" error:&error], @"it exists");
 	XCTAssertEqual(error.code, SPPostgresErrorQueryFailed);
+	XCTAssertEqualObjects([catalog ownerOfSchema:@"sp_dbm_schema" error:&error], @"pgkit_test", @"%@", error);
+
+	// Another owner, at creation and later
+	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPDatabaseMenuTestPort];
+	XCTAssertNotNil([admin execute:@"CREATE ROLE sp_dbm_owner NOLOGIN"], @"%@", admin.lastError.errorPrimaryMessage);
+	error = nil;
+	XCTAssertTrue([catalog createSchema:@"sp_dbm_owned" owner:@"sp_dbm_owner" error:&error], @"%@", error);
+	XCTAssertEqualObjects([catalog ownerOfSchema:@"sp_dbm_owned" error:&error], @"sp_dbm_owner", @"%@", error);
+	XCTAssertTrue([catalog setOwner:@"pgkit_test" ofSchema:@"sp_dbm_owned" error:&error], @"%@", error);
+	XCTAssertEqualObjects([catalog ownerOfSchema:@"sp_dbm_owned" error:&error], @"pgkit_test", @"%@", error);
+	XCTAssertTrue([catalog setOwner:@"sp_dbm_owner" ofSchema:@"sp_dbm_schema" error:&error], @"%@", error);
+	XCTAssertEqualObjects([catalog ownerOfSchema:@"sp_dbm_schema" error:&error], @"sp_dbm_owner");
+
+	// Errors: an unknown role, a schema that isn't there
+	error = nil;
+	XCTAssertFalse([catalog setOwner:@"sp_dbm_no_such_role" ofSchema:@"sp_dbm_owned" error:&error]);
+	XCTAssertEqual(error.code, SPPostgresErrorQueryFailed);
+	error = nil;
+	XCTAssertNil([catalog ownerOfSchema:@"sp_dbm_no_such_schema" error:&error]);
+	XCTAssertNotNil(error);
+}
+
+/// Fills in the open Add Schema sheet and presses Add.
+- (void)answerAddSchemaSheet:(NSString *)name owner:(NSString *)owner
+{
+	XCTAssertTrue([self spinUntil:^BOOL{ return [SPPostgresSchemaSheet currentSheet] != nil; } timeout:30]);
+	SPPostgresSchemaSheet *sheet = [SPPostgresSchemaSheet currentSheet];
+	XCTAssertFalse(sheet.editing);
+	sheet.nameField.stringValue = name;
+	[sheet controlTextDidChange:[NSNotification notificationWithName:NSControlTextDidChangeNotification object:sheet.nameField]];
+	if (owner) [sheet.ownerPopup selectItemWithTitle:owner];
+	[sheet validate];
+	XCTAssertTrue(sheet.actionButton.isEnabled, @"%@", name);
+	[sheet performAction:nil];
+	XCTAssertNil([SPPostgresSchemaSheet currentSheet]);
 }
 
 /// The + after the schema pop-up: a name sheet, CREATE SCHEMA, then the new schema listed and shown.
@@ -402,30 +440,51 @@ static const NSUInteger SPDatabaseMenuTestPort = 55418;
 	XCTAssertTrue(button.isEnabled);
 	NSPopUpButton *popup = [sidebar valueForKey:@"schemaPopup"];
 	XCTAssertEqual(button.superview, popup.superview);
-	XCTAssertGreaterThanOrEqual(NSMinX(button.frame), NSMaxX(popup.frame), @"after the pop-up");
+	NSButton *pencil = sidebar.editSchemaButton;
+	XCTAssertGreaterThanOrEqual(NSMinX(pencil.frame), NSMaxX(popup.frame), @"the pencil after the pop-up");
+	XCTAssertGreaterThanOrEqual(NSMinX(button.frame), NSMaxX(pencil.frame), @"the + after the pencil");
 	XCTAssertLessThanOrEqual(NSMaxX(button.frame), NSWidth(button.superview.bounds));
 	XCTAssertEqualWithAccuracy(NSMidY(button.frame), NSMidY(popup.frame), 1, @"on the pop-up's row");
 	XCTAssertEqualObjects(button.toolTip, @"Add a new schema");
 
-	// Cancel adds nothing
+	// The sheet: a name (Add needs one) and the owner, the connected user selected, among the server's roles
+	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPDatabaseMenuTestPort];
+	XCTAssertNotNil([admin execute:@"CREATE ROLE sp_dbm_owner NOLOGIN"], @"%@", admin.lastError.errorPrimaryMessage);
 	[button performClick:nil];
-	XCTAssertNotNil([SPPostgresNameSheet currentSheet]);
-	[[SPPostgresNameSheet currentSheet] cancel:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [SPPostgresSchemaSheet currentSheet] != nil; } timeout:30]);
+	SPPostgresSchemaSheet *sheet = [SPPostgresSchemaSheet currentSheet];
+	XCTAssertEqualObjects(sheet.sheet.title, @"Add Schema");
+	XCTAssertFalse(sheet.actionButton.isEnabled, @"no name yet");
+	XCTAssertEqualObjects(sheet.ownerPopup.titleOfSelectedItem, @"pgkit_test");
+	XCTAssertTrue([sheet.ownerPopup.itemTitles containsObject:@"sp_dbm_owner"]);
+	XCTAssertFalse([sheet.ownerPopup.itemTitles containsObject:@"pg_monitor"], @"built-in roles left out");
+
+	// Cancel adds nothing
+	[sheet cancel:nil];
 	XCTAssertTrue([self waitIdle]);
 	XCTAssertFalse([sidebar.schemaNames containsObject:@"sp_dbm_schema"]);
 
-	// Add: created, listed in the pop-up and shown
+	// Another owner: created owned by it
 	[button performClick:nil];
-	[self answerNameSheet:@"sp_dbm_schema"];
+	[self answerAddSchemaSheet:@"sp_dbm_owned" owner:@"sp_dbm_owner"];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [sidebar.selectedSchema isEqualToString:@"sp_dbm_owned"] && !self.document.isProcessing; } timeout:30], @"%@ %@", sidebar.selectedSchema, [self.alerts valueForKey:@"informativeText"]);
+	XCTAssertTrue([self waitIdle]);
+	SPPostgresCatalog *catalog = [[SPPostgresCatalog alloc] initWithConnection:[SPPostgresTestServers connectedConnectionOnPort:SPDatabaseMenuTestPort database:@"pgkit_test"]];
+	XCTAssertEqualObjects([catalog ownerOfSchema:@"sp_dbm_owned" error:NULL], @"sp_dbm_owner");
+
+	// Add: created, listed in the pop-up and shown, owned by the connected user
+	[button performClick:nil];
+	[self answerAddSchemaSheet:@"sp_dbm_schema" owner:nil];
 	XCTAssertTrue([self spinUntil:^BOOL{ return [sidebar.selectedSchema isEqualToString:@"sp_dbm_schema"] && !self.document.isProcessing; } timeout:30], @"%@ %@", sidebar.selectedSchema, [self.alerts valueForKey:@"informativeText"]);
 	XCTAssertTrue([self waitIdle]);
 	XCTAssertTrue([sidebar.schemaNames containsObject:@"sp_dbm_schema"]);
 	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"sp_dbm_schema");
 	XCTAssertEqual(self.alerts.count, 0u);
+	XCTAssertEqualObjects([catalog ownerOfSchema:@"sp_dbm_schema" error:NULL], @"pgkit_test");
 
 	// The same name again: the server's refusal is shown, the schema stays shown
 	[button performClick:nil];
-	[self answerNameSheet:@"sp_dbm_schema"];
+	[self answerAddSchemaSheet:@"sp_dbm_schema" owner:nil];
 	XCTAssertTrue([self spinUntil:^BOOL{ return self.alerts.count > 0; } timeout:30]);
 	XCTAssertTrue([self.alerts.firstObject.messageText containsString:@"sp_dbm_schema"], @"%@", self.alerts.firstObject.messageText);
 	XCTAssertTrue([self waitIdle]);
@@ -434,6 +493,71 @@ static const NSUInteger SPDatabaseMenuTestPort = 55418;
 	// Not while the tab is busy
 	sidebar.actionsEnabled = NO;
 	XCTAssertFalse(button.isEnabled);
+	sidebar.actionsEnabled = YES;
+}
+
+/// The pencil before the +: the shown schema's owner in a sheet; Save changes it.
+- (void)testEditSchemaButtonChangesOwner
+{
+	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPDatabaseMenuTestPort];
+	XCTAssertNotNil([admin execute:@"CREATE ROLE sp_dbm_owner NOLOGIN"], @"%@", admin.lastError.errorPrimaryMessage);
+	SPPostgresCatalog *catalog = [[SPPostgresCatalog alloc] initWithConnection:[SPPostgresTestServers connectedConnectionOnPort:SPDatabaseMenuTestPort database:@"pgkit_test"]];
+	NSError *error = nil;
+	XCTAssertTrue([catalog createSchema:@"sp_dbm_schema" error:&error], @"%@", error);
+
+	[self openDocument];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	[sidebar reloadSchema:@"sp_dbm_schema"];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [sidebar.selectedSchema isEqualToString:@"sp_dbm_schema"] && !self.document.isProcessing; } timeout:30]);
+	XCTAssertTrue([self waitIdle]);
+
+	NSButton *pencil = sidebar.editSchemaButton;
+	XCTAssertNotNil(pencil);
+	XCTAssertTrue(pencil.isEnabled);
+	XCTAssertNotNil(pencil.image);
+	XCTAssertEqualObjects(pencil.toolTip, @"Edit the schema's owner");
+
+	// The sheet: the schema's name (not editable), its owner selected; Save only for another owner
+	[pencil performClick:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [SPPostgresSchemaSheet currentSheet] != nil; } timeout:30]);
+	SPPostgresSchemaSheet *sheet = [SPPostgresSchemaSheet currentSheet];
+	XCTAssertTrue(sheet.editing);
+	XCTAssertEqualObjects(sheet.sheet.title, @"Edit Schema");
+	XCTAssertEqualObjects(sheet.nameField.stringValue, @"sp_dbm_schema");
+	XCTAssertFalse(sheet.nameField.isEditable);
+	XCTAssertEqualObjects(sheet.ownerPopup.titleOfSelectedItem, @"pgkit_test");
+	XCTAssertFalse(sheet.actionButton.isEnabled);
+
+	// Cancel changes nothing
+	[sheet.ownerPopup selectItemWithTitle:@"sp_dbm_owner"];
+	[sheet validate];
+	XCTAssertTrue(sheet.actionButton.isEnabled);
+	[sheet cancel:nil];
+	XCTAssertTrue([self waitIdle]);
+	XCTAssertEqualObjects([catalog ownerOfSchema:@"sp_dbm_schema" error:NULL], @"pgkit_test");
+
+	// Save: the new owner
+	[pencil performClick:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [SPPostgresSchemaSheet currentSheet] != nil; } timeout:30]);
+	sheet = [SPPostgresSchemaSheet currentSheet];
+	[sheet.ownerPopup selectItemWithTitle:@"sp_dbm_owner"];
+	[sheet validate];
+	[sheet performAction:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [[catalog ownerOfSchema:@"sp_dbm_schema" error:NULL] isEqualToString:@"sp_dbm_owner"]; } timeout:30]);
+	XCTAssertTrue([self waitIdle]);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts valueForKey:@"informativeText"]);
+	XCTAssertEqualObjects(sidebar.selectedSchema, @"sp_dbm_schema");
+
+	// The sheet now shows the new owner
+	[pencil performClick:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [SPPostgresSchemaSheet currentSheet] != nil; } timeout:30]);
+	XCTAssertEqualObjects([SPPostgresSchemaSheet currentSheet].ownerPopup.titleOfSelectedItem, @"sp_dbm_owner");
+	[[SPPostgresSchemaSheet currentSheet] cancel:nil];
+	XCTAssertTrue([self waitIdle]);
+
+	// Not while the tab is busy
+	sidebar.actionsEnabled = NO;
+	XCTAssertFalse(pencil.isEnabled);
 	sidebar.actionsEnabled = YES;
 }
 

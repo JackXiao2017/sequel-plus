@@ -14,6 +14,8 @@ Upgrading from 2.0.0-RC4.
 - The texts are kept in `~/Library/Application Support/Sequel Pro/Data/Query Scripts/`, one `.sql` file per connection.
 
 ### PostgreSQL connections
+- **Add Schema** (the **+** after the schema pop-up) also asks for the owner: a pop-up of the server's roles, with the connected user selected.
+- A pencil button before the **+** edits the shown schema's owner. **Save** changes it; if the server refuses, its message is shown.
 - With the **Database** field empty, a connection opens the `postgres` database. Before, it tried a database named after the user, which often doesn't exist.
 - Fixed: a favorite just added with the favorites **+** button, switched to PostgreSQL in the form, moved to Quick Connect. It now becomes a PostgreSQL favorite, stays selected and keeps what was typed. Other saved MySQL favorites still move their details to Quick Connect when switched.
 

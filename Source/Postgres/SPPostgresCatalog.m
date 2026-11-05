@@ -175,6 +175,11 @@ static BOOL SPPostgresCheckDatabaseName(NSString *name, NSError **error)
 
 - (BOOL)createSchema:(NSString *)name error:(NSError **)error
 {
+	return [self createSchema:name owner:nil error:error];
+}
+
+- (BOOL)createSchema:(NSString *)name owner:(NSString *)owner error:(NSError **)error
+{
 	NSUInteger bytes = [name lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
 	if (!bytes || bytes > 63) {
 		if (error) {
@@ -186,6 +191,24 @@ static BOOL SPPostgresCheckDatabaseName(NSString *name, NSError **error)
 		return NO;
 	}
 	NSString *sql = [@"CREATE SCHEMA " stringByAppendingString:SPPostgresQuoteIdentifier(name)];
+	if ([owner length]) sql = [sql stringByAppendingFormat:@" AUTHORIZATION %@", SPPostgresQuoteIdentifier(owner)];
+	return SPPostgresExecuteWithDetails(_connection, sql, nil, error) != nil;
+}
+
+- (NSString *)ownerOfSchema:(NSString *)schema error:(NSError **)error
+{
+	NSError *readError = nil;
+	NSArray *owners = [self firstColumnOf:@"SELECT pg_get_userbyid(n.nspowner)::text AS n FROM pg_catalog.pg_namespace n WHERE n.nspname = $1::text"
+								   values:@[schema ?: @""] error:&readError];
+	id owner = [owners firstObject];
+	if ([owner isKindOfClass:[NSString class]]) return owner;
+	if (error) *error = readError ?: SPPostgresMakeError(SPPostgresErrorQueryFailed, [NSString stringWithFormat:NSLocalizedString(@"The schema “%@” doesn't exist any more.", @"Postgres edit schema: schema gone"), schema], nil);
+	return nil;
+}
+
+- (BOOL)setOwner:(NSString *)owner ofSchema:(NSString *)schema error:(NSError **)error
+{
+	NSString *sql = [NSString stringWithFormat:@"ALTER SCHEMA %@ OWNER TO %@", SPPostgresQuoteIdentifier(schema ?: @""), SPPostgresQuoteIdentifier(owner ?: @"")];
 	return SPPostgresExecuteWithDetails(_connection, sql, nil, error) != nil;
 }
 

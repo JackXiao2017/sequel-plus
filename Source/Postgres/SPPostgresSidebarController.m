@@ -250,6 +250,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	// The bottom bar and the information pane (see -_buildButtonBarInView:)
 	NSButton *addButton;
 	NSButton *addSchemaButton;
+	NSButton *editSchemaButton;
 	NSPopUpButton *gearButton;
 	NSButton *refreshButton;
 	NSButton *infoToggleButton;
@@ -309,6 +310,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 @synthesize taskRunner;
 @synthesize addButton;
 @synthesize addSchemaButton;
+@synthesize editSchemaButton;
 @synthesize gearButton;
 @synthesize refreshButton;
 @synthesize infoToggleButton;
@@ -368,6 +370,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[gearExtensionMenu release];
 	[addButton release];
 	[addSchemaButton release];
+	[editSchemaButton release];
 	[gearButton release];
 	[refreshButton release];
 	[infoToggleButton release];
@@ -414,6 +417,7 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	SPPostgresSidebarClearMenuTargets(gearExtensionMenu);
 	[addButton setTarget:nil];
 	[addSchemaButton setTarget:nil];
+	[editSchemaButton setTarget:nil];
 	[gearButton setTarget:nil];
 	[refreshButton setTarget:nil];
 	[infoToggleButton setTarget:nil];
@@ -450,9 +454,9 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	[container addSubview:schemaLabel];
 
 	CGFloat popupX = NSMaxX([schemaLabel frame]) + 6;
-	// The + after the pop-up adds a schema
+	// After the pop-up: the pencil edits the shown schema, the + adds a schema
 	CGFloat addSchemaSize = 22;
-	schemaPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(popupX, barY + 5, NSWidth(frame) - popupX - 8 - addSchemaSize - 2, 22) pullsDown:NO];
+	schemaPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(popupX, barY + 5, NSWidth(frame) - popupX - 8 - 2 * addSchemaSize - 2, 22) pullsDown:NO];
 	[schemaPopup setControlSize:NSControlSizeSmall];
 	[schemaPopup setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
 	[schemaPopup setBezelStyle:NSBezelStyleRounded];
@@ -463,7 +467,22 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	[schemaPopup setToolTip:NSLocalizedString(@"Choose the schema whose tables and views are listed", @"PostgreSQL sidebar: schema picker tooltip")];
 	[container addSubview:schemaPopup];
 
-	addSchemaButton = [[NSButton alloc] initWithFrame:NSMakeRect(NSMaxX([schemaPopup frame]) + 2, barY + 5, addSchemaSize, 22)];
+	editSchemaButton = [[NSButton alloc] initWithFrame:NSMakeRect(NSMaxX([schemaPopup frame]) + 2, barY + 5, addSchemaSize, 22)];
+	[editSchemaButton setBezelStyle:NSBezelStyleRegularSquare];
+	[editSchemaButton setBordered:NO];
+	[editSchemaButton setButtonType:NSButtonTypeMomentaryChange];
+	NSImage *pencil = [NSImage imageWithSystemSymbolName:@"pencil" accessibilityDescription:NSLocalizedString(@"Edit schema", @"PostgreSQL sidebar: edit schema button accessibility")];
+	[pencil setTemplate:YES];
+	[editSchemaButton setImage:pencil];
+	[editSchemaButton setImagePosition:NSImageOnly];
+	[editSchemaButton setTitle:@""];
+	[editSchemaButton setToolTip:NSLocalizedString(@"Edit the schema's owner", @"PostgreSQL sidebar: edit schema button tooltip")];
+	[editSchemaButton setTarget:self];
+	[editSchemaButton setAction:@selector(editSchema:)];
+	[editSchemaButton setAutoresizingMask:NSViewMinXMargin | NSViewMinYMargin];
+	[container addSubview:editSchemaButton];
+
+	addSchemaButton = [[NSButton alloc] initWithFrame:NSMakeRect(NSMaxX([editSchemaButton frame]), barY + 5, addSchemaSize, 22)];
 	[addSchemaButton setBezelStyle:NSBezelStyleRegularSquare];
 	[addSchemaButton setBordered:NO];
 	[addSchemaButton setButtonType:NSButtonTypeMomentaryChange];
@@ -668,6 +687,7 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 {
 	[addButton setEnabled:actionsEnabled && [delegate respondsToSelector:@selector(sidebarAddTable:)]];
 	[addSchemaButton setEnabled:actionsEnabled && [delegate respondsToSelector:@selector(sidebarAddSchema:)]];
+	[editSchemaButton setEnabled:actionsEnabled && [delegate respondsToSelector:@selector(sidebarEditSchema:)]];
 	[gearButton setEnabled:actionsEnabled];
 	[refreshButton setEnabled:actionsEnabled];
 	[infoToggleButton setEnabled:YES];
@@ -699,6 +719,16 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 {
 	if (!actionsEnabled || invalidated) return;
 	if ([delegate respondsToSelector:@selector(sidebarAddSchema:)]) [delegate sidebarAddSchema:self];
+}
+
+- (IBAction)editSchema:(id)sender
+{
+	if (!actionsEnabled || invalidated) return;
+	if (![[self selectedSchema] length]) {
+		NSBeep();
+		return;
+	}
+	if ([delegate respondsToSelector:@selector(sidebarEditSchema:)]) [delegate sidebarEditSchema:self];
 }
 
 - (IBAction)refreshTables:(id)sender
