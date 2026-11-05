@@ -3619,6 +3619,50 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	}]];
 }
 
+#pragma mark - Add Schema
+
+/**
+ * The + after the schema pop-up: the shown pane's edits are saved, a sheet asks for the name, CREATE SCHEMA is sent,
+ * and the table list then lists and shows the new schema. A server error (e.g. the schema exists) is shown.
+ */
+- (void)sidebarAddSchema:(SPPostgresSidebarController *)theSidebar
+{
+	if (tornDown || !parentWindow || isProcessing || [parentWindow attachedSheet]) return;
+	if (![self _endPaneEditing]) return;
+	[SPPostgresNameSheet beginOnWindow:parentWindow
+								 title:NSLocalizedString(@"Add Schema", @"PostgreSQL add schema sheet title")
+							   message:[NSString stringWithFormat:NSLocalizedString(@"Enter the name of the new schema in database “%@”:", @"PostgreSQL add schema sheet message"), currentDatabase ?: @""]
+						   initialName:@""
+						   buttonTitle:NSLocalizedString(@"Add", @"add button")
+						  requiredText:nil
+							completion:^(NSString *name) {
+		if (name && !tornDown) [self _createSchema:name];
+	}];
+}
+
+- (void)_createSchema:(NSString *)name
+{
+	if ([self _refuseWriteWhileBusy]) return;
+	NSString *theName = [[name copy] autorelease];
+	[taskRunner runTaskWithDescription:NSLocalizedString(@"Adding schema...", @"PostgreSQL add schema task") cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		SPPostgresCatalog *writer = [[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease];
+		return [writer createSchema:theName error:error] ? @YES : nil;
+	} completion:^(id result, NSError *error, BOOL cancelled) {
+		if (tornDown || cancelled) return;
+		if (!result) {
+			[self _alertTitle:[NSString stringWithFormat:NSLocalizedString(@"Could not add the schema “%@”", @"PostgreSQL add schema failed"), theName] error:error];
+			return;
+		}
+		// The schema list is read again (with the new schema), then the new schema is shown
+		[self _whenIdle:^{
+			[sidebar reloadKeepingSelection:^(BOOL loaded) {
+				if (tornDown) return;
+				[self _whenIdle:^{ [sidebar reloadSchema:theName]; }];
+			}];
+		}];
+	}];
+}
+
 #pragma mark - Add Table
 
 /**

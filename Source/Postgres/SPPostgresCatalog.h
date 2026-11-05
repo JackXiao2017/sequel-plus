@@ -51,6 +51,11 @@ __attribute__((visibility("default")))
  */
 - (BOOL)createDatabase:(NSString *)name error:(NSError **)error;
 
+/// `CREATE SCHEMA <name>` in the connected database, owned by the connected user (the sidebar's + by the schema
+/// pop-up). An empty name, or one over 63 bytes in UTF-8, is refused with SPPostgresErrorInvalidSettings before
+/// anything is sent; a server error (e.g. the schema exists) is SPPostgresErrorQueryFailed with its message.
+- (BOOL)createSchema:(NSString *)name error:(NSError **)error;
+
 /// `CREATE DATABASE <name> TEMPLATE <source>` (Duplicate Database): the server refuses while any other session is
 /// connected to source. The name is checked as -createDatabase:error:'s.
 - (BOOL)copyDatabase:(NSString *)source toName:(NSString *)name error:(NSError **)error;

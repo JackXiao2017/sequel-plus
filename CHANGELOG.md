@@ -7,6 +7,7 @@ Upgrading from 2.0.0-RC3.
 ### New for PostgreSQL connections
 
 #### Table list
+- A **+** button after the schema pop-up adds a schema: enter its name and it's created in the open database, then shown. If the server refuses (for example, the schema already exists), its message is shown.
 - A **Filter** field under the schema pop-up shows only the tables, views, sequences and extensions whose names contain what you type. **Table ▸ Filter Tables** moves the cursor to it.
 - **TABLES**, **VIEWS**, **SEQUENCES** and **EXTENSIONS** can be collapsed and expanded. Each heading has its arrow at the front, always shown.
 - Every section starts collapsed when a schema opens. Selecting a table from elsewhere (history, Open Table in New Tab) opens its section.

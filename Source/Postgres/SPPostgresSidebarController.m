@@ -249,6 +249,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 	// The bottom bar and the information pane (see -_buildButtonBarInView:)
 	NSButton *addButton;
+	NSButton *addSchemaButton;
 	NSPopUpButton *gearButton;
 	NSButton *refreshButton;
 	NSButton *infoToggleButton;
@@ -307,6 +308,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 @synthesize tableMenu;
 @synthesize taskRunner;
 @synthesize addButton;
+@synthesize addSchemaButton;
 @synthesize gearButton;
 @synthesize refreshButton;
 @synthesize infoToggleButton;
@@ -365,6 +367,7 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	[gearSequenceMenu release];
 	[gearExtensionMenu release];
 	[addButton release];
+	[addSchemaButton release];
 	[gearButton release];
 	[refreshButton release];
 	[infoToggleButton release];
@@ -410,6 +413,7 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	SPPostgresSidebarClearMenuTargets(gearSequenceMenu);
 	SPPostgresSidebarClearMenuTargets(gearExtensionMenu);
 	[addButton setTarget:nil];
+	[addSchemaButton setTarget:nil];
 	[gearButton setTarget:nil];
 	[refreshButton setTarget:nil];
 	[infoToggleButton setTarget:nil];
@@ -446,7 +450,9 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	[container addSubview:schemaLabel];
 
 	CGFloat popupX = NSMaxX([schemaLabel frame]) + 6;
-	schemaPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(popupX, barY + 5, NSWidth(frame) - popupX - 8, 22) pullsDown:NO];
+	// The + after the pop-up adds a schema
+	CGFloat addSchemaSize = 22;
+	schemaPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(popupX, barY + 5, NSWidth(frame) - popupX - 8 - addSchemaSize - 2, 22) pullsDown:NO];
 	[schemaPopup setControlSize:NSControlSizeSmall];
 	[schemaPopup setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
 	[schemaPopup setBezelStyle:NSBezelStyleRounded];
@@ -456,6 +462,19 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	[schemaPopup setAction:@selector(chooseSchema:)];
 	[schemaPopup setToolTip:NSLocalizedString(@"Choose the schema whose tables and views are listed", @"PostgreSQL sidebar: schema picker tooltip")];
 	[container addSubview:schemaPopup];
+
+	addSchemaButton = [[NSButton alloc] initWithFrame:NSMakeRect(NSMaxX([schemaPopup frame]) + 2, barY + 5, addSchemaSize, 22)];
+	[addSchemaButton setBezelStyle:NSBezelStyleRegularSquare];
+	[addSchemaButton setBordered:NO];
+	[addSchemaButton setButtonType:NSButtonTypeMomentaryChange];
+	[addSchemaButton setImage:[NSImage imageNamed:NSImageNameAddTemplate]];
+	[addSchemaButton setImagePosition:NSImageOnly];
+	[addSchemaButton setTitle:@""];
+	[addSchemaButton setToolTip:NSLocalizedString(@"Add a new schema", @"PostgreSQL sidebar: add schema button tooltip")];
+	[addSchemaButton setTarget:self];
+	[addSchemaButton setAction:@selector(addSchema:)];
+	[addSchemaButton setAutoresizingMask:NSViewMinXMargin | NSViewMinYMargin];
+	[container addSubview:addSchemaButton];
 
 	// The filter field below it (MySQL's table list filter)
 	CGFloat filterY = barY - SPPostgresSidebarFilterBarHeight;
@@ -648,6 +667,7 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 - (void)_updateBarButtons
 {
 	[addButton setEnabled:actionsEnabled && [delegate respondsToSelector:@selector(sidebarAddTable:)]];
+	[addSchemaButton setEnabled:actionsEnabled && [delegate respondsToSelector:@selector(sidebarAddSchema:)]];
 	[gearButton setEnabled:actionsEnabled];
 	[refreshButton setEnabled:actionsEnabled];
 	[infoToggleButton setEnabled:YES];
@@ -673,6 +693,12 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 {
 	if (!actionsEnabled) return;
 	if ([delegate respondsToSelector:@selector(sidebarAddTable:)]) [delegate sidebarAddTable:self];
+}
+
+- (IBAction)addSchema:(id)sender
+{
+	if (!actionsEnabled || invalidated) return;
+	if ([delegate respondsToSelector:@selector(sidebarAddSchema:)]) [delegate sidebarAddSchema:self];
 }
 
 - (IBAction)refreshTables:(id)sender

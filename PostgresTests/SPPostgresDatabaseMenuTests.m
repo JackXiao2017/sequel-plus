@@ -66,6 +66,8 @@ static const NSUInteger SPDatabaseMenuTestPort = 55418;
 	}
 	// The role Alter Database's test gives a database to (it owns nothing once the databases are gone)
 	[admin execute:@"DROP ROLE IF EXISTS sp_dbm_owner"];
+	// The schema the + by the schema pop-up adds (empty)
+	[[SPPostgresTestServers connectedConnectionOnPort:port database:@"pgkit_test"] execute:@"DROP SCHEMA IF EXISTS sp_dbm_schema"];
 }
 
 - (void)setUp
@@ -369,6 +371,70 @@ static const NSUInteger SPDatabaseMenuTestPort = 55418;
 	XCTAssertFalse([document validateMenuItem:[self itemWithAction:@selector(addDatabase:)]]);
 	XCTAssertFalse([document validateMenuItem:[self itemWithAction:@selector(refreshTables:)]]);
 	XCTAssertTrue([self waitIdle]);
+}
+
+- (void)testCatalogCreatesSchemas
+{
+	PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:SPDatabaseMenuTestPort database:@"pgkit_test"];
+	SPPostgresCatalog *catalog = [[SPPostgresCatalog alloc] initWithConnection:connection];
+	NSError *error = nil;
+	XCTAssertFalse([catalog createSchema:@"" error:&error]);
+	XCTAssertEqual(error.code, SPPostgresErrorInvalidSettings);
+	error = nil;
+	XCTAssertFalse([catalog createSchema:[@"" stringByPaddingToLength:64 withString:@"s" startingAtIndex:0] error:&error]);
+	XCTAssertEqual(error.code, SPPostgresErrorInvalidSettings);
+
+	error = nil;
+	XCTAssertTrue([catalog createSchema:@"sp_dbm_schema" error:&error], @"%@", error);
+	XCTAssertTrue([[catalog schemaNames:&error] containsObject:@"sp_dbm_schema"], @"%@", error);
+	error = nil;
+	XCTAssertFalse([catalog createSchema:@"sp_dbm_schema" error:&error], @"it exists");
+	XCTAssertEqual(error.code, SPPostgresErrorQueryFailed);
+}
+
+/// The + after the schema pop-up: a name sheet, CREATE SCHEMA, then the new schema listed and shown.
+- (void)testAddSchemaButton
+{
+	[self openDocument];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	NSButton *button = sidebar.addSchemaButton;
+	XCTAssertNotNil(button);
+	XCTAssertTrue(button.isEnabled);
+	NSPopUpButton *popup = [sidebar valueForKey:@"schemaPopup"];
+	XCTAssertEqual(button.superview, popup.superview);
+	XCTAssertGreaterThanOrEqual(NSMinX(button.frame), NSMaxX(popup.frame), @"after the pop-up");
+	XCTAssertLessThanOrEqual(NSMaxX(button.frame), NSWidth(button.superview.bounds));
+	XCTAssertEqualWithAccuracy(NSMidY(button.frame), NSMidY(popup.frame), 1, @"on the pop-up's row");
+	XCTAssertEqualObjects(button.toolTip, @"Add a new schema");
+
+	// Cancel adds nothing
+	[button performClick:nil];
+	XCTAssertNotNil([SPPostgresNameSheet currentSheet]);
+	[[SPPostgresNameSheet currentSheet] cancel:nil];
+	XCTAssertTrue([self waitIdle]);
+	XCTAssertFalse([sidebar.schemaNames containsObject:@"sp_dbm_schema"]);
+
+	// Add: created, listed in the pop-up and shown
+	[button performClick:nil];
+	[self answerNameSheet:@"sp_dbm_schema"];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [sidebar.selectedSchema isEqualToString:@"sp_dbm_schema"] && !self.document.isProcessing; } timeout:30], @"%@ %@", sidebar.selectedSchema, [self.alerts valueForKey:@"informativeText"]);
+	XCTAssertTrue([self waitIdle]);
+	XCTAssertTrue([sidebar.schemaNames containsObject:@"sp_dbm_schema"]);
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"sp_dbm_schema");
+	XCTAssertEqual(self.alerts.count, 0u);
+
+	// The same name again: the server's refusal is shown, the schema stays shown
+	[button performClick:nil];
+	[self answerNameSheet:@"sp_dbm_schema"];
+	XCTAssertTrue([self spinUntil:^BOOL{ return self.alerts.count > 0; } timeout:30]);
+	XCTAssertTrue([self.alerts.firstObject.messageText containsString:@"sp_dbm_schema"], @"%@", self.alerts.firstObject.messageText);
+	XCTAssertTrue([self waitIdle]);
+	XCTAssertEqualObjects(sidebar.selectedSchema, @"sp_dbm_schema");
+
+	// Not while the tab is busy
+	sidebar.actionsEnabled = NO;
+	XCTAssertFalse(button.isEnabled);
+	sidebar.actionsEnabled = YES;
 }
 
 - (void)testAddRenameDuplicateAndDeleteDatabase
