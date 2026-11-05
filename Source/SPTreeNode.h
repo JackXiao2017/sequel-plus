@@ -60,5 +60,6 @@
 - (BOOL)isDescendantOfNodes:(nonnull NSArray *)nodes;
 
 - (nonnull NSDictionary *)dictionaryRepresentation;
+- (nullable NSDictionary *)mysqlDictionaryRepresentation;
 
 @end

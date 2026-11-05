@@ -47,6 +47,8 @@
 	
 	pthread_mutex_t writeLock;
 	pthread_mutex_t favoritesLock;
+
+	NSError *postgresFavoritesImportError;
 }
 
 /**
@@ -58,6 +60,12 @@
  * @property favoritesData Favorites data dictionary
  */
 @property (readonly) NSMutableDictionary *favoritesData;
+
+/**
+ * @property postgresFavoritesImportError Why the PostgreSQL favorites of the 2.0.0-RC builds (PostgresFavorites.plist)
+ *           could not be imported into the tree at launch (the file is then left as it is), or nil
+ */
+@property (readonly) NSError *postgresFavoritesImportError;
 
 + (SPFavoritesController *)sharedFavoritesController;
 

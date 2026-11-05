@@ -4,6 +4,16 @@
 
 Upgrading from 2.0.0-RC4.
 
+### Separate from Sequel Pro
+- Sequel Plus has its own app ID, `com.sequelplus.SequelPlus`, so its settings are kept apart from Sequel Pro's.
+- Its data (favorites, query history, bundles, themes, saved Query texts) is kept in `~/Library/Application Support/Sequel Plus`.
+- Its saved passwords are kept in the keychain as "Sequel Plus : …", "Sequel Plus SSHTunnel : …" and "Sequel Plus (PostgreSQL) : …".
+- The first launch copies everything over once:
+  - Sequel Pro's settings;
+  - its `~/Library/Application Support/Sequel Pro` folder, which includes the data of the RC builds;
+  - each saved password, to a new "Sequel Plus" keychain item. macOS asks to allow each one; choose **Always Allow**.
+- Sequel Pro's settings, folder and keychain items are only read, never changed. Afterwards the two apps don't share anything.
+
 ### New for MySQL and PostgreSQL connections
 
 #### Query editor keeps its SQL
@@ -11,7 +21,7 @@ Upgrading from 2.0.0-RC4.
 - Connecting again fills an empty Query editor with that connection's saved text. Text from an `.spf` file or **Open in New Tab** is never replaced.
 - A saved favorite has its own text, kept when the favorite is renamed or edited. A Quick Connect is matched by its host, port and user (and socket or SSH host).
 - Emptying the editor deletes the saved text. Two tabs on the same connection share it: the last one saved wins.
-- The texts are kept in `~/Library/Application Support/Sequel Pro/Data/Query Scripts/`, one `.sql` file per connection.
+- The texts are kept in `~/Library/Application Support/Sequel Plus/Data/Query Scripts/`, one `.sql` file per connection.
 
 ### PostgreSQL connections
 - **Add Schema** (the **+** after the schema pop-up) also asks for the owner: a pop-up of the server's roles, with the connected user selected.
@@ -19,13 +29,17 @@ Upgrading from 2.0.0-RC4.
 - With the **Database** field empty, a connection opens the `postgres` database. Before, it tried a database named after the user, which often doesn't exist.
 - Fixed: a favorite just added with the favorites **+** button, switched to PostgreSQL in the form, moved to Quick Connect. It now becomes a PostgreSQL favorite, stays selected and keeps what was typed. Other saved MySQL favorites still move their details to Quick Connect when switched.
 
+### Favorites
+- MySQL and PostgreSQL favorites are now saved together, in one favorites file (`Favorites.plist`). Groups, sorting and drag and drop work the same for both.
+- On first launch the PostgreSQL favorites of RC4 are moved into it, each where it was shown. The old `PostgresFavorites.plist` and `PostgresFavoritePlacements.plist` are kept as backups, renamed with `.imported` at the end.
+- Favorites export, favorites import and the **Default favorite** pop-up stay MySQL-only.
+
 ### App
 - Version **2.0.0**.
 
 ### Unchanged
 - **MySQL:** apart from the Query editor keeping its SQL, no changes to MySQL connections.
-- **Your data:** favorites, saved settings and data are kept from RC4.
-- **Bundle ID and data folder:** the app keeps the same bundle ID and the same `~/Library/Application Support/Sequel Pro` folder.
+- **Your data:** favorites, saved settings, passwords and data are carried over from RC4 (see "Separate from Sequel Pro").
 - **Updates:** checking for updates stays off.
 
 ## Sequel Plus 2.0.0-RC4
