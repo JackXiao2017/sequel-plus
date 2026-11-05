@@ -98,17 +98,12 @@ static BOOL isOSAtLeast10_7;
 	// it from guarded branches (see SPPostgresConnectionScreenAdapter.h).
 	SPPostgresConnectionScreenAdapter *postgresAdapter;
 
-	// YES while reloading for a change made elsewhere (another tab, another window, the store): the reload
-	// then doesn't save the Postgres favorites' layout, which could be older than the file's
-	BOOL reloadingForOutsideChange;
-
 	// The MySQL favorite just added with "+", while it stays selected: switching it to PostgreSQL turns it
 	// into a Postgres favorite (instead of leaving it for Quick Connect)
 	SPTreeNode *newMySQLFavoriteNode;
 }
 
 - (void)_loadPostgresFavoriteNode:(SPTreeNode *)node animating:(BOOL)animate;
-- (NSArray *)_displayedChildrenOfNode:(SPTreeNode *)node;
 - (void)_enableWindowToolbarItemsAfterConnecting;
 
 // Privately redeclare as read/write to get the synthesized setter
@@ -968,7 +963,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
  */
 - (IBAction)saveFavorite:(id)sender
 {
-	// PostgreSQL: saved to the Postgres favorites store, never to Favorites.plist
+	// PostgreSQL: saved by the adapter (as a PostgreSQL favorite of the favorites tree)
 	if ([postgresAdapter selectedEngine] == SPConnectionEnginePostgreSQL || [postgresAdapter isPostgresNode:[self selectedFavoriteNode]]) {
 		if ([[connectionView window] firstResponder]) [[connectionView window] endEditingFor:[[connectionView window] firstResponder]];
 		if ([postgresAdapter saveFormShowingErrors:NO]) {
@@ -1093,18 +1088,6 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
  */
 - (IBAction)addGroup:(id)sender
 {
-	// Groups are MySQL-only: with a Postgres favorite selected, add the group to the MySQL group the
-	// favorite is displayed in, where a MySQL favorite's sibling group would go
-	if ([postgresAdapter isPostgresNode:[self selectedFavoriteNode]]) {
-		SPTreeNode *groupParent = [postgresAdapter displayedParentOfNode:[self selectedFavoriteNode]];
-		[favoritesOutlineView expandItem:groupParent];
-		SPTreeNode *groupNode = [favoritesController addGroupNodeWithName:NSLocalizedString(@"New Folder", @"new folder placeholder name") asChildOfNode:groupParent];
-		[self _reloadFavoritesViewData];
-		[self _selectNode:groupNode];
-		[favoritesOutlineView editColumn:0 row:[favoritesOutlineView selectedRow] withEvent:nil select:YES];
-		return;
-	}
-
 	SPTreeNode *selectedNode = [self selectedFavoriteNode];
 	
 	SPTreeNode *parent = ([selectedNode isGroup] && selectedNode != quickConnectItem) ? selectedNode : (SPTreeNode *)[selectedNode parentNode];
@@ -1125,7 +1108,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
  */
 - (IBAction)removeNode:(id)sender
 {
-	// PostgreSQL favorite: removed from the Postgres store (after confirmation)
+	// PostgreSQL favorite: removed by the adapter (after confirmation), with its keychain items
 	if ([favoritesOutlineView numberOfSelectedRows] == 1 && [postgresAdapter isPostgresNode:[self selectedFavoriteNode]]) {
 		[postgresAdapter removeFavoriteNodeAfterConfirmation:[self selectedFavoriteNode]];
 		return;
@@ -1143,7 +1126,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 			message            = [NSString stringWithFormat:NSLocalizedString(@"Delete favorite '%@'?", @"delete database message"), [[[node representedObject] nodeFavorite] objectForKey:SPFavoriteNameKey]];
 			informativeMessage = [NSString stringWithFormat:NSLocalizedString(@"Are you sure you want to delete the favorite '%@'? This operation cannot be undone.", @"delete database informative message"), [[[node representedObject] nodeFavorite] objectForKey:SPFavoriteNameKey]];
 		}
-		else if ([[self _displayedChildrenOfNode:node] count] > 0) {
+		else if ([[node childNodes] count] > 0) {
 			message            = [NSString stringWithFormat:NSLocalizedString(@"Delete group '%@'?", @"delete database message"), [[node representedObject] nodeName]];
 			informativeMessage = [NSString stringWithFormat:NSLocalizedString(@"Are you sure you want to delete the group '%@'? All groups and favorites within this group will also be deleted. This operation cannot be undone.", @"delete database informative message"), [[node representedObject] nodeName]];
 		}
@@ -1183,7 +1166,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
  */
 - (IBAction)duplicateFavorite:(id)sender
 {
-	// PostgreSQL favorite: duplicated in the Postgres store
+	// PostgreSQL favorite: duplicated by the adapter, right after the original
 	if ([favoritesOutlineView numberOfSelectedRows] == 1 && [postgresAdapter isPostgresNode:[self selectedFavoriteNode]]) {
 		SPTreeNode *duplicateNode = [postgresAdapter duplicateFavoriteNode:[self selectedFavoriteNode]];
 		if (duplicateNode) {
@@ -1304,23 +1287,18 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 	// additional empty selection check
 	if(![[self selectedFavoriteNodes] count]) return;
 
-	// PostgreSQL: Postgres favorites are not exported (the export is MySQL's Favorites.plist format); nil
-	// exports the selection as before
-	NSArray *postgresFreeNodes = nil;
-	if ([postgresAdapter hasPostgresFavorites]) {
-		NSMutableArray *mysqlNodes = [NSMutableArray array];
-		for (SPTreeNode *selectedNode in [self selectedFavoriteNodes]) {
-			if (![postgresAdapter isPostgresNode:selectedNode]) [mysqlNodes addObject:selectedNode];
-		}
-		if (![mysqlNodes count]) return;
-		postgresFreeNodes = mysqlNodes;
+	// PostgreSQL: Postgres favorites are not exported (the export is MySQL-only), nor are those in a selected
+	// group (see SPFavoritesExporter)
+	NSMutableArray *mysqlNodes = [NSMutableArray array];
+	for (SPTreeNode *selectedNode in [self selectedFavoriteNodes]) {
+		if (![postgresAdapter isPostgresNode:selectedNode]) [mysqlNodes addObject:selectedNode];
 	}
+	if (![mysqlNodes count]) return;
 	
 	NSSavePanel *savePanel = [NSSavePanel savePanel];
 	
 	// suggest the name of the favorite or a default name for multiple selection
-	NSString *fileName = ([[self selectedFavoriteNodes] count] == 1)? [[(id<SPNamedNode>)[[self selectedFavoriteNode] representedObject] nodeName] stringByAppendingPathExtension:@"plist"] : nil;
-	if (postgresFreeNodes) fileName = ([postgresFreeNodes count] == 1) ? [[(id<SPNamedNode>)[[postgresFreeNodes objectAtIndex:0] representedObject] nodeName] stringByAppendingPathExtension:@"plist"] : nil;
+	NSString *fileName = ([mysqlNodes count] == 1)? [[(id<SPNamedNode>)[[mysqlNodes objectAtIndex:0] representedObject] nodeName] stringByAppendingPathExtension:@"plist"] : nil;
 	// This if() is so we can also catch nil due to favorite corruption (NSSavePanel will @throw if nil is passed in)
 	if(!fileName) fileName = SPExportFavoritesFilename;
 
@@ -1334,7 +1312,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 
 			[exporter setDelegate:self];
 
-			[exporter writeFavorites:(postgresFreeNodes ? postgresFreeNodes : [self selectedFavoriteNodes]) toFile:[[savePanel URL] path]];
+			[exporter writeFavorites:mysqlNodes toFile:[[savePanel URL] path]];
 		 }
 	 }];
 }
@@ -1707,10 +1685,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
  */
 - (void)_sortTreeNode:(SPTreeNode *)node usingKey:(NSString *)key
 {	
-	// PostgreSQL: with Postgres favorites, the displayed children (MySQL and Postgres favorites) are sorted together
-	BOOL sortsDisplayedChildren = [postgresAdapter hasPostgresFavorites];
-
-	NSMutableArray *nodes = sortsDisplayedChildren ? [[self _displayedChildrenOfNode:node] mutableCopy] : [[node mutableChildNodes] mutableCopy];
+	NSMutableArray *nodes = [[node mutableChildNodes] mutableCopy];
 	
 	// If this node only has one child and it's not another group node, don't bother proceeding
 	if (([nodes count] == 1) && (![[nodes objectAtIndex:0] isGroup])) {
@@ -1729,13 +1704,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 
 	if (reverseFavoritesSort) [nodes reverse];
 
-	// All of the displayed children, reordered
-	if (sortsDisplayedChildren) {
-		[postgresAdapter setDisplayedChildren:nodes ofGroup:node];
-	}
-	else {
-		[[node mutableChildNodes] setArray:nodes];
-	}
+	[[node mutableChildNodes] setArray:nodes];
 	
 	[nodes release];
 }
@@ -1818,10 +1787,6 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
  */
 - (void)_reloadFavoritesViewData
 {	
-	// PostgreSQL: place the Postgres favorites among the MySQL ones (saving where they are displayed now,
-	// unless the reload is for a change made elsewhere) before the outline asks for the displayed children
-	[postgresAdapter prepareOutlineWithMySQLSection:[self postgresMySQLSection] savingLayout:!reloadingForOutsideChange];
-
 	[favoritesOutlineView reloadData];
 	[favoritesOutlineView expandItem:[[favoritesRoot childNodes] objectAtIndex:0] expandChildren:NO];
 	
@@ -1934,10 +1899,6 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
  */
 - (void)_removeNode:(SPTreeNode *)node
 {
-	// PostgreSQL: a group's Postgres favorites (and their keychain items) go with it, while the group still
-	// says which they are
-	if ([node isGroup] && [postgresAdapter hasPostgresFavorites]) [postgresAdapter removePostgresFavoritesWithinGroup:node];
-
 	[self _removeAllPasswordsForNode:node];
 
 	[favoritesController removeFavoriteNode:node];
@@ -1966,6 +1927,12 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 		for (SPTreeNode *childNode in [node childNodes]) {
 			[self _removeAllPasswordsForNode:childNode];
 		}
+		return;
+	}
+
+	// PostgreSQL favorite: its own keychain items (it is no MySQL last used or default favorite)
+	if ([postgresAdapter isPostgresNode:node]) {
+		[postgresAdapter removeKeychainItemsOfPostgresFavoritesWithinNode:node];
 		return;
 	}
 
@@ -2020,6 +1987,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 
 	for (SPTreeNode *node in [favoritesRoot allChildLeafs]) 
 	{
+		// (a PostgreSQL favorite has no MySQL favorite dictionary, so never matches)
 		if ([[[[node representedObject] nodeFavorite] objectForKey:SPFavoriteIDKey] integerValue] == favoriteID) {
 			favoriteNode = node;
 		}
@@ -2791,8 +2759,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 		NSUInteger favCount = 0;
 		NSUInteger groupCount = 0;
 
-		// (with the Postgres favorites displayed in it)
-		for (SPTreeNode *eachNode in [self _displayedChildrenOfNode:node])
+		for (SPTreeNode *eachNode in [node childNodes])
 		{
 			if ([eachNode isGroup]) {
 				groupCount++;
@@ -2831,9 +2798,6 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 
 - (BOOL)outlineView:(NSOutlineView *)outlineView isItemExpandable:(id)item
 {
-	// PostgreSQL: a MySQL group holding only Postgres favorites has no childNodes, but expands
-	if ([postgresAdapter hasPostgresFavorites]) return (item != quickConnectItem && [[self _displayedChildrenOfNode:item] count] > 0);
-
 	return (item != quickConnectItem && ![item isLeaf]);
 }
 
@@ -2979,41 +2943,29 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 		node = [[favoritesRoot childNodes] objectAtIndex:0];
 	}
 
-	// PostgreSQL: with Postgres favorites the drop index is a displayed index, among MySQL and Postgres
-	// favorites; the layout moves the MySQL nodes in the MySQL tree and remembers where the Postgres ones are
-	if ([postgresAdapter hasPostgresFavorites]) {
-		[postgresAdapter moveNodes:draggedNodes toGroup:node displayedIndex:childIndex];
-	}
-	else {
-		// PostgreSQL: a Postgres node never enters the MySQL tree
-		for (SPTreeNode *treeNode in draggedNodes) {
-			if ([postgresAdapter isPostgresNode:treeNode]) return NO;
+	NSMutableArray *childNodeArray = [node mutableChildNodes];
+
+	for (SPTreeNode *treeNode in draggedNodes)
+	{
+		// Remove the node from its old location
+		NSInteger oldIndex = [childNodeArray indexOfObject:treeNode];
+		NSInteger newIndex = childIndex;
+
+		if (oldIndex != NSNotFound) {
+
+			[childNodeArray removeObjectAtIndex:oldIndex];
+
+			if (childIndex > oldIndex) {
+				newIndex--;
+			}
+		}
+		else {
+			[[[treeNode parentNode] mutableChildNodes] removeObject:treeNode];
 		}
 
-		NSMutableArray *childNodeArray = [node mutableChildNodes];
+		[childNodeArray insertObject:treeNode atIndex:newIndex];
 
-		for (SPTreeNode *treeNode in draggedNodes)
-		{
-			// Remove the node from its old location
-			NSInteger oldIndex = [childNodeArray indexOfObject:treeNode];
-			NSInteger newIndex = childIndex;
-
-			if (oldIndex != NSNotFound) {
-
-				[childNodeArray removeObjectAtIndex:oldIndex];
-
-				if (childIndex > oldIndex) {
-					newIndex--;
-				}
-			}
-			else {
-				[[[treeNode parentNode] mutableChildNodes] removeObject:treeNode];
-			}
-
-			[childNodeArray insertObject:treeNode atIndex:newIndex];
-
-			newIndex++;
-		}
+		newIndex++;
 	}
 
 	[favoritesController saveFavorites];
@@ -3231,8 +3183,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 
 	if ((action == @selector(sortFavorites:)) || (action == @selector(reverseSortFavorites:))) {
 
-		// (Postgres favorites are not leaves of the MySQL tree, but they are sorted with it)
-		if ([[favoritesRoot allChildLeafs] count] < 2 && ![postgresAdapter hasPostgresFavorites]) return NO;
+		if ([[favoritesRoot allChildLeafs] count] < 2) return NO;
 
 		// Loop all the items in the sort by menu only checking the currently selected one
 		for (NSMenuItem *item in [[menuItem menu] itemArray])
@@ -3321,7 +3272,8 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 	for (NSMutableDictionary *favorite in data)
 	{
 		newNode = [favoritesController addFavoriteNodeWithData:favorite asChildOfNode:nil];
-		[importedNodes addObject:newNode];
+		// (nil for a PostgreSQL favorite: favorites import is MySQL-only)
+		if (newNode) [importedNodes addObject:newNode];
 	}
 
 	if (currentSortItem > SPFavoritesSortUnsorted) {
@@ -3692,14 +3644,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 
 	NSArray *selectedFavoriteNodes = [self selectedFavoriteNodes];
 
-	// PostgreSQL: a change to the shared MySQL tree (e.g. a favorite or group deleted) saves the Postgres
-	// layout, snapshot against the changed tree, before it could be re-placed from the file and misplaced
-	BOOL savesPostgresLayout = ([aNotification object] == favoritesController && [postgresAdapter hasPostgresFavorites]);
-
-	BOOL wasReloadingForOutsideChange = reloadingForOutsideChange;
-	reloadingForOutsideChange = !savesPostgresLayout;
 	[self _reloadFavoritesViewData];
-	reloadingForOutsideChange = wasReloadingForOutsideChange;
 
 	NSMutableIndexSet *selectionIndexes = [NSMutableIndexSet indexSet];
 
@@ -3760,7 +3705,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 		return [[node childNodes] count] + 1;
 	}
 
-	return [[self _displayedChildrenOfNode:node] count];
+	return [[node childNodes] count];
 }
 
 /**
@@ -3780,10 +3725,9 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 		childIndex--;
 	}
 
-	// The root's children are the MySQL sections; a group's children are as displayed
-	if (!item) return NSArrayObjectAtIndex([favoritesRoot childNodes], childIndex);
+	SPTreeNode *node = (item == nil ? favoritesRoot : (SPTreeNode *)item);
 
-	return NSArrayObjectAtIndex([self _displayedChildrenOfNode:(SPTreeNode *)item], childIndex);
+	return NSArrayObjectAtIndex([node childNodes], childIndex);
 }
 
 - (id)outlineView:(NSOutlineView *)outlineView objectValueForTableColumn:(NSTableColumn *)tableColumn byItem:(id)item
@@ -3954,12 +3898,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 {
 	NSArray *selectedNodes = [self selectedFavoriteNodes];
 
-	// Synchronously, and without saving the layout: the adapter has just re-placed the favorites (from the
-	// file, for another window's change); saving the arrangement could overwrite a newer file
-	BOOL wasReloadingForOutsideChange = reloadingForOutsideChange;
-	reloadingForOutsideChange = YES;
 	[self _reloadFavoritesViewData];
-	reloadingForOutsideChange = wasReloadingForOutsideChange;
 
 	NSMutableIndexSet *selectionIndexes = [NSMutableIndexSet indexSet];
 	for (SPTreeNode *eachNode in selectedNodes) {
@@ -3971,9 +3910,9 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 
 - (void)postgresSelectOutlineItem:(id)item
 {
-	// Expand the groups it is displayed in, outermost first
+	// Expand the groups it is in, outermost first
 	NSMutableArray *ancestors = [NSMutableArray array];
-	for (SPTreeNode *parent = [postgresAdapter displayedParentOfNode:item]; parent && parent != favoritesRoot; parent = [postgresAdapter displayedParentOfNode:parent]) {
+	for (SPTreeNode *parent = (SPTreeNode *)[item parentNode]; parent && parent != favoritesRoot; parent = (SPTreeNode *)[parent parentNode]) {
 		[ancestors insertObject:parent atIndex:0];
 	}
 	for (SPTreeNode *ancestor in ancestors) [favoritesOutlineView expandItem:ancestor];
@@ -3985,28 +3924,16 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 	[self _scrollToSelectedNode];
 }
 
-- (SPTreeNode *)postgresMySQLSection
-{
-	return [[favoritesRoot childNodes] objectOrNilAtIndex:0];
-}
-
 - (SPTreeNode *)postgresGroupForNewFavorite
 {
+	// As a new MySQL favorite (-addFavorite:): the selected group, else the selected item's group, else the section
 	SPTreeNode *selectedNode = [self postgresSelectedOutlineItem];
-	if (!selectedNode || selectedNode == quickConnectItem) return [self postgresMySQLSection];
-	if ([selectedNode isGroup] && ![postgresAdapter isPostgresNode:selectedNode]) return selectedNode;
+	SPTreeNode *section = [[favoritesRoot childNodes] objectOrNilAtIndex:0];
+	if (!selectedNode || selectedNode == quickConnectItem) return section;
+	if ([selectedNode isGroup]) return selectedNode;
 
-	SPTreeNode *parent = [postgresAdapter displayedParentOfNode:selectedNode];
-	return parent ? parent : [self postgresMySQLSection];
-}
-
-/**
- * The children of `node` as the outline displays them: with Postgres favorites, its childNodes with the
- * Postgres favorites displayed there inserted; otherwise its childNodes.
- */
-- (NSArray *)_displayedChildrenOfNode:(SPTreeNode *)node
-{
-	return [postgresAdapter hasPostgresFavorites] ? [postgresAdapter displayedChildrenOfGroup:node] : [node childNodes];
+	SPTreeNode *parent = (SPTreeNode *)[selectedNode parentNode];
+	return (parent && parent != favoritesRoot) ? parent : section;
 }
 
 - (void)postgresSetConnecting:(BOOL)connecting

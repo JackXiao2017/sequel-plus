@@ -11,7 +11,7 @@ extern NSString * const SPQueryScriptEnginePostgreSQL __attribute__((visibility(
 __attribute__((visibility("default")))
 @interface SPQueryScriptStore : NSObject
 
-/// The store in ~/Library/Application Support/Sequel Pro/Data/Query Scripts.
+/// The store in ~/Library/Application Support/Sequel Plus/Data/Query Scripts.
 + (instancetype)sharedStore;
 
 - (instancetype)initWithDirectoryURL:(NSURL *)directoryURL;

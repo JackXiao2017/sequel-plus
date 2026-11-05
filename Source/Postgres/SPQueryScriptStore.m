@@ -1,4 +1,5 @@
 #import "SPQueryScriptStore.h"
+#import "SPSequelPlusMigration.h"
 #import <CommonCrypto/CommonDigest.h>
 
 NSString * const SPQueryScriptEngineMySQL = @"mysql";
@@ -20,9 +21,8 @@ static NSString *SPQueryScriptPart(NSString *value)
 	static SPQueryScriptStore *shared = nil;
 	static dispatch_once_t once;
 	dispatch_once(&once, ^{
-		NSURL *support = [[NSFileManager defaultManager] URLForDirectory:NSApplicationSupportDirectory inDomain:NSUserDomainMask appropriateForURL:nil create:NO error:NULL];
-		if (!support) support = [NSURL fileURLWithPath:[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support"] isDirectory:YES];
-		NSURL *directory = [[[support URLByAppendingPathComponent:@"Sequel Pro" isDirectory:YES]
+		NSURL *support = SPSequelPlusApplicationSupportURL(); // a temporary folder while the app hosts tests
+		NSURL *directory = [[[support URLByAppendingPathComponent:SPSequelPlusSupportFolderName isDirectory:YES]
 			URLByAppendingPathComponent:@"Data" isDirectory:YES] URLByAppendingPathComponent:@"Query Scripts" isDirectory:YES];
 		shared = [[SPQueryScriptStore alloc] initWithDirectoryURL:directory];
 	});

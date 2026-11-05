@@ -1338,10 +1338,8 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 		XCTAssertTrue([self.document validateToolbarItem:item]);
 		XCTAssertFalse(item.isBordered, @"as MySQL's");
 
-		// Clicking it opens the Transfer sheet (the favorites come from a test-owned store, never the real one)
-		NSString *storeDirectory = [self.directory stringByAppendingPathComponent:@"store"];
-		[[NSFileManager defaultManager] createDirectoryAtPath:storeDirectory withIntermediateDirectories:YES attributes:nil error:NULL];
-		SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initWithFileURL:[NSURL fileURLWithPath:[storeDirectory stringByAppendingPathComponent:@"PostgresFavorites.plist"]]];
+		// Clicking it opens the Transfer sheet (the favorites come from a test-owned in-memory store, never the real tree)
+		SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initInMemory];
 		Method shared = class_getClassMethod([SPPostgresFavoritesStore class], @selector(sharedStore));
 		IMP original = method_setImplementation(shared, imp_implementationWithBlock(^id(id me) { return store; }));
 		@try {

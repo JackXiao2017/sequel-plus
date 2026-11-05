@@ -10,6 +10,7 @@ NSString * const SPTestSelectLastFavoriteUsedKey = @"SelectLastFavoriteUsed";
 NSString * const SPTestDefaultFavoriteKey = @"DefaultFavorite";
 NSString * const SPTestSparkleAutomaticChecksKey = @"SUEnableAutomaticChecks";
 NSString * const SPTestWindowAnimationsKey = @"NSAutomaticWindowAnimationsEnabled";
+NSString * const SPTestAlwaysShowTabBarKey = @"WindowAlwaysShowTabBar";
 
 static const void *SPRequestedAutosaveKey = &SPRequestedAutosaveKey;
 static const void *SPRequestedAutosaveNameKey = &SPRequestedAutosaveNameKey;
@@ -141,6 +142,10 @@ static NSString *SPTestQueryStoreDirectory = nil;
 	// GCD worker that never finishes, so a full run exhausts the worker pool and blocks later dispatches (the task
 	// runner's cancel request among them)
 	domain[SPTestWindowAnimationsKey] = @NO;
+	// The window tab bar is always shown, so it never runs its show/hide animation: a test that frees its window
+	// controller right after closing a tab would otherwise leave that animation firing on the freed controller.
+	// (Before the app had its own ID, the runs inherited this setting from the owner's Sequel Pro preferences.)
+	domain[SPTestAlwaysShowTabBarKey] = @YES;
 	[prefs removeVolatileDomainForName:NSArgumentDomain];
 	[prefs setVolatileDomain:domain forName:NSArgumentDomain];
 

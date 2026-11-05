@@ -120,7 +120,7 @@
 
 - (NSString *)keychainName
 {
-	return [NSString stringWithFormat:@"Sequel Pro (PostgreSQL) : %@ (%@)", name ? name : @"", favoriteID];
+	return [NSString stringWithFormat:@"Sequel Plus (PostgreSQL) : %@ (%@)", name ? name : @"", favoriteID];
 }
 
 - (NSString *)keychainAccount
@@ -130,7 +130,7 @@
 
 - (NSString *)sshKeychainName
 {
-	return [NSString stringWithFormat:@"Sequel Pro (PostgreSQL) SSHTunnel : %@ (%@)", name ? name : @"", favoriteID];
+	return [NSString stringWithFormat:@"Sequel Plus (PostgreSQL) SSHTunnel : %@ (%@)", name ? name : @"", favoriteID];
 }
 
 - (NSString *)sshKeychainAccount

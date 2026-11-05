@@ -8,7 +8,8 @@ typedef NS_ENUM(NSInteger, SPPostgresConnectionType) {
 
 /**
  * A saved PostgreSQL connection. Passwords are never stored here; they live in the
- * Keychain under names starting with "Sequel Pro (PostgreSQL)".
+ * Keychain under names starting with "Sequel Plus (PostgreSQL)". Saved in the favorites tree
+ * (Favorites.plist) through SPPostgresFavoriteNode.
  */
 __attribute__((visibility("default")))
 @interface SPPostgresFavorite : NSObject <NSCopying>

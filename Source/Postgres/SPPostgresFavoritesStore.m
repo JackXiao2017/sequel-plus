@@ -1,24 +1,47 @@
 #import "SPPostgresFavoritesStore.h"
 #import "SPPostgresFavorite.h"
+#import "SPPostgresFavoriteNode.h"
+#import "SPFavoritesController.h"
+#import "SPTreeNode.h"
+#import "SPGroupNode.h"
+#import "SPConstants.h"
 
 NSString * const SPPostgresFavoritesDidChangeNotification = @"SPPostgresFavoritesDidChangeNotification";
 
+static NSString * const SPPostgresFavoritesStoreErrorDomain = @"SPPostgresFavoritesStoreErrorDomain";
+
 @implementation SPPostgresFavoritesStore {
-	NSURL *fileURL;
-	NSError *lastLoadError;
+	SPTreeNode *(^sectionProvider)(void);
+	BOOL (^saveHandler)(void);
+	NSError *(^loadErrorProvider)(void);
+	SPTreeNode *inMemoryRoot; // -initInMemory only
 }
 
-- (instancetype)initWithFileURL:(NSURL *)url
+- (instancetype)initWithSectionProvider:(SPTreeNode *(^)(void))theSectionProvider
+                            saveHandler:(BOOL (^)(void))theSaveHandler
+                      loadErrorProvider:(NSError *(^)(void))theLoadErrorProvider
 {
 	if ((self = [super init])) {
-		fileURL = [url copy];
+		sectionProvider = [theSectionProvider copy];
+		saveHandler = [theSaveHandler copy];
+		loadErrorProvider = [theLoadErrorProvider copy];
 	}
 	return self;
 }
 
-- (NSURL *)fileURL
+- (instancetype)initInMemory
 {
-	return fileURL;
+	// As SPFavoritesController's tree: an invisible root whose first child is the FAVORITES section
+	SPTreeNode *root = [SPTreeNode treeNodeWithRepresentedObject:[SPGroupNode groupNodeWithName:nil]];
+	SPTreeNode *section = [SPTreeNode treeNodeWithRepresentedObject:[SPGroupNode groupNodeWithName:@"FAVORITES"]];
+	[root setIsGroup:YES];
+	[section setIsGroup:YES];
+	[[root mutableChildNodes] addObject:section];
+
+	if ((self = [self initWithSectionProvider:^SPTreeNode *{ return section; } saveHandler:^BOOL{ return YES; } loadErrorProvider:nil])) {
+		inMemoryRoot = [root retain];
+	}
+	return self;
 }
 
 + (instancetype)sharedStore
@@ -26,133 +49,152 @@ NSString * const SPPostgresFavoritesDidChangeNotification = @"SPPostgresFavorite
 	static SPPostgresFavoritesStore *shared = nil;
 	static dispatch_once_t once;
 	dispatch_once(&once, ^{
-		NSURL *support = [[NSFileManager defaultManager] URLForDirectory:NSApplicationSupportDirectory
-																inDomain:NSUserDomainMask
-													   appropriateForURL:nil
-																  create:NO
-																   error:NULL];
-		if (!support) support = [NSURL fileURLWithPath:[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support"] isDirectory:YES];
-		NSURL *url = [[[support URLByAppendingPathComponent:@"Sequel Pro" isDirectory:YES]
-			URLByAppendingPathComponent:@"Data" isDirectory:YES] URLByAppendingPathComponent:@"PostgresFavorites.plist"];
-		shared = [[SPPostgresFavoritesStore alloc] initWithFileURL:url];
+		shared = [[SPPostgresFavoritesStore alloc] initWithSectionProvider:^SPTreeNode *{
+			NSArray *sections = [[[SPFavoritesController sharedFavoritesController] favoritesTree] childNodes];
+			return [sections count] ? [sections objectAtIndex:0] : nil;
+		} saveHandler:^BOOL{
+			SPFavoritesController *controller = [SPFavoritesController sharedFavoritesController];
+			[controller saveFavorites];
+			// Every connection screen shows the same tree: they reload (as for a MySQL favorite added or removed)
+			[[NSNotificationCenter defaultCenter] postNotificationName:SPConnectionFavoritesChangedNotification object:controller];
+			return YES;
+		} loadErrorProvider:^NSError *{
+			return [[SPFavoritesController sharedFavoritesController] postgresFavoritesImportError];
+		}];
 	});
 	return shared;
 }
 
 - (void)dealloc
 {
-	[fileURL release];
-	[lastLoadError release];
+	[sectionProvider release];
+	[saveHandler release];
+	[loadErrorProvider release];
+	[inMemoryRoot release];
 	[super dealloc];
 }
 
-// Returns the raw stored dictionaries (unsorted). A missing file yields an empty array.
-// Returns nil (with *error set) if the file exists but is unreadable, corrupt, not the expected
-// structure, or has a newer version than this code understands.
-- (NSMutableArray *)loadRawFavoritesError:(NSError **)error
-{
-	NSMutableArray *result = [NSMutableArray array];
-	if (![fileURL checkResourceIsReachableAndReturnError:NULL]) return result;
+#pragma mark - Reading
 
-	NSString *problem = nil;
-	NSDictionary *root = [NSDictionary dictionaryWithContentsOfURL:fileURL];
-	if (![root isKindOfClass:[NSDictionary class]]) {
-		problem = @"The file could not be read or is not a valid favorites property list.";
-	} else {
-		id version = [root objectForKey:@"version"];
-		id items = [root objectForKey:@"favorites"];
-		if (![version isKindOfClass:[NSNumber class]] || ![items isKindOfClass:[NSArray class]]) {
-			problem = @"The file does not have the expected structure.";
-		} else if ([version integerValue] > 1) {
-			problem = [NSString stringWithFormat:@"The file uses version %@, which is newer than this version of the application supports.", version];
-		} else {
-			for (id item in items) {
-				if ([item isKindOfClass:[NSDictionary class]]) [result addObject:item];
-			}
-		}
-	}
-	if (problem) {
-		if (error) {
-			*error = [NSError errorWithDomain:@"SPPostgresFavoritesStoreErrorDomain" code:1 userInfo:
-				[NSDictionary dictionaryWithObjectsAndKeys:
-					[NSString stringWithFormat:@"Cannot use PostgreSQL favorites file \"%@\". %@ It was left untouched.", [fileURL path], problem], NSLocalizedDescriptionKey, nil]];
-		}
-		return nil;
-	}
-	return result;
+- (SPTreeNode *)section
+{
+	return sectionProvider ? sectionProvider() : nil;
 }
 
-- (NSError *)lastLoadError
+- (NSArray *)favoriteNodes
 {
-	return [[lastLoadError retain] autorelease];
+	NSMutableArray *nodes = [NSMutableArray array];
+	for (SPTreeNode *node in [[self section] descendants]) {
+		if (SPPostgresFavoriteForNode(node)) [nodes addObject:node];
+	}
+	return nodes;
 }
 
 - (NSArray *)favorites
 {
-	NSError *error = nil;
-	NSArray *raw = [self loadRawFavoritesError:&error];
-	[lastLoadError release];
-	lastLoadError = raw ? nil : [error retain];
-
 	NSMutableArray *list = [NSMutableArray array];
-	for (NSDictionary *d in raw ?: @[]) {
-		SPPostgresFavorite *f = [SPPostgresFavorite favoriteWithDictionary:d];
-		if (f) [list addObject:f];
-	}
+	for (SPTreeNode *node in [self favoriteNodes]) [list addObject:[[SPPostgresFavoriteForNode(node) copy] autorelease]];
 	[list sortUsingComparator:^NSComparisonResult(SPPostgresFavorite *a, SPPostgresFavorite *b) {
 		return [(a.name ? a.name : @"") caseInsensitiveCompare:(b.name ? b.name : @"")];
 	}];
 	return list;
 }
 
-- (BOOL)writeRawFavorites:(NSArray *)raw error:(NSError **)error
+- (SPTreeNode *)nodeForFavoriteID:(NSString *)favoriteID
 {
-	NSError *dirError = nil;
-	if (![[NSFileManager defaultManager] createDirectoryAtURL:[fileURL URLByDeletingLastPathComponent]
-									withIntermediateDirectories:YES
-													 attributes:nil
-														  error:&dirError]) {
-		if (error) *error = dirError;
+	if (![favoriteID length]) return nil;
+	for (SPTreeNode *node in [[self section] descendants]) {
+		if ([[SPPostgresFavoriteForNode(node) favoriteID] isEqualToString:favoriteID]) return node;
+	}
+	return nil;
+}
+
+- (NSError *)lastLoadError
+{
+	return loadErrorProvider ? loadErrorProvider() : nil;
+}
+
+#pragma mark - Changes
+
+/// Saves the tree; on success tells observers.
+- (BOOL)_saveError:(NSError **)error
+{
+	if (saveHandler && !saveHandler()) {
+		if (error) {
+			*error = [NSError errorWithDomain:SPPostgresFavoritesStoreErrorDomain code:2 userInfo:@{
+				NSLocalizedDescriptionKey: NSLocalizedString(@"The favorites could not be saved", @"PostgreSQL favorites save failed title"),
+				NSLocalizedRecoverySuggestionErrorKey: NSLocalizedString(@"The favorites file could not be written.", @"PostgreSQL favorites save failed message")
+			}];
+		}
 		return NO;
 	}
+	[[NSNotificationCenter defaultCenter] postNotificationName:SPPostgresFavoritesDidChangeNotification object:self];
+	return YES;
+}
 
-	NSDictionary *root = [NSDictionary dictionaryWithObjectsAndKeys:@1, @"version", raw, @"favorites", nil];
-	BOOL ok;
-	if (@available(macOS 10.13, *)) {
-		ok = [root writeToURL:fileURL error:error];  // atomic
-	} else {
-		ok = [root writeToURL:fileURL atomically:YES];
-		if (!ok && error) *error = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteUnknownError userInfo:nil];
+- (NSError *)_noTreeError
+{
+	return [NSError errorWithDomain:SPPostgresFavoritesStoreErrorDomain code:3 userInfo:@{
+		NSLocalizedDescriptionKey: NSLocalizedString(@"The favorites could not be saved", @"PostgreSQL favorites save failed title"),
+		NSLocalizedRecoverySuggestionErrorKey: NSLocalizedString(@"The favorites could not be loaded.", @"PostgreSQL favorites: no favorites tree")
+	}];
+}
+
+- (SPTreeNode *)addFavorite:(SPPostgresFavorite *)favorite toGroup:(SPTreeNode *)group atIndex:(NSUInteger)index error:(NSError **)error
+{
+	SPTreeNode *section = [self section];
+	if (!favorite || !section) {
+		if (error) *error = [self _noTreeError];
+		return nil;
 	}
-	if (ok) {
-		[[NSNotificationCenter defaultCenter] postNotificationName:SPPostgresFavoritesDidChangeNotification object:self];
+	if (![group isKindOfClass:[SPTreeNode class]] || ![group isGroup] || SPPostgresFavoriteForNode(group)
+		|| (group != section && ![[section descendants] containsObject:group])) {
+		group = section;
+		index = NSNotFound; // (an index in another group)
 	}
-	return ok;
+
+	SPTreeNode *node = [SPPostgresFavoriteNode treeNodeWithFavorite:[[favorite copy] autorelease]];
+	NSMutableArray *children = [group mutableChildNodes];
+	[children insertObject:node atIndex:MIN(index, [children count])];
+
+	if (![self _saveError:error]) {
+		[children removeObjectIdenticalTo:node];
+		return nil;
+	}
+	return node;
 }
 
 - (BOOL)saveFavorite:(SPPostgresFavorite *)favorite error:(NSError **)error
 {
-	NSMutableArray *raw = [self loadRawFavoritesError:error];
-	if (!raw) return NO;
-	NSDictionary *dict = [favorite dictionaryRepresentation];
-	NSUInteger index = NSNotFound;
-	for (NSUInteger i = 0; i < [raw count]; i++) {
-		if ([[[raw objectAtIndex:i] objectForKey:@"id"] isEqual:favorite.favoriteID]) { index = i; break; }
+	SPTreeNode *node = [self nodeForFavoriteID:[favorite favoriteID]];
+	if (!node) return [self addFavorite:favorite toGroup:nil atIndex:NSNotFound error:error] != nil;
+
+	SPPostgresFavoriteNode *represented = [node representedObject];
+	SPPostgresFavorite *previous = [[[represented favorite] retain] autorelease];
+	[represented setFavorite:[[favorite copy] autorelease]];
+
+	if (![self _saveError:error]) {
+		[represented setFavorite:previous];
+		return NO;
 	}
-	if (index == NSNotFound) [raw addObject:dict];
-	else [raw replaceObjectAtIndex:index withObject:dict];
-	return [self writeRawFavorites:raw error:error];
+	return YES;
 }
 
 - (BOOL)removeFavoriteWithID:(NSString *)favoriteID error:(NSError **)error
 {
-	NSMutableArray *raw = [self loadRawFavoritesError:error];
-	if (!raw) return NO;
-	NSIndexSet *matches = [raw indexesOfObjectsPassingTest:^BOOL(NSDictionary *d, NSUInteger idx, BOOL *stop) {
-		return [[d objectForKey:@"id"] isEqual:favoriteID];
-	}];
-	[raw removeObjectsAtIndexes:matches];
-	return [self writeRawFavorites:raw error:error];
+	SPTreeNode *node = [[[self nodeForFavoriteID:favoriteID] retain] autorelease];
+	if (!node) return YES;
+
+	SPTreeNode *parent = (SPTreeNode *)[node parentNode];
+	NSMutableArray *siblings = [parent mutableChildNodes];
+	NSUInteger index = [siblings indexOfObjectIdenticalTo:node];
+	[siblings removeObjectAtIndex:index];
+
+	if (![self _saveError:error]) {
+		[siblings insertObject:node atIndex:index];
+		return NO;
+	}
+	return YES;
 }
 
 @end
