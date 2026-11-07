@@ -56,6 +56,17 @@ __attribute__((visibility("default")))
 /// anything is sent; a server error (e.g. the schema exists) is SPPostgresErrorQueryFailed with its message.
 - (BOOL)createSchema:(NSString *)name error:(NSError **)error;
 
+/// As -createSchema:error:, owned by `owner` (`CREATE SCHEMA <name> AUTHORIZATION <owner>`); nil or empty: the
+/// connected user. The server allows another owner to members of that role and to superusers.
+- (BOOL)createSchema:(NSString *)name owner:(NSString *)owner error:(NSError **)error;
+
+/// The schema's owner; nil with *error when it can't be read or doesn't exist.
+- (NSString *)ownerOfSchema:(NSString *)schema error:(NSError **)error;
+
+/// `ALTER SCHEMA <schema> OWNER TO <owner>`: the server allows it to the owner (when a member of the new owner, with
+/// CREATE on the database) and to superusers.
+- (BOOL)setOwner:(NSString *)owner ofSchema:(NSString *)schema error:(NSError **)error;
+
 /// `CREATE DATABASE <name> TEMPLATE <source>` (Duplicate Database): the server refuses while any other session is
 /// connected to source. The name is checked as -createDatabase:error:'s.
 - (BOOL)copyDatabase:(NSString *)source toName:(NSString *)name error:(NSError **)error;

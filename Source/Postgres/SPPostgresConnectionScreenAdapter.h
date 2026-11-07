@@ -3,7 +3,6 @@
 @class SPPostgresDocument;
 @class SPPostgresFavorite;
 @class SPPostgresFavoritesStore;
-@class SPPostgresFavoritePlacementsStore;
 @class SPTreeNode;
 
 typedef NS_ENUM(NSInteger, SPConnectionEngine) {
@@ -58,6 +57,10 @@ typedef NS_ENUM(NSInteger, SPConnectionEngine) {
 - (id)postgresSelectedOutlineItem;
 /// YES for a saved MySQL favorite leaf (not Quick Connect, not a group).
 - (BOOL)postgresItemIsSavedMySQLFavorite:(id)item;
+/// YES for the MySQL favorite just added with the favorites "+" button, while it is still the one selected.
+- (BOOL)postgresItemIsNewMySQLFavorite:(id)item;
+/// Removes a MySQL favorite from the MySQL favorites (the host's own removal, as its "-" button does).
+- (void)postgresRemoveMySQLFavorite:(id)item;
 - (void)selectQuickConnectItem;
 /// The Postgres favorites changed: reload the outline, keeping the selection.
 - (void)postgresFavoritesDidChange;
@@ -67,9 +70,8 @@ typedef NS_ENUM(NSInteger, SPConnectionEngine) {
 - (void)postgresSetConnecting:(BOOL)connecting;
 /// Show the result of "Test connection" in the form's status text.
 - (void)postgresShowTestResult:(NSString *)result;
-/// The FAVORITES section node (first child of the MySQL favorites tree).
-- (SPTreeNode *)postgresMySQLSection;
-/// Where a new Postgres favorite goes: the selected group, else the selected item's displayed parent, else the section.
+/// Where a new Postgres favorite goes, as a new MySQL favorite: the selected group, else the selected item's
+/// group, else the FAVORITES section.
 - (SPTreeNode *)postgresGroupForNewFavorite;
 
 @end
@@ -90,11 +92,10 @@ typedef NS_ENUM(NSInteger, SPConnectionEngine) {
  *
  * - The engine choice: a centred MySQL / PostgreSQL segmented control above the TCP/IP | Socket | SSH
  *   tabs. With PostgreSQL chosen, empty port fields show 5432.
- * - Postgres favorites in the one FAVORITES list, placed among the MySQL favorites and groups by an
- *   SPPostgresFavoritesLayout. The MySQL tree is never given a Postgres node: the nodes belong to a hidden
- *   holder node, and where each is displayed is remembered in PostgresFavoritePlacements.plist. The
- *   favorites come from SPPostgresFavoritesStore (never Favorites.plist); passwords use the
- *   "Sequel Pro (PostgreSQL)" keychain names.
+ * - Postgres favorites in the one FAVORITES list: they are favorites of the one favorites tree (saved to
+ *   Favorites.plist with the MySQL favorites and groups), leaves whose represented object is an
+ *   SPPostgresFavoriteNode. The adapter changes them through an SPPostgresFavoritesStore; groups, drag and drop
+ *   and sorting are MySQL's own code. Passwords use the "Sequel Plus (PostgreSQL)" keychain names.
  * - Connecting: on success the connection screen's tab becomes an SPPostgresDocument tab (see
  *   -postgresReplaceConnectionTabWithDocument:); no window is opened. On failure the error is shown as a
  *   sheet and the tab stays on its connection screen.
@@ -104,12 +105,9 @@ typedef NS_ENUM(NSInteger, SPConnectionEngine) {
 __attribute__((visibility("default")))
 @interface SPPostgresConnectionScreenAdapter : NSObject
 
-/// `controller` is normally the SPConnectionController (not retained).
-/// The placements store is the one beside `store`'s file (+[SPPostgresFavoritePlacementsStore storeBesideFavoritesStore:]).
+/// `controller` is normally the SPConnectionController (not retained). `store`: the Postgres favorites of the
+/// favorites tree (+[SPPostgresFavoritesStore sharedStore]).
 - (instancetype)initWithConnectionController:(id <SPPostgresConnectionScreenHost>)controller store:(SPPostgresFavoritesStore *)store;
-- (instancetype)initWithConnectionController:(id <SPPostgresConnectionScreenHost>)controller
-                                       store:(SPPostgresFavoritesStore *)store
-                             placementsStore:(SPPostgresFavoritePlacementsStore *)placementsStore;
 
 /// Defaults to an SPKeychain.
 @property (nonatomic, retain) id <SPPostgresKeychainAccess> keychain;
@@ -144,28 +142,14 @@ __attribute__((visibility("default")))
 
 #pragma mark Outline
 
-/// YES when the store has Postgres favorites (whether or not the outline was prepared yet).
+/// YES when the tree has Postgres favorites.
 - (BOOL)hasPostgresFavorites;
-/**
- * Called by the host before every outline reload. With `saveLayout`, first saves the current arrangement's
- * placements (merged over the stored ones for favorites not in the arrangement, pruned to existing
- * favorites; written only when different). Then resolves against `section` and the stored placements.
- */
-- (void)prepareOutlineWithMySQLSection:(SPTreeNode *)section savingLayout:(BOOL)saveLayout;
-/// The displayed children of a MySQL group (or of the section): its childNodes with Postgres nodes inserted.
-- (NSArray *)displayedChildrenOfGroup:(SPTreeNode *)group;
-/// The MySQL group a Postgres node is displayed in (the section for the top level); for a MySQL node, its parentNode.
-- (SPTreeNode *)displayedParentOfNode:(SPTreeNode *)node;
-/// Drag and drop (see -[SPPostgresFavoritesLayout moveNodes:toGroup:displayedIndex:]), then saves the placements.
-- (void)moveNodes:(NSArray *)nodes toGroup:(SPTreeNode *)group displayedIndex:(NSInteger)index;
-/// Sorting: `children` must be the complete displayed children of `group`, reordered. Not saved: the host
-/// reloads next, saving the layout.
-- (void)setDisplayedChildren:(NSArray *)children ofGroup:(SPTreeNode *)group;
-/// Removes every Postgres favorite displayed within `group` (store and keychain items), without asking.
-- (void)removePostgresFavoritesWithinGroup:(SPTreeNode *)group;
+/// Removes the keychain items of the Postgres favorite `node`, or of every Postgres favorite within the group
+/// `node` (at any depth). The host calls it for each node it deletes, as it removes MySQL favorites' items.
+- (void)removeKeychainItemsOfPostgresFavoritesWithinNode:(id)node;
 
-/// YES for the hidden holder node and the Postgres favorite nodes. A MySQL favorite node (whose favorite
-/// dictionary has no engine key) is never a Postgres node.
+/// YES for a Postgres favorite node. A MySQL favorite node (whose favorite dictionary has no engine key) is
+/// never a Postgres node.
 - (BOOL)isPostgresNode:(id)outlineItem;
 /// The favorite for a Postgres favorite node, else nil.
 - (SPPostgresFavorite *)favoriteForNode:(id)outlineItem;

@@ -91,20 +91,22 @@ static NSString *SPDatabaseImage = @"mysql-dolphin"; // favorites in the Default
 	
 	NSArray *favorites = [[[[[SPFavoritesController sharedFavoritesController] favoritesTree] childNodes] objectAtIndex:0] childNodes];
 	
-	if ([favorites count] > 0) {
-		
-		// Add all favorites to the menu
-		for (SPTreeNode *node in favorites)
+	NSUInteger addedItems = 0;
+
+	// Add all favorites to the menu
+	for (SPTreeNode *node in favorites)
+	{
+		NSArray *items = [self _constructMenuItemsForNode:node atLevel:0];
+
+		for (NSMenuItem *item in items)
 		{
-			NSArray *items = [self _constructMenuItemsForNode:node atLevel:0];
-			
-			for (NSMenuItem *item in items)
-			{
-				[[defaultFavoritePopup menu] addItem:item];
-			}
+			[[defaultFavoritePopup menu] addItem:item];
+			addedItems++;
 		}
 	}
-	else {
+
+	// (no MySQL favorite or group: only PostgreSQL favorites, which are not listed, or none)
+	if (!addedItems) {
 		[defaultFavoritePopup addItemWithTitle:NSLocalizedString(@"No Favorties", @"No favorites entry in favorites menu")]; 
 		
 		[[defaultFavoritePopup itemAtIndex:2] setEnabled:NO];
@@ -153,7 +155,8 @@ static NSString *SPDatabaseImage = @"mysql-dolphin"; // favorites in the Default
 			[items addObjectsFromArray:innerItems];
 		}
 	}
-	else {
+	else if ([[node representedObject] isKindOfClass:[SPFavoriteNode class]]) {
+		// (MySQL favorites only: a PostgreSQL favorite can't be the default favorite)
 		NSDictionary *favorite = [(SPFavoriteNode *)[node representedObject] nodeFavorite];
 		
 		NSMenuItem *menuItem = [[NSMenuItem alloc] initWithTitle:[favorite objectForKey:SPFavoriteNameKey] action:@selector(updateDefaultFavorite:) keyEquivalent:@""];

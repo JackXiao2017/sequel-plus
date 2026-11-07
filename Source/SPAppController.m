@@ -38,6 +38,7 @@
 #import "SPEncodingPopupAccessory.h"
 #import "SPWindowController.h"
 #import "SPPreferencesUpgrade.h"
+#import "SPSequelPlusMigration.h"
 #import "SPBundleEditorController.h"
 #import "SPTooltip.h"
 #import "SPBundleHTMLOutputController.h"
@@ -104,6 +105,10 @@
  */
 + (void)initialize
 {
+	// Sequel Plus's own preferences, data folder and keychain items: copied from Sequel Pro's on the first run, before
+	// anything reads them
+	[SPSequelPlusMigration migrateAtLaunch];
+
 	NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
 
 	NSMutableDictionary *preferenceDefaults = [NSMutableDictionary dictionaryWithContentsOfFile:[[NSBundle mainBundle] pathForResource:SPPreferenceDefaultsFile ofType:@"plist"]];

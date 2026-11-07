@@ -2,8 +2,6 @@
 #import "SPPostgresFavorite.h"
 #import "SPPostgresFavoriteNode.h"
 #import "SPPostgresFavoritesStore.h"
-#import "SPPostgresFavoritePlacementsStore.h"
-#import "SPPostgresFavoritesLayout.h"
 #import "SPPostgresConnector.h"
 #import "SPPostgresDocument.h"
 #import "SPPostgresErrors.h"
@@ -39,23 +37,22 @@ static NSString *SPPGOrEmpty(NSString *s)
 }
 
 @interface SPPostgresConnectionScreenAdapter ()
-- (void)_rebuildNodes;
+- (void)_checkLoadError;
 - (void)_favoritesDidChange:(NSNotification *)notification;
-- (void)_placementsDidChange:(NSNotification *)notification;
-- (NSDictionary *)_currentPlacementsOver:(NSDictionary *)stored;
-- (NSDictionary *)_savePlacements;
-- (SPTreeNode *)_displayNewFavorite:(SPPostgresFavorite *)favorite afterNode:(SPTreeNode *)existing;
-- (void)_forgetUnsavedFavorite;
+- (SPTreeNode *)_groupForNewFavorite;
 - (BOOL)_removeFavorite:(SPPostgresFavorite *)favorite error:(NSError **)error;
+- (void)_removeKeychainItemsOfFavorite:(SPPostgresFavorite *)favorite;
 - (NSWindow *)_sheetWindow;
 - (void)_showError:(NSError *)error;
-- (BOOL)_saveFormAsNew:(BOOL)asNew error:(NSError **)error;
+- (BOOL)_saveFormAsNew:(BOOL)asNew validate:(BOOL)validate error:(NSError **)error;
+- (BOOL)_saveFormAsNew:(BOOL)asNew validate:(BOOL)validate inGroup:(SPTreeNode *)group atIndex:(NSUInteger)index error:(NSError **)error;
+- (void)_convertNewMySQLFavorite:(id)mysqlItem;
 - (void)_storePassword:(NSString *)thePassword sshPassword:(NSString *)theSSHPassword forFavorite:(SPPostgresFavorite *)favorite previous:(SPPostgresFavorite *)previous;
 - (void)_rollBackPasswordsOf:(SPPostgresFavorite *)favorite to:(SPPostgresFavorite *)previous password:(NSString *)oldPassword sshPassword:(NSString *)oldSSHPassword;
+- (void)_reportFavoritesLoadError;
 - (void)_applyPortPlaceholders;
 - (void)_collectPortFieldsInView:(NSView *)view;
 - (NSError *)_connectionValidationError;
-- (void)_reportFavoritesLoadError;
 - (void)_connectionAttemptFinished:(SPPostgresConnector *)attemptConnector connection:(PGPostgresConnection *)connection error:(NSError *)error favorite:(SPPostgresFavorite *)favorite testOnly:(BOOL)testOnly;
 @end
 
@@ -76,15 +73,6 @@ static NSString *SPPGOrEmpty(NSString *s)
 	NSMutableArray *originalHostLabelFrames;
 	NSMutableArray *originalHostLabelFonts;
 
-	// The Postgres favorite nodes are children of a hidden holder (under an invisible root), never of a MySQL
-	// group; the layout says where each is displayed in the FAVORITES list
-	SPTreeNode *rootNode;
-	SPTreeNode *holderNode;
-	NSMutableDictionary *nodesByID;
-	SPPostgresFavoritePlacementsStore *placementsStore;
-	SPPostgresFavoritesLayout *layout;
-	SPTreeNode *mysqlSection; // the section of the last -prepareOutline…, nil before
-
 	SPPostgresFavorite *loadedFavorite;
 	SPPostgresConnector *pendingConnector;
 
@@ -96,10 +84,6 @@ static NSString *SPPGOrEmpty(NSString *s)
 
 	// YES during the adapter's own store writes (see -_favoritesDidChange:)
 	BOOL writingToStore;
-	// YES during the adapter's own placements writes (see -_placementsDidChange:)
-	BOOL writingPlacements;
-	// YES while the host reloads for another window's placements write (see -_placementsDidChange:)
-	BOOL applyingOutsidePlacements;
 	// YES while the host reloads the outline for a store change made by this adapter (see -loadFavoriteIntoForm:)
 	BOOL handlingStoreChange;
 }
@@ -108,16 +92,9 @@ static NSString *SPPGOrEmpty(NSString *s)
 
 - (instancetype)initWithConnectionController:(id <SPPostgresConnectionScreenHost>)controller store:(SPPostgresFavoritesStore *)theStore
 {
-	return [self initWithConnectionController:controller store:theStore placementsStore:[SPPostgresFavoritePlacementsStore storeBesideFavoritesStore:theStore]];
-}
-
-- (instancetype)initWithConnectionController:(id <SPPostgresConnectionScreenHost>)controller store:(SPPostgresFavoritesStore *)theStore placementsStore:(SPPostgresFavoritePlacementsStore *)thePlacementsStore
-{
 	if ((self = [super init])) {
 		host = controller;
 		store = [theStore retain];
-		placementsStore = [thePlacementsStore retain];
-		layout = [[SPPostgresFavoritesLayout alloc] init];
 		keychain = [[SPKeychain alloc] init];
 		engine = SPConnectionEngineMySQL;
 		portFields = [[NSMutableArray alloc] init];
@@ -126,21 +103,10 @@ static NSString *SPPGOrEmpty(NSString *s)
 		originalHostLabelFrames = [[NSMutableArray alloc] init];
 		originalHostLabelFonts = [[NSMutableArray alloc] init];
 		reboundPortFields = [[NSMutableArray alloc] init];
-		nodesByID = [[NSMutableDictionary alloc] init];
 
-		// The hidden holder of the Postgres nodes (never displayed), under an invisible root as the MySQL
-		// favorites are under favoritesTree
-		rootNode = [[SPTreeNode treeNodeWithRepresentedObject:[SPGroupNode groupNodeWithName:@""]] retain];
-		[rootNode setIsGroup:YES];
-		holderNode = [[SPTreeNode treeNodeWithRepresentedObject:[SPGroupNode groupNodeWithName:@""]] retain];
-		[holderNode setIsGroup:YES];
-		[[rootNode mutableChildNodes] addObject:holderNode];
-
-		[self _rebuildNodes];
+		[self _checkLoadError];
 
 		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_favoritesDidChange:) name:SPPostgresFavoritesDidChangeNotification object:store];
-		// Any placements store: another window's adapter has its own store object for the same file
-		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_placementsDidChange:) name:SPPostgresFavoritePlacementsDidChangeNotification object:nil];
 	}
 	return self;
 }
@@ -177,12 +143,6 @@ static NSString *SPPGOrEmpty(NSString *s)
 	[originalHostLabelFonts release];
 	[reboundPortFields release];
 	[reportedLoadError release];
-	[rootNode release];
-	[holderNode release];
-	[nodesByID release];
-	[placementsStore release];
-	[layout release];
-	[mysqlSection release];
 	[loadedFavorite release];
 	[super dealloc];
 }
@@ -363,6 +323,16 @@ static NSString *SPPGOrEmpty(NSString *s)
 	SPConnectionEngine newEngine = ([engineControl selectedSegment] == SPConnectionEnginePostgreSQL) ? SPConnectionEnginePostgreSQL : SPConnectionEngineMySQL;
 	if (newEngine == engine) return;
 
+	id selectedItem = [host respondsToSelector:@selector(postgresSelectedOutlineItem)] ? [host postgresSelectedOutlineItem] : nil;
+
+	// The MySQL favorite just added with "+" becomes a PostgreSQL favorite: it stays selected for editing
+	if (newEngine == SPConnectionEnginePostgreSQL && selectedItem
+		&& [host respondsToSelector:@selector(postgresItemIsNewMySQLFavorite:)] && [host postgresItemIsNewMySQLFavorite:selectedItem]
+		&& [host respondsToSelector:@selector(postgresRemoveMySQLFavorite:)]) {
+		[self _convertNewMySQLFavorite:selectedItem];
+		return;
+	}
+
 	// A saved favorite of the other engine can't change engine: move to Quick Connect, keeping the
 	// details in the form so they can be connected or saved as the new engine.
 	id item = [host respondsToSelector:@selector(postgresSelectedOutlineItem)] ? [host postgresSelectedOutlineItem] : nil;
@@ -398,34 +368,45 @@ static NSString *SPPGOrEmpty(NSString *s)
 	[self setSelectedEngine:newEngine];
 }
 
-#pragma mark - Outline
-
-- (void)_rebuildNodes
+/**
+ * Replaces `mysqlItem` (the MySQL favorite just added with "+") by a PostgreSQL favorite with the form's
+ * details, in its place (same group, same position), and selects it. The details aren't validated: the favorite
+ * is still being filled in. If the Postgres favorite can't be saved, the MySQL one is kept and the engine stays MySQL.
+ */
+- (void)_convertNewMySQLFavorite:(id)mysqlItem
 {
-	NSArray *favorites = [store favorites];
-	NSMutableArray *nodes = [NSMutableArray arrayWithCapacity:[favorites count]];
-	NSMutableDictionary *newNodesByID = [NSMutableDictionary dictionaryWithCapacity:[favorites count]];
+	// MySQL's default port (or none) means "the default": PostgreSQL's then applies
+	NSString *port = [[host port] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	if (![port length] || [port isEqualToString:SPPostgresScreenMySQLDefaultPort]) [host setPort:nil];
 
-	for (SPPostgresFavorite *favorite in favorites) {
-		NSString *favoriteID = [favorite favoriteID];
-		if (!favoriteID || [newNodesByID objectForKey:favoriteID]) continue;
+	[self setSelectedEngine:SPConnectionEnginePostgreSQL];
+	[loadedFavorite release], loadedFavorite = nil;
 
-		// Reuse nodes so the outline keeps its selection across reloads
-		SPTreeNode *node = [nodesByID objectForKey:favoriteID];
-		if (!node) {
-			SPPostgresFavoriteNode *represented = [[[SPPostgresFavoriteNode alloc] init] autorelease];
-			node = [SPTreeNode treeNodeWithRepresentedObject:represented];
-		}
-		[(SPPostgresFavoriteNode *)[node representedObject] setFavorite:favorite];
-		[nodes addObject:node];
-		[newNodesByID setObject:node forKey:favoriteID];
+	SPTreeNode *group = nil;
+	NSUInteger index = NSNotFound;
+	if ([mysqlItem isKindOfClass:[NSTreeNode class]] && [(NSTreeNode *)mysqlItem parentNode]) {
+		group = (SPTreeNode *)[(NSTreeNode *)mysqlItem parentNode];
+		index = [[group childNodes] indexOfObjectIdenticalTo:mysqlItem];
 	}
 
-	[[holderNode mutableChildNodes] setArray:nodes];
-	[nodesByID setDictionary:newNodesByID];
+	NSError *error = nil;
+	if (![self _saveFormAsNew:YES validate:NO inGroup:group atIndex:index error:&error]) {
+		[self setSelectedEngine:SPConnectionEngineMySQL];
+		if (error) [self _showError:error];
+		return;
+	}
 
-	// An unreadable favorites file is reported from a later run loop turn: the host may still be setting up
-	// its window (the adapter is made while the connection screen loads)
+	id node = [self nodeForFavoriteID:[loadedFavorite favoriteID]];
+	[host postgresRemoveMySQLFavorite:mysqlItem];
+	if (node && [host respondsToSelector:@selector(postgresSelectOutlineItem:)]) [host postgresSelectOutlineItem:node];
+}
+
+#pragma mark - Outline
+
+/// An error importing the Postgres favorites of the RC builds is reported from a later run loop turn: the host may
+/// still be setting up its window (the adapter is made while the connection screen loads).
+- (void)_checkLoadError
+{
 	NSError *loadError = [store lastLoadError];
 	if (!loadError) {
 		[reportedLoadError release], reportedLoadError = nil;
@@ -457,15 +438,9 @@ static NSString *SPPGOrEmpty(NSString *s)
 
 - (void)_favoritesDidChange:(NSNotification *)notification
 {
-	[self _rebuildNodes];
+	[self _checkLoadError];
 
-	// Re-place the nodes now (new ones by their stored placement, removed ones gone), keeping the arrangement
-	// not saved yet; nothing is written here (the host's reload saves)
-	if (mysqlSection) {
-		[layout resolveWithMySQLSection:mysqlSection postgresNodes:[holderNode childNodes] placements:[self _currentPlacementsOver:[placementsStore placements]]];
-	}
-
-	if (loadedFavorite && ![nodesByID objectForKey:[loadedFavorite favoriteID]]) {
+	if (loadedFavorite && ![self nodeForFavoriteID:[loadedFavorite favoriteID]]) {
 		[loadedFavorite release];
 		loadedFavorite = nil;
 	}
@@ -489,6 +464,15 @@ static NSString *SPPGOrEmpty(NSString *s)
 	return saved;
 }
 
+- (SPTreeNode *)_addToStore:(SPPostgresFavorite *)favorite group:(SPTreeNode *)group index:(NSUInteger)index error:(NSError **)error
+{
+	BOOL wasWriting = writingToStore;
+	writingToStore = YES;
+	SPTreeNode *node = [store addFavorite:favorite toGroup:group atIndex:index error:error];
+	writingToStore = wasWriting;
+	return node;
+}
+
 - (BOOL)_removeFromStoreFavoriteWithID:(NSString *)favoriteID error:(NSError **)error
 {
 	BOOL wasWriting = writingToStore;
@@ -498,185 +482,56 @@ static NSString *SPPGOrEmpty(NSString *s)
 	return removed;
 }
 
-/// Placements changed on disk. The adapter's own writes are ignored (the arrangement already is what was
-/// written); another window's write replaces this arrangement (any part not saved yet is dropped, so it
-/// can't overwrite the newer file) and reloads the host.
-- (void)_placementsDidChange:(NSNotification *)notification
+/// Where a new favorite goes: the host's group for new favorites (a MySQL group or the section).
+- (SPTreeNode *)_groupForNewFavorite
 {
-	if (writingPlacements) return;
-	NSURL *changedURL = [[notification object] respondsToSelector:@selector(fileURL)] ? [[notification object] fileURL] : nil;
-	NSString *changedPath = [[changedURL URLByStandardizingPath] path];
-	if (!changedPath || ![changedPath isEqualToString:[[[placementsStore fileURL] URLByStandardizingPath] path]]) return;
-
-	if (mysqlSection) {
-		[layout resolveWithMySQLSection:mysqlSection postgresNodes:[holderNode childNodes] placements:[placementsStore placements]];
-	}
-
-	if ([host respondsToSelector:@selector(postgresFavoritesDidChange)]) {
-		// Only where favorites are displayed changed: the loaded form stays as it is. The reload doesn't save:
-		// the arrangement is the file's, and the file may already hold the placement of a favorite the other
-		// window is about to save, which pruning would drop.
-		BOOL wasHandling = handlingStoreChange, wasApplying = applyingOutsidePlacements;
-		handlingStoreChange = YES;
-		applyingOutsidePlacements = YES;
-		[host postgresFavoritesDidChange];
-		handlingStoreChange = wasHandling;
-		applyingOutsidePlacements = wasApplying;
-	}
-}
-
-/// `stored` with the current arrangement's placements over it, without placements of favorites the store no
-/// longer has (kept all when the favorites file couldn't be read: the nodes don't say what exists then).
-- (NSDictionary *)_currentPlacementsOver:(NSDictionary *)stored
-{
-	NSMutableDictionary *current = [NSMutableDictionary dictionaryWithDictionary:stored];
-	if (mysqlSection) [current addEntriesFromDictionary:[layout placements]];
-	if (![store lastLoadError]) {
-		for (id favoriteID in [current allKeys]) {
-			if (![nodesByID objectForKey:favoriteID]) [current removeObjectForKey:favoriteID];
-		}
-	}
-	return current;
-}
-
-/// Writes the current placements when they differ from the file's. Returns them.
-- (NSDictionary *)_savePlacements
-{
-	NSDictionary *stored = [placementsStore placements];
-	NSDictionary *current = [self _currentPlacementsOver:stored];
-	if ([current isEqualToDictionary:stored]) return current;
-
-	BOOL wasWriting = writingPlacements;
-	writingPlacements = YES;
-	NSError *error = nil;
-	if (![placementsStore setPlacements:current error:&error]) {
-		NSLog(@"PostgreSQL favorite placements could not be saved: %@", [error localizedDescription]);
-	}
-	writingPlacements = wasWriting;
-	return current;
+	SPTreeNode *group = [host respondsToSelector:@selector(postgresGroupForNewFavorite)] ? [host postgresGroupForNewFavorite] : nil;
+	return (group && [group isGroup] && ![self isPostgresNode:group]) ? group : [store section];
 }
 
 - (BOOL)hasPostgresFavorites
 {
-	return [nodesByID count] > 0;
+	return [[store favoriteNodes] count] > 0;
 }
 
-- (void)prepareOutlineWithMySQLSection:(SPTreeNode *)section savingLayout:(BOOL)saveLayout
+- (void)removeKeychainItemsOfPostgresFavoritesWithinNode:(id)node
 {
-	// Saving: what was written, or (if the write failed) what is displayed now, so nothing moves
-	NSDictionary *placements = (saveLayout && !applyingOutsidePlacements) ? [self _savePlacements] : [placementsStore placements];
-
-	[section retain];
-	[mysqlSection release];
-	mysqlSection = section;
-	[layout resolveWithMySQLSection:section postgresNodes:[holderNode childNodes] placements:placements];
-}
-
-- (NSArray *)displayedChildrenOfGroup:(SPTreeNode *)group
-{
-	return [layout displayedChildrenOfGroup:group];
-}
-
-- (SPTreeNode *)displayedParentOfNode:(SPTreeNode *)node
-{
-	return [layout displayedParentOfNode:node];
-}
-
-- (void)moveNodes:(NSArray *)nodes toGroup:(SPTreeNode *)group displayedIndex:(NSInteger)index
-{
-	if (!mysqlSection) return;
-	[layout moveNodes:nodes toGroup:group displayedIndex:index];
-	[self _savePlacements];
-}
-
-- (void)setDisplayedChildren:(NSArray *)children ofGroup:(SPTreeNode *)group
-{
-	if (!mysqlSection) return;
-	[layout setDisplayedChildren:children ofGroup:group];
-}
-
-- (void)removePostgresFavoritesWithinGroup:(SPTreeNode *)group
-{
-	NSMutableArray *favorites = [NSMutableArray array];
-	for (SPTreeNode *node in [layout postgresNodesWithinGroup:group]) {
-		SPPostgresFavorite *favorite = [self favoriteForNode:node];
-		if (favorite) [favorites addObject:favorite];
+	SPPostgresFavorite *favorite = [self favoriteForNode:node];
+	if (favorite) {
+		[self _removeKeychainItemsOfFavorite:favorite];
+		return;
 	}
-
-	for (SPPostgresFavorite *favorite in favorites) {
-		NSError *error = nil;
-		if (![self _removeFavorite:favorite error:&error]) {
-			if (error) [self _showError:error];
-			return;
-		}
-	}
+	if (![node isKindOfClass:[NSTreeNode class]]) return;
+	for (id child in [(NSTreeNode *)node childNodes]) [self removeKeychainItemsOfPostgresFavoritesWithinNode:child];
 }
 
-/**
- * The node of a new favorite (not in the store yet), displayed right after `existing`, else at the end of the
- * host's group for new favorites, with the placements written. Saving the favorite next then finds it in
- * place (-_rebuildNodes reuses the node). Before the outline was prepared it gets no placement: it shows at
- * the end of the top level.
- */
-- (SPTreeNode *)_displayNewFavorite:(SPPostgresFavorite *)favorite afterNode:(SPTreeNode *)existing
+- (void)_removeKeychainItemsOfFavorite:(SPPostgresFavorite *)favorite
 {
-	SPPostgresFavoriteNode *represented = [[[SPPostgresFavoriteNode alloc] init] autorelease];
-	[represented setFavorite:favorite];
-	SPTreeNode *node = [SPTreeNode treeNodeWithRepresentedObject:represented];
-	[[holderNode mutableChildNodes] addObject:node];
-	[nodesByID setObject:node forKey:[favorite favoriteID]];
-
-	if (!mysqlSection) return node;
-
-	if (existing) {
-		[layout insertPostgresNode:node afterNode:existing];
-	}
-	else {
-		SPTreeNode *group = [host respondsToSelector:@selector(postgresGroupForNewFavorite)] ? [host postgresGroupForNewFavorite] : nil;
-		if (!group || ![group isGroup] || [self isPostgresNode:group]) group = mysqlSection;
-		[layout appendPostgresNode:node toGroup:group];
-	}
-	[self _savePlacements];
-
-	return node;
+	[keychain deletePasswordForName:[favorite keychainName] account:[favorite keychainAccount]];
+	[keychain deletePasswordForName:[favorite sshKeychainName] account:[favorite sshKeychainAccount]];
 }
 
-/// Saving a new favorite failed: drop its node (its placement is pruned by the next save).
-- (void)_forgetUnsavedFavorite
-{
-	[self _rebuildNodes];
-	if (mysqlSection) {
-		[layout resolveWithMySQLSection:mysqlSection postgresNodes:[holderNode childNodes] placements:[self _currentPlacementsOver:[placementsStore placements]]];
-	}
-}
-
-/// Removes `favorite` from the store, then its keychain items.
+/// Removes `favorite` from the tree, then its keychain items.
 - (BOOL)_removeFavorite:(SPPostgresFavorite *)favorite error:(NSError **)error
 {
 	if (![self _removeFromStoreFavoriteWithID:[favorite favoriteID] error:error]) return NO;
-	[keychain deletePasswordForName:[favorite keychainName] account:[favorite keychainAccount]];
-	[keychain deletePasswordForName:[favorite sshKeychainName] account:[favorite sshKeychainAccount]];
+	[self _removeKeychainItemsOfFavorite:favorite];
 	return YES;
 }
 
 - (BOOL)isPostgresNode:(id)outlineItem
 {
-	if (!outlineItem) return NO;
-	if (outlineItem == holderNode || outlineItem == rootNode) return YES;
 	return [self favoriteForNode:outlineItem] != nil;
 }
 
 - (SPPostgresFavorite *)favoriteForNode:(id)outlineItem
 {
-	if (![outlineItem isKindOfClass:[NSTreeNode class]]) return nil;
-	id represented = [(NSTreeNode *)outlineItem representedObject];
-	if (![represented isKindOfClass:[SPPostgresFavoriteNode class]]) return nil;
-	return [(SPPostgresFavoriteNode *)represented favorite];
+	return SPPostgresFavoriteForNode(outlineItem);
 }
 
 - (id)nodeForFavoriteID:(NSString *)favoriteID
 {
-	return favoriteID ? [nodesByID objectForKey:favoriteID] : nil;
+	return [store nodeForFavoriteID:favoriteID];
 }
 
 - (NSColor *)labelColorForNode:(id)outlineItem
@@ -889,17 +744,23 @@ static NSString *SPPGOrEmpty(NSString *s)
 
 - (BOOL)saveFormAsFavorite:(NSError **)error
 {
-	return [self _saveFormAsNew:NO error:error];
+	return [self _saveFormAsNew:NO validate:YES error:error];
 }
 
 - (BOOL)saveFormAsNewFavorite:(NSError **)error
 {
-	return [self _saveFormAsNew:YES error:error];
+	return [self _saveFormAsNew:YES validate:YES error:error];
 }
 
-- (BOOL)_saveFormAsNew:(BOOL)asNew error:(NSError **)error
+- (BOOL)_saveFormAsNew:(BOOL)asNew validate:(BOOL)validate error:(NSError **)error
 {
-	NSError *validationError = [self validationErrorForForm];
+	return [self _saveFormAsNew:asNew validate:validate inGroup:nil atIndex:NSNotFound error:error];
+}
+
+/// A new favorite goes into `group` at `index`; with no group, at the end of the group for new favorites.
+- (BOOL)_saveFormAsNew:(BOOL)asNew validate:(BOOL)validate inGroup:(SPTreeNode *)group atIndex:(NSUInteger)index error:(NSError **)error
+{
+	NSError *validationError = validate ? [self validationErrorForForm] : nil;
 	if (validationError) {
 		if (error) *error = validationError;
 		return NO;
@@ -918,12 +779,10 @@ static NSString *SPPGOrEmpty(NSString *s)
 	NSString *oldSSHPassword = previous ? [keychain getPasswordForName:[previous sshKeychainName] account:[previous sshKeychainAccount]] : nil;
 	[self _storePassword:thePassword sshPassword:theSSHPassword forFavorite:favorite previous:previous];
 
-	// A new favorite is displayed (and its placement written) before it is saved
-	if (!previous) [self _displayNewFavorite:favorite afterNode:nil];
-
-	if (![self _saveToStore:favorite error:error]) {
+	BOOL saved = previous ? [self _saveToStore:favorite error:error]
+	                      : ([self _addToStore:favorite group:(group ? group : [self _groupForNewFavorite]) index:(group ? index : NSNotFound) error:error] != nil);
+	if (!saved) {
 		[self _rollBackPasswordsOf:favorite to:previous password:oldPassword sshPassword:oldSSHPassword];
-		if (!previous) [self _forgetUnsavedFavorite];
 		return NO;
 	}
 
@@ -1009,7 +868,7 @@ static NSString *SPPGOrEmpty(NSString *s)
 - (BOOL)saveFormShowingErrors:(BOOL)asNew
 {
 	NSError *error = nil;
-	if ([self _saveFormAsNew:asNew error:&error]) return YES;
+	if ([self _saveFormAsNew:asNew validate:YES error:&error]) return YES;
 	if (error) [self _showError:error];
 	return NO;
 }
@@ -1019,15 +878,10 @@ static NSString *SPPGOrEmpty(NSString *s)
 	SPPostgresFavorite *favorite = [[[SPPostgresFavorite alloc] init] autorelease];
 	[favorite setName:NSLocalizedString(@"New Favorite", @"new favorite name")];
 
-	[self _displayNewFavorite:favorite afterNode:nil];
-
 	NSError *error = nil;
-	if (![self _saveToStore:favorite error:&error]) {
-		[self _forgetUnsavedFavorite];
-		if (error) [self _showError:error];
-		return nil;
-	}
-	return [self nodeForFavoriteID:[favorite favoriteID]];
+	SPTreeNode *node = [self _addToStore:favorite group:[self _groupForNewFavorite] index:NSNotFound error:&error];
+	if (!node && error) [self _showError:error];
+	return node;
 }
 
 - (void)removeFavoriteNodeAfterConfirmation:(id)outlineItem
@@ -1078,20 +932,22 @@ static NSString *SPPGOrEmpty(NSString *s)
 	NSString *thePassword = [keychain getPasswordForName:[original keychainName] account:[original keychainAccount]];
 	NSString *theSSHPassword = [keychain getPasswordForName:[original sshKeychainName] account:[original sshKeychainAccount]];
 
-	// Keychain first (see -_saveFormAsNew:error:)
+	// Keychain first (see -_saveFormAsNew:validate:error:)
 	[self _storePassword:thePassword sshPassword:theSSHPassword forFavorite:duplicate previous:nil];
 
-	[self _displayNewFavorite:duplicate afterNode:outlineItem];
+	// Right after the original, in its group
+	SPTreeNode *group = (SPTreeNode *)[(NSTreeNode *)outlineItem parentNode];
+	NSUInteger index = group ? [[group childNodes] indexOfObjectIdenticalTo:outlineItem] : NSNotFound;
 
 	NSError *error = nil;
-	if (![self _saveToStore:duplicate error:&error]) {
+	SPTreeNode *node = [self _addToStore:duplicate group:group index:(index == NSNotFound ? NSNotFound : index + 1) error:&error];
+	if (!node) {
 		[self _rollBackPasswordsOf:duplicate to:nil password:nil sshPassword:nil];
-		[self _forgetUnsavedFavorite];
 		if (error) [self _showError:error];
 		return nil;
 	}
 
-	return [self nodeForFavoriteID:[duplicate favoriteID]];
+	return node;
 }
 
 - (void)renameFavoriteNode:(id)outlineItem to:(NSString *)newName
@@ -1107,7 +963,7 @@ static NSString *SPPGOrEmpty(NSString *s)
 	NSString *thePassword = [keychain getPasswordForName:[original keychainName] account:[original keychainAccount]];
 	NSString *theSSHPassword = [keychain getPasswordForName:[original sshKeychainName] account:[original sshKeychainAccount]];
 
-	// Keychain first (see -_saveFormAsNew:error:)
+	// Keychain first (see -_saveFormAsNew:validate:error:)
 	[self _storePassword:thePassword sshPassword:theSSHPassword forFavorite:renamed previous:original];
 
 	NSError *error = nil;

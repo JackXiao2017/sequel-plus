@@ -49,6 +49,8 @@
 - (void)sidebarAddTable:(SPPostgresSidebarController *)sidebar;
 /// The + after the schema pop-up ("Add a new schema"): ask for a name and create the schema.
 - (void)sidebarAddSchema:(SPPostgresSidebarController *)sidebar;
+/// The pencil before the + ("Edit the schema's owner"): edit the selected schema.
+- (void)sidebarEditSchema:(SPPostgresSidebarController *)sidebar;
 @end
 
 /**
@@ -290,11 +292,17 @@ __attribute__((visibility("default")))
 /// Add: the delegate's -sidebarAddTable:.
 - (IBAction)addTable:(id)sender;
 
-/// The + right of the schema pop-up ("Add a new schema"): -addSchema:, enabled while actionsEnabled and the delegate
+/// The + after the schema pop-up and the pencil ("Add a new schema"): -addSchema:, enabled while actionsEnabled and the delegate
 /// implements -sidebarAddSchema:.
 @property (readonly) NSButton *addSchemaButton;
 /// The +: the delegate's -sidebarAddSchema:.
 - (IBAction)addSchema:(id)sender;
+
+/// The pencil between the schema pop-up and the + ("Edit the schema's owner"): -editSchema:, enabled while
+/// actionsEnabled and the delegate implements -sidebarEditSchema:.
+@property (readonly) NSButton *editSchemaButton;
+/// The pencil: the delegate's -sidebarEditSchema: (a beep when no schema is shown).
+- (IBAction)editSchema:(id)sender;
 
 /// Detaches the outline and popup from this controller, and drops the reloads still to come (no completion is called
 /// after this). Called by the window on close; also on dealloc.

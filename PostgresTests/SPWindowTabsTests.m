@@ -6,6 +6,7 @@
 #import "../Source/Postgres/SPPostgresDocument.h"
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
+#import "../Source/Postgres/SPQueryScriptStore.h"
 #import <objc/runtime.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -132,6 +133,8 @@
 - (void)toggleConsole:(id)sender;
 - (id)connectionController;
 - (void)_enableWindowToolbarItemsAfterConnecting;
+- (void)_startQueryScriptAutosave;
+- (void)parentTabDidClose;
 @end
 
 @interface SPWindowTabsTests : XCTestCase
@@ -655,6 +658,59 @@
 	XCTAssertNil([mysql valueForKey:@"parentWindow"]);
 	XCTAssertNil(postgres.parentWindow, @"the Postgres tab got -parentTabDidClose");
 	XCTAssertTrue([self spinUntil:^BOOL{ return !connection.isConnected; } timeout:2]);
+}
+
+#pragma mark - The Custom Query editor's saved script
+
+/// A MySQL tab whose connection screen holds these Quick Connect details, its editor saved and loaded as on connecting.
+- (id)addMySQLTabForUser:(NSString *)user favoriteID:(NSString *)favoriteID
+{
+	id mysql = [self addMySQLTab];
+	id connection = [mysql connectionController];
+	[connection setValue:@0 forKey:@"type"];
+	[connection setValue:@"db.example.com" forKey:@"host"];
+	[connection setValue:@"" forKey:@"port"];
+	[connection setValue:user forKey:@"user"];
+	[connection setValue:favoriteID forKey:@"connectionKeychainID"];
+	[mysql _startQueryScriptAutosave];
+	return mysql;
+}
+
+- (NSTextView *)customQueryEditorOf:(id)mysql
+{
+	NSTextView *editor = [[mysql valueForKey:@"customQueryInstance"] valueForKey:@"textView"];
+	XCTAssertNotNil(editor);
+	return editor;
+}
+
+- (void)testMySQLCustomQueryTextIsSavedPerConnectionAndReloaded
+{
+	id first = [self addMySQLTabForUser:@"root" favoriteID:nil];
+	NSTextView *editor = [self customQueryEditorOf:first];
+	XCTAssertEqualObjects([editor string], @"");
+	[editor setSelectedRange:NSMakeRange(0, 0)];
+	[editor insertText:@"SELECT * FROM t;" replacementRange:NSMakeRange(0, 0)];
+	[first parentTabDidClose];
+
+	NSString *key = [SPQueryScriptStore keyForEngine:SPQueryScriptEngineMySQL type:0 host:@"db.example.com" port:@"3306" user:@"root" socket:@"" sshHost:@"" sshUser:@""];
+	XCTAssertEqualObjects([[SPQueryScriptStore sharedStore] scriptForKey:key], @"SELECT * FROM t;", @"an empty port is the default, 3306");
+
+	// The same connection again: the editor gets it
+	id second = [self addMySQLTabForUser:@"root" favoriteID:nil];
+	XCTAssertEqualObjects([[self customQueryEditorOf:second] string], @"SELECT * FROM t;");
+
+	// Another user: nothing saved for it
+	id third = [self addMySQLTabForUser:@"alice" favoriteID:nil];
+	XCTAssertEqualObjects([[self customQueryEditorOf:third] string], @"");
+
+	// A favorite has its own script, whatever its details
+	id favorite = [self addMySQLTabForUser:@"root" favoriteID:@"77"];
+	XCTAssertEqualObjects([[self customQueryEditorOf:favorite] string], @"");
+	NSTextView *favoriteEditor = [self customQueryEditorOf:favorite];
+	[favoriteEditor insertText:@"SHOW TABLES;" replacementRange:NSMakeRange(0, 0)];
+	[favorite parentTabDidClose];
+	XCTAssertEqualObjects([[SPQueryScriptStore sharedStore] scriptForKey:[SPQueryScriptStore keyForEngine:SPQueryScriptEngineMySQL favoriteID:@"77"]], @"SHOW TABLES;");
+	XCTAssertEqualObjects([[SPQueryScriptStore sharedStore] scriptForKey:key], @"SELECT * FROM t;");
 }
 
 #pragma mark - A MySQL tab connecting in the background (R8)

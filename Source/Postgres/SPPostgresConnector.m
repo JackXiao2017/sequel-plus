@@ -8,6 +8,7 @@
 
 static const NSUInteger SPPostgresConnectTimeout = 10;
 static NSString * const SPPostgresApplicationName = @"Sequel Pro";
+static NSString * const SPPostgresDefaultDatabase = @"postgres";
 static const NSUInteger SPPostgresDefaultPort = 5432;
 static char SPPostgresConnectorProxyKey;
 
@@ -287,7 +288,9 @@ static char SPPostgresConnectorProxyKey;
 	if (useSocket) [theConnection setSocketPath:host];
 	[theConnection setUser:[favorite user]];
 	[theConnection setPassword:password];
-	[theConnection setDatabase:[favorite database]];
+	// No database given: "postgres" (libpq's own default is a database named after the user, often missing)
+	NSString *database = [[favorite database] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	[theConnection setDatabase:([database length] ? [favorite database] : SPPostgresDefaultDatabase)];
 	[theConnection setTimeout:SPPostgresConnectTimeout];
 	[theConnection setApplicationName:SPPostgresApplicationName];
 
