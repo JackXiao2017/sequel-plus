@@ -33,6 +33,8 @@
 #import "SPTreeNode.h"
 #import "SPGroupNode.h"
 #import "SPThreadAdditions.h"
+#import "SPPostgresFavoriteNode.h"
+#import "SPPostgresFavoritesImport.h"
 #import "pthread.h"
 
 static SPFavoritesController *sharedFavoritesController = nil;
@@ -42,6 +44,8 @@ static SPFavoritesController *sharedFavoritesController = nil;
 - (void)_loadFavorites;
 - (void)_constructFavoritesTree;
 - (void)_saveFavoritesData:(NSDictionary *)data;
+- (BOOL)_writeFavoritesData:(NSDictionary *)data;
+- (void)_importLegacyPostgresFavorites;
 - (void)_addNode:(SPTreeNode *)node asChildOfNode:(SPTreeNode *)parent;
 
 - (SPTreeNode *)_constructBranchForNodeData:(NSDictionary *)nodeData;
@@ -52,6 +56,7 @@ static SPFavoritesController *sharedFavoritesController = nil;
 
 @synthesize favoritesTree;
 @synthesize favoritesData;
+@synthesize postgresFavoritesImportError;
 
 #pragma mark -
 #pragma mark Initialisation
@@ -77,6 +82,9 @@ static SPFavoritesController *sharedFavoritesController = nil;
 		
         [self _loadFavorites];
 		[self _constructFavoritesTree];
+
+		// PostgreSQL favorites of the 2.0.0-RC builds (their own file) join the tree once
+		[self _importLegacyPostgresFavorites];
     }
     
     return self;
@@ -195,6 +203,10 @@ static SPFavoritesController *sharedFavoritesController = nil;
 {
 	id object;
 	NSArray *childs = nil;
+
+	// MySQL favorites only (e.g. favorites import): a PostgreSQL favorite dictionary is not added
+	if ([SPPostgresFavoriteNode isPostgresFavoriteDictionary:data]) return nil;
+
 	//if it has "Children" it must be a group node, otherwise assume favorite node
 	if ([data objectForKey:SPFavoriteChildrenKey]) {
 		object = [SPGroupNode groupNodeWithDictionary:data];
@@ -320,7 +332,7 @@ end_cleanup:
 	{
 		SPTreeNode *node = [self _constructBranchForNodeData:favorite];
 				
-		[[favoritesNode mutableChildNodes] addObject:node];
+		if (node) [[favoritesNode mutableChildNodes] addObject:node];
 	}
 	
 	[[rootNode mutableChildNodes] addObject:favoritesNode];
@@ -363,8 +375,12 @@ end_cleanup:
 		{
 			SPTreeNode *innerNode = [self _constructBranchForNodeData:favorite];
 			
-			[[treeNode mutableChildNodes] addObject:innerNode];			
+			if (innerNode) [[treeNode mutableChildNodes] addObject:innerNode];
 		}
+	}
+	else if ([SPPostgresFavoriteNode isPostgresFavoriteDictionary:nodeData]) {
+		// A PostgreSQL favorite: a leaf like a MySQL favorite, represented by an SPPostgresFavoriteNode
+		return [SPPostgresFavoriteNode treeNodeWithFavoritesDictionary:nodeData];
 	}
 	else {
 		node = [[SPFavoriteNode alloc] initWithDictionary:[NSMutableDictionary dictionaryWithDictionary:nodeData]];
@@ -384,6 +400,20 @@ end_cleanup:
  */
 - (void)_saveFavoritesData:(NSDictionary *)data
 {
+	@autoreleasepool {
+		[self _writeFavoritesData:data];
+	}
+}
+
+/**
+ * Writes the supplied favorites data to disk (see -_saveFavoritesData:).
+ *
+ * @return YES when the favorites file was written
+ */
+- (BOOL)_writeFavoritesData:(NSDictionary *)data
+{
+	BOOL written = NO;
+
 	@autoreleasepool {
 		pthread_mutex_lock(&writeLock);
 
@@ -455,10 +485,44 @@ end_cleanup:
 		else {
 			// Remove the original backup
 			[fileManager removeItemAtPath:favoritesBackupFile error:NULL];
+
+			written = YES;
 		}
 
 end_cleanup:
 		pthread_mutex_unlock(&writeLock);
+	}
+
+	return written;
+}
+
+/**
+ * Puts the PostgreSQL favorites of the 2.0.0-RC builds (PostgresFavorites.plist in the data folder) into the tree,
+ * where those builds displayed them, and saves it (see SPPostgresFavoritesImport). A file that can't be read is
+ * left as it is: postgresFavoritesImportError says why.
+ */
+- (void)_importLegacyPostgresFavorites
+{
+	NSError *error = nil;
+	NSString *dataPath = [[NSFileManager defaultManager] applicationSupportDirectoryForSubDirectory:SPDataSupportFolder error:&error];
+
+	if (!dataPath || error) return;
+
+	SPTreeNode *section = [[favoritesTree childNodes] count] ? [[favoritesTree childNodes] objectAtIndex:0] : nil;
+
+	error = nil;
+
+	BOOL imported = [SPPostgresFavoritesImport importFavoritesInDataFolder:[NSURL fileURLWithPath:dataPath isDirectory:YES]
+	                                                          intoSection:section
+	                                                                 save:^BOOL{ return [self _writeFavoritesData:[section dictionaryRepresentation]]; }
+	                                                        importedCount:NULL
+	                                                                error:&error];
+
+	if (postgresFavoritesImportError) SPClear(postgresFavoritesImportError);
+
+	if (!imported) {
+		NSLog(@"PostgreSQL favorites could not be imported: %@", [error localizedDescription]);
+		postgresFavoritesImportError = [error retain];
 	}
 }
 
@@ -484,6 +548,7 @@ end_cleanup:
 {
 	if (favoritesTree) SPClear(favoritesTree);
 	if (favoritesData) SPClear(favoritesData);
+	if (postgresFavoritesImportError) SPClear(postgresFavoritesImportError);
 	
 	pthread_mutex_destroy(&writeLock);
 	pthread_mutex_destroy(&favoritesLock);

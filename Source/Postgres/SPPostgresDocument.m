@@ -19,6 +19,8 @@
 #import "SPPostgresSequences.h"
 #import "SPPostgresTableStructure.h"
 #import "SPPostgresQueryController.h"
+#import "SPQueryScriptStore.h"
+#import "SPPostgresFavoritesStore.h"
 #import "SPPostgresTextView.h"
 #import "SPPostgresHelp.h"
 #import "SPPostgresHistory.h"
@@ -31,6 +33,7 @@
 #import "SPPostgresCatalog.h"
 #import "SPPostgresNameSheet.h"
 #import "SPPostgresAlterDatabaseSheet.h"
+#import "SPPostgresSchemaSheet.h"
 #import "SPPostgresServerListSheet.h"
 #import "SPGotoDatabaseController.h"
 #import "SPPostgresConnector.h"
@@ -98,6 +101,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 - (void)_dropExtension:(NSString *)name;
 - (void)_extensionInstalled:(NSString *)name;
 - (void)_installQueryController;
+- (NSString *)_queryScriptKey;
 - (NSDictionary *)_completionNames;
 - (void)_showHelpFor:(NSString *)searchString autoHelp:(BOOL)autoHelp;
 - (void)_closeHelpViewer;
@@ -173,6 +177,9 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	SPPostgresSequenceController *sequenceController;
 	SPPostgresExtensionController *extensionController;
 	SPPostgresQueryController *queryController;
+	// Saves the Query editor's text for this connection (see -_installQueryController)
+	SPQueryScriptAutosaver *queryScriptAutosaver;
+	NSString *queryScriptKey;
 	SPPostgresHistory *history;
 	/// The pane shown in the right pane (an SPPostgresPane… name)
 	NSString *currentPane;
@@ -385,6 +392,8 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[sequenceController release];
 	[extensionController release];
 	[queryController release];
+	[queryScriptAutosaver release];
+	[queryScriptKey release];
 	[history release];
 	[currentPane release];
 	[paneBeforeSequence release];
@@ -904,6 +913,10 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	NSView *pane = [self _rightPane];
 	if (!pane) return;
 
+	// An edit not saved yet goes to this connection's script before the editor goes
+	[queryScriptAutosaver invalidate];
+	[queryScriptAutosaver release], queryScriptAutosaver = nil;
+
 	NSString *text = [[[[queryController editor] string] copy] autorelease];
 
 	if (queryController) {
@@ -915,6 +928,10 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	queryController = [[SPPostgresQueryController alloc] initWithConnection:connection];
 	[queryController setTaskRunner:taskRunner]; // the tab's, as Content's
 	if ([text length]) [[queryController editor] setString:text];
+
+	// The editor's text is saved for this connection as it is edited; a new tab's empty editor gets what was saved
+	queryScriptAutosaver = [[SPQueryScriptAutosaver alloc] initWithTextView:[queryController editor] store:[SPQueryScriptStore sharedStore] key:[self _queryScriptKey]];
+	if (![text length]) [queryScriptAutosaver loadIntoEmptyEditorUsing:nil];
 
 	// Unretained, as the Content controller's presenter: -invalidate (on replace or teardown) drops the block
 	__block SPPostgresDocument *document = self;
@@ -937,6 +954,33 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[queryView setFrame:[pane bounds]];
 	[queryView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 	if ([currentPane isEqualToString:SPPostgresPaneQuery]) [pane addSubview:queryView];
+}
+
+/**
+ * This connection's key for its saved Query editor text: its saved favorite's, else (Quick Connect) its server
+ * details. Fixed for the tab's life, so moving to another database keeps the same script.
+ */
+- (NSString *)_queryScriptKey
+{
+	if (queryScriptKey) return queryScriptKey;
+
+	NSString *favoriteID = [favorite favoriteID];
+	BOOL saved = NO;
+	if ([favoriteID length]) {
+		for (SPPostgresFavorite *each in [[SPPostgresFavoritesStore sharedStore] favorites]) {
+			if ([[each favoriteID] isEqualToString:favoriteID]) { saved = YES; break; }
+		}
+	}
+
+	if (saved) {
+		queryScriptKey = [[SPQueryScriptStore keyForEngine:SPQueryScriptEnginePostgreSQL favoriteID:favoriteID] copy];
+	}
+	else {
+		queryScriptKey = [[SPQueryScriptStore keyForEngine:SPQueryScriptEnginePostgreSQL type:[favorite type] host:[favorite host]
+		                                              port:[NSString stringWithFormat:@"%lu", (unsigned long)[favorite port]] user:[favorite user]
+		                                            socket:[favorite socketPath] sshHost:[favorite sshHost] sshUser:[favorite sshUser]] copy];
+	}
+	return queryScriptKey;
 }
 
 #pragma mark - Help
@@ -1874,6 +1918,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	// The Database menu's sheets on this window (their blocks retain self)
 	if ([[[SPPostgresNameSheet currentSheet] sheet] sheetParent] == parentWindow) [[SPPostgresNameSheet currentSheet] cancel:nil];
 	if ([[[SPPostgresAlterDatabaseSheet currentSheet] sheet] sheetParent] == parentWindow) [[SPPostgresAlterDatabaseSheet currentSheet] cancel:nil];
+	if ([[[SPPostgresSchemaSheet currentSheet] sheet] sheetParent] == parentWindow) [[SPPostgresSchemaSheet currentSheet] cancel:nil];
 	if ([[[SPPostgresServerListSheet currentSheet] sheet] sheetParent] == parentWindow) [[SPPostgresServerListSheet currentSheet] close:nil];
 
 	// A pending database switch completes (cancelled) and lets go of its block, which retains self
@@ -1944,6 +1989,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	[infoController invalidate];
 	[sequenceController invalidate]; // ends a Set Value sheet still up
 	[extensionController invalidate];
+	[queryScriptAutosaver invalidate]; // saves an edit not saved yet
 	[queryController invalidate];
 	[self _closeHelpViewer];
 	[splitView setDelegate:nil];
@@ -3622,31 +3668,48 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 #pragma mark - Add Schema
 
 /**
- * The + after the schema pop-up: the shown pane's edits are saved, a sheet asks for the name, CREATE SCHEMA is sent,
+ * The + after the schema pop-up: the shown pane's edits are saved, the server's roles and the connected user are read,
+ * then a sheet asks for the name and the owner (the connected user selected). CREATE SCHEMA … AUTHORIZATION is sent,
  * and the table list then lists and shows the new schema. A server error (e.g. the schema exists) is shown.
  */
 - (void)sidebarAddSchema:(SPPostgresSidebarController *)theSidebar
 {
 	if (tornDown || !parentWindow || isProcessing || [parentWindow attachedSheet]) return;
 	if (![self _endPaneEditing]) return;
-	[SPPostgresNameSheet beginOnWindow:parentWindow
-								 title:NSLocalizedString(@"Add Schema", @"PostgreSQL add schema sheet title")
-							   message:[NSString stringWithFormat:NSLocalizedString(@"Enter the name of the new schema in database “%@”:", @"PostgreSQL add schema sheet message"), currentDatabase ?: @""]
-						   initialName:@""
-						   buttonTitle:NSLocalizedString(@"Add", @"add button")
-						  requiredText:nil
-							completion:^(NSString *name) {
-		if (name && !tornDown) [self _createSchema:name];
+	NSString *database = [[currentDatabase copy] autorelease];
+	[taskRunner runTaskWithDescription:NSLocalizedString(@"Loading...", @"PostgreSQL add schema: loading task") cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		SPPostgresCatalog *reader = [[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease];
+		NSArray *roles = [reader roleNames:error];
+		if (!roles) return nil;
+		id user = [[[theConnection execute:@"SELECT current_user::text"] rowAsArray] firstObject];
+		return @{@"roles": roles, @"user": [user isKindOfClass:[NSString class]] ? user : @""};
+	} completion:^(id result, NSError *error, BOOL cancelled) {
+		if (tornDown || cancelled) return;
+		if (!result) {
+			[self _alertTitle:NSLocalizedString(@"Could not read the server's roles", @"PostgreSQL add schema: roles read failed") error:error];
+			return;
+		}
+		NSString *user = result[@"user"];
+		[self _whenIdle:^{
+			if (tornDown || !parentWindow || [parentWindow attachedSheet]) return;
+			[SPPostgresSchemaSheet beginAddOnWindow:parentWindow database:database owner:user roles:result[@"roles"] completion:^(NSDictionary *values) {
+				if (!values || tornDown) return;
+				// The connected user owns a new schema anyway: AUTHORIZATION only for another owner
+				NSString *owner = [values[@"owner"] isEqualToString:user] ? nil : values[@"owner"];
+				[self _createSchema:values[@"name"] owner:owner];
+			}];
+		}];
 	}];
 }
 
-- (void)_createSchema:(NSString *)name
+- (void)_createSchema:(NSString *)name owner:(NSString *)owner
 {
 	if ([self _refuseWriteWhileBusy]) return;
 	NSString *theName = [[name copy] autorelease];
+	NSString *theOwner = [[owner copy] autorelease];
 	[taskRunner runTaskWithDescription:NSLocalizedString(@"Adding schema...", @"PostgreSQL add schema task") cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
 		SPPostgresCatalog *writer = [[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease];
-		return [writer createSchema:theName error:error] ? @YES : nil;
+		return [writer createSchema:theName owner:theOwner error:error] ? @YES : nil;
 	} completion:^(id result, NSError *error, BOOL cancelled) {
 		if (tornDown || cancelled) return;
 		if (!result) {
@@ -3660,6 +3723,54 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 				[self _whenIdle:^{ [sidebar reloadSchema:theName]; }];
 			}];
 		}];
+	}];
+}
+
+#pragma mark - Edit Schema
+
+/**
+ * The pencil before the +: the shown pane's edits are saved, the shown schema's owner and the server's roles are read,
+ * then a sheet offers its owner. Save sends ALTER SCHEMA … OWNER TO; a server error is shown.
+ */
+- (void)sidebarEditSchema:(SPPostgresSidebarController *)theSidebar
+{
+	if (tornDown || !parentWindow || isProcessing || [parentWindow attachedSheet]) return;
+	NSString *schema = [[[sidebar selectedSchema] copy] autorelease];
+	if (![schema length]) return;
+	if (![self _endPaneEditing]) return;
+	[taskRunner runTaskWithDescription:NSLocalizedString(@"Loading...", @"PostgreSQL edit schema: loading task") cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		SPPostgresCatalog *reader = [[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease];
+		NSString *owner = [reader ownerOfSchema:schema error:error];
+		if (!owner) return nil;
+		NSArray *roles = [reader roleNames:error];
+		if (!roles) return nil;
+		return @{@"owner": owner, @"roles": roles};
+	} completion:^(id result, NSError *error, BOOL cancelled) {
+		if (tornDown || cancelled) return;
+		if (!result) {
+			[self _alertTitle:[NSString stringWithFormat:NSLocalizedString(@"Could not read the schema “%@”", @"PostgreSQL edit schema: read failed"), schema] error:error];
+			return;
+		}
+		[self _whenIdle:^{
+			if (tornDown || !parentWindow || [parentWindow attachedSheet]) return;
+			[SPPostgresSchemaSheet beginEditOnWindow:parentWindow schema:schema owner:result[@"owner"] roles:result[@"roles"] completion:^(NSDictionary *values) {
+				if (values && !tornDown) [self _setOwner:values[@"owner"] ofSchema:schema];
+			}];
+		}];
+	}];
+}
+
+- (void)_setOwner:(NSString *)owner ofSchema:(NSString *)schema
+{
+	if ([self _refuseWriteWhileBusy]) return;
+	NSString *theOwner = [[owner copy] autorelease];
+	NSString *theSchema = [[schema copy] autorelease];
+	[taskRunner runTaskWithDescription:NSLocalizedString(@"Changing owner...", @"PostgreSQL edit schema task") cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		SPPostgresCatalog *writer = [[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease];
+		return [writer setOwner:theOwner ofSchema:theSchema error:error] ? @YES : nil;
+	} completion:^(id result, NSError *error, BOOL cancelled) {
+		if (tornDown || cancelled || result) return;
+		[self _alertTitle:[NSString stringWithFormat:NSLocalizedString(@"Could not change the owner of the schema “%@”", @"PostgreSQL edit schema failed"), theSchema] error:error];
 	}];
 }
 

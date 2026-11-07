@@ -1,4 +1,4 @@
-Sequel Plus <img alt="Logo" src="https://sequelpro.com/images/logo.png" align="right" height="50">
+Sequel Plus <img alt="Logo" src="/images/Sequel-Plus-icon-512.png" align="right" height="50">
 =======
 
 Sequel Plus is the "sequel" to the longtime macOS tool Sequel Pro.
@@ -6,7 +6,8 @@ Sequel Plus is a fast, easy-to-use Mac database management application for worki
 
 If you would like to sponsor Sequel Plus, please sponsor one of our maintainers via GitHub Sponsors!
 
-![Screenshot](https://sequelplus.com/images/browse.png)
+![Screenshot](/images/Sequel-Plus.png)
+
 
 Build Instructions
 =======

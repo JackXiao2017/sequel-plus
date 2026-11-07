@@ -1,26 +1,22 @@
 #import <XCTest/XCTest.h>
 #import "../Source/Postgres/SPPostgresFavorite.h"
+#import "../Source/Postgres/SPPostgresFavoriteNode.h"
 #import "../Source/Postgres/SPPostgresFavoritesStore.h"
 
+// SPTreeNode / SPGroupNode / SPFavoriteNode are app classes without exported symbols: look them up at run time
+@interface NSObject (SPPGStoreTestsMySQLNodes)
++ (id)groupNodeWithName:(NSString *)name;
++ (id)favoriteNodeWithDictionary:(NSMutableDictionary *)dictionary;
+- (BOOL)isGroup;
+- (NSArray *)descendants;
+@end
+
+/// The store is a view of the PostgreSQL favorites in the favorites tree: these tests use in-memory trees only
+/// (never SPFavoritesController's, never a file).
 @interface SPPostgresFavoritesStoreTests : XCTestCase
-@property (nonatomic, strong) NSURL *dir;
-@property (nonatomic, strong) NSURL *fileURL;
 @end
 
 @implementation SPPostgresFavoritesStoreTests
-
-- (void)setUp
-{
-	NSString *name = [@"SPPGFavTests-" stringByAppendingString:[[NSUUID UUID] UUIDString]];
-	self.dir = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:name] isDirectory:YES];
-	[[NSFileManager defaultManager] createDirectoryAtURL:self.dir withIntermediateDirectories:YES attributes:nil error:nil];
-	self.fileURL = [self.dir URLByAppendingPathComponent:@"PostgresFavorites.plist"];
-}
-
-- (void)tearDown
-{
-	[[NSFileManager defaultManager] removeItemAtURL:self.dir error:nil];
-}
 
 - (SPPostgresFavorite *)fullFavorite
 {
@@ -44,196 +40,195 @@
 	return f;
 }
 
-- (void)testRoundTripPreservesEveryField
+- (SPPostgresFavorite *)favoriteNamed:(NSString *)name
 {
-	SPPostgresFavorite *f = [self fullFavorite];
-	SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initWithFileURL:self.fileURL];
-	NSError *error = nil;
-	XCTAssertTrue([store saveFavorite:f error:&error], @"%@", error);
-
-	SPPostgresFavoritesStore *reloaded = [[SPPostgresFavoritesStore alloc] initWithFileURL:self.fileURL];
-	XCTAssertEqual(reloaded.favorites.count, 1u);
-	SPPostgresFavorite *g = reloaded.favorites.firstObject;
-	XCTAssertEqualObjects(g.favoriteID, f.favoriteID);
-	XCTAssertEqualObjects(g.name, @"Prod");
-	XCTAssertEqual(g.colorIndex, 3);
-	XCTAssertEqual(g.type, SPPostgresSSHConnection);
-	XCTAssertEqualObjects(g.host, @"db.example.com");
-	XCTAssertEqual(g.port, 6543u);
-	XCTAssertEqualObjects(g.user, @"alice");
-	XCTAssertEqualObjects(g.database, @"appdb");
-	XCTAssertEqualObjects(g.socketPath, @"/tmp/.s.PGSQL.5432");
-	XCTAssertTrue(g.useSSL);
-	XCTAssertEqualObjects(g.sslCACertPath, @"/ca.pem");
-	XCTAssertEqualObjects(g.sslCertPath, @"/cert.pem");
-	XCTAssertEqualObjects(g.sslKeyPath, @"/key.pem");
-	XCTAssertEqualObjects(g.sshHost, @"bastion");
-	XCTAssertEqualObjects(g.sshUser, @"bob");
-	XCTAssertEqual(g.sshPort, 2222u);
-	XCTAssertEqualObjects(g.sshKeyPath, @"/id_rsa");
-
-	// Defaults and nil strings
-	SPPostgresFavorite *d = [[SPPostgresFavorite alloc] init];
-	XCTAssertEqual(d.port, 5432u);
-	XCTAssertEqual(d.type, SPPostgresTCPIPConnection);
-	XCTAssertEqual(d.colorIndex, -1);
-	XCTAssertNotNil(d.favoriteID);
-	SPPostgresFavorite *e = [SPPostgresFavorite favoriteWithDictionary:[d dictionaryRepresentation]];
-	XCTAssertEqualObjects(e.favoriteID, d.favoriteID);
-	XCTAssertNil(e.host);
-	XCTAssertEqual(e.colorIndex, -1);
-	XCTAssertEqual(e.port, 5432u);
-	XCTAssertFalse(e.useSSL);
-
-	SPPostgresFavorite *c = [f copy];
-	XCTAssertEqualObjects(c.favoriteID, f.favoriteID);
-	XCTAssertEqualObjects(c.sshKeyPath, f.sshKeyPath);
+	SPPostgresFavorite *f = [[SPPostgresFavorite alloc] init];
+	f.name = name;
+	f.host = @"db";
+	return f;
 }
 
-- (void)testSaveReplacesFavoriteWithSameID
+- (id)mysqlGroup:(NSString *)name children:(NSArray *)children
 {
-	SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initWithFileURL:self.fileURL];
+	NSTreeNode *node = [NSClassFromString(@"SPTreeNode") treeNodeWithRepresentedObject:[NSClassFromString(@"SPGroupNode") groupNodeWithName:name]];
+	[[node mutableChildNodes] addObjectsFromArray:children];
+	return node;
+}
+
+- (id)mysqlFavorite:(NSInteger)favoriteID
+{
+	NSMutableDictionary *dict = [@{ @"id": @(favoriteID), @"name": [NSString stringWithFormat:@"m%ld", (long)favoriteID], @"host": @"mysqlhost", @"type": @0 } mutableCopy];
+	return [NSClassFromString(@"SPTreeNode") treeNodeWithRepresentedObject:[NSClassFromString(@"SPFavoriteNode") favoriteNodeWithDictionary:dict]];
+}
+
+- (NSArray *)namesIn:(NSArray *)nodes
+{
+	NSMutableArray *names = [NSMutableArray array];
+	for (NSTreeNode *node in nodes) [names addObject:[[node representedObject] nodeName] ?: @"?"];
+	return names;
+}
+
+/// A store over `section`, whose saves answer `saveResult` and are counted in `saves`.
+- (SPPostgresFavoritesStore *)storeOverSection:(id)section saveResult:(BOOL *)saveResult saves:(NSUInteger *)saves
+{
+	return [[SPPostgresFavoritesStore alloc] initWithSectionProvider:^SPTreeNode *{ return section; } saveHandler:^BOOL{
+		if (saves) (*saves)++;
+		return saveResult ? *saveResult : YES;
+	} loadErrorProvider:nil];
+}
+
+- (void)testInMemoryStoreRoundTripsEveryField
+{
+	SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initInMemory];
+	XCTAssertNotNil([store section]);
+	XCTAssertEqual([[store favorites] count], 0u);
+
 	SPPostgresFavorite *f = [self fullFavorite];
-	XCTAssertTrue([store saveFavorite:f error:nil]);
-	SPPostgresFavorite *g = [f copy];
-	g.name = @"Renamed";
-	XCTAssertTrue([store saveFavorite:g error:nil]);
-	XCTAssertEqual(store.favorites.count, 1u);
-	XCTAssertEqualObjects([store.favorites.firstObject name], @"Renamed");
+	NSError *error = nil;
+	XCTAssertTrue([store saveFavorite:f error:&error], @"%@", error);
+	XCTAssertEqual([[store favorites] count], 1u);
+	SPPostgresFavorite *g = [store favorites].firstObject;
+	XCTAssertEqualObjects([g dictionaryRepresentation], [f dictionaryRepresentation]);
+	XCTAssertFalse(g == f, @"the store keeps its own copy");
+
+	id node = [store nodeForFavoriteID:f.favoriteID];
+	XCTAssertNotNil(node);
+	XCTAssertEqual((id)[node parentNode], (id)[store section], @"a new favorite without a group goes to the end of the section");
+	XCTAssertFalse([node isGroup]);
+	XCTAssertEqualObjects([SPPostgresFavoriteForNode(node) favoriteID], f.favoriteID);
+}
+
+- (void)testFavoritesAreSortedByNameAndNodesInTreeOrder
+{
+	SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initInMemory];
+	id group = [self mysqlGroup:@"G" children:@[[self mysqlFavorite:1]]];
+	[[(NSTreeNode *)[store section] mutableChildNodes] addObject:group];
+
+	NSError *error = nil;
+	XCTAssertNotNil([store addFavorite:[self favoriteNamed:@"b"] toGroup:nil atIndex:NSNotFound error:&error], @"%@", error);
+	XCTAssertNotNil([store addFavorite:[self favoriteNamed:@"A"] toGroup:group atIndex:0 error:&error], @"%@", error);
+	XCTAssertNotNil([store addFavorite:[self favoriteNamed:@"c"] toGroup:group atIndex:NSNotFound error:&error], @"%@", error);
+
+	XCTAssertEqualObjects([[store favorites] valueForKey:@"name"], (@[@"A", @"b", @"c"]));
+	XCTAssertEqualObjects([self namesIn:[store favoriteNodes]], (@[@"A", @"c", @"b"]), @"depth first, in tree order");
+	XCTAssertEqualObjects([self namesIn:[group childNodes]], (@[@"A", @"m1", @"c"]));
+}
+
+- (void)testAddToNonGroupOrForeignNodeGoesToTheSection
+{
+	SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initInMemory];
+	id mysql = [self mysqlFavorite:1];
+	[[(NSTreeNode *)[store section] mutableChildNodes] addObject:mysql];
+	id foreignGroup = [self mysqlGroup:@"Elsewhere" children:@[]];
+
+	id a = [store addFavorite:[self favoriteNamed:@"a"] toGroup:mysql atIndex:0 error:NULL];
+	id b = [store addFavorite:[self favoriteNamed:@"b"] toGroup:foreignGroup atIndex:0 error:NULL];
+	id c = [store addFavorite:[self favoriteNamed:@"c"] toGroup:a atIndex:0 error:NULL];
+	XCTAssertEqualObjects([self namesIn:[(NSTreeNode *)[store section] childNodes]], (@[@"m1", @"a", @"b", @"c"]), @"at the end (the index was for another group)");
+	XCTAssertEqual([[foreignGroup childNodes] count], 0u);
+	XCTAssertEqual((id)[b parentNode], (id)[store section]);
+	XCTAssertEqual((id)[c parentNode], (id)[store section]);
+}
+
+- (void)testSaveReplacesFavoriteInPlace
+{
+	SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initInMemory];
+	id group = [self mysqlGroup:@"G" children:@[[self mysqlFavorite:1], [self mysqlFavorite:2]]];
+	[[(NSTreeNode *)[store section] mutableChildNodes] addObject:group];
+	SPPostgresFavorite *f = [self favoriteNamed:@"Before"];
+	id node = [store addFavorite:f toGroup:group atIndex:1 error:NULL];
+
+	SPPostgresFavorite *renamed = [f copy];
+	renamed.name = @"After";
+	renamed.port = 6000;
+	NSError *error = nil;
+	XCTAssertTrue([store saveFavorite:renamed error:&error], @"%@", error);
+	XCTAssertEqual((id)[store nodeForFavoriteID:f.favoriteID], node, @"same node");
+	XCTAssertEqualObjects([self namesIn:[group childNodes]], (@[@"m1", @"After", @"m2"]), @"same place");
+	XCTAssertEqual(((SPPostgresFavorite *)[store favorites].firstObject).port, 6000u);
+	XCTAssertEqual([[store favorites] count], 1u);
 }
 
 - (void)testRemoveDeletesOnlyThatFavorite
 {
-	SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initWithFileURL:self.fileURL];
-	SPPostgresFavorite *a = [self fullFavorite]; a.name = @"beta";
-	SPPostgresFavorite *b = [self fullFavorite]; b.name = @"Alpha";
-	XCTAssertTrue([store saveFavorite:a error:nil]);
-	XCTAssertTrue([store saveFavorite:b error:nil]);
-	XCTAssertEqualObjects([store.favorites.firstObject name], @"Alpha", @"sorted case-insensitively");
-	XCTAssertTrue([store removeFavoriteWithID:b.favoriteID error:nil]);
-	XCTAssertEqual(store.favorites.count, 1u);
-	XCTAssertEqualObjects([store.favorites.firstObject favoriteID], a.favoriteID);
+	SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initInMemory];
+	id group = [self mysqlGroup:@"G" children:@[[self mysqlFavorite:1]]];
+	[[(NSTreeNode *)[store section] mutableChildNodes] addObject:group];
+	SPPostgresFavorite *a = [self favoriteNamed:@"a"], *b = [self favoriteNamed:@"b"];
+	[store addFavorite:a toGroup:group atIndex:NSNotFound error:NULL];
+	[store addFavorite:b toGroup:nil atIndex:NSNotFound error:NULL];
+
+	NSError *error = nil;
+	XCTAssertTrue([store removeFavoriteWithID:a.favoriteID error:&error], @"%@", error);
+	XCTAssertEqualObjects([[store favorites] valueForKey:@"favoriteID"], @[b.favoriteID]);
+	XCTAssertEqualObjects([self namesIn:[group childNodes]], @[@"m1"], @"MySQL favorites untouched");
+	XCTAssertTrue([store removeFavoriteWithID:@"no-such-id" error:&error], @"nothing to remove is fine");
 }
 
-- (void)testMissingFileMeansNoFavorites
+- (void)testFailedSaveUndoesTheChangeAndDoesNotNotify
 {
-	SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initWithFileURL:self.fileURL];
-	XCTAssertEqual(store.favorites.count, 0u);
+	id section = [self mysqlGroup:@"FAVORITES" children:@[[self mysqlFavorite:1]]];
+	BOOL saveResult = YES;
+	NSUInteger saves = 0;
+	SPPostgresFavoritesStore *store = [self storeOverSection:section saveResult:&saveResult saves:&saves];
+	SPPostgresFavorite *f = [self favoriteNamed:@"kept"];
+	XCTAssertNotNil([store addFavorite:f toGroup:section atIndex:0 error:NULL]);
+	XCTAssertEqual(saves, 1u);
+
+	__block NSUInteger notifications = 0;
+	id observer = [[NSNotificationCenter defaultCenter] addObserverForName:SPPostgresFavoritesDidChangeNotification object:store queue:nil usingBlock:^(NSNotification *n) { notifications++; }];
+	[self addTeardownBlock:^{ [[NSNotificationCenter defaultCenter] removeObserver:observer]; }];
+
+	saveResult = NO;
+	NSError *error = nil;
+	XCTAssertNil([store addFavorite:[self favoriteNamed:@"new"] toGroup:nil atIndex:NSNotFound error:&error]);
+	XCTAssertNotNil(error);
+	SPPostgresFavorite *changed = [f copy];
+	changed.name = @"changed";
+	error = nil;
+	XCTAssertFalse([store saveFavorite:changed error:&error]);
+	XCTAssertNotNil(error);
+	error = nil;
+	XCTAssertFalse([store removeFavoriteWithID:f.favoriteID error:&error]);
+	XCTAssertNotNil(error);
+
+	XCTAssertEqualObjects([self namesIn:[section childNodes]], (@[@"kept", @"m1"]), @"every change undone");
+	XCTAssertEqual(notifications, 0u);
+
+	saveResult = YES;
+	XCTAssertTrue([store saveFavorite:changed error:&error], @"%@", error);
+	XCTAssertEqual(notifications, 1u);
+	XCTAssertTrue([store removeFavoriteWithID:f.favoriteID error:&error], @"%@", error);
+	XCTAssertEqual(notifications, 2u);
 }
 
-- (void)testNeverTouchesMySQLFavoritesFile
+- (void)testNoTreeIsAnError
 {
-	NSURL *mysql = [self.dir URLByAppendingPathComponent:@"Favorites.plist"];
-	NSData *bytes = [@"original-bytes" dataUsingEncoding:NSUTF8StringEncoding];
-	[bytes writeToURL:mysql atomically:YES];
-	SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initWithFileURL:self.fileURL];
-	SPPostgresFavorite *f = [self fullFavorite];
-	XCTAssertTrue([store saveFavorite:f error:nil]);
-	XCTAssertTrue([store removeFavoriteWithID:f.favoriteID error:nil]);
-	XCTAssertEqualObjects([NSData dataWithContentsOfURL:mysql], bytes);
+	SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initWithSectionProvider:^SPTreeNode *{ return nil; } saveHandler:^BOOL{ return YES; } loadErrorProvider:nil];
+	NSError *error = nil;
+	XCTAssertNil([store addFavorite:[self favoriteNamed:@"a"] toGroup:nil atIndex:NSNotFound error:&error]);
+	XCTAssertNotNil(error);
+	XCTAssertEqual([[store favorites] count], 0u);
+}
+
+- (void)testLastLoadErrorComesFromTheProvider
+{
+	NSError *problem = [NSError errorWithDomain:@"test" code:1 userInfo:@{ NSLocalizedDescriptionKey: @"cannot read" }];
+	__block NSError *current = problem;
+	SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initWithSectionProvider:nil saveHandler:nil loadErrorProvider:^NSError *{ return current; }];
+	XCTAssertEqualObjects([store lastLoadError], problem);
+	current = nil;
+	XCTAssertNil([store lastLoadError]);
+	XCTAssertNil([[[SPPostgresFavoritesStore alloc] initInMemory] lastLoadError]);
 }
 
 - (void)testKeychainNamesUsePostgresPrefix
 {
 	SPPostgresFavorite *f = [self fullFavorite];
-	XCTAssertTrue([f.keychainName hasPrefix:@"Sequel Pro (PostgreSQL) : "]);
-	XCTAssertEqualObjects(f.keychainName, ([NSString stringWithFormat:@"Sequel Pro (PostgreSQL) : Prod (%@)", f.favoriteID]));
-	XCTAssertEqualObjects(f.keychainAccount, @"alice@db.example.com/appdb");
-	XCTAssertEqualObjects(f.sshKeychainName, ([NSString stringWithFormat:@"Sequel Pro (PostgreSQL) SSHTunnel : Prod (%@)", f.favoriteID]));
-	XCTAssertEqualObjects(f.sshKeychainAccount, @"bob@bastion");
-}
-
-- (void)testNotificationPostedOnSaveAndRemoveButNotOnRefusal
-{
-	SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initWithFileURL:self.fileURL];
-	__block NSInteger count = 0;
-	id token = [[NSNotificationCenter defaultCenter] addObserverForName:SPPostgresFavoritesDidChangeNotification
-																 object:nil queue:nil usingBlock:^(NSNotification *n) { count++; }];
-	SPPostgresFavorite *f = [self fullFavorite];
-	XCTAssertTrue([store saveFavorite:f error:nil]);
-	XCTAssertEqual(count, 1);
-	XCTAssertTrue([store removeFavoriteWithID:f.favoriteID error:nil]);
-	XCTAssertEqual(count, 2);
-
-	[[@"garbage" dataUsingEncoding:NSUTF8StringEncoding] writeToURL:self.fileURL atomically:YES];
-	XCTAssertFalse([store saveFavorite:f error:nil]);
-	XCTAssertFalse([store removeFavoriteWithID:f.favoriteID error:nil]);
-	XCTAssertEqual(count, 2, @"refused writes must not notify");
-	[[NSNotificationCenter defaultCenter] removeObserver:token];
-}
-
-- (void)testWritesVersionOne
-{
-	SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initWithFileURL:self.fileURL];
-	XCTAssertTrue([store saveFavorite:[self fullFavorite] error:nil]);
-	NSDictionary *root = [NSDictionary dictionaryWithContentsOfURL:self.fileURL];
-	XCTAssertEqualObjects(root[@"version"], @1);
-	XCTAssertEqual([root[@"favorites"] count], 1u);
-}
-
-- (void)testCorruptFileIsRefusedAndLeftUntouched
-{
-	NSData *garbage = [@"this is not a plist" dataUsingEncoding:NSUTF8StringEncoding];
-	[garbage writeToURL:self.fileURL atomically:YES];
-	SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initWithFileURL:self.fileURL];
-	XCTAssertEqual(store.favorites.count, 0u);
-	NSError *error = nil;
-	XCTAssertFalse([store saveFavorite:[self fullFavorite] error:&error]);
-	XCTAssertNotNil(error);
-	XCTAssertTrue(error.localizedDescription.length > 0);
-	error = nil;
-	XCTAssertFalse([store removeFavoriteWithID:@"x" error:&error]);
-	XCTAssertNotNil(error);
-	XCTAssertEqualObjects([NSData dataWithContentsOfURL:self.fileURL], garbage);
-}
-
-- (void)testLastLoadErrorReportsAnUnreadableFile
-{
-	SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initWithFileURL:self.fileURL];
-
-	// Missing file: no error
-	XCTAssertEqual(store.favorites.count, 0u);
-	XCTAssertNil([store lastLoadError]);
-
-	// Corrupt file: the error names the file, which is left untouched
-	NSData *garbage = [@"this is not a plist" dataUsingEncoding:NSUTF8StringEncoding];
-	[garbage writeToURL:self.fileURL atomically:YES];
-	XCTAssertEqual(store.favorites.count, 0u);
-	NSError *error = [store lastLoadError];
-	XCTAssertNotNil(error);
-	XCTAssertTrue([error.localizedDescription containsString:self.fileURL.path], @"%@", error.localizedDescription);
-	XCTAssertEqualObjects([NSData dataWithContentsOfURL:self.fileURL], garbage);
-
-	// Valid file again: cleared
-	[[NSFileManager defaultManager] removeItemAtURL:self.fileURL error:nil];
-	XCTAssertTrue([store saveFavorite:[self fullFavorite] error:NULL]);
-	XCTAssertEqual(store.favorites.count, 1u);
-	XCTAssertNil([store lastLoadError]);
-}
-
-- (void)testNewerVersionFileIsRefusedAndLeftUntouched
-{
-	NSDictionary *root = @{@"version": @2, @"favorites": @[[[self fullFavorite] dictionaryRepresentation]]};
-	XCTAssertTrue([root writeToURL:self.fileURL atomically:YES]);
-	NSData *before = [NSData dataWithContentsOfURL:self.fileURL];
-	SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initWithFileURL:self.fileURL];
-	NSError *error = nil;
-	XCTAssertFalse([store saveFavorite:[self fullFavorite] error:&error]);
-	XCTAssertNotNil(error);
-	XCTAssertEqualObjects([NSData dataWithContentsOfURL:self.fileURL], before);
-}
-
-- (void)testWriteFailurePopulatesError
-{
-	NSURL *ro = [self.dir URLByAppendingPathComponent:@"readonly" isDirectory:YES];
-	[[NSFileManager defaultManager] createDirectoryAtURL:ro withIntermediateDirectories:YES attributes:nil error:nil];
-	[[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions: @0500} ofItemAtPath:ro.path error:nil];
-	SPPostgresFavoritesStore *store = [[SPPostgresFavoritesStore alloc] initWithFileURL:[ro URLByAppendingPathComponent:@"PostgresFavorites.plist"]];
-	NSError *error = nil;
-	BOOL ok = [store saveFavorite:[self fullFavorite] error:&error];
-	[[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions: @0700} ofItemAtPath:ro.path error:nil];
-	XCTAssertFalse(ok);
-	XCTAssertNotNil(error);
+	XCTAssertTrue([[f keychainName] hasPrefix:@"Sequel Plus (PostgreSQL) : Prod ("]);
+	XCTAssertTrue([[f sshKeychainName] hasPrefix:@"Sequel Plus (PostgreSQL) SSHTunnel : Prod ("]);
+	XCTAssertEqualObjects([f keychainAccount], @"alice@db.example.com/appdb");
+	XCTAssertEqualObjects([f sshKeychainAccount], @"bob@bastion");
 }
 
 @end

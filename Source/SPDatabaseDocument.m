@@ -30,6 +30,7 @@
 //  More info at <https://github.com/sequelpro/sequelpro>
 
 #import "SPDatabaseDocument.h"
+#import "SPQueryScriptStore.h"
 #import "NSWindow+SPCompactChrome.h"
 #import "SPConnectionController.h"
 #import "SPTablesList.h"
@@ -106,7 +107,13 @@ static int64_t SPDatabaseDocumentInstanceCounter = 0;
 static BOOL isOSAtLeast10_14;
 
 @interface SPDatabaseDocument ()
+{
+	// Saves the Custom Query editor's text for this connection (see -_startQueryScriptAutosave)
+	SPQueryScriptAutosaver *queryScriptAutosaver;
+}
 
+- (void)_startQueryScriptAutosave;
+- (NSString *)_queryScriptKey;
 - (void)_addDatabase;
 - (void)_alterDatabase;
 - (void)_copyDatabase;
@@ -567,6 +574,9 @@ static BOOL isOSAtLeast10_14;
 		[customQueryInstance doPerformLoadQueryService:queryEditorInitString];
 		SPClear(queryEditorInitString);
 	}
+
+	// The Custom Query editor's text is saved for this connection; an empty editor gets what was saved
+	[self _startQueryScriptAutosave];
 
 	if (spfSession != nil) {
 
@@ -4278,8 +4288,48 @@ static BOOL isOSAtLeast10_14;
 /**
  * Invoked when the parent tab is about to close
  */
+/**
+ * Starts saving the Custom Query editor's text for this connection, first putting the saved text in the editor
+ * when it is empty (it isn't when an spf file or a "Run in new tab" gave it text).
+ */
+- (void)_startQueryScriptAutosave
+{
+	NSString *key = [self _queryScriptKey];
+	SPTextView *editor = [customQueryInstance valueForKeyPath:@"textView"];
+	if (!key || !editor) return;
+
+	[queryScriptAutosaver invalidate];
+	if (queryScriptAutosaver) SPClear(queryScriptAutosaver);
+	queryScriptAutosaver = [[SPQueryScriptAutosaver alloc] initWithTextView:editor store:[SPQueryScriptStore sharedStore] key:key];
+	[queryScriptAutosaver loadIntoEmptyEditorUsing:^(NSString *script) {
+		[customQueryInstance doPerformLoadQueryService:script];
+		[editor setSelectedRange:NSMakeRange(0, 0)];
+		[editor scrollRangeToVisible:NSMakeRange(0, 0)];
+	}];
+}
+
+/// This connection's key for its saved Custom Query text: its favorite's, else (Quick Connect) its server details.
+- (NSString *)_queryScriptKey
+{
+	NSString *favoriteID = [connectionController connectionKeychainID];
+	if ([favoriteID length]) return [SPQueryScriptStore keyForEngine:SPQueryScriptEngineMySQL favoriteID:favoriteID];
+
+	NSInteger type = [connectionController type];
+	NSString *port = [[connectionController port] length] ? [connectionController port] : @"3306"; // empty: the default
+	return [SPQueryScriptStore keyForEngine:SPQueryScriptEngineMySQL type:type
+	                                   host:(type == SPSocketConnection ? @"" : [connectionController host])
+	                                   port:(type == SPSocketConnection ? @"" : port)
+	                                   user:[connectionController user]
+	                                 socket:(type == SPSocketConnection ? [connectionController socket] : @"")
+	                                sshHost:(type == SPSSHTunnelConnection ? [connectionController sshHost] : @"")
+	                                sshUser:(type == SPSSHTunnelConnection ? [connectionController sshUser] : @"")];
+}
+
 - (void)parentTabDidClose
 {
+	// An edit of the Custom Query editor not saved yet
+	[queryScriptAutosaver invalidate];
+
 #ifndef SP_CODA
 	// Cancel autocompletion trigger
 	if([prefs boolForKey:SPCustomQueryAutoComplete]) {
@@ -7554,6 +7604,8 @@ static BOOL isOSAtLeast10_14;
 	if (queryExecutionTimer) [queryExecutionTimer invalidate], SPClear(queryExecutionTimer);
 	if (taskFadeInStartDate) SPClear(taskFadeInStartDate);
 	if (queryEditorInitString) SPClear(queryEditorInitString);
+	[queryScriptAutosaver invalidate];
+	if (queryScriptAutosaver) SPClear(queryScriptAutosaver);
 	if (sqlFileURL) SPClear(sqlFileURL);
 	if (spfFileURL) SPClear(spfFileURL);
 	if (spfPreferences) SPClear(spfPreferences);

@@ -1,4 +1,5 @@
 #import "SPPostgresQueryStore.h"
+#import "SPSequelPlusMigration.h"
 
 NSString * const SPPostgresQueryStoreDidChangeNotification = @"SPPostgresQueryStoreDidChangeNotification";
 
@@ -26,13 +27,8 @@ static const NSInteger SPPostgresQueryStoreVersion = 1;
 
 + (NSURL *)_dataFileURLNamed:(NSString *)name
 {
-	NSURL *support = [[NSFileManager defaultManager] URLForDirectory:NSApplicationSupportDirectory
-															inDomain:NSUserDomainMask
-												   appropriateForURL:nil
-															  create:NO
-															   error:NULL];
-	if (!support) support = [NSURL fileURLWithPath:[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support"] isDirectory:YES];
-	return [[[support URLByAppendingPathComponent:@"Sequel Pro" isDirectory:YES]
+	NSURL *support = SPSequelPlusApplicationSupportURL(); // a temporary folder while the app hosts tests
+	return [[[support URLByAppendingPathComponent:SPSequelPlusSupportFolderName isDirectory:YES]
 		URLByAppendingPathComponent:@"Data" isDirectory:YES] URLByAppendingPathComponent:name];
 }
 

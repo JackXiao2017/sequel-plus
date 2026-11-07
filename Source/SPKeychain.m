@@ -362,7 +362,7 @@
 - (NSString *)nameForFavoriteName:(NSString *)favoriteName id:(NSString *)favoriteId
 {
 	// Look up the keychain name using long longs to support 64-bit > 32-bit keychain usage
-	return [NSString stringWithFormat:@"Sequel Pro : %@ (%lld)", favoriteName ? favoriteName: @"", [favoriteId longLongValue]];
+	return [NSString stringWithFormat:@"Sequel Plus : %@ (%lld)", favoriteName ? favoriteName: @"", [favoriteId longLongValue]];
 }
 
 /**
@@ -379,7 +379,7 @@
 - (NSString *)nameForSSHForFavoriteName:(NSString *)favoriteName id:(NSString *)favoriteId
 {
 	// Look up the keychain name using long longs to support 64-bit > 32-bit keychain usage
-	return [NSString stringWithFormat:@"Sequel Pro SSHTunnel : %@ (%lld)", favoriteName ? favoriteName: @"", [favoriteId longLongValue]];
+	return [NSString stringWithFormat:@"Sequel Plus SSHTunnel : %@ (%lld)", favoriteName ? favoriteName: @"", [favoriteId longLongValue]];
 }
 
 /**

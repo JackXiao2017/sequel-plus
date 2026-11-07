@@ -31,6 +31,7 @@
 #import "SPTreeNode.h"
 #import "SPFavoriteNode.h"
 #import "SPGroupNode.h"
+#import "SPPostgresFavoriteNode.h"
 
 // Constants
 static NSString *SPTreeNodeIsGroupKey = @"SPTreeNodeIsGroup";
@@ -251,11 +252,25 @@ static NSString *SPTreeNodeIsGroupKey = @"SPTreeNodeIsGroup";
 }
 
 /**
- * Constructs a dictionary representation of the favorite.
+ * Constructs a dictionary representation of the favorite (as saved in Favorites.plist), including
+ * PostgreSQL favorites.
  *
  * @return The dictionary representation.
  */
 - (NSDictionary *)dictionaryRepresentation
+{
+	return [self _dictionaryRepresentationIncludingPostgresFavorites:YES];
+}
+
+/**
+ * As -dictionaryRepresentation, without PostgreSQL favorites (nil for one): what favorites export writes.
+ */
+- (NSDictionary *)mysqlDictionaryRepresentation
+{
+	return [self _dictionaryRepresentationIncludingPostgresFavorites:NO];
+}
+
+- (NSDictionary *)_dictionaryRepresentationIncludingPostgresFavorites:(BOOL)includePostgres
 {
 	NSMutableDictionary *dictionary = nil;
 	
@@ -265,13 +280,17 @@ static NSString *SPTreeNodeIsGroupKey = @"SPTreeNodeIsGroup";
 		
 		dictionary = [NSMutableDictionary dictionaryWithDictionary:[object nodeFavorite]];
 	}
+	else if ([object isKindOfClass:[SPPostgresFavoriteNode class]]) {
+
+		if (includePostgres) dictionary = [NSMutableDictionary dictionaryWithDictionary:[object favoritesDictionary]];
+	}
 	else if ([object isKindOfClass:[SPGroupNode class]]) {
 		
 		NSMutableArray *children = [NSMutableArray array];
 		
 		for (SPTreeNode *node in [self childNodes])
 		{
-			NSDictionary *representation = [node dictionaryRepresentation];
+			NSDictionary *representation = [node _dictionaryRepresentationIncludingPostgresFavorites:includePostgres];
 			
 			if (representation) {
 				[children addObject:representation];

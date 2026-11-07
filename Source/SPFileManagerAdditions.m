@@ -28,6 +28,7 @@
 //
 //  More info at <https://github.com/sequelpro/sequelpro>
 
+#import "SPSequelPlusMigration.h"
 #import "SPFileManagerAdditions.h"
 #import "SPFileHandle.h"
 #import <UniversalDetector/UniversalDetector.h>
@@ -65,7 +66,8 @@ static NSString *DirectoryLocationDomain = @"DirectoryLocationDomain";
 
 	NSError *error;
 
-	NSArray* paths = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
+	// Application Support (a temporary folder while the app hosts tests: see SPSequelPlusApplicationSupportURL())
+	NSArray* paths = @[[SPSequelPlusApplicationSupportURL() path]];
 
 	if (![paths count]) {
 		if (errorOut) {
@@ -92,8 +94,8 @@ static NSString *DirectoryLocationDomain = @"DirectoryLocationDomain";
 	// Use only the first path returned
 	NSString *resolvedPath = [paths objectAtIndex:0];
 
-	// Append the application name
-	resolvedPath = [resolvedPath stringByAppendingPathComponent:[[[NSBundle mainBundle] infoDictionary] objectForKey:@"CFBundleExecutable"]];
+	// Append the application's folder name: Sequel Plus's own, apart from the original Sequel Pro's
+	resolvedPath = [resolvedPath stringByAppendingPathComponent:SPSequelPlusSupportFolderName];
 
 	// Append the subdirectory if passed
 	if (subDirectory)

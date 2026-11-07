@@ -1,5 +1,6 @@
 #import "SPTestPrefsGuard.h"
 #import "../Source/Postgres/SPPostgresQueryStore.h"
+#import "../Source/Postgres/SPQueryScriptStore.h"
 #import "../Source/Postgres/SPPostgresFeatureScope.h"
 #import <objc/runtime.h>
 #import <XCTest/XCTest.h>
@@ -9,6 +10,7 @@ NSString * const SPTestSelectLastFavoriteUsedKey = @"SelectLastFavoriteUsed";
 NSString * const SPTestDefaultFavoriteKey = @"DefaultFavorite";
 NSString * const SPTestSparkleAutomaticChecksKey = @"SUEnableAutomaticChecks";
 NSString * const SPTestWindowAnimationsKey = @"NSAutomaticWindowAnimationsEnabled";
+NSString * const SPTestAlwaysShowTabBarKey = @"WindowAlwaysShowTabBar";
 
 static const void *SPRequestedAutosaveKey = &SPRequestedAutosaveKey;
 static const void *SPRequestedAutosaveNameKey = &SPRequestedAutosaveNameKey;
@@ -40,6 +42,10 @@ static const void *SPRequestedAutosaveNameKey = &SPRequestedAutosaveNameKey;
  *   Support: every query a test runs through a Query view is recorded in the shared history unless the test injects
  *   its own store. Their files are removed after every test (so no test sees another's history), and the folder at
  *   the end of the run.
+ *
+ * - The Query editors' saved scripts (+[SPQueryScriptStore sharedStore], MySQL and PostgreSQL tabs) are in a folder of
+ *   this run's temporary directory, never the real "Query Scripts" folder under Application Support. Its files are
+ *   removed after every test.
  *
  * - Sparkle's automatic update checks are off (SUEnableAutomaticChecks reads NO from the volatile argument
  *   domain, and a check already scheduled is dropped), so no check runs in the middle of a test.
@@ -115,6 +121,10 @@ static NSString *SPTestQueryStoreDirectory = nil;
 							 imp_implementationWithBlock(^id(id me) { return historyStore; }));
 	method_setImplementation(class_getClassMethod([SPPostgresQueryStore class], @selector(sharedFavoritesStore)),
 							 imp_implementationWithBlock(^id(id me) { return favoritesStore; }));
+	// The Query editors' saved scripts: in the same temporary directory
+	SPQueryScriptStore *scriptStore = [[SPQueryScriptStore alloc] initWithDirectoryURL:[NSURL fileURLWithPath:[storeDirectory stringByAppendingPathComponent:@"Query Scripts"] isDirectory:YES]];
+	method_setImplementation(class_getClassMethod([SPQueryScriptStore class], @selector(sharedStore)),
+							 imp_implementationWithBlock(^id(id me) { return scriptStore; }));
 	// Emptied after every test, removed at the end of the run
 	static SPTestPrefsGuard *observer = nil;
 	observer = [[SPTestPrefsGuard alloc] init];
@@ -132,6 +142,10 @@ static NSString *SPTestQueryStoreDirectory = nil;
 	// GCD worker that never finishes, so a full run exhausts the worker pool and blocks later dispatches (the task
 	// runner's cancel request among them)
 	domain[SPTestWindowAnimationsKey] = @NO;
+	// The window tab bar is always shown, so it never runs its show/hide animation: a test that frees its window
+	// controller right after closing a tab would otherwise leave that animation firing on the freed controller.
+	// (Before the app had its own ID, the runs inherited this setting from the owner's Sequel Pro preferences.)
+	domain[SPTestAlwaysShowTabBarKey] = @YES;
 	[prefs removeVolatileDomainForName:NSArgumentDomain];
 	[prefs setVolatileDomain:domain forName:NSArgumentDomain];
 
@@ -157,6 +171,7 @@ static NSString *SPTestQueryStoreDirectory = nil;
 	NSFileManager *manager = [NSFileManager defaultManager];
 	[manager removeItemAtURL:[[SPPostgresQueryStore sharedHistoryStore] fileURL] error:NULL];
 	[manager removeItemAtURL:[[SPPostgresQueryStore sharedFavoritesStore] fileURL] error:NULL];
+	[manager removeItemAtURL:[[SPQueryScriptStore sharedStore] directoryURL] error:NULL];
 }
 
 - (void)testBundleDidFinish:(NSBundle *)testBundle

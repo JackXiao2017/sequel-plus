@@ -20,9 +20,9 @@ __attribute__((visibility("default")))
 
 - (instancetype)initWithFileURL:(NSURL *)url;
 
-/// …/Application Support/Sequel Pro/Data/PostgresQueryHistory.plist
+/// …/Application Support/Sequel Plus/Data/PostgresQueryHistory.plist
 + (instancetype)sharedHistoryStore;
-/// …/Application Support/Sequel Pro/Data/PostgresQueryFavorites.plist
+/// …/Application Support/Sequel Plus/Data/PostgresQueryFavorites.plist
 + (instancetype)sharedFavoritesStore;
 
 @property (readonly, copy) NSURL *fileURL;

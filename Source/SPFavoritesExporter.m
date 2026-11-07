@@ -72,8 +72,11 @@
 		{
 			// The selection could contain a group as well as items in that group.
 			// So we skip those items, as their group will already export them.
-			if(![node isDescendantOfNodes:[self exportFavorites]])
-				[favorites addObject:[node dictionaryRepresentation]];
+			// PostgreSQL favorites are not exported (nil for one; left out of a group's children)
+			if(![node isDescendantOfNodes:[self exportFavorites]]) {
+				NSDictionary *representation = [node mysqlDictionaryRepresentation];
+				if (representation) [favorites addObject:representation];
+			}
 		}
 
 		NSDictionary *dictionary = @{SPFavoritesDataRootKey : favorites};
