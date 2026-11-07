@@ -49,6 +49,8 @@
 - (void)dealloc {
 	[image release];
 	image = nil;
+	[trailingText release];
+	trailingText = nil;
 	[super dealloc];
 }
 
@@ -57,6 +59,7 @@
 	ImageAndTextCell *cell = (ImageAndTextCell *)[super copyWithZone:zone];
 	cell->image = nil;
 	if (image) cell->image = [image copyWithZone:zone];
+	cell->trailingText = [trailingText copy];
 	return cell;
 }
 
@@ -154,8 +157,41 @@
 
 }
 
+- (void)setTrailingText:(NSString *)text
+{
+	if (text != trailingText) {
+		[trailingText release];
+		trailingText = [text copy];
+	}
+}
+
+- (NSString *)trailingText
+{
+	return trailingText;
+}
+
+/// Draws trailingText at the right of cellFrame and returns what is left for the title.
+- (NSRect)drawTrailingTextInFrame:(NSRect)cellFrame
+{
+	if (![trailingText length]) return cellFrame;
+
+	NSColor *color = ([self backgroundStyle] == NSBackgroundStyleEmphasized) ? [NSColor alternateSelectedControlTextColor] : [NSColor secondaryLabelColor];
+	NSDictionary *attributes = @{ NSFontAttributeName: [self font] ?: [NSFont systemFontOfSize:[NSFont smallSystemFontSize]], NSForegroundColorAttributeName: color };
+	NSSize size = [trailingText sizeWithAttributes:attributes];
+	CGFloat width = ceil(size.width);
+	if (width + 24 > NSWidth(cellFrame)) return cellFrame; // too narrow: the name only
+
+	NSRect textFrame = NSMakeRect(NSMaxX(cellFrame) - width - 4, NSMinY(cellFrame) + floor((NSHeight(cellFrame) - size.height) / 2) + 1, width, ceil(size.height));
+	[trailingText drawInRect:textFrame withAttributes:attributes];
+
+	cellFrame.size.width -= width + 10;
+	return cellFrame;
+}
+
 - (void)drawWithFrame:(NSRect)cellFrame inView:(NSView *)controlView
 {
+	cellFrame = [self drawTrailingTextInFrame:cellFrame];
+
 	if (_indentationLevel != 0)
 	{
 		NSRect indentationFrame;

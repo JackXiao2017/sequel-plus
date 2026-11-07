@@ -112,6 +112,8 @@
 	NSMutableArray *filteredTables;
 	NSMutableArray *tableTypes;
 	NSMutableArray *filteredTableTypes;
+	// Each base table's size in bytes (data + indexes), by name; shown after the name. Main thread only.
+	NSDictionary *tableSizes;
 	SPTableType selectedTableType;
 	NSString *selectedTableName;
 	BOOL isTableListFiltered;

@@ -1,5 +1,20 @@
 # Changelog
 
+## Sequel Plus 2.0.1
+
+Upgrading from 2.0.0.
+
+### Table list shows table sizes
+- Each table in the table list shows its size after its name, aligned right in a lighter color. A long name is shortened with "…" before the size.
+- The size matches a figure in the Table Information pane:
+  - **MySQL:** "size:", the table's data without its indexes (`DATA_LENGTH` from `information_schema.TABLES`). MySQL 8 may cache these figures, so a size can lag behind recent changes, as in Table Information.
+  - **PostgreSQL:** "total size:", the table's data, TOAST and indexes (`pg_size_pretty(pg_total_relation_size(…))`), written the way the server writes it (e.g. "32 kB").
+- Views, procedures, functions and sequences show no size. In PostgreSQL a partitioned table shows none either; each partition shows its own.
+- Sizes are read when the list loads or is refreshed. If the server doesn't allow reading them, the list shows names only, as before.
+
+### App
+- Version **2.0.1**.
+
 ## Sequel Plus 2.0.0
 
 Upgrading from 2.0.0-RC4.

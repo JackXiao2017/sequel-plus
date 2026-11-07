@@ -40,6 +40,7 @@
 {
 	NSImage	*image;
 	NSInteger _indentationLevel;
+	NSString *trailingText;
 }
 
 - (void)setImage:(NSImage *)anImage;
@@ -47,6 +48,11 @@
 
 - (void)drawWithFrame:(NSRect)cellFrame inView:(NSView *)controlView;
 - (NSSize)cellSize;
+
+/// Secondary text drawn right-aligned at the end of the cell (e.g. a table's size); the title truncates before it.
+/// nil (the default) draws nothing, as before.
+- (void)setTrailingText:(NSString *)text;
+- (NSString *)trailingText;
 
 - (void)setIndentationLevel:(NSInteger)level;
 - (NSInteger)IndentationLevel;

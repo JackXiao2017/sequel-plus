@@ -439,4 +439,41 @@ static const NSUInteger SPSidebarFilterTestPort = 55418;
 	XCTAssertTrue([[self rowTitles] containsObject:@"spf_alpha_v"]);
 }
 
+#pragma mark - Table sizes
+
+/// The (shown) cell of the table or view row titled `title`.
+- (NSTableCellView *)cellOfRowTitled:(NSString *)title
+{
+	NSOutlineView *outline = [self outline];
+	for (NSInteger row = 0; row < outline.numberOfRows; row++) {
+		id item = [outline itemAtRow:row];
+		if (![self.sidebar outlineView:outline isGroupItem:item] && [[item valueForKey:@"title"] isEqualToString:title]) {
+			return [outline viewAtColumn:0 row:row makeIfNecessary:YES];
+		}
+	}
+	return nil;
+}
+
+- (void)testTableRowsShowTheirSizeRightAligned
+{
+	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPSidebarFilterTestPort];
+	NSString *expected = [[[admin execute:@"SELECT pg_size_pretty(pg_total_relation_size('public.spf_alpha'))::text AS n"] rowAsDictionary] objectForKey:@"n"];
+	[admin disconnect];
+
+	NSTableCellView *cell = [self cellOfRowTitled:@"spf_alpha"];
+	XCTAssertNotNil(cell);
+	[[self outline] layoutSubtreeIfNeeded]; // as when the row is drawn
+	NSTextField *size = [cell viewWithTag:1];
+	XCTAssertFalse([size isHidden]);
+	XCTAssertNotNil(expected);
+	XCTAssertEqualObjects([size stringValue], expected, @"as the table info pane's total size: shows it");
+	XCTAssertEqual([size alignment], NSTextAlignmentRight);
+	XCTAssertEqualWithAccuracy(NSMaxX([size frame]), NSWidth([cell bounds]) - 4, 1, @"at the trailing edge");
+	XCTAssertLessThanOrEqual(NSMaxX([[cell textField] frame]), NSMinX([size frame]), @"the name ends before the size");
+
+	NSTableCellView *view = [self cellOfRowTitled:@"spf_alpha_v"];
+	XCTAssertNotNil(view);
+	XCTAssertTrue([[view viewWithTag:1] isHidden], @"a view has no size");
+}
+
 @end
