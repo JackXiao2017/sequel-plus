@@ -633,6 +633,7 @@
 		DD413EAAACFABF63D8D9106C /* SPPostgresQueryFavoritesTests.m in Sources */ = {isa = PBXBuildFile; fileRef = C43F4DC971A26CE9EA8BEA9C /* SPPostgresQueryFavoritesTests.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 		DDC3590C9C869D509844DC43 /* SPPostgresHistoryTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 15ABCC7B505FD970BEB64B35 /* SPPostgresHistoryTests.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 		DF066B19B482180D9F5DD3D4 /* SPPostgresFavoritesTreeTests.m in Sources */ = {isa = PBXBuildFile; fileRef = DC379F59F958052731C775A6 /* SPPostgresFavoritesTreeTests.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
+		E06596620050CF4244D41BCF /* SPImageAndTextCellTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 5589FA885D33A1B8A2E28943 /* SPImageAndTextCellTests.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 		E41A23155B043DBB05A439DC /* SPPostgresQueryEditingTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 99C611D799E63F6D6A9B38B6 /* SPPostgresQueryEditingTests.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 		E53F0DC283B6FD91A30FA82E /* SPPostgresQueryStore.m in Sources */ = {isa = PBXBuildFile; fileRef = 0D738DE5F6932DC6C7A5C79B /* SPPostgresQueryStore.m */; };
 		E73F1CD16804D61A09D9DB1D /* SPPostgresConnector.m in Sources */ = {isa = PBXBuildFile; fileRef = 4213E842209E57EF27E71686 /* SPPostgresConnector.m */; };
@@ -1180,6 +1181,7 @@
 		5241B8488FF45A2225BD7C3C /* SPPostgresDocument.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPPostgresDocument.m; path = Source/Postgres/SPPostgresDocument.m; sourceTree = SOURCE_ROOT; };
 		540BA07E9D443D023FA238F5 /* SPPostgresTaskDisplayTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPPostgresTaskDisplayTests.m; path = PostgresTests/SPPostgresTaskDisplayTests.m; sourceTree = SOURCE_ROOT; };
 		5471D03AEDC55E83BB3A1E32 /* SPPostgresTriggersTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPPostgresTriggersTests.m; path = PostgresTests/SPPostgresTriggersTests.m; sourceTree = SOURCE_ROOT; };
+		5589FA885D33A1B8A2E28943 /* SPImageAndTextCellTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPImageAndTextCellTests.m; path = PostgresTests/SPImageAndTextCellTests.m; sourceTree = SOURCE_ROOT; };
 		55CAAA5838F5AE0A95A2A8AC /* SPPostgresCSVTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPPostgresCSVTests.m; path = PostgresTests/SPPostgresCSVTests.m; sourceTree = SOURCE_ROOT; };
 		55F19AA58361713CEABBFFCA /* SPPostgresDocumentTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPPostgresDocumentTests.m; path = PostgresTests/SPPostgresDocumentTests.m; sourceTree = SOURCE_ROOT; };
 		5606498CF75309F67A6AF204 /* SPPostgresSequenceControllerTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPPostgresSequenceControllerTests.m; path = PostgresTests/SPPostgresSequenceControllerTests.m; sourceTree = SOURCE_ROOT; };
@@ -3203,6 +3205,7 @@
 				07651131354A542F6798A7D7 /* SPSequelPlusMigrationTests.m */,
 				97C3E7243E4233FF2076C138 /* SPPostgresFavoritesImportTests.m */,
 				DC379F59F958052731C775A6 /* SPPostgresFavoritesTreeTests.m */,
+				5589FA885D33A1B8A2E28943 /* SPImageAndTextCellTests.m */,
 			);
 			name = PostgresTests;
 			sourceTree = "<group>";
@@ -4183,6 +4186,7 @@
 				770B1DFDB619FA9B4ECF65C5 /* SPSequelPlusMigrationTests.m in Sources */,
 				FCD8D0A9CD364BADACC69984 /* SPPostgresFavoritesImportTests.m in Sources */,
 				DF066B19B482180D9F5DD3D4 /* SPPostgresFavoritesTreeTests.m in Sources */,
+				E06596620050CF4244D41BCF /* SPImageAndTextCellTests.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

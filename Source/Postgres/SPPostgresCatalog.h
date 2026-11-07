@@ -38,6 +38,11 @@ __attribute__((visibility("default")))
 /// Sequences (relkind S) in the schema, sorted.
 - (NSArray *)sequenceNamesInSchema:(NSString *)schema error:(NSError **)error;
 
+/// The total size of each of the schema's tables (relkind r), by table name, as the table info pane's "total size:"
+/// shows it: pg_size_pretty(pg_total_relation_size), the data, TOAST and indexes (e.g. @"32 kB"). A partitioned table (relkind p)
+/// has no storage of its own and isn't included.
+- (NSDictionary<NSString *, NSString *> *)tableSizesInSchema:(NSString *)schema error:(NSError **)error;
+
 /// The column names of the schema's tables, views, materialized views, foreign and partitioned tables (relkind r, p,
 /// v, m, f), by relation name, each in column order (no dropped or system columns). One query (the Query editor's
 /// completion).

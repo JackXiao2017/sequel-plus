@@ -137,6 +137,25 @@
 	}
 }
 
+- (void)testTableSizes
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresCatalog *catalog = [self catalogOnPort:port.unsignedIntegerValue database:@"pgkit_test"];
+		PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_test"];
+		NSString *expected = [[[connection execute:@"SELECT pg_size_pretty(pg_total_relation_size('public.customers'))::text AS n"] rowAsDictionary] objectForKey:@"n"];
+		[connection disconnect];
+
+		NSError *error = nil;
+		NSDictionary *sizes = [catalog tableSizesInSchema:@"public" error:&error];
+		XCTAssertNotNil(sizes, @"%@", error);
+		XCTAssertNotNil(expected);
+		XCTAssertEqualObjects(sizes[@"customers"], expected, @"the table info pane's total size: data, TOAST and indexes");
+		XCTAssertNil(sizes[@"v_customers"], @"views have no size");
+		XCTAssertNotNil([catalog tableSizesInSchema:@"Sales Data" error:&error][@"Orders 2026"], @"%@", error);
+		XCTAssertEqualObjects([catalog tableSizesInSchema:@"no such schema" error:&error], @{});
+	}
+}
+
 - (void)testColumnNamesByRelation
 {
 	for (NSNumber *port in [SPPostgresTestServers ports]) {

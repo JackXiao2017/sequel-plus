@@ -86,6 +86,9 @@ static NSDictionary *SPPostgresSidebarRead(PGPostgresConnection *connection, SPP
 		// The Query editor's completion columns: not a list, so a failure isn't reported (completion goes without)
 		NSDictionary *columns = [catalog columnNamesByRelationInSchema:schema error:NULL];
 		if (columns) [read setObject:columns forKey:@"relationColumns"];
+		// Each table's size, shown after its name: not a list either, so a failure only leaves the sizes out
+		NSDictionary *sizes = [catalog tableSizesInSchema:schema error:NULL];
+		if (sizes) [read setObject:sizes forKey:@"tableSizes"];
 	}
 
 	[read setObject:failures forKey:@"failures"];
@@ -173,6 +176,48 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 {
 	[super resizeSubviewsWithOldSize:oldSize];
 	[self _layoutHeader];
+}
+
+@end
+
+/// A table, view, sequence or extension row: the icon and name, and at the trailing edge the detail (a table's size,
+/// an extension's version), sized to its text. The name ends before the detail (truncating). Laid out here, after
+/// AppKit's own layout of the cell, which would stretch the name across the detail.
+@interface SPPostgresSidebarItemCellView : NSTableCellView
+- (void)_layoutDetail;
+@end
+
+@implementation SPPostgresSidebarItemCellView
+
+- (void)_layoutDetail
+{
+	NSRect bounds = [self bounds];
+	NSTextField *detail = [self viewWithTag:SPPostgresSidebarDetailTag];
+	NSTextField *name = [self textField];
+	CGFloat detailWidth = 0;
+	if (detail && ![detail isHidden] && [[detail stringValue] length]) {
+		CGFloat fitted = ceil([detail fittingSize].width);
+		NSRect detailFrame = [detail frame];
+		detailFrame.size.width = fitted;
+		detailFrame.origin.x = NSWidth(bounds) - 4 - fitted;
+		[detail setFrame:detailFrame];
+		detailWidth = fitted + 6;
+	}
+	NSRect nameFrame = [name frame];
+	nameFrame.size.width = MAX(20, NSWidth(bounds) - NSMinX(nameFrame) - 4 - detailWidth);
+	[name setFrame:nameFrame];
+}
+
+- (void)layout
+{
+	[super layout];
+	[self _layoutDetail];
+}
+
+- (void)resizeSubviewsWithOldSize:(NSSize)oldSize
+{
+	[super resizeSubviewsWithOldSize:oldSize];
+	[self _layoutDetail];
 }
 
 @end
@@ -1100,8 +1145,9 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 		[relationColumns release];
 		relationColumns = [[read objectForKey:@"relationColumns"] copy];
 
+		NSDictionary *tableSizes = [read objectForKey:@"tableSizes"];
 		for (NSString *name in tableNames) {
-			[[tables children] addObject:[SPPostgresSidebarItem itemWithTitle:name detail:nil kind:SPPostgresSidebarTable]];
+			[[tables children] addObject:[SPPostgresSidebarItem itemWithTitle:name detail:[tableSizes objectForKey:name] kind:SPPostgresSidebarTable]];
 		}
 		for (NSString *name in viewNames) {
 			[[views children] addObject:[SPPostgresSidebarItem itemWithTitle:name detail:nil kind:SPPostgresSidebarView]];
@@ -2043,7 +2089,7 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 	NSTableCellView *cell = [theOutlineView makeViewWithIdentifier:identifier owner:self];
 	if (!cell) {
 		CGFloat width = [tableColumn width];
-		Class cellClass = isSection ? [SPPostgresSidebarSectionCellView class] : [NSTableCellView class];
+		Class cellClass = isSection ? [SPPostgresSidebarSectionCellView class] : [SPPostgresSidebarItemCellView class];
 		cell = [[[cellClass alloc] initWithFrame:NSMakeRect(0, 0, width, 18)] autorelease];
 		[cell setIdentifier:identifier];
 
@@ -2082,7 +2128,7 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 			[textField setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
 			[textField setFrame:NSMakeRect(24, 1, width - 28, 16)];
 
-			// Extension version, right-aligned
+			// Extension version or table size, right-aligned
 			NSTextField *detailField = [NSTextField labelWithString:@""];
 			[detailField setTag:SPPostgresSidebarDetailTag];
 			[detailField setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
@@ -2120,11 +2166,9 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 		[detailField setStringValue:detail];
 		[detailField setHidden:![detail length]];
 
-		// Leave room for the version so long extension names truncate before it
-		NSRect textFrame = [[cell textField] frame];
-		CGFloat detailWidth = [detail length] ? ceil([detailField fittingSize].width) + 6 : 0;
-		textFrame.size.width = MAX(20, NSWidth([cell bounds]) - NSMinX(textFrame) - 4 - detailWidth);
-		[[cell textField] setFrame:textFrame];
+		// Sized to its text at the trailing edge; long names truncate before it
+		[(SPPostgresSidebarItemCellView *)cell _layoutDetail];
+		[cell setNeedsLayout:YES];
 	}
 
 	return cell;

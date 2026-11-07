@@ -227,6 +227,24 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 			}
 		}
 
+		// Each base table's size (data + indexes), shown after its name. Not available (no information_schema, no
+		// rights): no sizes, and the list is unchanged.
+		NSMutableDictionary *sizes = [NSMutableDictionary dictionary];
+		SPMySQLResult *sizeResult = [mySQLConnection queryString:[NSString stringWithFormat:@"SELECT TABLE_NAME, DATA_LENGTH FROM information_schema.TABLES WHERE TABLE_SCHEMA = %@ AND TABLE_TYPE = 'BASE TABLE'", [[tableDocumentInstance database] tickQuotedString]]];
+		if (sizeResult && ![mySQLConnection queryErrored]) {
+			[sizeResult setDefaultRowReturnType:SPMySQLResultRowAsArray];
+			[sizeResult setReturnDataAsStrings:YES];
+			for (NSArray *eachRow in sizeResult) {
+				id name = [eachRow objectAtIndex:0];
+				id size = [eachRow objectAtIndex:1];
+				if ([name isKindOfClass:[NSString class]] && [size isKindOfClass:[NSString class]]) [sizes setObject:@([size longLongValue]) forKey:name];
+			}
+		}
+		SPMainQSync(^{
+			[tableSizes release];
+			tableSizes = [sizes copy];
+		});
+
 		// Reorder the tables in alphabetical order
 		[tables sortArrayUsingSelector:@selector(localizedCompare:) withPairedMutableArrays:tableTypes, nil];
 
@@ -1825,6 +1843,9 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
  */
 - (void)tableView:(NSTableView *)aTableView  willDisplayCell:(ImageAndTextCell*)aCell forTableColumn:(NSTableColumn *)aTableColumn row:(NSInteger)rowIndex
 {
+	// The cell is shared by every row: only a table's row shows a size (set below)
+	if ([aCell isKindOfClass:[ImageAndTextCell class]]) [aCell setTrailingText:nil];
+
 	if (rowIndex > 0 && rowIndex < (NSInteger)[filteredTableTypes count] && [[aTableColumn identifier] isEqualToString:@"tables"]) {
 
 		id item = NSArrayObjectAtIndex(filteredTables, rowIndex);
@@ -1841,11 +1862,14 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 				[aCell setIndentationLevel:1];
 				[aCell setFont:smallSystemFont];
 				break;
-			case SPTableTypeTable:
+			case SPTableTypeTable: {
 				[aCell setImage:[NSImage imageNamed:@"table-small"]];
 				[aCell setIndentationLevel:1];
 				[aCell setFont:smallSystemFont];
-				break;
+				NSNumber *size = [tableSizes objectForKey:item];
+				[aCell setTrailingText:size ? [NSString stringForByteSize:[size longLongValue]] : nil];
+				return;
+			}
 			case SPTableTypeProc:
 				[aCell setImage:[NSImage imageNamed:@"proc-small"]];
 				[aCell setIndentationLevel:1];
@@ -2836,6 +2860,7 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 	
 	SPClear(tables);
 	SPClear(tableTypes);
+	if (tableSizes) SPClear(tableSizes);
 
 	if (isTableListFiltered && filteredTables)     SPClear(filteredTables);
 	if (isTableListFiltered && filteredTableTypes) SPClear(filteredTableTypes);

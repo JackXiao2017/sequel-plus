@@ -119,6 +119,24 @@
 	return [self relationNamesInSchema:schema kinds:@"'S'" error:error];
 }
 
+- (NSDictionary<NSString *, NSString *> *)tableSizesInSchema:(NSString *)schema error:(NSError **)error
+{
+	PGPostgresResult *result = [self run:@"SELECT c.relname::text AS r, pg_catalog.pg_size_pretty(pg_catalog.pg_total_relation_size(c.oid))::text AS n "
+										  "FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace "
+										  "WHERE ns.nspname = $1::text AND c.relkind = 'r'"
+								  values:@[schema ?: @""] error:error];
+	if (!result) return nil;
+
+	NSMutableDictionary *sizes = [NSMutableDictionary dictionary];
+	for (NSDictionary *row in result) {
+		id relation = [row objectForKey:@"r"];
+		id size = [row objectForKey:@"n"];
+		if (![relation isKindOfClass:[NSString class]] || ![size isKindOfClass:[NSString class]]) continue;
+		[sizes setObject:size forKey:relation];
+	}
+	return sizes;
+}
+
 - (NSDictionary<NSString *, NSArray<NSString *> *> *)columnNamesByRelationInSchema:(NSString *)schema error:(NSError **)error
 {
 	PGPostgresResult *result = [self run:@"SELECT c.relname::text AS r, a.attname::text AS n FROM pg_catalog.pg_attribute a "
