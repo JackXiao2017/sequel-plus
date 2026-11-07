@@ -37,8 +37,13 @@ Upgrading from 2.0.0-RC4.
 ### App
 - Version **2.0.0**.
 
+### Readme
+- The readme's logo and screenshot are now in the repository's `images/` folder instead of on Sequel Pro's website:
+  - `Sequel-Plus-icon-512.png`, the app icon;
+  - `Sequel-Plus.png`, the connection screen with MySQL and PostgreSQL favorites in one list.
+
 ### Unchanged
-- **MySQL:** apart from the Query editor keeping its SQL, no changes to MySQL connections.
+- **MySQL:** connecting to and working with a MySQL server is unchanged. What's new for MySQL is listed above: the Query editor keeps its SQL, and MySQL favorites share `Favorites.plist` and the separate Sequel Plus data and passwords.
 - **Your data:** favorites, saved settings, passwords and data are carried over from RC4 (see "Separate from Sequel Pro").
 - **Updates:** checking for updates stays off.
 
