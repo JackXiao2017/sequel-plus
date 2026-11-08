@@ -2253,8 +2253,9 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	[self _presentAlert:alert];
 }
 
-/// "Truncate Table(s)": MySQL's question (after the shown pane's edits are applied, once the tab is idle), then every
-/// row of the tables is deleted in one TRUNCATE (never CASCADE): all of them or, on an error, none.
+/// "Truncate Table(s)": MySQL's question (after the shown pane's edits are applied, once the tab is idle), with a
+/// Restart identity checkbox (off), then every row of the tables is deleted in one TRUNCATE (never CASCADE; RESTART
+/// IDENTITY when checked): all of them or, on an error, none.
 - (void)sidebar:(SPPostgresSidebarController *)theSidebar truncateTables:(NSArray<NSString *> *)tables
 {
 	if (tornDown || ![tables count] || isProcessing || !parentWindow || [parentWindow attachedSheet]) return;
@@ -2275,6 +2276,14 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	}
 	NSAlert *alert = [self _tableActionAlert:NSLocalizedString(@"Truncate", @"truncate button") key:@"t" message:message informativeText:informativeText];
 
+	// Whether the tables' serial and identity columns start again (TRUNCATE … RESTART IDENTITY); off by default
+	NSButton *restartIdentity = [NSButton checkboxWithTitle:NSLocalizedString(@"Restart identity (reset serial and identity counters)", @"PostgreSQL truncate: restart identity checkbox") target:nil action:NULL];
+	[restartIdentity setIdentifier:@"restartIdentity"];
+	[restartIdentity setState:NSControlStateValueOff];
+	[restartIdentity setToolTip:NSLocalizedString(@"Adds RESTART IDENTITY: the sequences owned by the tables' columns are reset", @"PostgreSQL truncate: restart identity checkbox tooltip")];
+	[restartIdentity sizeToFit];
+	[alert setAccessoryView:restartIdentity];
+
 	[self _presentWhenIdle:^{
 		// Something changed under it meanwhile: dropped, with a beep (as a refused action)
 		if (![self _canAskAbout:names inSchema:schema sections:@[@"TABLES"]]) {
@@ -2284,20 +2293,20 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 		// The document stays alive until the answer comes (a sheet's or a presenter's)
 		[self retain];
 		[self _confirm:alert completion:^(BOOL confirmed) {
-			if (confirmed && !tornDown) [self _truncateTables:names inSchema:schema];
+			if (confirmed && !tornDown) [self _truncateTables:names inSchema:schema restartIdentity:[restartIdentity state] == NSControlStateValueOn];
 			[self release];
 		}];
 	}];
 }
 
-- (void)_truncateTables:(NSArray *)tables inSchema:(NSString *)schema
+- (void)_truncateTables:(NSArray *)tables inSchema:(NSString *)schema restartIdentity:(BOOL)restartIdentity
 {
 	if ([self _refuseWriteWhileBusy]) {
 		[self _presentBusyRefusal:NSLocalizedString(@"The tab is busy, so nothing was truncated.", @"PostgreSQL truncate refused while the tab is busy")];
 		return;
 	}
 	NSError *error = nil;
-	if (![SPPostgresTableActions truncateTables:tables inSchema:schema connection:connection error:&error]) {
+	if (![SPPostgresTableActions truncateTables:tables inSchema:schema restartIdentity:restartIdentity connection:connection error:&error]) {
 		[self _presentTableActionError:error title:NSLocalizedString(@"Error truncating table", @"error truncating table message")];
 		return;
 	}

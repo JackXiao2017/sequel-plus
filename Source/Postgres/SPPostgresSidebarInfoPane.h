@@ -24,6 +24,8 @@ __attribute__((visibility("default")))
 - (instancetype)initWithFrame:(NSRect)frame;
 
 @property (readonly) NSView *view;
+/// The height the view needs to show the most lines a relation has (with a comment) without scrolling.
+@property (readonly) CGFloat heightShowingAllLines;
 /// The table view (for tests).
 @property (readonly) NSTableView *tableView;
 

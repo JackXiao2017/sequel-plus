@@ -19,6 +19,7 @@ static NSString * const SPPostgresSidebarInfoColumn = @"info";
 	/// The relation whose facts the lines show (not one still being read), nil for none
 	NSString *shownName;
 	NSString *shownSchema;
+	CGFloat heightShowingAllLines;
 }
 
 @synthesize tableView;
@@ -65,8 +66,31 @@ static NSString * const SPPostgresSidebarInfoColumn = @"info";
 		[tableView setDelegate:self];
 		[scrollView setDocumentView:tableView];
 		[tableView sizeLastColumnToFit];
+
+		// The most lines a relation shows: the header, type, owner, rows, size, index size, total size and comment.
+		// Measured in a window (offscreen, never shown): there the source list sets its rows below a top inset, and
+		// the same margin is kept under the last row.
+		NSWindow *measuring = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, NSWidth(frame), 1000) styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:YES];
+		[measuring setReleasedWhenClosed:NO];
+		NSView *content = [[[NSView alloc] initWithFrame:NSMakeRect(0, 0, NSWidth(frame), 1000)] autorelease];
+		[measuring setContentView:content];
+		[content addSubview:scrollView];
+		[self _showLines:@[@"", @"", @"", @"", @"", @"", @"", @""]];
+		NSRect first = [tableView rectOfRow:0];
+		NSRect last = [tableView rectOfRow:[tableView numberOfRows] - 1];
+		heightShowingAllLines = ceil(NSMaxY(last) + NSMinY(first));
+		[scrollView removeFromSuperview];
+		[scrollView setFrame:NSMakeRect(0, 0, NSWidth(frame), NSHeight(frame))];
+		[measuring close];
+		[measuring release];
+		[self _showLines:@[NSLocalizedString(@"INFORMATION", @"header for blank info pane")]];
 	}
 	return self;
+}
+
+- (CGFloat)heightShowingAllLines
+{
+	return heightShowingAllLines;
 }
 
 - (void)dealloc
