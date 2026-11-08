@@ -12,6 +12,7 @@
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
 #import "../Source/Postgres/SPPostgresTaskRunner.h"
+#import "../Source/Postgres/SPPostgresCatalog.h"
 
 static const NSUInteger SPInfoTestPort = 55418;
 
@@ -216,9 +217,9 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	XCTAssertEqualObjects([info.typeField stringValue], @"table");
 	XCTAssertEqualObjects([info.ownerField stringValue], @"pgkit_test");
 	XCTAssertEqualObjects([info.rowsField stringValue], @"Unknown (not analyzed)");
-	XCTAssertEqualObjects([info.tableSizeField stringValue], [self serverValue:@"SELECT pg_size_pretty(pg_table_size('structure_test.fresh'))"]);
-	XCTAssertEqualObjects([info.indexSizeField stringValue], [self serverValue:@"SELECT pg_size_pretty(pg_indexes_size('structure_test.fresh'))"]);
-	XCTAssertEqualObjects([info.totalSizeField stringValue], [self serverValue:@"SELECT pg_size_pretty(pg_total_relation_size('structure_test.fresh'))"]);
+	XCTAssertEqualObjects([info.tableSizeField stringValue], [SPPostgresCatalog stringForSize:[[self serverValue:@"SELECT pg_table_size('structure_test.fresh')::text"] longLongValue]]);
+	XCTAssertEqualObjects([info.indexSizeField stringValue], [SPPostgresCatalog stringForSize:[[self serverValue:@"SELECT pg_indexes_size('structure_test.fresh')::text"] longLongValue]]);
+	XCTAssertEqualObjects([info.totalSizeField stringValue], [SPPostgresCatalog stringForSize:[[self serverValue:@"SELECT pg_total_relation_size('structure_test.fresh')::text"] longLongValue]]);
 	XCTAssertTrue([[info.indexSizeField stringValue] hasSuffix:@"kB"], @"%@", [info.indexSizeField stringValue]);
 	XCTAssertEqualObjects(info.noticeText, @"");
 

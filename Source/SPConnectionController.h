@@ -182,6 +182,13 @@
 	NSDictionary *currentFavorite;
 	SPFavoritesController *favoritesController;
 	SPFavoritesSortItem currentSortItem;
+
+	// The filter above the favorites list: while it holds text, the list shows only the favorites whose name or
+	// host contains it, the groups they are in (expanded), and the selected favorite
+	NSSearchField *favoritesFilterField;
+	NSString *favoritesFilter;
+	NSMutableSet *visibleFavoriteNodes;
+	BOOL isApplyingFavoritesFilter;
 #endif
 }
 
@@ -227,6 +234,9 @@
 
 // Connection processes
 - (IBAction)initiateConnection:(id)sender;
+
+/// The form's "Show all databases" (saved in the favorite): NO, the database selector lists only the connection's database.
+- (BOOL)showAllDatabases;
 - (IBAction)cancelConnection:(id)sender;
 #ifdef SP_CODA
 - (BOOL)cancellingConnection;
@@ -269,6 +279,10 @@
 
 // Accessors
 - (SPFavoritesOutlineView *)favoritesOutlineView;
+
+// Favorites filter
+- (IBAction)filterFavorites:(id)sender;
+- (NSSearchField *)favoritesFilterField;
 
 #endif
 

@@ -13,6 +13,9 @@ __attribute__((visibility("default")))
 
 /// One `TRUNCATE TABLE "s"."a", "s"."b"` (no CASCADE, no RESTART IDENTITY). An empty list succeeds without sending anything.
 + (BOOL)truncateTables:(NSArray<NSString *> *)tables inSchema:(NSString *)schema connection:(PGPostgresConnection *)connection error:(NSError **)error;
+/// The same, with RESTART IDENTITY when restartIdentity (the sequences owned by the tables' serial and identity
+/// columns start again); never CASCADE.
++ (BOOL)truncateTables:(NSArray<NSString *> *)tables inSchema:(NSString *)schema restartIdentity:(BOOL)restartIdentity connection:(PGPostgresConnection *)connection error:(NSError **)error;
 
 /**
  * Drops tables, views and materialized views (and foreign tables) with one DROP per relkind that names every object

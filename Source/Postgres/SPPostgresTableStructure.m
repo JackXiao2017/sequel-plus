@@ -2,6 +2,7 @@
 #import "SPPostgresTableData.h"
 #import "SPPostgresTableDuplicator.h"
 #import "SPPostgresErrors.h"
+#import "SPPostgresCatalog.h"
 #import <PostgresKit/PostgresKit.h>
 
 /// Fails with message (SPPostgresErrorQueryFailed) for a value refused before anything is sent.
@@ -523,6 +524,13 @@ static void SPPostgresTriggerParse(NSString *definition, NSString *quotedName, N
 	return [self kindForRelkind:rows[0][0] error:error];
 }
 
+/// A size column (bytes, as text) written as the table list writes sizes; @"" for NULL.
+static NSString *SPPostgresStructureSize(id value)
+{
+	NSString *bytes = SPPostgresStructureText(value);
+	return bytes ? [SPPostgresCatalog stringForSize:[bytes longLongValue]] : @"";
+}
+
 - (NSDictionary *)tableInfo:(NSError **)error
 {
 	// reltuples is -1 for "never vacuumed or analyzed" from PostgreSQL 14; before, it is 0 then (as for an empty
@@ -533,9 +541,9 @@ static void SPPostgresTriggerParse(NSString *definition, NSString *quotedName, N
 		"  WHEN c.reltuples = 0 AND c.relpages = 0 AND s.last_vacuum IS NULL AND s.last_autovacuum IS NULL"
 		"   AND s.last_analyze IS NULL AND s.last_autoanalyze IS NULL THEN NULL"
 		"  ELSE pg_catalog.round(c.reltuples::numeric) END::text,"
-		" pg_catalog.pg_size_pretty(pg_catalog.pg_table_size(c.oid))::text,"
-		" pg_catalog.pg_size_pretty(pg_catalog.pg_indexes_size(c.oid))::text,"
-		" pg_catalog.pg_size_pretty(pg_catalog.pg_total_relation_size(c.oid))::text,"
+		" pg_catalog.pg_table_size(c.oid)::text,"
+		" pg_catalog.pg_indexes_size(c.oid)::text,"
+		" pg_catalog.pg_total_relation_size(c.oid)::text,"
 		" pg_catalog.obj_description(c.oid, 'pg_class')::text"
 		" FROM rel JOIN pg_catalog.pg_class c ON c.oid = rel.oid"
 		" LEFT JOIN pg_catalog.pg_stat_all_tables s ON s.relid = c.oid" values:nil error:error];
@@ -551,9 +559,9 @@ static void SPPostgresTriggerParse(NSString *definition, NSString *quotedName, N
 		@"kind": kind,
 		@"owner": SPPostgresStructureText(row[1]) ?: @"",
 		@"rowEstimate": estimate ? (id)@([estimate longLongValue]) : none,
-		@"tableSize": SPPostgresStructureText(row[3]) ?: @"",
-		@"indexSize": SPPostgresStructureText(row[4]) ?: @"",
-		@"totalSize": SPPostgresStructureText(row[5]) ?: @"",
+		@"tableSize": SPPostgresStructureSize(row[3]),
+		@"indexSize": SPPostgresStructureSize(row[4]),
+		@"totalSize": SPPostgresStructureSize(row[5]),
 		@"comment": SPPostgresStructureText(row[6]) ?: (id)none,
 	};
 }

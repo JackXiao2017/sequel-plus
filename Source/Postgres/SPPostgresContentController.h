@@ -79,6 +79,9 @@ __attribute__((visibility("default")))
 
 @property (readonly) NSTableView *tableView;
 
+/// Where Copy as SQL INSERT puts the selected rows. Default: the general pasteboard.
+@property (nonatomic, retain) NSPasteboard *pasteboard;
+
 /// The bottom bar, as MySQL's (DBView.xib): add, delete, duplicate, refresh, edit mode, filter toggle | count, notice |
 /// previous, jump to page, next. While the runner is busy every button but the edit mode toggle is disabled.
 @property (readonly) NSButton *addButton, *removeButton, *duplicateButton, *refreshButton, *editModeButton, *filterToggleButton, *previousPageButton, *paginationButton, *nextPageButton;

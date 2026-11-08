@@ -3,7 +3,7 @@
 @implementation SPPostgresFavorite
 
 @synthesize favoriteID, name, colorIndex, type, host, port, user, database, socketPath;
-@synthesize useSSL, sslCACertPath, sslCertPath, sslKeyPath;
+@synthesize useSSL, showAllDatabases, sslCACertPath, sslCertPath, sslKeyPath;
 @synthesize sshHost, sshUser, sshPort, sshKeyPath;
 
 - (instancetype)init
@@ -14,6 +14,7 @@
 		colorIndex = -1;
 		type = SPPostgresTCPIPConnection;
 		port = 5432;
+		showAllDatabases = YES;
 	}
 	return self;
 }
@@ -48,6 +49,7 @@
 	copy.database = database;
 	copy.socketPath = socketPath;
 	copy.useSSL = useSSL;
+	copy.showAllDatabases = showAllDatabases;
 	copy.sslCACertPath = sslCACertPath;
 	copy.sslCertPath = sslCertPath;
 	copy.sslKeyPath = sslKeyPath;
@@ -74,6 +76,8 @@
 	put(@"database", database);
 	put(@"socketPath", socketPath);
 	put(@"useSSL", @(useSSL));
+	// Saved only when off (on is the default, as for favorites saved before the option)
+	if (!showAllDatabases) put(@"showAllDatabases", @NO);
 	put(@"sslCACertPath", sslCACertPath);
 	put(@"sslCertPath", sslCertPath);
 	put(@"sslKeyPath", sslKeyPath);
@@ -108,6 +112,8 @@
 	f.database = str(@"database");
 	f.socketPath = str(@"socketPath");
 	f.useSSL = [num(@"useSSL") boolValue];
+	// Favorites saved before the option show every database
+	f.showAllDatabases = num(@"showAllDatabases") ? [num(@"showAllDatabases") boolValue] : YES;
 	f.sslCACertPath = str(@"sslCACertPath");
 	f.sslCertPath = str(@"sslCertPath");
 	f.sslKeyPath = str(@"sslKeyPath");

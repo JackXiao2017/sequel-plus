@@ -70,7 +70,9 @@
 
 - (NSArray *)databaseNames:(NSError **)error
 {
-	return [self firstColumnOf:@"SELECT datname::text AS n FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY datname COLLATE \"C\""
+	// Only those the user may connect to (CONNECT privilege, directly, through PUBLIC or a role; always for a superuser)
+	return [self firstColumnOf:@"SELECT datname::text AS n FROM pg_database WHERE datallowconn AND NOT datistemplate "
+							   "AND has_database_privilege(oid, 'CONNECT') ORDER BY datname COLLATE \"C\""
 						values:nil error:error];
 }
 
@@ -117,6 +119,39 @@
 - (NSArray *)sequenceNamesInSchema:(NSString *)schema error:(NSError **)error
 {
 	return [self relationNamesInSchema:schema kinds:@"'S'" error:error];
+}
+
++ (NSString *)stringForSize:(long long)bytes
+{
+	if (bytes < 1024) return [NSString stringWithFormat:@"%lld bytes", bytes];
+
+	double kilobytes = (double)bytes / 1024.0;
+	if (llround(kilobytes) < 1024) return [NSString stringWithFormat:@"%lld kB", (long long)llround(kilobytes)];
+
+	double megabytes = kilobytes / 1024.0;
+	if (llround(megabytes) < 1024) return [NSString stringWithFormat:@"%lld MB", (long long)llround(megabytes)];
+
+	double gigabytes = megabytes / 1024.0;
+	if (gigabytes < 1023.95) return [NSString stringWithFormat:@"%.1f GB", gigabytes];
+	return [NSString stringWithFormat:@"%.1f TB", gigabytes / 1024.0];
+}
+
+- (NSDictionary<NSString *, NSString *> *)tableSizesInSchema:(NSString *)schema error:(NSError **)error
+{
+	PGPostgresResult *result = [self run:@"SELECT c.relname::text AS r, pg_catalog.pg_total_relation_size(c.oid)::text AS b "
+										  "FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace "
+										  "WHERE ns.nspname = $1::text AND c.relkind = 'r'"
+								  values:@[schema ?: @""] error:error];
+	if (!result) return nil;
+
+	NSMutableDictionary *sizes = [NSMutableDictionary dictionary];
+	for (NSDictionary *row in result) {
+		id relation = [row objectForKey:@"r"];
+		id bytes = [row objectForKey:@"b"];
+		if (![relation isKindOfClass:[NSString class]] || ![bytes isKindOfClass:[NSString class]]) continue;
+		[sizes setObject:[SPPostgresCatalog stringForSize:[bytes longLongValue]] forKey:relation];
+	}
+	return sizes;
 }
 
 - (NSDictionary<NSString *, NSArray<NSString *> *> *)columnNamesByRelationInSchema:(NSString *)schema error:(NSError **)error

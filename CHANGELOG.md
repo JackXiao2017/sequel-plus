@@ -1,5 +1,82 @@
 # Changelog
 
+## Sequel Plus 2.0.1
+
+Upgrading from 2.0.0.
+
+### Table list shows table sizes
+- Each table in the table list shows its size after its name, aligned right in a lighter color. A long name is shortened with "…" before the size.
+- The size matches a figure in the Table Information pane:
+  - **MySQL:** "size:", the table's data without its indexes (`DATA_LENGTH` from `information_schema.TABLES`). MySQL 8 may cache these figures, so a size can lag behind recent changes, as in Table Information.
+  - **PostgreSQL:** "total size:", the table's data, TOAST and indexes (`pg_total_relation_size`).
+- Sizes move up a unit at 1024 of the smaller one. From 1024 MB they are shown in GB with one decimal, "1.5 GiB" (MySQL) or "1.5 GB" (PostgreSQL), and from 1024 GB in TB.
+
+### PostgreSQL: sizes written in kB from 1 kB
+- PostgreSQL's own size format (`pg_size_pretty`) stays in bytes up to 10 kB and in MB up to 10 GB, so a one-page table showed as "8192 bytes". The table list and Table Info (size, index size and total size, in both the Table Info tab and the sidebar's info pane) now write sizes themselves:
+  - under 1 kB in bytes ("0 bytes");
+  - then whole kB and MB up to 1023 ("8 kB", "17 MB");
+  - from 1024 MB, GB with one decimal ("1.5 GB"), and from 1024 GB, TB.
+- Views, procedures, functions and sequences show no size. In PostgreSQL a partitioned table shows none either; each partition shows its own.
+- Sizes are read when the list loads or is refreshed. If the server doesn't allow reading them, the list shows names only, as before.
+
+### Filter for the favorites list
+- A **Filter** field above the connection screen's favorites list. As you type, the list shows only the MySQL and PostgreSQL favorites whose name or host contains the text (ignoring case and accents), with the groups they are in expanded. Typing a group's name shows everything in that group.
+- The selected favorite stays in the list while filtering, and the form keeps what it shows. Quick Connect is always shown.
+- Clearing the field shows the whole list again, with groups expanded or collapsed as you left them.
+- While filtering, favorites can't be dragged to new places. Adding a favorite or group clears the filter, so the new item is visible.
+
+### PostgreSQL: adding a row to a table with a required column
+- **Fixed:** in Content, **Add row** (+) on a table with a NOT NULL column that has no default failed at once ("null value in column … violates not-null constraint"). It inserted the row before you could type anything.
+- On such a table the new row is now added in the grid only, as MySQL does, and editing starts in the first required column. The row is inserted when you leave it: Return, selecting another row, adding another row, refreshing, sorting, filtering or changing page. Only the values you typed are sent; the other columns get their defaults.
+- If the insert fails (e.g. a required value is still missing), the error is shown and the row stays, with what you typed, so you can finish it. Deleting the new row (−) just removes it, with nothing sent to the server.
+- Tables without a required column work as before: the row is inserted at once with every column's default.
+
+### PostgreSQL: Truncate can restart identity
+- The **Truncate Table** question has a **Restart identity** checkbox, off by default. Checked, the truncate also resets the counters of the tables' serial and identity columns (`TRUNCATE … RESTART IDENTITY`), so new rows are numbered from the start again. Unchecked, numbering carries on, as before.
+
+### PostgreSQL: the table information pane shows every line
+- The **TABLE INFORMATION** pane under the table list is now tall enough for all its lines: type, owner, rows, size, index size, total size and comment. It was fixed at MySQL's 166 pt, which cut off **total size** and **comment**.
+
+### Query's run button shows its whole title (MySQL and PostgreSQL)
+- The run button above the results (**Run Current**, **Run Previous**, **Run Selection**, **Run All**) shows its full title, centred. It was cut off ("Run Curre…") because the button kept room for the menu's ⌘R and ⌥⌘R shortcuts.
+
+### PostgreSQL: Add Database and Refresh Databases in the database selector
+- The toolbar's database selector is laid out as MySQL's: **Choose Database...**, then **Add Database...** and **Refresh Databases**, then the databases.
+  - **Add Database...** asks for the name, creates the database and switches to it, as Database ▸ Add Database… does.
+  - **Refresh Databases** reads the list again.
+  - Choosing any of these keeps the tab in its database, which the selector shows again.
+
+### Databases in the database selector (MySQL and PostgreSQL)
+- **Show all databases**, a new checkbox under the Database field in the connection editor, for MySQL and PostgreSQL, on every connection tab. It is on by default, and for favorites saved before it.
+  - **On:** the toolbar's database selector lists every database you can use, as before.
+  - **Off:** it lists only the connection's database (MySQL also lists the database in use, after a `USE`). The Database field must then be filled: Connect, Test Connection, Save Changes and Add to Favorites ask for it, and its placeholder says "required".
+  - Clicking it is an edit of the connection, like typing in a field: Save Changes, Add to Favorites and Test Connection appear.
+  - It is saved with the favorite, and is on for Quick Connect.
+- PostgreSQL: the database selector, and Transfer's database lists, now leave out databases you have no CONNECT privilege on, whether granted directly, through a role, or through PUBLIC. Superusers still see every database. (MySQL's list already shows only databases you have a privilege on.)
+
+### PostgreSQL: TABLES expanded in the sidebar
+- The sidebar's **TABLES** is now expanded in a new connection tab, and after choosing another database or schema or refreshing. Views, Sequences and Extensions still start collapsed.
+- After choosing a database or schema, or refreshing, the other sections keep the state you left them in.
+
+### PostgreSQL: copying rows, and a right-click menu in the grids
+- **Right-click menu**, as MySQL's, in Content's grid and in Query's results. Right-clicking a row selects it first.
+  - **Content:** Copy, Copy with Column Names, Copy as SQL INSERT, Add New Row, Duplicate Row and Delete Row. The row items are enabled as the bottom bar's buttons are: Duplicate Row needs exactly one selected row.
+  - **Query results:** Copy, Copy with Column Names and Copy as SQL INSERT.
+- **Edit ▸ Copy** (⌘C) and **Copy with Column Names** (⌥⌘C) copy the selected rows as tab-separated text, as in MySQL. A line per row, with the column names' line first for Copy with Column Names. NULL is shown as the NULL placeholder from Preferences, and line breaks and tabs inside a value become ↵ and ⇥. Query results copy whole values. There is no paste.
+- **Edit ▸ Copy as SQL INSERT** (⌃⌥⌘C) now works in Content's grid and in Query's results, as in MySQL. It copies the selected rows as one INSERT statement, with a VALUES line per row:
+  ```
+  INSERT INTO "public"."items" ("id", "name")
+  VALUES
+  	('1', 'first'),
+  	('2', NULL);
+  ```
+  - Columns are in the order shown, with names in double quotes. Values are quoted text, which PostgreSQL converts to each column's type; NULL stays NULL.
+  - **Content:** the rows go into the table being shown. Generated columns are left out, since PostgreSQL refuses values for them.
+  - **Query results:** whole values are copied, not the shortened ones shown in the grid. The rows go into the table every column comes from, or `<table>` when they come from several tables or from none, as in MySQL.
+
+### App
+- Version **2.0.1**.
+
 ## Sequel Plus 2.0.0
 
 Upgrading from 2.0.0-RC4.

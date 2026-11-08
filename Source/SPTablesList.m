@@ -85,6 +85,34 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 
 @implementation SPTablesList
 
+/**
+ * A table's size as the list shows it, in Table Information's units (B, KiB, MiB, GiB, TiB) and formats, moving up a
+ * unit at 1024 of the smaller one: "1,023 B", "1.0 KiB", "1,023.9 MiB", "1.0 GiB".
+ */
++ (NSString *)listStringForTableSize:(long long)bytes
+{
+	NSNumberFormatter *formatter = [[[NSNumberFormatter alloc] init] autorelease];
+	[formatter setNumberStyle:NSNumberFormatterDecimalStyle];
+
+	if (bytes < 1024) {
+		[formatter setFormat:@"#,##0 B"];
+		return [formatter stringFromNumber:@(bytes)];
+	}
+
+	double size = (double)bytes / 1024.0;
+	for (NSString *unit in @[@"KiB", @"MiB", @"GiB"]) {
+		// One decimal: a value that would be written 1,024.0 is in the next unit
+		if (size < 1023.95) {
+			[formatter setFormat:[NSString stringWithFormat:@"#,##0.0 %@", unit]];
+			return [formatter stringFromNumber:@(size)];
+		}
+		size /= 1024.0;
+	}
+
+	[formatter setFormat:@"#,##0.0 TiB"];
+	return [formatter stringFromNumber:@(size)];
+}
+
 #pragma mark -
 #pragma mark Initialisation
 
@@ -226,6 +254,24 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 				}
 			}
 		}
+
+		// Each base table's size (data + indexes), shown after its name. Not available (no information_schema, no
+		// rights): no sizes, and the list is unchanged.
+		NSMutableDictionary *sizes = [NSMutableDictionary dictionary];
+		SPMySQLResult *sizeResult = [mySQLConnection queryString:[NSString stringWithFormat:@"SELECT TABLE_NAME, DATA_LENGTH FROM information_schema.TABLES WHERE TABLE_SCHEMA = %@ AND TABLE_TYPE = 'BASE TABLE'", [[tableDocumentInstance database] tickQuotedString]]];
+		if (sizeResult && ![mySQLConnection queryErrored]) {
+			[sizeResult setDefaultRowReturnType:SPMySQLResultRowAsArray];
+			[sizeResult setReturnDataAsStrings:YES];
+			for (NSArray *eachRow in sizeResult) {
+				id name = [eachRow objectAtIndex:0];
+				id size = [eachRow objectAtIndex:1];
+				if ([name isKindOfClass:[NSString class]] && [size isKindOfClass:[NSString class]]) [sizes setObject:@([size longLongValue]) forKey:name];
+			}
+		}
+		SPMainQSync(^{
+			[tableSizes release];
+			tableSizes = [sizes copy];
+		});
 
 		// Reorder the tables in alphabetical order
 		[tables sortArrayUsingSelector:@selector(localizedCompare:) withPairedMutableArrays:tableTypes, nil];
@@ -1825,6 +1871,9 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
  */
 - (void)tableView:(NSTableView *)aTableView  willDisplayCell:(ImageAndTextCell*)aCell forTableColumn:(NSTableColumn *)aTableColumn row:(NSInteger)rowIndex
 {
+	// The cell is shared by every row: only a table's row shows a size (set below)
+	if ([aCell isKindOfClass:[ImageAndTextCell class]]) [aCell setTrailingText:nil];
+
 	if (rowIndex > 0 && rowIndex < (NSInteger)[filteredTableTypes count] && [[aTableColumn identifier] isEqualToString:@"tables"]) {
 
 		id item = NSArrayObjectAtIndex(filteredTables, rowIndex);
@@ -1841,11 +1890,14 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 				[aCell setIndentationLevel:1];
 				[aCell setFont:smallSystemFont];
 				break;
-			case SPTableTypeTable:
+			case SPTableTypeTable: {
 				[aCell setImage:[NSImage imageNamed:@"table-small"]];
 				[aCell setIndentationLevel:1];
 				[aCell setFont:smallSystemFont];
-				break;
+				NSNumber *size = [tableSizes objectForKey:item];
+				[aCell setTrailingText:size ? [SPTablesList listStringForTableSize:[size longLongValue]] : nil];
+				return;
+			}
 			case SPTableTypeProc:
 				[aCell setImage:[NSImage imageNamed:@"proc-small"]];
 				[aCell setIndentationLevel:1];
@@ -2836,6 +2888,7 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 	
 	SPClear(tables);
 	SPClear(tableTypes);
+	if (tableSizes) SPClear(tableSizes);
 
 	if (isTableListFiltered && filteredTables)     SPClear(filteredTables);
 	if (isTableListFiltered && filteredTableTypes) SPClear(filteredTableTypes);

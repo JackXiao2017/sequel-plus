@@ -20,6 +20,7 @@ static const CGFloat SPPostgresSidebarSchemaBarHeight = 32;
 static const CGFloat SPPostgresSidebarFilterBarHeight = 26;
 /// MySQL's table list bar and information pane (DBView.xib)
 static const CGFloat SPPostgresSidebarButtonBarHeight = 23;
+/// MySQL's info pane height (DBView.xib); taller when the pane's rows need it (see -[SPPostgresSidebarInfoPane heightShowingAllLines])
 static const CGFloat SPPostgresSidebarInfoPaneHeight = 166;
 static const NSInteger SPPostgresSidebarDetailTag = 1;
 /// The disclosure button at the front of a section header
@@ -86,6 +87,9 @@ static NSDictionary *SPPostgresSidebarRead(PGPostgresConnection *connection, SPP
 		// The Query editor's completion columns: not a list, so a failure isn't reported (completion goes without)
 		NSDictionary *columns = [catalog columnNamesByRelationInSchema:schema error:NULL];
 		if (columns) [read setObject:columns forKey:@"relationColumns"];
+		// Each table's size, shown after its name: not a list either, so a failure only leaves the sizes out
+		NSDictionary *sizes = [catalog tableSizesInSchema:schema error:NULL];
+		if (sizes) [read setObject:sizes forKey:@"tableSizes"];
 	}
 
 	[read setObject:failures forKey:@"failures"];
@@ -177,6 +181,48 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 
 @end
 
+/// A table, view, sequence or extension row: the icon and name, and at the trailing edge the detail (a table's size,
+/// an extension's version), sized to its text. The name ends before the detail (truncating). Laid out here, after
+/// AppKit's own layout of the cell, which would stretch the name across the detail.
+@interface SPPostgresSidebarItemCellView : NSTableCellView
+- (void)_layoutDetail;
+@end
+
+@implementation SPPostgresSidebarItemCellView
+
+- (void)_layoutDetail
+{
+	NSRect bounds = [self bounds];
+	NSTextField *detail = [self viewWithTag:SPPostgresSidebarDetailTag];
+	NSTextField *name = [self textField];
+	CGFloat detailWidth = 0;
+	if (detail && ![detail isHidden] && [[detail stringValue] length]) {
+		CGFloat fitted = ceil([detail fittingSize].width);
+		NSRect detailFrame = [detail frame];
+		detailFrame.size.width = fitted;
+		detailFrame.origin.x = NSWidth(bounds) - 4 - fitted;
+		[detail setFrame:detailFrame];
+		detailWidth = fitted + 6;
+	}
+	NSRect nameFrame = [name frame];
+	nameFrame.size.width = MAX(20, NSWidth(bounds) - NSMinX(nameFrame) - 4 - detailWidth);
+	[name setFrame:nameFrame];
+}
+
+- (void)layout
+{
+	[super layout];
+	[self _layoutDetail];
+}
+
+- (void)resizeSubviewsWithOldSize:(NSSize)oldSize
+{
+	[super resizeSubviewsWithOldSize:oldSize];
+	[self _layoutDetail];
+}
+
+@end
+
 @interface SPPostgresSidebarOutlineView : NSOutlineView
 @property (assign) SPPostgresSidebarController *menuSource;
 @end
@@ -258,6 +304,8 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	SPSplitView *infoSplitView;
 	NSView *infoPaneContainer;
 	SPPostgresSidebarInfoPane *infoPane;
+	/// The information pane's height: every line of a relation shows, at least MySQL's
+	CGFloat infoPaneHeight;
 	/// Inside a reload's apply: the information pane reads once, at its end (see -_runReload:…)
 	NSUInteger applyingReload;
 	NSUserDefaults *defaults;
@@ -332,8 +380,8 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 		selectedRelationNames = [@[] retain];
 		filterString = @"";
 		displayedChildren = [[NSMutableDictionary alloc] init];
-		// Every section starts collapsed (selecting an item by name expands its section)
-		collapsedSections = [[NSMutableSet alloc] initWithObjects:SPPostgresSidebarTables, SPPostgresSidebarViews, SPPostgresSidebarSequences, SPPostgresSidebarExtensions, nil];
+		// TABLES starts expanded, the other sections collapsed (selecting an item by name expands its section)
+		collapsedSections = [[NSMutableSet alloc] initWithObjects:SPPostgresSidebarViews, SPPostgresSidebarSequences, SPPostgresSidebarExtensions, nil];
 		defaults = [[NSUserDefaults standardUserDefaults] retain];
 		actionsEnabled = YES;
 
@@ -516,7 +564,10 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	[infoSplitView setDividerStyle:NSSplitViewDividerStyleThin];
 	[infoSplitView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 
-	CGFloat outlineHeight = splitHeight - SPPostgresSidebarInfoPaneHeight - [infoSplitView dividerThickness];
+	// The pane is as tall as every line of a relation needs (a comment included), at least MySQL's height
+	infoPane = [[SPPostgresSidebarInfoPane alloc] initWithFrame:NSMakeRect(0, 0, NSWidth(frame), SPPostgresSidebarInfoPaneHeight)];
+	infoPaneHeight = MAX(SPPostgresSidebarInfoPaneHeight, [infoPane heightShowingAllLines]);
+	CGFloat outlineHeight = splitHeight - infoPaneHeight - [infoSplitView dividerThickness];
 	NSScrollView *scrollView = [[[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, NSWidth(frame), outlineHeight)] autorelease];
 	[scrollView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 	[scrollView setHasVerticalScroller:YES];
@@ -563,9 +614,9 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	[infoSplitView addSubview:scrollView];
 
 	// Not height-sizable: the pane keeps its height as the panel resizes (the outline takes the difference)
-	infoPaneContainer = [[NSView alloc] initWithFrame:NSMakeRect(0, outlineHeight + [infoSplitView dividerThickness], NSWidth(frame), SPPostgresSidebarInfoPaneHeight)];
+	infoPaneContainer = [[NSView alloc] initWithFrame:NSMakeRect(0, outlineHeight + [infoSplitView dividerThickness], NSWidth(frame), infoPaneHeight)];
 	[infoPaneContainer setAutoresizingMask:NSViewWidthSizable];
-	infoPane = [[SPPostgresSidebarInfoPane alloc] initWithFrame:[infoPaneContainer bounds]];
+	[[infoPane view] setFrame:[infoPaneContainer bounds]];
 	[infoPaneContainer addSubview:[infoPane view]];
 	[infoSplitView addSubview:infoPaneContainer];
 	[infoSplitView adjustSubviews];
@@ -782,7 +833,7 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	}
 
 	NSRect bounds = [theSplitView bounds];
-	CGFloat paneHeight = MIN(SPPostgresSidebarInfoPaneHeight, NSHeight(bounds));
+	CGFloat paneHeight = MIN(infoPaneHeight, NSHeight(bounds));
 	CGFloat outlineHeight = MAX(0, NSHeight(bounds) - paneHeight - [theSplitView dividerThickness]);
 	[[subviews objectAtIndex:0] setFrame:NSMakeRect(0, 0, NSWidth(bounds), outlineHeight)];
 	[infoPaneContainer setFrame:NSMakeRect(0, NSHeight(bounds) - paneHeight, NSWidth(bounds), paneHeight)];
@@ -924,6 +975,7 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 		// database, lists that can't be read are shown empty, with no schema
 		BOOL listsRead = [read objectForKey:@"schema"] && [read objectForKey:@"tables"] && [read objectForKey:@"views"] && [read objectForKey:@"sequences"];
 		[self _applySchemaRead:(emptying && !listsRead) ? @{} : read];
+		[self _expandTablesSection];
 
 		BOOL loaded = ![[read objectForKey:@"failures"] count];
 		[self _endReload];
@@ -968,6 +1020,7 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 
 		holdingSelectionChanges = YES;
 		[self _applySchemaRead:read];
+		[self _expandTablesSection];
 		// The same schema (not the default one standing in for a schema that is gone): its tables and views (those
 		// still listed) or sequence again
 		if ([relations count] && [previousSchema isEqualToString:selectedSchema]) [self selectRelationsNamed:relations];
@@ -1038,6 +1091,7 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 		[self _beginReload];
 		[self _rememberFailuresOfRead:read];
 		BOOL loaded = [self _applySchemaRead:read];
+		[self _expandTablesSection];
 		[self _endReload];
 
 		if (!holding) return loaded;
@@ -1059,6 +1113,19 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 		}
 		if (theCompletion) theCompletion(loaded);
 	}];
+}
+
+/// TABLES expanded, and remembered so: every reload (a database, a schema, a refresh) shows it expanded, as a new tab
+/// does. The other sections keep their state.
+- (void)_expandTablesSection
+{
+	[collapsedSections removeObject:SPPostgresSidebarTables];
+	SPPostgresSidebarItem *section = [self _sectionNamed:SPPostgresSidebarTables];
+	if (!section || ![[self _visibleSections] containsObject:section]) return;
+	BOOL wasReloading = reloading;
+	reloading = YES;
+	[outlineView expandItem:section];
+	reloading = wasReloading;
 }
 
 - (NSString *)pendingSchema
@@ -1100,8 +1167,9 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 		[relationColumns release];
 		relationColumns = [[read objectForKey:@"relationColumns"] copy];
 
+		NSDictionary *tableSizes = [read objectForKey:@"tableSizes"];
 		for (NSString *name in tableNames) {
-			[[tables children] addObject:[SPPostgresSidebarItem itemWithTitle:name detail:nil kind:SPPostgresSidebarTable]];
+			[[tables children] addObject:[SPPostgresSidebarItem itemWithTitle:name detail:[tableSizes objectForKey:name] kind:SPPostgresSidebarTable]];
 		}
 		for (NSString *name in viewNames) {
 			[[views children] addObject:[SPPostgresSidebarItem itemWithTitle:name detail:nil kind:SPPostgresSidebarView]];
@@ -2043,7 +2111,7 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 	NSTableCellView *cell = [theOutlineView makeViewWithIdentifier:identifier owner:self];
 	if (!cell) {
 		CGFloat width = [tableColumn width];
-		Class cellClass = isSection ? [SPPostgresSidebarSectionCellView class] : [NSTableCellView class];
+		Class cellClass = isSection ? [SPPostgresSidebarSectionCellView class] : [SPPostgresSidebarItemCellView class];
 		cell = [[[cellClass alloc] initWithFrame:NSMakeRect(0, 0, width, 18)] autorelease];
 		[cell setIdentifier:identifier];
 
@@ -2082,7 +2150,7 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 			[textField setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
 			[textField setFrame:NSMakeRect(24, 1, width - 28, 16)];
 
-			// Extension version, right-aligned
+			// Extension version or table size, right-aligned
 			NSTextField *detailField = [NSTextField labelWithString:@""];
 			[detailField setTag:SPPostgresSidebarDetailTag];
 			[detailField setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
@@ -2120,11 +2188,9 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 		[detailField setStringValue:detail];
 		[detailField setHidden:![detail length]];
 
-		// Leave room for the version so long extension names truncate before it
-		NSRect textFrame = [[cell textField] frame];
-		CGFloat detailWidth = [detail length] ? ceil([detailField fittingSize].width) + 6 : 0;
-		textFrame.size.width = MAX(20, NSWidth([cell bounds]) - NSMinX(textFrame) - 4 - detailWidth);
-		[[cell textField] setFrame:textFrame];
+		// Sized to its text at the trailing edge; long names truncate before it
+		[(SPPostgresSidebarItemCellView *)cell _layoutDetail];
+		[cell setNeedsLayout:YES];
 	}
 
 	return cell;

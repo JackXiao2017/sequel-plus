@@ -16,11 +16,16 @@ static NSString *SPPostgresQualifiedName(NSString *schema, NSString *name)
 
 + (BOOL)truncateTables:(NSArray<NSString *> *)tables inSchema:(NSString *)schema connection:(PGPostgresConnection *)connection error:(NSError **)error
 {
+	return [self truncateTables:tables inSchema:schema restartIdentity:NO connection:connection error:error];
+}
+
++ (BOOL)truncateTables:(NSArray<NSString *> *)tables inSchema:(NSString *)schema restartIdentity:(BOOL)restartIdentity connection:(PGPostgresConnection *)connection error:(NSError **)error
+{
 	if (![tables count]) return YES;
 
 	NSMutableArray *qualified = [NSMutableArray arrayWithCapacity:[tables count]];
 	for (NSString *table in tables) [qualified addObject:SPPostgresQualifiedName(schema, table)];
-	NSString *sql = [NSString stringWithFormat:@"TRUNCATE TABLE %@", [qualified componentsJoinedByString:@", "]];
+	NSString *sql = [NSString stringWithFormat:@"TRUNCATE TABLE %@%@", [qualified componentsJoinedByString:@", "], restartIdentity ? @" RESTART IDENTITY" : @""];
 
 	return SPPostgresRunStructureChange(connection, SPPostgresTableActionsLockTimeout, ^BOOL(NSError **bodyError) {
 		return SPPostgresExecuteWithDetails(connection, sql, nil, bodyError) != nil;

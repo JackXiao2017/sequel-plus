@@ -4,6 +4,7 @@
 #import "../Source/Postgres/SPPostgresCreateStatement.h"
 #import "../Source/Postgres/SPPostgresTableStructure.h"
 #import "../Source/Postgres/SPPostgresStatementSplitter.h"
+#import "../Source/Postgres/SPPostgresCatalog.h"
 
 /// The generated CREATE statement (both ports): it recreates what it describes, read back through Task 1's readers.
 @interface SPPostgresCreateStatementTests : XCTestCase
@@ -421,10 +422,11 @@
 		XCTAssertEqualObjects(info[@"owner"], @"pgkit_test");
 		XCTAssertEqualObjects(info[@"rowEstimate"], [NSNull null], @"never analysed");
 		XCTAssertEqualObjects(info[@"comment"], [NSNull null]);
-		XCTAssertEqualObjects(info[@"tableSize"], [self value:@"SELECT pg_size_pretty(pg_table_size('structure_test.fresh'))" on:connection]);
-		XCTAssertEqualObjects(info[@"indexSize"], [self value:@"SELECT pg_size_pretty(pg_indexes_size('structure_test.fresh'))" on:connection]);
-		XCTAssertEqualObjects(info[@"totalSize"], [self value:@"SELECT pg_size_pretty(pg_total_relation_size('structure_test.fresh'))" on:connection]);
+		XCTAssertEqualObjects(info[@"tableSize"], [SPPostgresCatalog stringForSize:[[self value:@"SELECT pg_table_size('structure_test.fresh')::text" on:connection] longLongValue]]);
+		XCTAssertEqualObjects(info[@"indexSize"], [SPPostgresCatalog stringForSize:[[self value:@"SELECT pg_indexes_size('structure_test.fresh')::text" on:connection] longLongValue]]);
+		XCTAssertEqualObjects(info[@"totalSize"], [SPPostgresCatalog stringForSize:[[self value:@"SELECT pg_total_relation_size('structure_test.fresh')::text" on:connection] longLongValue]]);
 		XCTAssertTrue([info[@"totalSize"] hasSuffix:@"kB"], @"%@", info[@"totalSize"]);
+		XCTAssertEqualObjects(info[@"tableSize"], @"8 kB", @"one page: kB, not pg_size_pretty's 8192 bytes");
 
 		[self run:@"ANALYZE structure_test.fresh" on:connection];
 		XCTAssertEqualObjects([fresh tableInfo:&error][@"rowEstimate"], @2);
