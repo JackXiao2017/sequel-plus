@@ -8,7 +8,14 @@ Upgrading from 2.0.0.
 - Each table in the table list shows its size after its name, aligned right in a lighter color. A long name is shortened with "…" before the size.
 - The size matches a figure in the Table Information pane:
   - **MySQL:** "size:", the table's data without its indexes (`DATA_LENGTH` from `information_schema.TABLES`). MySQL 8 may cache these figures, so a size can lag behind recent changes, as in Table Information.
-  - **PostgreSQL:** "total size:", the table's data, TOAST and indexes (`pg_size_pretty(pg_total_relation_size(…))`), written the way the server writes it (e.g. "32 kB").
+  - **PostgreSQL:** "total size:", the table's data, TOAST and indexes (`pg_total_relation_size`).
+- Sizes move up a unit at 1024 of the smaller one. From 1024 MB they are shown in GB with one decimal, "1.5 GiB" (MySQL) or "1.5 GB" (PostgreSQL), and from 1024 GB in TB.
+
+### PostgreSQL: sizes written in kB from 1 kB
+- PostgreSQL's own size format (`pg_size_pretty`) stays in bytes up to 10 kB and in MB up to 10 GB, so a one-page table showed as "8192 bytes". The table list and Table Info (size, index size and total size, in both the Table Info tab and the sidebar's info pane) now write sizes themselves:
+  - under 1 kB in bytes ("0 bytes");
+  - then whole kB and MB up to 1023 ("8 kB", "17 MB");
+  - from 1024 MB, GB with one decimal ("1.5 GB"), and from 1024 GB, TB.
 - Views, procedures, functions and sequences show no size. In PostgreSQL a partitioned table shows none either; each partition shows its own.
 - Sizes are read when the list loads or is refreshed. If the server doesn't allow reading them, the list shows names only, as before.
 
@@ -23,6 +30,22 @@ Upgrading from 2.0.0.
 - On such a table the new row is now added in the grid only, as MySQL does, and editing starts in the first required column. The row is inserted when you leave it: Return, selecting another row, adding another row, refreshing, sorting, filtering or changing page. Only the values you typed are sent; the other columns get their defaults.
 - If the insert fails (e.g. a required value is still missing), the error is shown and the row stays, with what you typed, so you can finish it. Deleting the new row (−) just removes it, with nothing sent to the server.
 - Tables without a required column work as before: the row is inserted at once with every column's default.
+
+### PostgreSQL: copying rows, and a right-click menu in the grids
+- **Right-click menu**, as MySQL's, in Content's grid and in Query's results. Right-clicking a row selects it first.
+  - **Content:** Copy, Copy with Column Names, Copy as SQL INSERT, Add New Row, Duplicate Row and Delete Row. The row items are enabled as the bottom bar's buttons are: Duplicate Row needs exactly one selected row.
+  - **Query results:** Copy, Copy with Column Names and Copy as SQL INSERT.
+- **Edit ▸ Copy** (⌘C) and **Copy with Column Names** (⌥⌘C) copy the selected rows as tab-separated text, as in MySQL. A line per row, with the column names' line first for Copy with Column Names. NULL is shown as the NULL placeholder from Preferences, and line breaks and tabs inside a value become ↵ and ⇥. Query results copy whole values. There is no paste.
+- **Edit ▸ Copy as SQL INSERT** (⌃⌥⌘C) now works in Content's grid and in Query's results, as in MySQL. It copies the selected rows as one INSERT statement, with a VALUES line per row:
+  ```
+  INSERT INTO "public"."items" ("id", "name")
+  VALUES
+  	('1', 'first'),
+  	('2', NULL);
+  ```
+  - Columns are in the order shown, with names in double quotes. Values are quoted text, which PostgreSQL converts to each column's type; NULL stays NULL.
+  - **Content:** the rows go into the table being shown. Generated columns are left out, since PostgreSQL refuses values for them.
+  - **Query results:** whole values are copied, not the shortened ones shown in the grid. The rows go into the table every column comes from, or `<table>` when they come from several tables or from none, as in MySQL.
 
 ### App
 - Version **2.0.1**.

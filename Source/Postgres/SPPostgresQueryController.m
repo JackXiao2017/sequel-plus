@@ -24,6 +24,7 @@
 #import "SPComboPopupButton.h"
 #import "SPConstants.h"
 #import "SPStringAdditions.h"
+#import "SPPostgresRowsGrid.h"
 #import <PostgresKit/PostgresKit.h>
 
 // MySQL's Query tab (DBView.xib): 23 pt bars, at the top of the results and at the bottom of the tab
@@ -231,7 +232,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 
 #pragma mark - Controller
 
-@interface SPPostgresQueryController () <NSSplitViewDelegate, NSWindowDelegate, NSMenuDelegate, NSTextFieldDelegate>
+@interface SPPostgresQueryController () <NSSplitViewDelegate, NSWindowDelegate, NSMenuDelegate, NSTextFieldDelegate, SPPostgresRowsGridDelegate>
 
 @property (readwrite, copy) NSString *statusText;
 @property (readwrite, copy) NSString *lastRunQueryText;
@@ -835,7 +836,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[resultsScrollView setBorderType:NSNoBorder];
 	[resultsScrollView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 
-	resultsView = [[SPTableView alloc] initWithFrame:[[resultsScrollView contentView] bounds]];
+	resultsView = [[SPPostgresRowsGrid alloc] initWithFrame:[[resultsScrollView contentView] bounds]];
 	[resultsView setUsesAlternatingRowBackgroundColors:YES];
 	[resultsView setAllowsMultipleSelection:YES];
 	[resultsView setAllowsColumnReordering:YES];
@@ -844,6 +845,10 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[resultsView setGridStyleMask:[[NSUserDefaults standardUserDefaults] boolForKey:SPDisplayTableViewVerticalGridlines] ? NSTableViewSolidVerticalGridLineMask : NSTableViewGridNone];
 	[resultsView setDataSource:self];
 	[resultsView setDelegate:self];
+	// The right-click menu, MySQL's (DBView.xib's Table Custom Query Menu): the three copy items
+	NSMenu *resultsMenu = [[[NSMenu alloc] initWithTitle:@""] autorelease];
+	for (NSMenuItem *item in [SPPostgresRowsGrid copyMenuItemsForGrid:resultsView]) [resultsMenu addItem:item];
+	[resultsView setMenu:resultsMenu];
 	[resultsScrollView setDocumentView:resultsView];
 	[pane addSubview:resultsScrollView];
 
@@ -2814,6 +2819,72 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	if (!tableColumn || !resultEditor) return -1;
 	NSInteger column = [[tableColumn identifier] integerValue];
 	return (column >= 0 && (NSUInteger)column < [resultEditor columnCount]) ? column : -1;
+}
+
+/// The selected result rows' whole values (not cut for display; NSNull for NULL), in the grid's column order (as
+/// shown), with the columns' names in names and, in tableColumns, the grid columns. Nil when nothing is selected.
+- (NSArray<NSArray *> *)_selectedResultValuesWithNames:(NSMutableArray *)names tableColumns:(NSMutableArray *)tableColumns
+{
+	NSIndexSet *selection = [resultsView selectedRowIndexes];
+	if (!resultEditor || ![selection count]) return nil;
+
+	NSArray *allNames = [self lastResultColumnNames];
+	for (NSTableColumn *tableColumn in [resultsView tableColumns]) {
+		NSInteger column = [self _resultColumnOfTableColumn:tableColumn];
+		if (column < 0) continue;
+		[names addObject:(NSUInteger)column < [allNames count] ? [allNames objectAtIndex:(NSUInteger)column] : @""];
+		[tableColumns addObject:tableColumn];
+	}
+	if (![names count]) return nil;
+
+	NSMutableArray *copied = [NSMutableArray array];
+	[selection enumerateIndexesUsingBlock:^(NSUInteger rowIndex, BOOL *stop) {
+		NSMutableArray *values = [NSMutableArray arrayWithCapacity:[tableColumns count]];
+		for (NSTableColumn *tableColumn in tableColumns) {
+			[values addObject:[self _valueAtRow:(NSInteger)rowIndex tableColumn:tableColumn] ?: [NSNull null]];
+		}
+		[copied addObject:values];
+	}];
+	return copied;
+}
+
+/// Copy (and Copy with Column Names) in the results grid: the selected rows as tab-separated text, NULL as the NULL
+/// placeholder (MySQL's -rowsAsTabStringWithHeaders:...). Also as tabular text, as MySQL.
+- (void)rowsGrid:(NSTableView *)grid copyRowsWithColumnNames:(BOOL)withColumnNames
+{
+	NSMutableArray *names = [NSMutableArray array];
+	NSArray *copied = [self _selectedResultValuesWithNames:names tableColumns:[NSMutableArray array]];
+	if (!copied) return;
+
+	NSString *text = SPPostgresTabText(withColumnNames ? names : nil, copied, [self _nullPlaceholder]);
+	NSPasteboard *board = pasteboard ?: [NSPasteboard generalPasteboard];
+	[board clearContents];
+	[board setString:text forType:NSPasteboardTypeString];
+	[board setString:text forType:NSPasteboardTypeTabularText];
+}
+
+/// Copy as SQL INSERT in the results grid: the selected rows (whole values, not cut for display) as an INSERT, the
+/// columns in the grid's order (as shown). Into the table every shown column comes from (when the runner is idle to
+/// look it up), else into <table>, as MySQL.
+- (void)rowsGridCopyAsSQLInserts:(NSTableView *)grid
+{
+	NSMutableArray *names = [NSMutableArray array];
+	NSMutableArray *tableColumns = [NSMutableArray array];
+	NSArray *copied = [self _selectedResultValuesWithNames:names tableColumns:tableColumns];
+	if (!copied) return;
+
+	NSString *origin = nil;
+	BOOL oneOrigin = ![taskRunner isBusy];
+	for (NSTableColumn *tableColumn in tableColumns) {
+		if (!oneOrigin) break;
+		NSString *table = [resultEditor qualifiedTableNameOfColumn:(NSUInteger)[self _resultColumnOfTableColumn:tableColumn]];
+		if (!table || (origin && ![origin isEqualToString:table])) oneOrigin = NO;
+		else origin = table;
+	}
+
+	NSPasteboard *board = pasteboard ?: [NSPasteboard generalPasteboard];
+	[board clearContents];
+	[board setString:SPPostgresSQLInserts((oneOrigin && origin) ? origin : @"<table>", names, copied) forType:NSPasteboardTypeString];
 }
 
 - (NSArray *)lastResultColumnNames
