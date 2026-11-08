@@ -73,6 +73,10 @@ typedef NS_ENUM(NSInteger, SPConnectionEngine) {
 /// Where a new Postgres favorite goes, as a new MySQL favorite: the selected group, else the selected item's
 /// group, else the FAVORITES section.
 - (SPTreeNode *)postgresGroupForNewFavorite;
+/// The user changed a form control the host does not observe (the Show all databases checkbox): an edit of the form.
+- (void)postgresFormDidChange;
+/// Size the form again (the adapter changed the height of the form containers).
+- (void)resizeTabViewToConnectionType:(NSUInteger)theType animating:(BOOL)animate;
 
 @end
 
@@ -139,6 +143,14 @@ __attribute__((visibility("default")))
 /// Action of the engine control. Switching away from the engine of a selected saved favorite moves the
 /// selection to Quick Connect, keeping the details typed in the form.
 - (IBAction)engineControlChanged:(id)sender;
+
+/// The form's "Show all databases" (MySQL and PostgreSQL, under the Database field; YES by default and for Quick
+/// Connect): saved in the favorite, it makes the tab's database selector list every database or only the connection's.
+/// The host keeps it for MySQL favorites (SPFavoriteShowAllDatabasesKey).
+@property (nonatomic, assign) BOOL showAllDatabases;
+- (IBAction)showAllDatabasesChanged:(id)sender;
+/// With Show all databases off, the Database field must be filled: the error to show, or nil (MySQL and PostgreSQL).
+- (NSError *)databaseOptionValidationError;
 
 #pragma mark Outline
 

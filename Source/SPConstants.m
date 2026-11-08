@@ -294,6 +294,7 @@ NSString *SPFavoritesGroupIsExpandedKey                  = @"IsExpanded";
 NSString *SPFavoriteIDKey                                = @"id";
 NSString *SPFavoriteNameKey                              = @"name";
 NSString *SPFavoriteDatabaseKey                          = @"database";
+NSString *SPFavoriteShowAllDatabasesKey                  = @"showAllDatabases";
 NSString *SPFavoriteHostKey                              = @"host";
 NSString *SPFavoritePortKey                              = @"port";
 NSString *SPFavoriteUserKey                              = @"user";

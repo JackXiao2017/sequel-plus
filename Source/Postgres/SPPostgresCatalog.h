@@ -20,7 +20,7 @@ __attribute__((visibility("default")))
 /// The server_version setting (e.g. @"18.0"), or nil on failure.
 - (NSString *)serverVersionString;
 
-/// Connectable, non-template databases, sorted.
+/// Connectable, non-template databases the user may connect to (CONNECT privilege), sorted.
 - (NSArray *)databaseNames:(NSError **)error;
 
 /// User-visible schemas (no pg_catalog, information_schema, pg_toast*, pg_temp_*), sorted.

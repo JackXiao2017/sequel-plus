@@ -31,6 +31,14 @@ Upgrading from 2.0.0.
 - If the insert fails (e.g. a required value is still missing), the error is shown and the row stays, with what you typed, so you can finish it. Deleting the new row (−) just removes it, with nothing sent to the server.
 - Tables without a required column work as before: the row is inserted at once with every column's default.
 
+### Databases in the database selector (MySQL and PostgreSQL)
+- **Show all databases**, a new checkbox under the Database field in the connection editor, for MySQL and PostgreSQL, on every connection tab. It is on by default, and for favorites saved before it.
+  - **On:** the toolbar's database selector lists every database you can use, as before.
+  - **Off:** it lists only the connection's database (MySQL also lists the database in use, after a `USE`). The Database field must then be filled: Connect, Test Connection, Save Changes and Add to Favorites ask for it, and its placeholder says "required".
+  - Clicking it is an edit of the connection, like typing in a field: Save Changes, Add to Favorites and Test Connection appear.
+  - It is saved with the favorite, and is on for Quick Connect.
+- PostgreSQL: the database selector, and Transfer's database lists, now leave out databases you have no CONNECT privilege on, whether granted directly, through a role, or through PUBLIC. Superusers still see every database. (MySQL's list already shows only databases you have a privilege on.)
+
 ### PostgreSQL: TABLES expanded in the sidebar
 - The sidebar's **TABLES** is now expanded in a new connection tab, and after choosing another database or schema or refreshing. Views, Sequences and Extensions still start collapsed.
 - After choosing a database or schema, or refreshing, the other sections keep the state you left them in.

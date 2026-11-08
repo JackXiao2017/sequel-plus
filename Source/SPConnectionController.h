@@ -234,6 +234,9 @@
 
 // Connection processes
 - (IBAction)initiateConnection:(id)sender;
+
+/// The form's "Show all databases" (saved in the favorite): NO, the database selector lists only the connection's database.
+- (BOOL)showAllDatabases;
 - (IBAction)cancelConnection:(id)sender;
 #ifdef SP_CODA
 - (BOOL)cancellingConnection;
