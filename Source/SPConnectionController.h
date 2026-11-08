@@ -182,6 +182,13 @@
 	NSDictionary *currentFavorite;
 	SPFavoritesController *favoritesController;
 	SPFavoritesSortItem currentSortItem;
+
+	// The filter above the favorites list: while it holds text, the list shows only the favorites whose name or
+	// host contains it, the groups they are in (expanded), and the selected favorite
+	NSSearchField *favoritesFilterField;
+	NSString *favoritesFilter;
+	NSMutableSet *visibleFavoriteNodes;
+	BOOL isApplyingFavoritesFilter;
 #endif
 }
 
@@ -269,6 +276,10 @@
 
 // Accessors
 - (SPFavoritesOutlineView *)favoritesOutlineView;
+
+// Favorites filter
+- (IBAction)filterFavorites:(id)sender;
+- (NSSearchField *)favoritesFilterField;
 
 #endif
 

@@ -535,6 +535,7 @@
 		BA6B043E20A4FB0B00B012E1 /* button_filter@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BA6B043C20A4FB0B00B012E1 /* button_filter@2x.png */; };
 		BA6B044120A4FEDC00B012E1 /* button_filter_active.png in Resources */ = {isa = PBXBuildFile; fileRef = BA6B043F20A4FEDB00B012E1 /* button_filter_active.png */; };
 		BA6B044220A4FEDC00B012E1 /* button_filter.png in Resources */ = {isa = PBXBuildFile; fileRef = BA6B044020A4FEDC00B012E1 /* button_filter.png */; };
+		BA9BEBF95D1186F72F92C0DD /* SPFavoritesFilterTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 618B5B5AF4DBA7A68A11925C /* SPFavoritesFilterTests.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 		BAC6BAF920A0D22400247837 /* FilterTableWindow.xib in Resources */ = {isa = PBXBuildFile; fileRef = BAC6BAF720A0D22400247837 /* FilterTableWindow.xib */; };
 		BAE25E0120B32BDA00DD9A40 /* HelpViewer.xib in Resources */ = {isa = PBXBuildFile; fileRef = BAE25DFF20B32BDA00DD9A40 /* HelpViewer.xib */; };
 		BC01BCCF104024BE006BDEE7 /* SPEncodingPopupAccessory.m in Sources */ = {isa = PBXBuildFile; fileRef = BC01BCCE104024BE006BDEE7 /* SPEncodingPopupAccessory.m */; };
@@ -1419,6 +1420,7 @@
 		5EA8F231ABB696B7A2349A5D /* SPWindowTabsTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPWindowTabsTests.m; path = PostgresTests/SPWindowTabsTests.m; sourceTree = SOURCE_ROOT; };
 		5F669ABC88121C92EC6F6A03 /* SPPostgresImportController.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPPostgresImportController.m; path = Source/Postgres/SPPostgresImportController.m; sourceTree = SOURCE_ROOT; };
 		6016C0419F296F1289A46A73 /* SPPostgresSidebarInfoPane.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; name = SPPostgresSidebarInfoPane.h; path = Source/Postgres/SPPostgresSidebarInfoPane.h; sourceTree = SOURCE_ROOT; };
+		618B5B5AF4DBA7A68A11925C /* SPFavoritesFilterTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPFavoritesFilterTests.m; path = PostgresTests/SPFavoritesFilterTests.m; sourceTree = SOURCE_ROOT; };
 		62C728AF618C2CCDFD964464 /* SPPostgresConstraintSheet.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; name = SPPostgresConstraintSheet.h; path = Source/Postgres/SPPostgresConstraintSheet.h; sourceTree = SOURCE_ROOT; };
 		62D5A5212997118F2FB518A2 /* SPPostgresRelationsControllerTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPPostgresRelationsControllerTests.m; path = PostgresTests/SPPostgresRelationsControllerTests.m; sourceTree = SOURCE_ROOT; };
 		63AFC63F0D5304855DDE9011 /* SPPostgresQueryControllerTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPPostgresQueryControllerTests.m; path = PostgresTests/SPPostgresQueryControllerTests.m; sourceTree = SOURCE_ROOT; };
@@ -3206,6 +3208,7 @@
 				97C3E7243E4233FF2076C138 /* SPPostgresFavoritesImportTests.m */,
 				DC379F59F958052731C775A6 /* SPPostgresFavoritesTreeTests.m */,
 				5589FA885D33A1B8A2E28943 /* SPImageAndTextCellTests.m */,
+				618B5B5AF4DBA7A68A11925C /* SPFavoritesFilterTests.m */,
 			);
 			name = PostgresTests;
 			sourceTree = "<group>";
@@ -4187,6 +4190,7 @@
 				FCD8D0A9CD364BADACC69984 /* SPPostgresFavoritesImportTests.m in Sources */,
 				DF066B19B482180D9F5DD3D4 /* SPPostgresFavoritesTreeTests.m in Sources */,
 				E06596620050CF4244D41BCF /* SPImageAndTextCellTests.m in Sources */,
+				BA9BEBF95D1186F72F92C0DD /* SPFavoritesFilterTests.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
