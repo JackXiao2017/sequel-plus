@@ -1197,4 +1197,86 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	XCTAssertEqualObjects([self valueAtRow:1 column:@"username"], SPContentTestNull);
 }
 
+#pragma mark - Copy as SQL INSERT
+
+/// Edit ▸ Copy as SQL INSERT copies the selected rows as an INSERT into the table (generated columns left out); Copy
+/// and Copy with Column Names aren't offered. The statement runs: it adds copies of the rows.
+- (void)testCopyAsSQLInsert
+{
+	XCTAssertNotNil([self.other execute:@"CREATE TABLE content_test.sp_copy (id int PRIMARY KEY, name text, note text, twice int GENERATED ALWAYS AS (id * 2) STORED)"]);
+	XCTAssertNotNil([self.other execute:@"INSERT INTO content_test.sp_copy (id, name, note) VALUES (1, 'it''s', NULL), (2, 'b', 'bee')"]);
+	[self selectTable:@"sp_copy"];
+	[self useInlineRunner];
+	NSPasteboard *board = [NSPasteboard pasteboardWithUniqueName];
+	[self addTeardownBlock:^{ [board releaseGlobally]; }];
+	self.content.pasteboard = board;
+
+	NSMenuItem *copy = [[NSMenuItem alloc] initWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
+	[copy setTag:2001];
+	NSMenuItem *withNames = [[NSMenuItem alloc] initWithTitle:@"Copy with Column Names" action:@selector(copy:) keyEquivalent:@"c"];
+	[withNames setTag:2002];
+	NSMenuItem *asSQL = [[NSMenuItem alloc] initWithTitle:@"Copy as SQL INSERT" action:@selector(copy:) keyEquivalent:@"c"];
+	[asSQL setTag:2003];
+	XCTAssertFalse([[self grid] validateMenuItem:asSQL], @"nothing selected");
+
+	XCTAssertFalse([[self grid] validateMenuItem:copy]);
+
+	[[self grid] selectRowIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, 2)] byExtendingSelection:NO];
+	XCTAssertTrue([[self grid] validateMenuItem:copy]);
+	XCTAssertTrue([[self grid] validateMenuItem:withNames]);
+	XCTAssertTrue([[self grid] validateMenuItem:asSQL]);
+
+	// Copy: tab-separated, every shown column (the generated one too), NULL as the placeholder; as tabular text too
+	[(id)[self grid] copy:copy];
+	NSString *text = [NSString stringWithFormat:@"1\tit's\t%@\t2\n2\tb\tbee\t4", SPContentTestNull];
+	XCTAssertEqualObjects([board stringForType:NSPasteboardTypeString], text);
+	XCTAssertEqualObjects([board stringForType:NSPasteboardTypeTabularText], text);
+	[(id)[self grid] copy:withNames];
+	XCTAssertEqualObjects([board stringForType:NSPasteboardTypeString], ([@"id\tname\tnote\ttwice\n" stringByAppendingString:text]));
+	XCTAssertFalse([[self grid] respondsToSelector:@selector(paste:)], @"no Paste");
+	XCTAssertTrue([[self grid] validateMenuItem:[[NSMenuItem alloc] initWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"]], @"other items as before");
+
+	[(id)[self grid] copy:asSQL];
+	NSString *sql = [board stringForType:NSPasteboardTypeString];
+	XCTAssertEqualObjects(sql, @"INSERT INTO \"content_test\".\"sp_copy\" (\"id\", \"name\", \"note\")\nVALUES\n\t('1', 'it''s', NULL),\n\t('2', 'b', 'bee');");
+
+	XCTAssertNotNil([self.other execute:@"DELETE FROM content_test.sp_copy"]);
+	XCTAssertNotNil([self.other execute:sql], @"%@", [[self.other lastError] errorPrimaryMessage]);
+	XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(id || ':' || name || ':' || coalesce(note, '-') || ':' || twice, ',' ORDER BY id) FROM content_test.sp_copy"], @"1:it's:-:2,2:b:bee:4");
+}
+
+- (void)testGridRightClickMenuIsMySQLs
+{
+	[self selectTable:@"items"];
+	[self useInlineRunner];
+	id<NSMenuItemValidation> content = (id<NSMenuItemValidation>)self.content;
+	NSMenu *menu = [[self grid] menu];
+	NSMutableArray *titles = [NSMutableArray array];
+	for (NSMenuItem *item in [menu itemArray]) [titles addObject:[item isSeparatorItem] ? @"-" : [item title]];
+	XCTAssertEqualObjects(titles, (@[@"Copy", @"Copy with Column Names", @"Copy as SQL INSERT", @"-", @"Add New Row", @"-", @"Duplicate Row", @"Delete Row"]));
+	XCTAssertEqual([[menu itemAtIndex:2] tag], 2003);
+	XCTAssertEqual([[menu itemAtIndex:0] target], [self grid]);
+
+	NSMenuItem *add = [menu itemWithTitle:@"Add New Row"];
+	NSMenuItem *duplicate = [menu itemWithTitle:@"Duplicate Row"];
+	NSMenuItem *delete = [menu itemWithTitle:@"Delete Row"];
+	XCTAssertEqual([add target], self.content);
+	XCTAssertEqual([delete action], @selector(removeRows:));
+
+	[[self grid] deselectAll:nil];
+	XCTAssertTrue([content validateMenuItem:add]);
+	XCTAssertFalse([content validateMenuItem:duplicate], @"no row selected");
+	XCTAssertFalse([content validateMenuItem:delete]);
+	XCTAssertFalse([[self grid] validateMenuItem:[menu itemAtIndex:0]]);
+
+	[[self grid] selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+	XCTAssertTrue([content validateMenuItem:duplicate]);
+	XCTAssertTrue([content validateMenuItem:delete]);
+	XCTAssertTrue([[self grid] validateMenuItem:[menu itemAtIndex:0]]);
+
+	[[self grid] selectRowIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, 2)] byExtendingSelection:NO];
+	XCTAssertFalse([content validateMenuItem:duplicate], @"one row only, as the bar's button");
+	XCTAssertTrue([content validateMenuItem:delete]);
+}
+
 @end

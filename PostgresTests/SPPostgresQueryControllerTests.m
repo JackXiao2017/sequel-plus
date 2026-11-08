@@ -240,6 +240,56 @@ static NSString * const SPQueryTestToolbarQuery = @"SwitchToRunQueryToolbarItemI
 	XCTAssertEqual(self.alerts.count, 0u);
 }
 
+/// Copy as SQL INSERT in the results grid: whole values, into the table the columns come from, else <table>.
+- (void)testCopyResultRowsAsSQLInsert
+{
+	NSPasteboard *board = [NSPasteboard pasteboardWithUniqueName];
+	[self addTeardownBlock:^{ [board releaseGlobally]; }];
+	self.query.pasteboard = board;
+	NSMenuItem *asSQL = [[NSMenuItem alloc] initWithTitle:@"Copy as SQL INSERT" action:@selector(copy:) keyEquivalent:@"c"];
+	[asSQL setTag:2003];
+	NSMenuItem *copy = [[NSMenuItem alloc] initWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
+	[copy setTag:2001];
+
+	[self setSQL:@"SELECT 1 AS a, NULL::text AS b, repeat('y', 2000) AS c UNION ALL SELECT 2, 'two', 'z' ORDER BY a"];
+	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	[[self grid] selectRowIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, 2)] byExtendingSelection:NO];
+	XCTAssertTrue([[self grid] validateMenuItem:asSQL]);
+	XCTAssertTrue([[self grid] validateMenuItem:copy]);
+	[(id)[self grid] copy:asSQL];
+	NSString *expected = [NSString stringWithFormat:@"INSERT INTO <table> (\"a\", \"b\", \"c\")\nVALUES\n\t('1', NULL, '%@'),\n\t('2', 'two', 'z');",
+						  [@"" stringByPaddingToLength:2000 withString:@"y" startingAtIndex:0]];
+	XCTAssertEqualObjects([board stringForType:NSPasteboardTypeString], expected);
+
+	// Copy and Copy with Column Names: tab-separated whole values, NULL as the placeholder
+	NSString *ys = [@"" stringByPaddingToLength:2000 withString:@"y" startingAtIndex:0];
+	[(id)[self grid] copy:copy];
+	NSString *text = [NSString stringWithFormat:@"1\t%@\t%@\n2\ttwo\tz", SPQueryTestNull, ys];
+	XCTAssertEqualObjects([board stringForType:NSPasteboardTypeString], text);
+	NSMenuItem *withNames = [[NSMenuItem alloc] initWithTitle:@"Copy with Column Names" action:@selector(copy:) keyEquivalent:@"c"];
+	[withNames setTag:2002];
+	[(id)[self grid] copy:withNames];
+	XCTAssertEqualObjects([board stringForType:NSPasteboardTypeString], ([@"a\tb\tc\n" stringByAppendingString:text]));
+
+	// The right-click menu: MySQL's three copy items, aimed at the grid
+	NSMutableArray *titles = [NSMutableArray array];
+	for (NSMenuItem *item in [[[self grid] menu] itemArray]) {
+		[titles addObject:[item title]];
+		XCTAssertEqual([item target], [self grid]);
+		XCTAssertEqual([item action], @selector(copy:));
+	}
+	XCTAssertEqualObjects(titles, (@[@"Copy", @"Copy with Column Names", @"Copy as SQL INSERT"]));
+
+	[self setSQL:@"SELECT id, name FROM content_test.items WHERE id = 5"];
+	[self.query runAllQueries:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	[[self grid] selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+	[(id)[self grid] copy:asSQL];
+	XCTAssertEqualObjects([board stringForType:NSPasteboardTypeString], @"INSERT INTO \"content_test\".\"items\" (\"id\", \"name\")\nVALUES\n\t('5', 'item 5');");
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
 - (void)testRunCurrentRunsOnlyCursorStatement
 {
 	[self setSQL:@"SELECT 1 AS one;\nSELECT 2 AS two;\nUPDATE content_test.items SET name = 'changed'"];

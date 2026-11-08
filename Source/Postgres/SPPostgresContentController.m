@@ -8,6 +8,7 @@
 #import "SPPostgresFieldEditorSheet.h"
 #import "SPPostgresDateTimePicker.h"
 #import "SPPostgresPaginationView.h"
+#import "SPPostgresRowsGrid.h"
 
 // MySQL's Content tab (DBView.xib): 23 pt button bar, 32 x 25 textured buttons
 static const CGFloat SPPostgresContentBottomBarHeight = 23;
@@ -48,7 +49,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 @end
 
 /// The grid: ⌫ / ⌦ (no ⌘, ⌥ or ⌃, no cell being edited) delete the selected rows, as the Delete button's tooltip says.
-@interface SPPostgresContentGrid : SPTableView
+@interface SPPostgresContentGrid : SPPostgresRowsGrid
 @end
 
 @implementation SPPostgresContentGrid
@@ -66,7 +67,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 
 @end
 
-@interface SPPostgresContentController ()
+@interface SPPostgresContentController () <SPPostgresRowsGridDelegate>
 
 @property (readwrite, copy) NSString *schema;
 @property (readwrite, copy) NSString *table;
@@ -147,6 +148,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 @synthesize confirmationPresenter;
 @synthesize fieldEditorPresenter;
 @synthesize taskRunner;
+@synthesize pasteboard;
 @synthesize stale;
 @synthesize addButton;
 @synthesize removeButton;
@@ -266,6 +268,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	[alertPresenter release];
 	alertPresenter = nil;
 	[confirmationPresenter release];
+	[pasteboard release];
 	confirmationPresenter = nil;
 	[fieldEditorPresenter release];
 	fieldEditorPresenter = nil;
@@ -463,6 +466,9 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	[tableView setGridStyleMask:[defaults boolForKey:SPDisplayTableViewVerticalGridlines] ? NSTableViewSolidVerticalGridLineMask : NSTableViewGridNone];
 	[tableView setDataSource:self];
 	[tableView setDelegate:self];
+	NSMenu *gridMenu = [self _newGridMenu];
+	[tableView setMenu:gridMenu];
+	[gridMenu release];
 	[scrollView setDocumentView:tableView];
 	[view addSubview:scrollView];
 
@@ -1378,6 +1384,93 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 
 	// Either way the grid shows what is on the server now
 	[self reload];
+}
+
+#pragma mark - Copy as SQL INSERT
+
+/// The selected rows' values (NSString, or NSNull for NULL), in the grid's column order (as shown), and in names the
+/// columns' names. Generated columns are left out unless includingGenerated. Nil when nothing is selected.
+- (NSArray<NSArray *> *)_selectedRowValuesIncludingGenerated:(BOOL)includingGenerated names:(NSMutableArray *)names
+{
+	NSIndexSet *selection = [tableView selectedRowIndexes];
+	if (![selection count] || !tableData) return nil;
+
+	NSMutableArray *indexes = [NSMutableArray array];
+	for (NSTableColumn *tableColumn in [tableView tableColumns]) {
+		SPPostgresColumn *column = [self _columnForTableColumn:tableColumn];
+		if (!column || ([column isGenerated] && !includingGenerated)) continue;
+		[names addObject:[column name]];
+		[indexes addObject:[tableColumn identifier]];
+	}
+	if (![names count]) return nil;
+
+	NSMutableArray *copied = [NSMutableArray array];
+	[selection enumerateIndexesUsingBlock:^(NSUInteger rowIndex, BOOL *stop) {
+		if (rowIndex >= [rows count]) return;
+		NSArray *row = [rows objectAtIndex:rowIndex];
+		NSMutableArray *values = [NSMutableArray arrayWithCapacity:[indexes count]];
+		for (id identifier in indexes) {
+			NSUInteger index = (NSUInteger)[identifier integerValue];
+			[values addObject:index < [row count] ? [row objectAtIndex:index] : [NSNull null]];
+		}
+		[copied addObject:values];
+	}];
+	return copied;
+}
+
+/// Copy (and Copy with Column Names): the selected rows as tab-separated text, every shown column, NULL as the NULL
+/// placeholder (MySQL's -rowsAsTabStringWithHeaders:...). Also as tabular text, as MySQL.
+- (void)rowsGrid:(NSTableView *)grid copyRowsWithColumnNames:(BOOL)withColumnNames
+{
+	NSMutableArray *names = [NSMutableArray array];
+	NSArray *copied = [self _selectedRowValuesIncludingGenerated:YES names:names];
+	if (!copied) return;
+
+	NSString *text = SPPostgresTabText(withColumnNames ? names : nil, copied, [self _nullPlaceholder]);
+	NSPasteboard *board = pasteboard ?: [NSPasteboard generalPasteboard];
+	[board clearContents];
+	[board setString:text forType:NSPasteboardTypeString];
+	[board setString:text forType:NSPasteboardTypeTabularText];
+}
+
+/// Copy as SQL INSERT: the selected rows as an INSERT into this table, the columns in the grid's order (as shown),
+/// generated columns left out (PostgreSQL refuses values for them).
+- (void)rowsGridCopyAsSQLInserts:(NSTableView *)grid
+{
+	NSMutableArray *names = [NSMutableArray array];
+	NSArray *copied = [self _selectedRowValuesIncludingGenerated:NO names:names];
+	if (!copied) return;
+
+	NSString *qualified = [NSString stringWithFormat:@"\"%@\".\"%@\"", [schema stringByReplacingOccurrencesOfString:@"\"" withString:@"\"\""],
+						   [table stringByReplacingOccurrencesOfString:@"\"" withString:@"\"\""]];
+	NSPasteboard *board = pasteboard ?: [NSPasteboard generalPasteboard];
+	[board clearContents];
+	[board setString:SPPostgresSQLInserts(qualified, names, copied) forType:NSPasteboardTypeString];
+}
+
+/// The grid's right-click menu, MySQL's (DBView.xib's Table Content Menu): Copy, Copy with Column Names, Copy as SQL
+/// INSERT | Add New Row | Duplicate Row, Delete Row.
+- (NSMenu *)_newGridMenu
+{
+	NSMenu *menu = [[NSMenu alloc] initWithTitle:@""];
+	for (NSMenuItem *item in [SPPostgresRowsGrid copyMenuItemsForGrid:tableView]) [menu addItem:item];
+	[menu addItem:[NSMenuItem separatorItem]];
+	[[menu addItemWithTitle:NSLocalizedString(@"Add New Row", @"add new row contextual menu item") action:@selector(addRow:) keyEquivalent:@""] setTarget:self];
+	[menu addItem:[NSMenuItem separatorItem]];
+	[[menu addItemWithTitle:NSLocalizedString(@"Duplicate Row", @"duplicate row contextual menu item") action:@selector(duplicateRow:) keyEquivalent:@""] setTarget:self];
+	[[menu addItemWithTitle:NSLocalizedString(@"Delete Row", @"delete row contextual menu item") action:@selector(removeRows:) keyEquivalent:@""] setTarget:self];
+	return menu;
+}
+
+/// The grid menu's row actions, as the bottom bar's buttons (-_updateBottomBar).
+- (BOOL)validateMenuItem:(NSMenuItem *)menuItem
+{
+	SEL action = [menuItem action];
+	BOOL canWrite = !invalidated && ![taskRunner isBusy] && tableData && [columns count] && loaded && editable;
+	if (action == @selector(addRow:)) return canWrite;
+	if (action == @selector(duplicateRow:)) return canWrite && [tableView numberOfSelectedRows] == 1;
+	if (action == @selector(removeRows:)) return canWrite && [tableView numberOfSelectedRows] > 0;
+	return YES;
 }
 
 #pragma mark - New row not on the server yet
