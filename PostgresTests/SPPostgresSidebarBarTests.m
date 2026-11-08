@@ -142,7 +142,7 @@ static NSInteger SPTestClickedRow(id self, SEL _cmd)
 	XCTAssertEqual([self.controller selectedDocument], self.document);
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
-	// Sections start collapsed: these tests work with the rows, so every section is expanded
+	// Sections but TABLES start collapsed: these tests work with the rows, so every section is expanded
 	for (NSString *section in @[@"TABLES", @"VIEWS", @"SEQUENCES", @"EXTENSIONS"]) XCTAssertTrue([self.document.sidebar setSection:section collapsed:NO]);
 }
 
