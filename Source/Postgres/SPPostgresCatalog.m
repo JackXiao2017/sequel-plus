@@ -70,7 +70,9 @@
 
 - (NSArray *)databaseNames:(NSError **)error
 {
-	return [self firstColumnOf:@"SELECT datname::text AS n FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY datname COLLATE \"C\""
+	// Only those the user may connect to (CONNECT privilege, directly, through PUBLIC or a role; always for a superuser)
+	return [self firstColumnOf:@"SELECT datname::text AS n FROM pg_database WHERE datallowconn AND NOT datistemplate "
+							   "AND has_database_privilege(oid, 'CONNECT') ORDER BY datname COLLATE \"C\""
 						values:nil error:error];
 }
 

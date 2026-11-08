@@ -111,6 +111,7 @@ static BOOL isOSAtLeast10_7;
 
 - (void)_saveCurrentDetailsCreatingNewFavorite:(BOOL)createNewFavorite validateDetails:(BOOL)validateDetails;
 - (BOOL)_checkHost;
+- (BOOL)_checkDatabaseOption;
 #ifndef SP_CODA
 - (void)_sortFavorites;
 - (void)_sortTreeNode:(SPTreeNode *)node usingKey:(NSString *)key;
@@ -285,6 +286,9 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 			return;
 		}
 	}
+
+	// Show all databases off: the database to show is required
+	if (![self _checkDatabaseOption]) return;
 
 	// Ensure that a socket connection is not inadvertently used
 	if (![self _checkHost]) return;
@@ -842,6 +846,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 	[self setColorIndex:([fav objectForKey:SPFavoriteColorIndexKey]? [[fav objectForKey:SPFavoriteColorIndexKey] integerValue] : -1)];
 	[self setPort:([fav objectForKey:SPFavoritePortKey] ? [fav objectForKey:SPFavoritePortKey] : @"")];
 	[self setDatabase:([fav objectForKey:SPFavoriteDatabaseKey] ? [fav objectForKey:SPFavoriteDatabaseKey] : @"")];
+	[postgresAdapter setShowAllDatabases:([fav objectForKey:SPFavoriteShowAllDatabasesKey] ? [[fav objectForKey:SPFavoriteShowAllDatabasesKey] boolValue] : YES)];
 	[self setUseCompression:([fav objectForKey:SPFavoriteUseCompressionKey] ? [[fav objectForKey:SPFavoriteUseCompressionKey] boolValue] : YES)];
 	
 	// SSL details
@@ -1414,6 +1419,9 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 		return;
 	}
 
+	// Show all databases off: the database to show is required
+	if (validateDetails && ![self _checkDatabaseOption]) return;
+
 	// Ensure that a socket connection is not inadvertently used
 	if (![self _checkHost]) return;
 
@@ -1456,6 +1464,8 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 	_setOrRemoveKey(SPFavoriteUserKey, [self user]);
 	_setOrRemoveKey(SPFavoritePortKey, [self port]);
 	_setOrRemoveKey(SPFavoriteDatabaseKey, [self database]);
+	// Saved only when off (a favorite without it shows all databases)
+	_setOrRemoveKey(SPFavoriteShowAllDatabasesKey, ([self showAllDatabases] ? nil : @NO));
 	[theFavorite setObject:[NSNumber numberWithInteger:[self colorIndex]] forKey:SPFavoriteColorIndexKey];
 	// SSL details
 	[theFavorite setObject:[NSNumber numberWithInteger:[self useSSL]] forKey:SPFavoriteUseSSLKey];
@@ -1610,6 +1620,22 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 
 	[[NSNotificationCenter defaultCenter] postNotificationName:SPConnectionFavoritesChangedNotification object:self];
 #endif
+}
+
+- (BOOL)showAllDatabases
+{
+	return postgresAdapter ? [postgresAdapter showAllDatabases] : YES;
+}
+
+/**
+ * With Show all databases off, the Database field must be filled; shows the error otherwise.
+ */
+- (BOOL)_checkDatabaseOption
+{
+	NSError *error = [postgresAdapter databaseOptionValidationError];
+	if (!error) return YES;
+	SPOnewayAlertSheet([error localizedDescription], [dbDocument parentWindow], [[error userInfo] objectForKey:NSLocalizedRecoverySuggestionErrorKey]);
+	return NO;
 }
 
 /**
@@ -3124,6 +3150,12 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 #pragma mark Color Selector delegate
 
 - (void)colorSelectorDidChange:(SPColorSelectorView *)sel
+{
+	[self _startEditingConnection];
+}
+
+/// The Show all databases checkbox (MySQL and PostgreSQL forms) changed
+- (void)postgresFormDidChange
 {
 	[self _startEditingConnection];
 }

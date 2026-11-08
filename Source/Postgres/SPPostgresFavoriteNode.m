@@ -45,7 +45,7 @@ static NSString * const SPPostgresFavoriteRepresentationIDKey = @"id";
 	// Keys this version doesn't know (written by a later one) are kept
 	NSMutableDictionary *others = [NSMutableDictionary dictionaryWithDictionary:dictionary];
 	[others removeObjectsForKeys:@[SPPostgresFavoriteRepresentationIDKey, SPPostgresFavoriteUUIDKey, SPFavoriteEngineKey,
-		@"name", @"colorIndex", @"type", @"host", @"port", @"user", @"database", @"socketPath", @"useSSL",
+		@"name", @"colorIndex", @"type", @"host", @"port", @"user", @"database", @"socketPath", @"useSSL", @"showAllDatabases",
 		@"sslCACertPath", @"sslCertPath", @"sslKeyPath", @"sshHost", @"sshUser", @"sshPort", @"sshKeyPath"]];
 	SPPostgresFavoriteNode *represented = [node representedObject];
 	represented->otherEntries = [others count] ? [others copy] : nil;

@@ -2960,6 +2960,11 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 - (void)_reloadDatabasePopup
 {
 	if (tornDown) return;
+	// The connection's option: only its database (the tab's, always listed), not the others
+	if (![favorite showAllDatabases]) {
+		[self _showDatabaseNames:@[] error:nil];
+		return;
+	}
 	SPPostgresCatalog *theCatalog = catalog;
 	[taskRunner runTaskWithDescription:NSLocalizedString(@"Reloading...", @"Reloading table task string") cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
 		return [theCatalog databaseNames:error];

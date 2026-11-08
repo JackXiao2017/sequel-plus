@@ -1210,6 +1210,25 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	return nil;
 }
 
+/// The connection's "Show all databases" off: the database selector lists only the tab's database.
+- (void)testDatabasePopupListsOnlyTheConnectionsDatabaseWhenNotShowingAll
+{
+	NSArray *all = [[self databasePopup] itemTitles];
+	XCTAssertTrue([all containsObject:@"pgkit_nopublic"], @"%@", all);
+
+	[(SPPostgresFavorite *)[self.document valueForKey:@"favorite"] setShowAllDatabases:NO];
+	[self.document refreshDatabases:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	NSPopUpButton *popup = [self databasePopup];
+	XCTAssertEqualObjects([popup itemTitles], (@[@"pgkit_test", @"", @"Refresh Databases"]));
+	XCTAssertEqualObjects([popup titleOfSelectedItem], @"pgkit_test");
+
+	[(SPPostgresFavorite *)[self.document valueForKey:@"favorite"] setShowAllDatabases:YES];
+	[self.document refreshDatabases:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertEqualObjects([[self databasePopup] itemTitles], all);
+}
+
 /// Collects what the tab would show as sheets.
 - (NSMutableArray<NSAlert *> *)captureAlerts
 {

@@ -681,6 +681,17 @@ static BOOL isOSAtLeast10_14;
 		}
 	}
 
+	// Show all databases off (in the connection's favorite): only the connection's database, and the one in use
+	if (![connectionController showAllDatabases]) {
+		NSMutableArray *shown = [NSMutableArray array];
+		for (NSString *database in @[([connectionController database] ? [connectionController database] : @""), ([self database] ? [self database] : @"")]) {
+			if ([database length] && ![shown containsObject:database]) [shown addObject:database];
+		}
+		for (NSString *database in shown) [chooseDatabaseButton addItemWithTitle:database];
+		(![self database]) ? [chooseDatabaseButton selectItemAtIndex:0] : [chooseDatabaseButton selectItemWithTitle:[self database]];
+		return;
+	}
+
 	// Add system databases
 	for (NSString *database in allSystemDatabases)
 	{
