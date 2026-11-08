@@ -12,6 +12,12 @@ Upgrading from 2.0.0.
 - Views, procedures, functions and sequences show no size. In PostgreSQL a partitioned table shows none either; each partition shows its own.
 - Sizes are read when the list loads or is refreshed. If the server doesn't allow reading them, the list shows names only, as before.
 
+### Filter for the favorites list
+- A **Filter** field above the connection screen's favorites list. As you type, the list shows only the MySQL and PostgreSQL favorites whose name or host contains the text (ignoring case and accents), with the groups they are in expanded. Typing a group's name shows everything in that group.
+- The selected favorite stays in the list while filtering, and the form keeps what it shows. Quick Connect is always shown.
+- Clearing the field shows the whole list again, with groups expanded or collapsed as you left them.
+- While filtering, favorites can't be dragged to new places. Adding a favorite or group clears the filter, so the new item is visible.
+
 ### App
 - Version **2.0.1**.
 
