@@ -31,6 +31,12 @@ Upgrading from 2.0.0.
 - If the insert fails (e.g. a required value is still missing), the error is shown and the row stays, with what you typed, so you can finish it. Deleting the new row (−) just removes it, with nothing sent to the server.
 - Tables without a required column work as before: the row is inserted at once with every column's default.
 
+### PostgreSQL: Add Database and Refresh Databases in the database selector
+- The toolbar's database selector is laid out as MySQL's: **Choose Database...**, then **Add Database...** and **Refresh Databases**, then the databases.
+  - **Add Database...** asks for the name, creates the database and switches to it, as Database ▸ Add Database… does.
+  - **Refresh Databases** reads the list again.
+  - Choosing any of these keeps the tab in its database, which the selector shows again.
+
 ### Databases in the database selector (MySQL and PostgreSQL)
 - **Show all databases**, a new checkbox under the Database field in the connection editor, for MySQL and PostgreSQL, on every connection tab. It is on by default, and for favorites saved before it.
   - **On:** the toolbar's database selector lists every database you can use, as before.
