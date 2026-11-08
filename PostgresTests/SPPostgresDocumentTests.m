@@ -2443,6 +2443,106 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	XCTAssertEqual(self.document.connection.transactionStatus, PGPostgresTransactionIdle);
 }
 
+- (void)testTruncateFreesStorageShownInInfoPanes
+{
+	PGPostgresConnection *admin = [self sp9AdminRunning:@[@"CREATE TABLE public.sp9_a (id integer PRIMARY KEY, v text)",
+														  @"INSERT INTO public.sp9_a SELECT g, repeat('x', 200) FROM generate_series(1, 20000) g",
+														  @"ANALYZE public.sp9_a"]];
+	[self captureAlerts];
+	[self answerConfirmationsWith:YES];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	XCTAssertTrue([sidebar selectTableNamed:@"sp9_a"]);
+	[self waitForTab];
+	[self.document showPane:SPPostgresPaneInfo];
+	[self waitForTab];
+	XCTAssertEqualObjects(self.document.infoController.totalSizeField.stringValue, @"5 MB");
+	XCTAssertTrue([sidebar.infoPane.lines containsObject:@"total size: 5 MB"], @"%@", sidebar.infoPane.lines);
+
+	// The server frees the storage at once, and Table Info and the sidebar's pane show it
+	[self.document sidebar:sidebar truncateTables:@[@"sp9_a"]];
+	[self waitForTabAndQuestions];
+	NSString *serverTotal = [SPPostgresCatalog stringForSize:[[self value:@"SELECT pg_total_relation_size('public.sp9_a')::text" on:admin] longLongValue]];
+	XCTAssertEqualObjects(serverTotal, @"16 kB");
+	XCTAssertEqualObjects(self.document.infoController.totalSizeField.stringValue, serverTotal);
+	XCTAssertTrue([sidebar.infoPane.lines containsObject:[@"total size: " stringByAppendingString:serverTotal]], @"%@", sidebar.infoPane.lines);
+
+	// Again from Content: switching to Table Info shows the sizes after the truncate
+	XCTAssertNotNil([admin execute:@"INSERT INTO public.sp9_a SELECT g, repeat('x', 200) FROM generate_series(1, 20000) g"]);
+	[self.document.infoController reload];
+	[self waitForTab];
+	XCTAssertEqualObjects(self.document.infoController.totalSizeField.stringValue, @"5 MB");
+	[self.document showPane:SPPostgresPaneContent];
+	[self waitForTab];
+	[self.document sidebar:sidebar truncateTables:@[@"sp9_a"]];
+	[self waitForTabAndQuestions];
+	[self.document showPane:SPPostgresPaneInfo];
+	[self waitForTab];
+	XCTAssertEqualObjects(self.document.infoController.totalSizeField.stringValue, @"16 kB");
+}
+
+/// The question's Restart identity checkbox (off unless ticked).
+- (NSButton *)restartIdentityCheckboxOf:(NSAlert *)alert
+{
+	NSButton *checkbox = (NSButton *)alert.accessoryView;
+	XCTAssertTrue([checkbox isKindOfClass:[NSButton class]]);
+	XCTAssertEqualObjects(checkbox.identifier, @"restartIdentity");
+	return checkbox;
+}
+
+- (void)testTruncateRestartsIdentityOnlyWhenChecked
+{
+	PGPostgresConnection *admin = [self sp9AdminRunning:@[@"CREATE TABLE public.sp9_a (id serial PRIMARY KEY, v text)",
+														  @"CREATE TABLE public.sp9_b (id integer GENERATED ALWAYS AS IDENTITY, v text)",
+														  @"INSERT INTO public.sp9_a (v) VALUES ('a'), ('b'), ('c')",
+														  @"INSERT INTO public.sp9_b (v) VALUES ('a'), ('b')"]];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	__block BOOL tick = NO;
+	NSMutableArray<NSAlert *> *asked = [NSMutableArray array];
+	self.document.confirmationPresenter = ^(NSAlert *alert, void (^completion)(BOOL)) {
+		[asked addObject:alert];
+		NSButton *checkbox = (NSButton *)alert.accessoryView;
+		if (tick && [checkbox isKindOfClass:[NSButton class]]) [checkbox setState:NSControlStateValueOn];
+		completion(YES);
+	};
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	XCTAssertTrue([sidebar selectTableNamed:@"sp9_a"]);
+	[self waitForTab];
+
+	// Unchecked (the default): the rows go, the numbering goes on
+	[self.document sidebar:sidebar truncateTables:@[@"sp9_a"]];
+	[self waitForTabAndQuestions];
+	XCTAssertEqual(asked.count, 1u);
+	NSButton *checkbox = [self restartIdentityCheckboxOf:asked[0]];
+	XCTAssertEqual(checkbox.state, NSControlStateValueOff);
+	XCTAssertEqualObjects(checkbox.title, @"Restart identity (reset serial and identity counters)");
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_a" on:admin], @"0");
+	XCTAssertEqualObjects([self value:@"INSERT INTO public.sp9_a (v) VALUES ('d') RETURNING id::text" on:admin], @"4");
+
+	// Checked, two tables (serial and identity): both start again from 1
+	tick = YES;
+	XCTAssertTrue(([sidebar selectRelationsNamed:@[@"sp9_a", @"sp9_b"]]));
+	[self waitForTab];
+	[self.document sidebar:sidebar truncateTables:sidebar.selectedRelationNames];
+	[self waitForTabAndQuestions];
+	XCTAssertEqual(asked.count, 2u);
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_a" on:admin], @"0");
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_b" on:admin], @"0");
+	XCTAssertEqualObjects([self value:@"INSERT INTO public.sp9_a (v) VALUES ('e') RETURNING id::text" on:admin], @"1");
+	XCTAssertEqualObjects([self value:@"INSERT INTO public.sp9_b (v) VALUES ('e') RETURNING id::text" on:admin], @"1");
+
+	// Each question starts unchecked again
+	tick = NO;
+	XCTAssertTrue([sidebar selectTableNamed:@"sp9_a"]);
+	[self waitForTab];
+	[self.document sidebar:sidebar truncateTables:@[@"sp9_a"]];
+	[self waitForTabAndQuestions];
+	XCTAssertEqual(asked.count, 3u);
+	XCTAssertEqual([self restartIdentityCheckboxOf:asked[2]].state, NSControlStateValueOff);
+	XCTAssertEqualObjects([self value:@"INSERT INTO public.sp9_a (v) VALUES ('f') RETURNING id::text" on:admin], @"2");
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+	XCTAssertEqual(self.document.connection.transactionStatus, PGPostgresTransactionIdle);
+}
+
 - (void)testTruncateCancelledKeepsRows
 {
 	PGPostgresConnection *admin = [self sp9AdminRunning:@[@"CREATE TABLE public.sp9_a (id integer)", @"INSERT INTO public.sp9_a VALUES (1), (2), (3)",

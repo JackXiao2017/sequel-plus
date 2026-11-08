@@ -20,6 +20,7 @@ static const CGFloat SPPostgresSidebarSchemaBarHeight = 32;
 static const CGFloat SPPostgresSidebarFilterBarHeight = 26;
 /// MySQL's table list bar and information pane (DBView.xib)
 static const CGFloat SPPostgresSidebarButtonBarHeight = 23;
+/// MySQL's info pane height (DBView.xib); taller when the pane's rows need it (see -[SPPostgresSidebarInfoPane heightShowingAllLines])
 static const CGFloat SPPostgresSidebarInfoPaneHeight = 166;
 static const NSInteger SPPostgresSidebarDetailTag = 1;
 /// The disclosure button at the front of a section header
@@ -303,6 +304,8 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 	SPSplitView *infoSplitView;
 	NSView *infoPaneContainer;
 	SPPostgresSidebarInfoPane *infoPane;
+	/// The information pane's height: every line of a relation shows, at least MySQL's
+	CGFloat infoPaneHeight;
 	/// Inside a reload's apply: the information pane reads once, at its end (see -_runReload:…)
 	NSUInteger applyingReload;
 	NSUserDefaults *defaults;
@@ -561,7 +564,10 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	[infoSplitView setDividerStyle:NSSplitViewDividerStyleThin];
 	[infoSplitView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 
-	CGFloat outlineHeight = splitHeight - SPPostgresSidebarInfoPaneHeight - [infoSplitView dividerThickness];
+	// The pane is as tall as every line of a relation needs (a comment included), at least MySQL's height
+	infoPane = [[SPPostgresSidebarInfoPane alloc] initWithFrame:NSMakeRect(0, 0, NSWidth(frame), SPPostgresSidebarInfoPaneHeight)];
+	infoPaneHeight = MAX(SPPostgresSidebarInfoPaneHeight, [infoPane heightShowingAllLines]);
+	CGFloat outlineHeight = splitHeight - infoPaneHeight - [infoSplitView dividerThickness];
 	NSScrollView *scrollView = [[[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, NSWidth(frame), outlineHeight)] autorelease];
 	[scrollView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
 	[scrollView setHasVerticalScroller:YES];
@@ -608,9 +614,9 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	[infoSplitView addSubview:scrollView];
 
 	// Not height-sizable: the pane keeps its height as the panel resizes (the outline takes the difference)
-	infoPaneContainer = [[NSView alloc] initWithFrame:NSMakeRect(0, outlineHeight + [infoSplitView dividerThickness], NSWidth(frame), SPPostgresSidebarInfoPaneHeight)];
+	infoPaneContainer = [[NSView alloc] initWithFrame:NSMakeRect(0, outlineHeight + [infoSplitView dividerThickness], NSWidth(frame), infoPaneHeight)];
 	[infoPaneContainer setAutoresizingMask:NSViewWidthSizable];
-	infoPane = [[SPPostgresSidebarInfoPane alloc] initWithFrame:[infoPaneContainer bounds]];
+	[[infoPane view] setFrame:[infoPaneContainer bounds]];
 	[infoPaneContainer addSubview:[infoPane view]];
 	[infoSplitView addSubview:infoPaneContainer];
 	[infoSplitView adjustSubviews];
@@ -827,7 +833,7 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 	}
 
 	NSRect bounds = [theSplitView bounds];
-	CGFloat paneHeight = MIN(SPPostgresSidebarInfoPaneHeight, NSHeight(bounds));
+	CGFloat paneHeight = MIN(infoPaneHeight, NSHeight(bounds));
 	CGFloat outlineHeight = MAX(0, NSHeight(bounds) - paneHeight - [theSplitView dividerThickness]);
 	[[subviews objectAtIndex:0] setFrame:NSMakeRect(0, 0, NSWidth(bounds), outlineHeight)];
 	[infoPaneContainer setFrame:NSMakeRect(0, NSHeight(bounds) - paneHeight, NSWidth(bounds), paneHeight)];

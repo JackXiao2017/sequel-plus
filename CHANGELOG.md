@@ -31,6 +31,12 @@ Upgrading from 2.0.0.
 - If the insert fails (e.g. a required value is still missing), the error is shown and the row stays, with what you typed, so you can finish it. Deleting the new row (−) just removes it, with nothing sent to the server.
 - Tables without a required column work as before: the row is inserted at once with every column's default.
 
+### PostgreSQL: Truncate can restart identity
+- The **Truncate Table** question has a **Restart identity** checkbox, off by default. Checked, the truncate also resets the counters of the tables' serial and identity columns (`TRUNCATE … RESTART IDENTITY`), so new rows are numbered from the start again. Unchecked, numbering carries on, as before.
+
+### PostgreSQL: the table information pane shows every line
+- The **TABLE INFORMATION** pane under the table list is now tall enough for all its lines: type, owner, rows, size, index size, total size and comment. It was fixed at MySQL's 166 pt, which cut off **total size** and **comment**.
+
 ### Query's run button shows its whole title (MySQL and PostgreSQL)
 - The run button above the results (**Run Current**, **Run Previous**, **Run Selection**, **Run All**) shows its full title, centred. It was cut off ("Run Curre…") because the button kept room for the menu's ⌘R and ⌥⌘R shortcuts.
 
