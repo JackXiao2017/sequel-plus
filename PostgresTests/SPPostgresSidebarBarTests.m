@@ -142,7 +142,7 @@ static NSInteger SPTestClickedRow(id self, SEL _cmd)
 	XCTAssertEqual([self.controller selectedDocument], self.document);
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 
-	// Sections start collapsed: these tests work with the rows, so every section is expanded
+	// Sections but TABLES start collapsed: these tests work with the rows, so every section is expanded
 	for (NSString *section in @[@"TABLES", @"VIEWS", @"SEQUENCES", @"EXTENSIONS"]) XCTAssertTrue([self.document.sidebar setSection:section collapsed:NO]);
 }
 
@@ -262,7 +262,9 @@ static NSInteger SPTestClickedRow(id self, SEL _cmd)
 	XCTAssertTrue([split.subviews.firstObject isKindOfClass:[NSScrollView class]]);
 	XCTAssertTrue([[(NSScrollView *)split.subviews.firstObject documentView] isKindOfClass:[NSOutlineView class]]);
 	XCTAssertEqual(split.subviews.lastObject, sidebar.infoPaneContainer);
-	XCTAssertEqual(NSHeight(sidebar.infoPaneContainer.frame), 166);
+	// As tall as every line of a relation needs, at least MySQL's 166 pt
+	XCTAssertEqual(NSHeight(sidebar.infoPaneContainer.frame), MAX(166, sidebar.infoPane.heightShowingAllLines));
+	XCTAssertGreaterThanOrEqual(NSHeight(sidebar.infoPaneContainer.frame), 166);
 }
 
 - (void)testSplitHandleIsWired
@@ -1090,7 +1092,7 @@ static NSArray *SPOneViewTitles(void)
 	XCTAssertNotNil(pane);
 	XCTAssertEqual(pane.taskRunner, self.document.taskRunner, @"the pane reads on the tab's runner");
 
-	// MySQL's info table: in the 166 pt container, a borderless scroll view, a single-column source list
+	// MySQL's info table: in its container, a borderless scroll view, a single-column source list
 	XCTAssertEqual(pane.view.superview, sidebar.infoPaneContainer);
 	XCTAssertTrue([pane.view isKindOfClass:[NSScrollView class]]);
 	XCTAssertEqual([(NSScrollView *)pane.view borderType], NSNoBorder);
@@ -1117,6 +1119,30 @@ static NSArray *SPOneViewTitles(void)
 	XCTAssertTrue([table.delegate tableView:table isGroupRow:0]);
 	XCTAssertFalse([table.delegate tableView:table isGroupRow:1]);
 	XCTAssertFalse([table.delegate tableView:table shouldSelectRow:1]);
+}
+
+- (void)testInfoPaneShowsEveryLineOfATableWithAComment
+{
+	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPPostgresSidebarBarTestPort];
+	XCTAssertNotNil([admin execute:@"COMMENT ON TABLE public.customers IS 'fits'"]);
+	[self addTeardownBlock:^{
+		[admin execute:@"COMMENT ON TABLE public.customers IS NULL"];
+	}];
+
+	SPPostgresSidebarController *sidebar = [self expandedSidebar];
+	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	NSArray<NSString *> *lines = sidebar.infoPane.lines;
+	XCTAssertEqual(lines.count, 8u, @"%@", lines);
+	XCTAssertEqualObjects(lines.lastObject, @"comment: fits");
+
+	// Every row lies inside the pane: the last one ends within the visible area
+	NSTableView *table = sidebar.infoPane.tableView;
+	[[sidebar view] layoutSubtreeIfNeeded];
+	NSRect last = [table rectOfRow:table.numberOfRows - 1];
+	NSRect visible = [[(NSScrollView *)sidebar.infoPane.view contentView] bounds];
+	XCTAssertLessThanOrEqual(NSMaxY(last), NSMaxY(visible), @"last row %@, visible %@, row height %g", NSStringFromRect(last), NSStringFromRect(visible), table.rowHeight);
+	XCTAssertEqual(NSMinY(visible), 0, @"the pane doesn't need scrolling");
 }
 
 - (void)testInfoPaneShowsViewAndComment

@@ -3,6 +3,7 @@
 #import "SPPostgresTestServers.h"
 #import "SPTestPrefsGuard.h"
 #import "../Source/SPWindowController.h"
+#import "../Source/Postgres/SPPostgresNameSheet.h"
 #import "../Source/Postgres/SPPostgresDocument.h"
 #import "../Source/Postgres/SPPostgresSidebarController.h"
 #import "../Source/Postgres/SPPostgresStructureController.h"
@@ -582,7 +583,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	XCTAssertTrue([popup.itemTitles containsObject:@"Sales Data"]);
 	XCTAssertGreaterThan(NSMinY([popup convertRect:popup.bounds toView:nil]), NSMaxY([outline.enclosingScrollView convertRect:outline.enclosingScrollView.bounds toView:nil]) - 1);
 
-	// Section rows appear in order with Extensions last (every section starts collapsed: expanded to see its rows)
+	// Section rows appear in order with Extensions last (sections but TABLES start collapsed: expanded to see their rows)
 	for (NSString *section in @[@"TABLES", @"VIEWS", @"SEQUENCES", @"EXTENSIONS"]) XCTAssertTrue([sidebar setSection:section collapsed:NO]);
 	NSMutableArray *groupTitles = [NSMutableArray array];
 	for (NSInteger row = 0; row < outline.numberOfRows; row++) {
@@ -1210,6 +1211,74 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	return nil;
 }
 
+/// As MySQL's: "Choose Database...", Add Database... and Refresh Databases above the databases. Choosing one of the
+/// first three leaves the tab in its database (the pop-up shows it again); Add Database... asks for the name.
+- (void)testDatabasePopupHasAddAndRefreshAsMySQL
+{
+	NSPopUpButton *popup = [self databasePopup];
+	NSArray *items = popup.itemArray;
+	XCTAssertGreaterThan(items.count, 5u);
+	XCTAssertEqualObjects([items[0] title], @"Choose Database...");
+	XCTAssertTrue([items[1] isSeparatorItem]);
+	XCTAssertEqualObjects([items[2] title], @"Add Database...");
+	XCTAssertEqual([items[2] action], @selector(addDatabase:));
+	XCTAssertEqual([items[2] target], self.document);
+	XCTAssertEqualObjects([items[3] title], @"Refresh Databases");
+	XCTAssertEqual([items[3] action], @selector(refreshDatabases:));
+	XCTAssertEqual([items[3] target], self.document);
+	XCTAssertTrue([items[4] isSeparatorItem]);
+	NSArray *databases = [[popup itemTitles] subarrayWithRange:NSMakeRange(5, items.count - 5)];
+	XCTAssertTrue([databases containsObject:@"pgkit_test"]);
+	XCTAssertTrue([databases containsObject:@"pgkit_nopublic"]);
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"pgkit_test");
+	XCTAssertTrue([self.document validateMenuItem:items[2]], @"Add Database... is enabled when idle");
+	XCTAssertTrue([self.document validateMenuItem:items[3]]);
+
+	// "Choose Database...": no switch, the tab's database shown again
+	[popup selectItemAtIndex:0];
+	[popup sendAction:[popup action] to:[popup target]];
+	XCTAssertFalse(self.document.isProcessing);
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"pgkit_test");
+
+	// Refresh Databases, as chosen in the pop-up: the list read again, the tab's database shown
+	[popup selectItemAtIndex:3];
+	[NSApp sendAction:[items[3] action] to:[items[3] target] from:items[3]];
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"pgkit_test");
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertEqualObjects([[popup itemTitles] subarrayWithRange:NSMakeRange(5, popup.numberOfItems - 5)], databases);
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"pgkit_test");
+
+	// Add Database..., as chosen in the pop-up: the name sheet, the tab's database shown
+	[popup selectItemAtIndex:2];
+	[NSApp sendAction:[popup.itemArray[2] action] to:[popup.itemArray[2] target] from:popup.itemArray[2]];
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"pgkit_test");
+	SPPostgresNameSheet *sheet = [SPPostgresNameSheet currentSheet];
+	XCTAssertNotNil(sheet, @"the Add Database sheet");
+	XCTAssertEqualObjects(sheet.sheet.title, @"Add Database");
+	[sheet cancel:nil];
+	XCTAssertNil([SPPostgresNameSheet currentSheet]);
+	XCTAssertFalse(self.document.isProcessing, @"cancelled: nothing created");
+}
+
+/// The connection's "Show all databases" off: the database selector lists only the tab's database.
+- (void)testDatabasePopupListsOnlyTheConnectionsDatabaseWhenNotShowingAll
+{
+	NSArray *all = [[self databasePopup] itemTitles];
+	XCTAssertTrue([all containsObject:@"pgkit_nopublic"], @"%@", all);
+
+	[(SPPostgresFavorite *)[self.document valueForKey:@"favorite"] setShowAllDatabases:NO];
+	[self.document refreshDatabases:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	NSPopUpButton *popup = [self databasePopup];
+	XCTAssertEqualObjects([popup itemTitles], (@[@"Choose Database...", @"", @"Add Database...", @"Refresh Databases", @"", @"pgkit_test"]));
+	XCTAssertEqualObjects([popup titleOfSelectedItem], @"pgkit_test");
+
+	[(SPPostgresFavorite *)[self.document valueForKey:@"favorite"] setShowAllDatabases:YES];
+	[self.document refreshDatabases:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertEqualObjects([[self databasePopup] itemTitles], all);
+}
+
 /// Collects what the tab would show as sheets.
 - (NSMutableArray<NSAlert *> *)captureAlerts
 {
@@ -1590,7 +1659,7 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 		XCTAssertEqual([sidebar menuForRow:-1], menu);
 		XCTAssertTrue([menu itemWithTitle:@"Drop Extension…"].hidden);
 
-		// On a table: the table menu, unchanged (TABLES starts collapsed)
+		// On a table: the table menu, unchanged (TABLES expanded, as it starts)
 		XCTAssertTrue([sidebar setSection:@"TABLES" collapsed:NO]);
 		XCTAssertEqual([sidebar menuForRow:[self rowTitled:@"sp_t5_items" group:NO in:sidebar]], sidebar.tableMenu);
 		XCTAssertEqual([sidebar.tableMenu indexOfItemWithTarget:sidebar andAction:NSSelectorFromString(@"renameTable:")], 0);
@@ -2370,6 +2439,106 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_a" on:admin], @"0");
 	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_b" on:admin], @"0");
 	XCTAssertEqualObjects(sidebar.selectedRelationNames, (@[@"sp9_a", @"sp9_b"]));
+	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
+	XCTAssertEqual(self.document.connection.transactionStatus, PGPostgresTransactionIdle);
+}
+
+- (void)testTruncateFreesStorageShownInInfoPanes
+{
+	PGPostgresConnection *admin = [self sp9AdminRunning:@[@"CREATE TABLE public.sp9_a (id integer PRIMARY KEY, v text)",
+														  @"INSERT INTO public.sp9_a SELECT g, repeat('x', 200) FROM generate_series(1, 20000) g",
+														  @"ANALYZE public.sp9_a"]];
+	[self captureAlerts];
+	[self answerConfirmationsWith:YES];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	XCTAssertTrue([sidebar selectTableNamed:@"sp9_a"]);
+	[self waitForTab];
+	[self.document showPane:SPPostgresPaneInfo];
+	[self waitForTab];
+	XCTAssertEqualObjects(self.document.infoController.totalSizeField.stringValue, @"5 MB");
+	XCTAssertTrue([sidebar.infoPane.lines containsObject:@"total size: 5 MB"], @"%@", sidebar.infoPane.lines);
+
+	// The server frees the storage at once, and Table Info and the sidebar's pane show it
+	[self.document sidebar:sidebar truncateTables:@[@"sp9_a"]];
+	[self waitForTabAndQuestions];
+	NSString *serverTotal = [SPPostgresCatalog stringForSize:[[self value:@"SELECT pg_total_relation_size('public.sp9_a')::text" on:admin] longLongValue]];
+	XCTAssertEqualObjects(serverTotal, @"16 kB");
+	XCTAssertEqualObjects(self.document.infoController.totalSizeField.stringValue, serverTotal);
+	XCTAssertTrue([sidebar.infoPane.lines containsObject:[@"total size: " stringByAppendingString:serverTotal]], @"%@", sidebar.infoPane.lines);
+
+	// Again from Content: switching to Table Info shows the sizes after the truncate
+	XCTAssertNotNil([admin execute:@"INSERT INTO public.sp9_a SELECT g, repeat('x', 200) FROM generate_series(1, 20000) g"]);
+	[self.document.infoController reload];
+	[self waitForTab];
+	XCTAssertEqualObjects(self.document.infoController.totalSizeField.stringValue, @"5 MB");
+	[self.document showPane:SPPostgresPaneContent];
+	[self waitForTab];
+	[self.document sidebar:sidebar truncateTables:@[@"sp9_a"]];
+	[self waitForTabAndQuestions];
+	[self.document showPane:SPPostgresPaneInfo];
+	[self waitForTab];
+	XCTAssertEqualObjects(self.document.infoController.totalSizeField.stringValue, @"16 kB");
+}
+
+/// The question's Restart identity checkbox (off unless ticked).
+- (NSButton *)restartIdentityCheckboxOf:(NSAlert *)alert
+{
+	NSButton *checkbox = (NSButton *)alert.accessoryView;
+	XCTAssertTrue([checkbox isKindOfClass:[NSButton class]]);
+	XCTAssertEqualObjects(checkbox.identifier, @"restartIdentity");
+	return checkbox;
+}
+
+- (void)testTruncateRestartsIdentityOnlyWhenChecked
+{
+	PGPostgresConnection *admin = [self sp9AdminRunning:@[@"CREATE TABLE public.sp9_a (id serial PRIMARY KEY, v text)",
+														  @"CREATE TABLE public.sp9_b (id integer GENERATED ALWAYS AS IDENTITY, v text)",
+														  @"INSERT INTO public.sp9_a (v) VALUES ('a'), ('b'), ('c')",
+														  @"INSERT INTO public.sp9_b (v) VALUES ('a'), ('b')"]];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	__block BOOL tick = NO;
+	NSMutableArray<NSAlert *> *asked = [NSMutableArray array];
+	self.document.confirmationPresenter = ^(NSAlert *alert, void (^completion)(BOOL)) {
+		[asked addObject:alert];
+		NSButton *checkbox = (NSButton *)alert.accessoryView;
+		if (tick && [checkbox isKindOfClass:[NSButton class]]) [checkbox setState:NSControlStateValueOn];
+		completion(YES);
+	};
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	XCTAssertTrue([sidebar selectTableNamed:@"sp9_a"]);
+	[self waitForTab];
+
+	// Unchecked (the default): the rows go, the numbering goes on
+	[self.document sidebar:sidebar truncateTables:@[@"sp9_a"]];
+	[self waitForTabAndQuestions];
+	XCTAssertEqual(asked.count, 1u);
+	NSButton *checkbox = [self restartIdentityCheckboxOf:asked[0]];
+	XCTAssertEqual(checkbox.state, NSControlStateValueOff);
+	XCTAssertEqualObjects(checkbox.title, @"Restart identity (reset serial and identity counters)");
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_a" on:admin], @"0");
+	XCTAssertEqualObjects([self value:@"INSERT INTO public.sp9_a (v) VALUES ('d') RETURNING id::text" on:admin], @"4");
+
+	// Checked, two tables (serial and identity): both start again from 1
+	tick = YES;
+	XCTAssertTrue(([sidebar selectRelationsNamed:@[@"sp9_a", @"sp9_b"]]));
+	[self waitForTab];
+	[self.document sidebar:sidebar truncateTables:sidebar.selectedRelationNames];
+	[self waitForTabAndQuestions];
+	XCTAssertEqual(asked.count, 2u);
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_a" on:admin], @"0");
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_b" on:admin], @"0");
+	XCTAssertEqualObjects([self value:@"INSERT INTO public.sp9_a (v) VALUES ('e') RETURNING id::text" on:admin], @"1");
+	XCTAssertEqualObjects([self value:@"INSERT INTO public.sp9_b (v) VALUES ('e') RETURNING id::text" on:admin], @"1");
+
+	// Each question starts unchecked again
+	tick = NO;
+	XCTAssertTrue([sidebar selectTableNamed:@"sp9_a"]);
+	[self waitForTab];
+	[self.document sidebar:sidebar truncateTables:@[@"sp9_a"]];
+	[self waitForTabAndQuestions];
+	XCTAssertEqual(asked.count, 3u);
+	XCTAssertEqual([self restartIdentityCheckboxOf:asked[2]].state, NSControlStateValueOff);
+	XCTAssertEqualObjects([self value:@"INSERT INTO public.sp9_a (v) VALUES ('f') RETURNING id::text" on:admin], @"2");
 	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
 	XCTAssertEqual(self.document.connection.transactionStatus, PGPostgresTransactionIdle);
 }

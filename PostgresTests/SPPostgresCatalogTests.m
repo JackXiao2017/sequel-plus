@@ -137,6 +137,45 @@
 	}
 }
 
+- (void)testTableSizes
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresCatalog *catalog = [self catalogOnPort:port.unsignedIntegerValue database:@"pgkit_test"];
+		PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_test"];
+		NSString *bytes = [[[connection execute:@"SELECT pg_total_relation_size('public.customers')::text AS n"] rowAsDictionary] objectForKey:@"n"];
+		NSString *expected = bytes ? [SPPostgresCatalog stringForSize:[bytes longLongValue]] : nil;
+		[connection disconnect];
+
+		NSError *error = nil;
+		NSDictionary *sizes = [catalog tableSizesInSchema:@"public" error:&error];
+		XCTAssertNotNil(sizes, @"%@", error);
+		XCTAssertNotNil(expected);
+		XCTAssertEqualObjects(sizes[@"customers"], expected, @"the table info pane's total size: data, TOAST and indexes");
+		XCTAssertNil(sizes[@"v_customers"], @"views have no size");
+		XCTAssertNotNil([catalog tableSizesInSchema:@"Sales Data" error:&error][@"Orders 2026"], @"%@", error);
+		XCTAssertEqualObjects([catalog tableSizesInSchema:@"no such schema" error:&error], @{});
+	}
+}
+
+- (void)testStringForSize
+{
+	long long MB = 1024LL * 1024LL;
+	XCTAssertEqualObjects([SPPostgresCatalog stringForSize:0], @"0 bytes");
+	XCTAssertEqualObjects([SPPostgresCatalog stringForSize:1023], @"1023 bytes");
+	XCTAssertEqualObjects([SPPostgresCatalog stringForSize:1024], @"1 kB");
+	XCTAssertEqualObjects([SPPostgresCatalog stringForSize:8192], @"8 kB", @"not pg_size_pretty's 8192 bytes");
+	XCTAssertEqualObjects([SPPostgresCatalog stringForSize:1000 * 1024], @"1000 kB");
+	XCTAssertEqualObjects([SPPostgresCatalog stringForSize:1023 * 1024], @"1023 kB");
+	XCTAssertEqualObjects([SPPostgresCatalog stringForSize:1024 * 1024], @"1 MB");
+	XCTAssertEqualObjects([SPPostgresCatalog stringForSize:17 * MB], @"17 MB");
+	XCTAssertEqualObjects([SPPostgresCatalog stringForSize:1000 * MB], @"1000 MB");
+	XCTAssertEqualObjects([SPPostgresCatalog stringForSize:1023 * MB], @"1023 MB");
+	XCTAssertEqualObjects([SPPostgresCatalog stringForSize:1024 * MB], @"1.0 GB");
+	XCTAssertEqualObjects([SPPostgresCatalog stringForSize:5000 * MB], @"4.9 GB");
+	XCTAssertEqualObjects([SPPostgresCatalog stringForSize:1000LL * 1024LL * MB], @"1000.0 GB");
+	XCTAssertEqualObjects([SPPostgresCatalog stringForSize:1024LL * 1024LL * MB], @"1.0 TB");
+}
+
 - (void)testColumnNamesByRelation
 {
 	for (NSNumber *port in [SPPostgresTestServers ports]) {

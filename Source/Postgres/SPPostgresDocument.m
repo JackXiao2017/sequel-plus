@@ -1059,11 +1059,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	if (tornDown) return @{};
 
 
-	NSMutableArray *databases = [NSMutableArray array];
-	for (NSMenuItem *item in [databasePopup itemArray]) {
-		if ([item isSeparatorItem]) break; // then "Refresh Databases"
-		[databases addObject:[item title]];
-	}
+	NSArray *databases = [self _listedDatabaseNames];
 
 	NSArray *columns = @[];
 	NSString *table = [sidebar selectedTableName];
@@ -2257,8 +2253,9 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	[self _presentAlert:alert];
 }
 
-/// "Truncate Table(s)": MySQL's question (after the shown pane's edits are applied, once the tab is idle), then every
-/// row of the tables is deleted in one TRUNCATE (never CASCADE): all of them or, on an error, none.
+/// "Truncate Table(s)": MySQL's question (after the shown pane's edits are applied, once the tab is idle), with a
+/// Restart identity checkbox (off), then every row of the tables is deleted in one TRUNCATE (never CASCADE; RESTART
+/// IDENTITY when checked): all of them or, on an error, none.
 - (void)sidebar:(SPPostgresSidebarController *)theSidebar truncateTables:(NSArray<NSString *> *)tables
 {
 	if (tornDown || ![tables count] || isProcessing || !parentWindow || [parentWindow attachedSheet]) return;
@@ -2279,6 +2276,14 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	}
 	NSAlert *alert = [self _tableActionAlert:NSLocalizedString(@"Truncate", @"truncate button") key:@"t" message:message informativeText:informativeText];
 
+	// Whether the tables' serial and identity columns start again (TRUNCATE … RESTART IDENTITY); off by default
+	NSButton *restartIdentity = [NSButton checkboxWithTitle:NSLocalizedString(@"Restart identity (reset serial and identity counters)", @"PostgreSQL truncate: restart identity checkbox") target:nil action:NULL];
+	[restartIdentity setIdentifier:@"restartIdentity"];
+	[restartIdentity setState:NSControlStateValueOff];
+	[restartIdentity setToolTip:NSLocalizedString(@"Adds RESTART IDENTITY: the sequences owned by the tables' columns are reset", @"PostgreSQL truncate: restart identity checkbox tooltip")];
+	[restartIdentity sizeToFit];
+	[alert setAccessoryView:restartIdentity];
+
 	[self _presentWhenIdle:^{
 		// Something changed under it meanwhile: dropped, with a beep (as a refused action)
 		if (![self _canAskAbout:names inSchema:schema sections:@[@"TABLES"]]) {
@@ -2288,20 +2293,20 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 		// The document stays alive until the answer comes (a sheet's or a presenter's)
 		[self retain];
 		[self _confirm:alert completion:^(BOOL confirmed) {
-			if (confirmed && !tornDown) [self _truncateTables:names inSchema:schema];
+			if (confirmed && !tornDown) [self _truncateTables:names inSchema:schema restartIdentity:[restartIdentity state] == NSControlStateValueOn];
 			[self release];
 		}];
 	}];
 }
 
-- (void)_truncateTables:(NSArray *)tables inSchema:(NSString *)schema
+- (void)_truncateTables:(NSArray *)tables inSchema:(NSString *)schema restartIdentity:(BOOL)restartIdentity
 {
 	if ([self _refuseWriteWhileBusy]) {
 		[self _presentBusyRefusal:NSLocalizedString(@"The tab is busy, so nothing was truncated.", @"PostgreSQL truncate refused while the tab is busy")];
 		return;
 	}
 	NSError *error = nil;
-	if (![SPPostgresTableActions truncateTables:tables inSchema:schema connection:connection error:&error]) {
+	if (![SPPostgresTableActions truncateTables:tables inSchema:schema restartIdentity:restartIdentity connection:connection error:&error]) {
 		[self _presentTableActionError:error title:NSLocalizedString(@"Error truncating table", @"error truncating table message")];
 		return;
 	}
@@ -2960,6 +2965,11 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 - (void)_reloadDatabasePopup
 {
 	if (tornDown) return;
+	// The connection's option: only its database (the tab's, always listed), not the others
+	if (![favorite showAllDatabases]) {
+		[self _showDatabaseNames:@[] error:nil];
+		return;
+	}
 	SPPostgresCatalog *theCatalog = catalog;
 	[taskRunner runTaskWithDescription:NSLocalizedString(@"Reloading...", @"Reloading table task string") cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
 		return [theCatalog databaseNames:error];
@@ -2974,26 +2984,44 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 - (void)_showDatabaseNames:(NSArray *)names error:(NSError *)error
 {
 	if (!names) {
-		// Keep the databases that were listed (the separator and "Refresh Databases" follow them)
-		NSInteger listed = [databasePopup numberOfItems] - 2;
-		names = (listed > 0) ? [[databasePopup itemTitles] subarrayWithRange:NSMakeRange(0, (NSUInteger)listed)] : @[];
+		// Keep the databases that were listed
+		names = [self _listedDatabaseNames];
 		[self _reportCatalogError:error];
 	}
 
+	// As MySQL's (-[SPDatabaseDocument setDatabases:]): "Choose Database...", Add Database... and Refresh Databases,
+	// then the databases
 	[databasePopup removeAllItems];
-	[databasePopup addItemsWithTitles:names];
-	if ([currentDatabase length] && ![names containsObject:currentDatabase]) [databasePopup addItemWithTitle:currentDatabase];
+	NSMenu *menu = [databasePopup menu];
+	[databasePopup addItemWithTitle:NSLocalizedString(@"Choose Database...", @"menu item for choose db")];
+	[menu addItem:[NSMenuItem separatorItem]];
+	[[menu addItemWithTitle:NSLocalizedString(@"Add Database...", @"menu item to add db") action:@selector(addDatabase:) keyEquivalent:@""] setTarget:self];
+	[[menu addItemWithTitle:NSLocalizedString(@"Refresh Databases", @"menu item to refresh databases") action:@selector(refreshDatabases:) keyEquivalent:@""] setTarget:self];
+	[menu addItem:[NSMenuItem separatorItem]];
 
-	[[databasePopup menu] addItem:[NSMenuItem separatorItem]];
-	NSMenuItem *refresh = [[databasePopup menu] addItemWithTitle:NSLocalizedString(@"Refresh Databases", @"menu item to refresh databases") action:@selector(refreshDatabases:) keyEquivalent:@""];
-	[refresh setTarget:self];
+	// Items, not -addItemsWithTitles: (which drops a title already in the menu)
+	for (NSString *name in names) [menu addItemWithTitle:name action:NULL keyEquivalent:@""];
+	if ([currentDatabase length] && ![names containsObject:currentDatabase]) [menu addItemWithTitle:currentDatabase action:NULL keyEquivalent:@""];
 
-	if ([currentDatabase length]) [databasePopup selectItemWithTitle:currentDatabase];
+	[self _selectCurrentDatabaseInPopup];
+}
+
+/// Index of the first database in the pop-up (after its second separator), or the item count when none.
+- (NSInteger)_firstDatabaseIndexInPopup
+{
+	NSInteger separators = 0;
+	NSArray *items = [databasePopup itemArray];
+	for (NSUInteger i = 0; i < [items count]; i++) {
+		if ([[items objectAtIndex:i] isSeparatorItem] && ++separators == 2) return (NSInteger)i + 1;
+	}
+	return (NSInteger)[items count];
 }
 
 - (void)refreshDatabases:(id)sender
 {
 	if (tornDown) return;
+	// Chosen in the pop-up: it shows the tab's database again
+	[self _selectCurrentDatabaseInPopup];
 	// A cell or field edit is saved first, while nothing else uses the connection (the busy state would end it)
 	if (![self _endPaneEditing]) {
 		[self _selectCurrentDatabaseInPopup];
@@ -3004,6 +3032,11 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 
 - (void)chooseDatabase:(id)sender
 {
+	// "Choose Database...": nothing to switch to
+	if ([databasePopup indexOfSelectedItem] < [self _firstDatabaseIndexInPopup]) {
+		[self _selectCurrentDatabaseInPopup];
+		return;
+	}
 	NSString *database = [databasePopup titleOfSelectedItem];
 	if ([database isEqualToString:currentDatabase]) return;
 	[self switchToDatabase:database];
@@ -3012,7 +3045,15 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 /// The pop-up shows the database the tab is in (after a switch that didn't start).
 - (void)_selectCurrentDatabaseInPopup
 {
-	if ([currentDatabase length] && [databasePopup indexOfItemWithTitle:currentDatabase] >= 0) [databasePopup selectItemWithTitle:currentDatabase];
+	NSInteger first = [self _firstDatabaseIndexInPopup];
+	NSArray *items = [databasePopup itemArray];
+	for (NSInteger i = first; i < (NSInteger)[items count]; i++) {
+		if ([currentDatabase length] && [[[items objectAtIndex:(NSUInteger)i] title] isEqualToString:currentDatabase]) {
+			[databasePopup selectItemAtIndex:i];
+			return;
+		}
+	}
+	if ([databasePopup numberOfItems]) [databasePopup selectItemAtIndex:0];
 }
 
 - (void)switchToDatabase:(NSString *)database
@@ -3148,7 +3189,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 
 	if (!newConnection) {
 		[newConnector release];
-		if ([databasePopup indexOfItemWithTitle:currentDatabase] >= 0) [databasePopup selectItemWithTitle:currentDatabase];
+		[self _selectCurrentDatabaseInPopup];
 		if (switched) [self _whenIdle:^{ switched(NO); }];
 
 		// A history move to that database didn't happen: back where it was, so it can be tried again
@@ -4219,14 +4260,12 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 
 #pragma mark - Database menu
 
-/// The databases the pop-up lists (before its separator and "Refresh Databases").
+/// The databases the pop-up lists (after "Choose Database...", Add Database... and Refresh Databases).
 - (NSArray<NSString *> *)_listedDatabaseNames
 {
 	NSMutableArray *names = [NSMutableArray array];
-	for (NSMenuItem *item in [databasePopup itemArray]) {
-		if ([item isSeparatorItem]) break;
-		[names addObject:[item title]];
-	}
+	NSArray *items = [databasePopup itemArray];
+	for (NSInteger i = [self _firstDatabaseIndexInPopup]; i < (NSInteger)[items count]; i++) [names addObject:[[items objectAtIndex:(NSUInteger)i] title]];
 	return names;
 }
 
@@ -4306,6 +4345,8 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 /// Database ▸ Add Database…: asks for the name, sends CREATE DATABASE, then switches to the new database.
 - (IBAction)addDatabase:(id)sender
 {
+	// Chosen in the pop-up: it shows the tab's database again
+	[self _selectCurrentDatabaseInPopup];
 	if (![self _canRunDatabaseAction] || ![self _endPaneEditing]) return;
 	[SPPostgresNameSheet beginOnWindow:parentWindow
 								 title:NSLocalizedString(@"Add Database", @"PostgreSQL add database sheet title")

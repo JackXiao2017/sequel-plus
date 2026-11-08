@@ -665,6 +665,8 @@ static const NSUInteger SPTextViewTestPort = 55418;
 	NSDictionary *names = provider();
 	XCTAssertTrue([names[@"databases"] containsObject:@"pgkit_test"], @"%@", names[@"databases"]);
 	XCTAssertFalse([names[@"databases"] containsObject:@"Refresh Databases"]);
+	XCTAssertFalse([names[@"databases"] containsObject:@"Add Database..."]);
+	XCTAssertFalse([names[@"databases"] containsObject:@"Choose Database..."]);
 	XCTAssertTrue([names[@"schemas"] containsObject:@"content_test"], @"%@", names[@"schemas"]);
 	XCTAssertTrue([names[@"tables"] containsObject:@"items"], @"%@", names[@"tables"]);
 	XCTAssertFalse([names[@"tables"] containsObject:@"items_view"]);

@@ -7,6 +7,7 @@
 #import "../Source/Postgres/SPPostgresSidebarController.h"
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
+#import "../Source/Postgres/SPPostgresCatalog.h"
 
 static const NSUInteger SPSidebarFilterTestPort = 55418;
 
@@ -315,9 +316,10 @@ static const NSUInteger SPSidebarFilterTestPort = 55418;
 {
 	for (NSString *title in @[@"TABLES", @"VIEWS", @"SEQUENCES", @"EXTENSIONS"]) {
 		NSArray *initial = self.initialSections[title];
-		XCTAssertEqualObjects(initial[0], @NO, @"%@ starts collapsed", title);
-		XCTAssertEqualObjects(initial[1], @YES, @"%@", title);
-		XCTAssertEqualObjects(initial[2], @(NSControlStateValueOff), @"%@'s button shows collapsed", title);
+		BOOL expanded = [title isEqualToString:@"TABLES"];
+		XCTAssertEqualObjects(initial[0], @(expanded), @"%@: only TABLES starts expanded", title);
+		XCTAssertEqualObjects(initial[1], @(!expanded), @"%@", title);
+		XCTAssertEqualObjects(initial[2], expanded ? @(NSControlStateValueOn) : @(NSControlStateValueOff), @"%@'s button", title);
 		// The button is in front of the title
 		XCTAssertLessThan([initial[3] doubleValue], [initial[4] doubleValue], @"%@", title);
 
@@ -362,26 +364,54 @@ static const NSUInteger SPSidebarFilterTestPort = 55418;
 	[[self outline] collapseItem:[self sectionItemNamed:@"EXTENSIONS"]];
 	XCTAssertTrue([self.sidebar isSectionCollapsed:@"EXTENSIONS"]);
 
-	// Kept across a reload and a schema change
+	// A refresh expands TABLES; the other sections keep their state
 	[self.sidebar reloadKeepingSelection];
 	[self waitForRunner];
-	XCTAssertFalse([[self outline] isItemExpanded:[self sectionItemNamed:@"TABLES"]]);
+	XCTAssertTrue([[self outline] isItemExpanded:[self sectionItemNamed:@"TABLES"]]);
+	XCTAssertFalse([self.sidebar isSectionCollapsed:@"TABLES"]);
 	XCTAssertFalse([[self outline] isItemExpanded:[self sectionItemNamed:@"EXTENSIONS"]]);
 	XCTAssertTrue([[self outline] isItemExpanded:[self sectionItemNamed:@"VIEWS"]]);
 
+	// So does a reload of the same schema
+	XCTAssertTrue([self.sidebar setSection:@"TABLES" collapsed:YES]);
+	[self.sidebar reloadSchema:self.sidebar.selectedSchema];
+	[self waitForRunner];
+	XCTAssertFalse([self.sidebar isSectionCollapsed:@"TABLES"]);
+
+	// And another schema
+	XCTAssertTrue([self.sidebar setSection:@"TABLES" collapsed:YES]);
 	[self.sidebar reloadSchema:@"spf_other"];
 	[self waitForRunner];
 	XCTAssertEqualObjects(self.sidebar.selectedSchema, @"spf_other");
 	XCTAssertEqualObjects([self.sidebar itemTitlesInSection:@"TABLES"], @[@"spf_other_t"]);
-	XCTAssertFalse([[self outline] isItemExpanded:[self sectionItemNamed:@"TABLES"]]);
-	XCTAssertFalse([[self rowTitles] containsObject:@"spf_other_t"]);
-
-	// Expanded again
-	XCTAssertTrue([self.sidebar setSection:@"TABLES" collapsed:NO]);
 	XCTAssertFalse([self.sidebar isSectionCollapsed:@"TABLES"]);
+	XCTAssertTrue([[self outline] isItemExpanded:[self sectionItemNamed:@"TABLES"]]);
 	XCTAssertTrue([[self rowTitles] containsObject:@"spf_other_t"]);
+	XCTAssertTrue([self.sidebar isSectionCollapsed:@"EXTENSIONS"]);
 	[[self outline] expandItem:[self sectionItemNamed:@"EXTENSIONS"]];
 	XCTAssertFalse([self.sidebar isSectionCollapsed:@"EXTENSIONS"]);
+}
+
+- (void)testAnotherDatabaseExpandsTables
+{
+	XCTAssertTrue([self.sidebar setSection:@"TABLES" collapsed:YES]);
+	XCTAssertTrue([self.sidebar setSection:@"VIEWS" collapsed:YES]);
+	id catalog = [self.sidebar valueForKey:@"catalog"];
+
+	// The same database reloaded: TABLES expanded, the others as they were
+	[self.sidebar reloadWithCatalog:catalog completion:nil];
+	[self waitForRunner];
+	XCTAssertFalse([self.sidebar isSectionCollapsed:@"TABLES"]);
+	XCTAssertTrue([self.sidebar isSectionCollapsed:@"VIEWS"]);
+	XCTAssertTrue([self.sidebar setSection:@"TABLES" collapsed:YES]);
+
+	// Another database (a database switch): TABLES expanded, the others as they were
+	[self.sidebar reloadWithNewCatalog:catalog completion:nil];
+	[self waitForRunner];
+	XCTAssertFalse([self.sidebar isSectionCollapsed:@"TABLES"]);
+	XCTAssertTrue([[self outline] isItemExpanded:[self sectionItemNamed:@"TABLES"]]);
+	XCTAssertTrue([[self rowTitles] containsObject:@"spf_alpha"]);
+	XCTAssertTrue([self.sidebar isSectionCollapsed:@"VIEWS"]);
 }
 
 - (void)testCollapsingTheSelectedRowsSectionDeselectsIt
@@ -437,6 +467,44 @@ static const NSUInteger SPSidebarFilterTestPort = 55418;
 	XCTAssertEqualObjects([self.sidebar displayedItemTitlesInSection:@"TABLES"], (@[@"spf_alpha", @"spf_beta"]));
 	XCTAssertFalse([[self rowTitles] containsObject:@"spf_alpha"]);
 	XCTAssertTrue([[self rowTitles] containsObject:@"spf_alpha_v"]);
+}
+
+#pragma mark - Table sizes
+
+/// The (shown) cell of the table or view row titled `title`.
+- (NSTableCellView *)cellOfRowTitled:(NSString *)title
+{
+	NSOutlineView *outline = [self outline];
+	for (NSInteger row = 0; row < outline.numberOfRows; row++) {
+		id item = [outline itemAtRow:row];
+		if (![self.sidebar outlineView:outline isGroupItem:item] && [[item valueForKey:@"title"] isEqualToString:title]) {
+			return [outline viewAtColumn:0 row:row makeIfNecessary:YES];
+		}
+	}
+	return nil;
+}
+
+- (void)testTableRowsShowTheirSizeRightAligned
+{
+	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPSidebarFilterTestPort];
+	NSString *bytes = [[[admin execute:@"SELECT pg_total_relation_size('public.spf_alpha')::text AS n"] rowAsDictionary] objectForKey:@"n"];
+	NSString *expected = bytes ? [SPPostgresCatalog stringForSize:[bytes longLongValue]] : nil;
+	[admin disconnect];
+
+	NSTableCellView *cell = [self cellOfRowTitled:@"spf_alpha"];
+	XCTAssertNotNil(cell);
+	[[self outline] layoutSubtreeIfNeeded]; // as when the row is drawn
+	NSTextField *size = [cell viewWithTag:1];
+	XCTAssertFalse([size isHidden]);
+	XCTAssertNotNil(expected);
+	XCTAssertEqualObjects([size stringValue], expected, @"as the table info pane's total size: shows it");
+	XCTAssertEqual([size alignment], NSTextAlignmentRight);
+	XCTAssertEqualWithAccuracy(NSMaxX([size frame]), NSWidth([cell bounds]) - 4, 1, @"at the trailing edge");
+	XCTAssertLessThanOrEqual(NSMaxX([[cell textField] frame]), NSMinX([size frame]), @"the name ends before the size");
+
+	NSTableCellView *view = [self cellOfRowTitled:@"spf_alpha_v"];
+	XCTAssertNotNil(view);
+	XCTAssertTrue([[view viewWithTag:1] isHidden], @"a view has no size");
 }
 
 @end

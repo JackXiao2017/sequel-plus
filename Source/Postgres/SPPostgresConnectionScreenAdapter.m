@@ -52,6 +52,8 @@ static NSString *SPPGOrEmpty(NSString *s)
 - (void)_reportFavoritesLoadError;
 - (void)_applyPortPlaceholders;
 - (void)_collectPortFieldsInView:(NSView *)view;
+- (void)_addDatabasesOptionToTabView:(NSView *)tabItemView;
+- (void)_applyDatabasesOption;
 - (NSError *)_connectionValidationError;
 - (void)_connectionAttemptFinished:(SPPostgresConnector *)attemptConnector connection:(PGPostgresConnection *)connection error:(NSError *)error favorite:(SPPostgresFavorite *)favorite testOnly:(BOOL)testOnly;
 @end
@@ -76,8 +78,15 @@ static NSString *SPPGOrEmpty(NSString *s)
 	SPPostgresFavorite *loadedFavorite;
 	SPPostgresConnector *pendingConnector;
 
-	// Port fields whose value binding the adapter re-made (see -_applyPortPlaceholders); unbound by -invalidate
+	// Port and Database fields whose value binding the adapter re-made (see -_applyPortPlaceholders and
+	// -_applyDatabasesOption); unbound by -invalidate
 	NSMutableArray *reboundPortFields;
+
+	// The "Show all databases" checkbox under each tab's Database field (MySQL and PostgreSQL; see -_applyDatabasesOption):
+	// per tab, the form container, its checkbox, and the frames as loaded of the views that move to make room
+	NSMutableArray *databasesOptionTabs;
+	BOOL databasesOptionShown;
+	BOOL showAllDatabases;
 
 	// The description of the favorites file error last reported (see -_reportFavoritesLoadError)
 	NSString *reportedLoadError;
@@ -103,6 +112,7 @@ static NSString *SPPGOrEmpty(NSString *s)
 		originalHostLabelFrames = [[NSMutableArray alloc] init];
 		originalHostLabelFonts = [[NSMutableArray alloc] init];
 		reboundPortFields = [[NSMutableArray alloc] init];
+		showAllDatabases = YES;
 
 		[self _checkLoadError];
 
@@ -142,6 +152,7 @@ static NSString *SPPGOrEmpty(NSString *s)
 	[originalHostLabelFrames release];
 	[originalHostLabelFonts release];
 	[reboundPortFields release];
+	[databasesOptionTabs release];
 	[reportedLoadError release];
 	[loadedFavorite release];
 	[super dealloc];
@@ -189,6 +200,7 @@ static NSString *SPPGOrEmpty(NSString *s)
 
 		for (NSTabViewItem *item in [tabView tabViewItems]) {
 			[self _collectPortFieldsInView:[item view]];
+			[self _addDatabasesOptionToTabView:[item view]];
 		}
 	}
 
@@ -201,6 +213,7 @@ static NSString *SPPGOrEmpty(NSString *s)
 	[container addSubview:control];
 
 	[self _applyPortPlaceholders];
+	[self _applyDatabasesOption];
 
 	return engineControlAreaHeight;
 }
@@ -273,6 +286,8 @@ static NSString *SPPGOrEmpty(NSString *s)
 	BOOL postgres = (engine == SPConnectionEnginePostgreSQL);
 	[hostLabels enumerateObjectsUsingBlock:^(NSTextField *label, NSUInteger idx, BOOL *stop) {
 		NSRect frame = [[originalHostLabelFrames objectAtIndex:idx] rectValue];
+		// Its row may have moved (-_applyDatabasesOption): only its width and font are this method's
+		frame.origin.y = NSMinY([label frame]);
 		NSFont *font = [originalHostLabelFonts objectAtIndex:idx];
 		[label setFont:font];
 		[label setStringValue:(postgres ? SPPostgresScreenPostgreSQLHostLabel : SPPostgresScreenMySQLHostLabel)];
@@ -308,6 +323,145 @@ static NSString *SPPGOrEmpty(NSString *s)
 	engine = (newEngine == SPConnectionEnginePostgreSQL) ? SPConnectionEnginePostgreSQL : SPConnectionEngineMySQL;
 	[engineControl setSelectedSegment:engine];
 	[self _applyPortPlaceholders];
+	[self _applyDatabasesOption];
+}
+
+#pragma mark - Show all databases
+
+/// Height of the row the checkbox takes, under the Database field.
+static const CGFloat SPPostgresDatabasesOptionRowHeight = 26;
+
+/**
+ * Adds the (hidden) "Show all databases" checkbox to the form container of tabItemView: the subview holding a field
+ * bound to "database". Notes which views move when it is shown (-_applyDatabasesOption): the container, its Database
+ * row and the rows above it, and the container's siblings below it (the SSL details).
+ */
+- (void)_addDatabasesOptionToTabView:(NSView *)tabItemView
+{
+	NSView *container = nil;
+	NSView *databaseField = nil;
+	for (NSView *candidate in [tabItemView subviews]) {
+		for (NSView *view in [candidate subviews]) {
+			if (![view isKindOfClass:[NSTextField class]]) continue;
+			if ([[[view infoForBinding:NSValueBinding] objectForKey:NSObservedKeyPathKey] isEqualToString:@"database"]) {
+				container = candidate;
+				databaseField = view;
+				break;
+			}
+		}
+		if (container) break;
+	}
+	if (!container) return;
+
+	NSMutableArray *above = [NSMutableArray array];
+	for (NSView *view in [container subviews]) {
+		if (NSMinY([view frame]) >= NSMinY([databaseField frame]) - 4) [above addObject:view];
+	}
+	NSMutableArray *below = [NSMutableArray array];
+	for (NSView *sibling in [tabItemView subviews]) {
+		if (sibling != container && NSMaxY([sibling frame]) <= NSMinY([container frame]) + 1) [below addObject:sibling];
+	}
+
+	NSButton *checkbox = [NSButton checkboxWithTitle:NSLocalizedString(@"Show all databases", @"PostgreSQL connection: show all databases checkbox")
+											  target:self action:@selector(showAllDatabasesChanged:)];
+	[checkbox setToolTip:NSLocalizedString(@"On: the database selector lists every database you can use. Off: only this connection's database (enter it in Database).", @"connection: show all databases tooltip")];
+	NSRect fieldFrame = [databaseField frame];
+	[checkbox setFrame:NSMakeRect(NSMinX(fieldFrame) - 2, NSMinY(fieldFrame) - 2, NSWidth(fieldFrame) + 4, 18)];
+	[checkbox setHidden:YES];
+	[container addSubview:checkbox];
+
+	if (!databasesOptionTabs) databasesOptionTabs = [[NSMutableArray alloc] init];
+	NSString *placeholder = [[(NSTextField *)databaseField cell] placeholderString];
+	NSDictionary *options = [[databaseField infoForBinding:NSValueBinding] objectForKey:NSOptionsKey];
+	[databasesOptionTabs addObject:@{@"container": container, @"checkbox": checkbox, @"above": above, @"below": below,
+	                                 @"databaseField": databaseField, @"placeholder": (placeholder ? placeholder : @""),
+	                                 @"options": (options ? options : @{})}];
+}
+
+/// Each form (MySQL and PostgreSQL) shows the checkbox in a row under its Database field (the Database row and those
+/// above it move up, the form grows at the bottom, its top staying), once. Views move by the row's height from where
+/// they are (the host may have resized the forms since). The host then sizes the tabs again.
+- (void)_applyDatabasesOption
+{
+	for (NSDictionary *tab in databasesOptionTabs) {
+		[[tab objectForKey:@"checkbox"] setState:showAllDatabases ? NSControlStateValueOn : NSControlStateValueOff];
+		// Off: the Database field must be filled (-databaseOptionValidationError). The placeholder is in the cell (empty
+		// value) and in the value binding (nil value, NSNullPlaceholder): both switch, as for the port fields
+		NSTextField *field = [tab objectForKey:@"databaseField"];
+		NSString *placeholder = showAllDatabases ? [tab objectForKey:@"placeholder"] : NSLocalizedString(@"required", @"connection: database placeholder when not showing all databases");
+		NSMutableDictionary *options = [[[tab objectForKey:@"options"] mutableCopy] autorelease];
+		NSDictionary *binding = [field infoForBinding:NSValueBinding];
+		id observed = [binding objectForKey:NSObservedObjectKey];
+		NSString *keyPath = [binding objectForKey:NSObservedKeyPathKey];
+		if ([options objectForKey:NSNullPlaceholderBindingOption] && !showAllDatabases) [options setObject:placeholder forKey:NSNullPlaceholderBindingOption];
+		NSString *current = [[binding objectForKey:NSOptionsKey] objectForKey:NSNullPlaceholderBindingOption];
+		NSString *wanted = [options objectForKey:NSNullPlaceholderBindingOption];
+		if (observed && keyPath && wanted && ![current isEqual:wanted]) {
+			[observed retain];
+			[field unbind:NSValueBinding];
+			[field bind:NSValueBinding toObject:observed withKeyPath:keyPath options:options];
+			[observed release];
+			if (![reboundPortFields containsObject:field]) [reboundPortFields addObject:field];
+		}
+		[[field cell] setPlaceholderString:placeholder];
+		[field setNeedsDisplay:YES];
+	}
+
+	BOOL shown = YES;
+	if (shown == databasesOptionShown) return;
+	databasesOptionShown = shown;
+
+	CGFloat delta = shown ? SPPostgresDatabasesOptionRowHeight : -SPPostgresDatabasesOptionRowHeight;
+	for (NSDictionary *tab in databasesOptionTabs) {
+		NSView *container = [tab objectForKey:@"container"];
+		NSButton *checkbox = [tab objectForKey:@"checkbox"];
+
+		// The rows are placed here, not by autoresizing
+		BOOL autoresizes = [container autoresizesSubviews];
+		[container setAutoresizesSubviews:NO];
+		NSRect frame = [container frame];
+		frame.origin.y -= delta;
+		frame.size.height += delta;
+		[container setFrame:frame];
+		[container setAutoresizesSubviews:autoresizes];
+
+		for (NSView *view in [tab objectForKey:@"above"]) [view setFrameOrigin:NSMakePoint(NSMinX([view frame]), NSMinY([view frame]) + delta)];
+		for (NSView *view in [tab objectForKey:@"below"]) [view setFrameOrigin:NSMakePoint(NSMinX([view frame]), NSMinY([view frame]) - delta)];
+		[checkbox setHidden:!shown];
+		[container setNeedsDisplay:YES];
+	}
+
+	if ([databasesOptionTabs count] && [host respondsToSelector:@selector(resizeTabViewToConnectionType:animating:)]) {
+		[host resizeTabViewToConnectionType:(NSUInteger)[host type] animating:NO];
+	}
+}
+
+- (BOOL)showAllDatabases
+{
+	return showAllDatabases;
+}
+
+- (void)setShowAllDatabases:(BOOL)show
+{
+	showAllDatabases = show;
+	[self _applyDatabasesOption];
+}
+
+- (IBAction)showAllDatabasesChanged:(id)sender
+{
+	[self setShowAllDatabases:([sender state] == NSControlStateValueOn)];
+	// An edit of the form, like typing in a field: the host shows Save Changes, Add to Favorites and Test Connection
+	if ([host respondsToSelector:@selector(postgresFormDidChange)]) [host postgresFormDidChange];
+}
+
+- (NSError *)databaseOptionValidationError
+{
+	if (showAllDatabases) return nil;
+	if ([[[host database] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] length]) return nil;
+	return [NSError errorWithDomain:SPPostgresErrorDomain
+	                           code:SPPostgresErrorInvalidSettings
+	                       userInfo:@{ NSLocalizedDescriptionKey: NSLocalizedString(@"Insufficient connection details", @"insufficient details message"),
+	                                   NSLocalizedRecoverySuggestionErrorKey: NSLocalizedString(@"Please enter a database, or turn on Show all databases.", @"connection: database required when not showing all databases") }];
 }
 
 + (NSArray *)_formKeys
@@ -582,6 +736,8 @@ static NSString *SPPGOrEmpty(NSString *s)
 		[loadedFavorite release];
 		loadedFavorite = nil;
 	}
+	// Quick Connect: every database (a MySQL favorite's own setting is set by the host after this)
+	[self setShowAllDatabases:YES];
 	if (isFavorite && engine != SPConnectionEngineMySQL) {
 		[self setSelectedEngine:SPConnectionEngineMySQL];
 	}
@@ -622,6 +778,7 @@ static NSString *SPPGOrEmpty(NSString *s)
 	[host setColorIndex:[favorite colorIndex]];
 
 	[host setUseSSL:([favorite useSSL] ? NSOnState : NSOffState)];
+	[self setShowAllDatabases:[favorite showAllDatabases]];
 	[host setSslKeyFileLocationEnabled:([[favorite sslKeyPath] length] ? NSOnState : NSOffState)];
 	[host setSslKeyFileLocation:SPPGOrEmpty([favorite sslKeyPath])];
 	[host setSslCertificateFileLocationEnabled:([[favorite sslCertPath] length] ? NSOnState : NSOffState)];
@@ -659,6 +816,7 @@ static NSString *SPPGOrEmpty(NSString *s)
 	[favorite setColorIndex:[host colorIndex]];
 
 	[favorite setUseSSL:([host useSSL] == NSOnState)];
+	[favorite setShowAllDatabases:showAllDatabases];
 	[favorite setSslKeyPath:([host sslKeyFileLocationEnabled] ? SPPGNonEmpty([host sslKeyFileLocation]) : nil)];
 	[favorite setSslCertPath:([host sslCertificateFileLocationEnabled] ? SPPGNonEmpty([host sslCertificateFileLocation]) : nil)];
 	[favorite setSslCACertPath:([host sslCACertFileLocationEnabled] ? SPPGNonEmpty([host sslCACertFileLocation]) : nil)];
@@ -699,7 +857,7 @@ static NSString *SPPGOrEmpty(NSString *s)
 		message = NSLocalizedString(@"Insufficient details provided to establish a connection. Please enter the hostname for the SSH Tunnel, or disable the SSH Tunnel.", @"insufficient SSH tunnel details informative message");
 	}
 
-	if (!message) return nil;
+	if (!message) return [self databaseOptionValidationError];
 
 	return [NSError errorWithDomain:SPPostgresErrorDomain
 	                           code:SPPostgresErrorInvalidSettings

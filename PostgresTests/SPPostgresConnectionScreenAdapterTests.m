@@ -376,8 +376,9 @@
 	[controller setValue:adapter forKey:@"postgresAdapter"];
 
 	[controller resizeTabViewToConnectionType:0 animating:NO];
-	XCTAssertEqualWithAccuracy(NSHeight([container frame]), containerHeightBefore + extra, 0.5);
-	XCTAssertEqualWithAccuracy(NSHeight([tabView frame]), tabHeightBefore, 0.5, @"tabs keep their height");
+	// The band above the tabs, and the Show all databases row under the Database field (26)
+	XCTAssertEqualWithAccuracy(NSHeight([container frame]), containerHeightBefore + extra + 26, 0.5);
+	XCTAssertEqualWithAccuracy(NSHeight([tabView frame]), tabHeightBefore + 26, 0.5, @"tabs keep their height, plus the row");
 
 	NSRect controlFrame = [[adapter engineControl] frame];
 	XCTAssertTrue(NSContainsRect([container bounds], controlFrame), @"control inside the form");
@@ -456,6 +457,8 @@
 	[adapter installEngineControlInContainer:container];
 	[controller setValue:adapter forKey:@"postgresAdapter"];
 
+	// The host row is above the Database row: up by the Show all databases row (26), the form's top staying
+	nibFrame = NSOffsetRect(nibFrame, 0, 26);
 	XCTAssertEqualObjects([label stringValue], @"MySQL Host:");
 	XCTAssertTrue(NSEqualRects([label frame], nibFrame));
 

@@ -500,6 +500,7 @@ extern NSString *SPFavoritesGroupIsExpandedKey;
 extern NSString *SPFavoriteIDKey;
 extern NSString *SPFavoriteNameKey;
 extern NSString *SPFavoriteDatabaseKey;
+extern NSString *SPFavoriteShowAllDatabasesKey;
 extern NSString *SPFavoriteHostKey;
 extern NSString *SPFavoritePortKey;
 extern NSString *SPFavoriteUserKey;

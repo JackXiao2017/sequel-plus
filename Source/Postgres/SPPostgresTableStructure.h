@@ -249,8 +249,8 @@ __attribute__((visibility("default")))
  * - @"rowEstimate": an NSNumber, pg_class.reltuples rounded, or NSNull when there is no estimate (reltuples -1,
  *   PostgreSQL 14+'s "never vacuumed or analyzed"; before 14, 0 with no pages and no vacuum or analyze on
  *   record; always for a view, which holds no rows);
- * - @"tableSize", @"indexSize", @"totalSize": pg_size_pretty of pg_table_size, pg_indexes_size and
- *   pg_total_relation_size (e.g. @"16 kB");
+ * - @"tableSize", @"indexSize", @"totalSize": pg_table_size, pg_indexes_size and pg_total_relation_size, written by
+ *   +[SPPostgresCatalog stringForSize:] (e.g. @"16 kB");
  * - @"comment": the table's comment, or NSNull.
  */
 - (NSDictionary *)tableInfo:(NSError **)error;

@@ -111,6 +111,7 @@ static BOOL isOSAtLeast10_7;
 
 - (void)_saveCurrentDetailsCreatingNewFavorite:(BOOL)createNewFavorite validateDetails:(BOOL)validateDetails;
 - (BOOL)_checkHost;
+- (BOOL)_checkDatabaseOption;
 #ifndef SP_CODA
 - (void)_sortFavorites;
 - (void)_sortTreeNode:(SPTreeNode *)node usingKey:(NSString *)key;
@@ -120,6 +121,10 @@ static BOOL isOSAtLeast10_7;
 - (void)_restoreConnectionInterface;
 - (void)_selectNode:(SPTreeNode *)node;
 - (void)_scrollToSelectedNode;
+- (void)_setUpFavoritesFilterField;
+- (void)_updateVisibleFavoriteNodesKeeping:(NSArray *)selectedNodes;
+- (NSArray *)_shownChildNodesOfNode:(SPTreeNode *)node;
+- (void)_clearFavoritesFilter;
 - (void)_removeNode:(SPTreeNode *)node;
 - (void)_removeAllPasswordsForNode:(SPTreeNode *)node;
 
@@ -281,6 +286,9 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 			return;
 		}
 	}
+
+	// Show all databases off: the database to show is required
+	if (![self _checkDatabaseOption]) return;
 
 	// Ensure that a socket connection is not inadvertently used
 	if (![self _checkHost]) return;
@@ -838,6 +846,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 	[self setColorIndex:([fav objectForKey:SPFavoriteColorIndexKey]? [[fav objectForKey:SPFavoriteColorIndexKey] integerValue] : -1)];
 	[self setPort:([fav objectForKey:SPFavoritePortKey] ? [fav objectForKey:SPFavoritePortKey] : @"")];
 	[self setDatabase:([fav objectForKey:SPFavoriteDatabaseKey] ? [fav objectForKey:SPFavoriteDatabaseKey] : @"")];
+	[postgresAdapter setShowAllDatabases:([fav objectForKey:SPFavoriteShowAllDatabasesKey] ? [[fav objectForKey:SPFavoriteShowAllDatabasesKey] boolValue] : YES)];
 	[self setUseCompression:([fav objectForKey:SPFavoriteUseCompressionKey] ? [[fav objectForKey:SPFavoriteUseCompressionKey] boolValue] : YES)];
 	
 	// SSL details
@@ -1088,6 +1097,9 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
  */
 - (IBAction)addGroup:(id)sender
 {
+	// The new group is edited in place: shown by clearing the filter
+	[self _clearFavoritesFilter];
+
 	SPTreeNode *selectedNode = [self selectedFavoriteNode];
 	
 	SPTreeNode *parent = ([selectedNode isGroup] && selectedNode != quickConnectItem) ? selectedNode : (SPTreeNode *)[selectedNode parentNode];
@@ -1407,6 +1419,9 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 		return;
 	}
 
+	// Show all databases off: the database to show is required
+	if (validateDetails && ![self _checkDatabaseOption]) return;
+
 	// Ensure that a socket connection is not inadvertently used
 	if (![self _checkHost]) return;
 
@@ -1449,6 +1464,8 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 	_setOrRemoveKey(SPFavoriteUserKey, [self user]);
 	_setOrRemoveKey(SPFavoritePortKey, [self port]);
 	_setOrRemoveKey(SPFavoriteDatabaseKey, [self database]);
+	// Saved only when off (a favorite without it shows all databases)
+	_setOrRemoveKey(SPFavoriteShowAllDatabasesKey, ([self showAllDatabases] ? nil : @NO));
 	[theFavorite setObject:[NSNumber numberWithInteger:[self colorIndex]] forKey:SPFavoriteColorIndexKey];
 	// SSL details
 	[theFavorite setObject:[NSNumber numberWithInteger:[self useSSL]] forKey:SPFavoriteUseSSLKey];
@@ -1603,6 +1620,22 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 
 	[[NSNotificationCenter defaultCenter] postNotificationName:SPConnectionFavoritesChangedNotification object:self];
 #endif
+}
+
+- (BOOL)showAllDatabases
+{
+	return postgresAdapter ? [postgresAdapter showAllDatabases] : YES;
+}
+
+/**
+ * With Show all databases off, the Database field must be filled; shows the error otherwise.
+ */
+- (BOOL)_checkDatabaseOption
+{
+	NSError *error = [postgresAdapter databaseOptionValidationError];
+	if (!error) return YES;
+	SPOnewayAlertSheet([error localizedDescription], [dbDocument parentWindow], [[error userInfo] objectForKey:NSLocalizedRecoverySuggestionErrorKey]);
+	return NO;
 }
 
 /**
@@ -1787,8 +1820,12 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
  */
 - (void)_reloadFavoritesViewData
 {	
+	// While filtering, the (possibly changed) tree is filtered again, keeping the selected items shown
+	if (favoritesFilter) [self _updateVisibleFavoriteNodesKeeping:[self selectedFavoriteNodes]];
+
 	[favoritesOutlineView reloadData];
 	[favoritesOutlineView expandItem:[[favoritesRoot childNodes] objectAtIndex:0] expandChildren:NO];
+	if (favoritesFilter) [favoritesOutlineView expandItem:nil expandChildren:YES];
 	
 	[self _scrollToSelectedNode];
 }
@@ -1877,6 +1914,9 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
  */
 - (void)_selectNode:(SPTreeNode *)node
 {
+	// A node the filter hides (e.g. a new favorite): shown by clearing the filter
+	if (visibleFavoriteNodes && node != quickConnectItem && ![visibleFavoriteNodes containsObject:node]) [self _clearFavoritesFilter];
+
 	[favoritesOutlineView selectRowIndexes:[NSIndexSet indexSetWithIndex:[favoritesOutlineView rowForItem:node]] byExtendingSelection:NO];
 	[self _scrollToSelectedNode];
 }
@@ -2627,6 +2667,8 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 
 - (void)outlineViewSelectionIsChanging:(NSNotification *)notification
 {
+	if (isApplyingFavoritesFilter) return;
+
 	if (isEditingConnection) {
 		[self _stopEditingConnection];
 
@@ -2636,6 +2678,9 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 
 - (void)outlineViewSelectionDidChange:(NSNotification *)notification
 {
+	// The filter re-selecting the same items: the form keeps what it shows (and any edits)
+	if (isApplyingFavoritesFilter) return;
+
 	NSInteger selected = [favoritesOutlineView numberOfSelectedRows];
 
 	if (isEditingConnection) {
@@ -2875,6 +2920,9 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 	// Prevent the top level or the quick connect item from being a target
 	if (!item || item == quickConnectItem) return result;
 
+	// While filtering, the shown positions aren't the favorites' positions in their groups
+	if (favoritesFilter) return result;
+
 	// Nothing can be dropped into or onto a Postgres favorite
 	if ([postgresAdapter isPostgresNode:item]) return result;
 
@@ -3106,6 +3154,12 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 	[self _startEditingConnection];
 }
 
+/// The Show all databases checkbox (MySQL and PostgreSQL forms) changed
+- (void)postgresFormDidChange
+{
+	[self _startEditingConnection];
+}
+
 #pragma mark -
 #pragma mark Scroll view notifications
 
@@ -3327,6 +3381,9 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
  */
 - (void)_setNodeIsExpanded:(BOOL)expanded fromNotification:(NSNotification *)notification
 {
+	// While filtering, groups are expanded to show their matches: not the user's choice, not kept
+	if (favoritesFilter) return;
+
 	SPGroupNode *node = [[[notification userInfo] valueForKey:@"NSObject"] representedObject];
 
 	[node setNodeIsExpanded:expanded];
@@ -3595,6 +3652,8 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 	// Register drag types for the favorites outline view
 	[favoritesOutlineView registerForDraggedTypes:@[SPFavoritesPasteboardDragType]];
 	[favoritesOutlineView setDraggingSourceOperationMask:NSDragOperationMove forLocal:YES];
+
+	[self _setUpFavoritesFilterField];
 }
 
 /**
@@ -3687,6 +3746,201 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 }
 #endif
 
+#pragma mark - Favorites filter
+
+#ifndef SP_CODA
+
+static const CGFloat SPFavoritesFilterBarHeight = 28;
+
+/**
+ * Adds the filter field above the favorites list (the list's scroll view gives up the space).
+ */
+- (void)_setUpFavoritesFilterField
+{
+	if (favoritesFilterField) return;
+
+	NSScrollView *scrollView = [favoritesOutlineView enclosingScrollView];
+	NSView *pane = [scrollView superview];
+	if (!scrollView || !pane) return;
+
+	NSRect scrollFrame = [scrollView frame];
+	scrollFrame.size.height -= SPFavoritesFilterBarHeight;
+	CGFloat fieldY;
+	if ([pane isFlipped]) {
+		fieldY = NSMinY(scrollFrame) + 5;
+		scrollFrame.origin.y += SPFavoritesFilterBarHeight;
+	}
+	else {
+		fieldY = NSMaxY(scrollFrame) + 4;
+	}
+	[scrollView setFrame:scrollFrame];
+
+	favoritesFilterField = [[NSSearchField alloc] initWithFrame:NSMakeRect(8, fieldY, NSWidth(scrollFrame) - 16, 19)];
+	[favoritesFilterField setControlSize:NSControlSizeSmall];
+	[favoritesFilterField setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+	[[favoritesFilterField cell] setPlaceholderString:NSLocalizedString(@"Filter", @"filter label")];
+	[favoritesFilterField setSendsSearchStringImmediately:YES];
+	[favoritesFilterField setSendsWholeSearchString:NO];
+	[favoritesFilterField setAutoresizingMask:NSViewWidthSizable | ([pane isFlipped] ? NSViewMaxYMargin : NSViewMinYMargin)];
+	[favoritesFilterField setTarget:self];
+	[favoritesFilterField setAction:@selector(filterFavorites:)];
+	[favoritesFilterField setToolTip:NSLocalizedString(@"List only the favorites whose name or host contains this text", @"connection screen: favorites filter field tooltip")];
+	[favoritesFilterField setNextKeyView:favoritesOutlineView];
+	[pane addSubview:favoritesFilterField];
+}
+
+- (NSSearchField *)favoritesFilterField
+{
+	return favoritesFilterField;
+}
+
+/**
+ * Filters the favorites list by the filter field's text (from the field as it is typed in).
+ */
+- (IBAction)filterFavorites:(id)sender
+{
+	NSString *filter = [[favoritesFilterField stringValue] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	if (![filter length]) filter = nil;
+	if (filter == favoritesFilter || [filter isEqualToString:favoritesFilter]) return;
+
+	NSArray *selectedNodes = [self selectedFavoriteNodes];
+	BOOL wasFiltering = (favoritesFilter != nil);
+
+	[favoritesFilter release];
+	favoritesFilter = [filter copy];
+
+	if (favoritesFilter) {
+		[self _updateVisibleFavoriteNodesKeeping:selectedNodes];
+	}
+	else {
+		SPClear(visibleFavoriteNodes);
+	}
+
+	isApplyingFavoritesFilter = YES;
+
+	[favoritesOutlineView reloadData];
+	[favoritesOutlineView expandItem:[[favoritesRoot childNodes] objectOrNilAtIndex:0] expandChildren:NO];
+	if (favoritesFilter) {
+		[favoritesOutlineView expandItem:nil expandChildren:YES];
+	}
+	else if (wasFiltering) {
+		// Back to the groups as the user left them
+		[self _restoreOutlineViewStateNode:favoritesRoot];
+	}
+
+	// The same items stay selected (they are always shown)
+	NSMutableIndexSet *rows = [NSMutableIndexSet indexSet];
+	for (id node in selectedNodes) {
+		NSInteger row = [favoritesOutlineView rowForItem:node];
+		if (row >= 0) [rows addIndex:row];
+	}
+	[favoritesOutlineView selectRowIndexes:rows byExtendingSelection:NO];
+
+	isApplyingFavoritesFilter = NO;
+
+	[self _scrollToSelectedNode];
+}
+
+/**
+ * Clears the filter field and shows the whole list.
+ */
+- (void)_clearFavoritesFilter
+{
+	if (!favoritesFilter) return;
+
+	[favoritesFilterField setStringValue:@""];
+	[self filterFavorites:favoritesFilterField];
+}
+
+/**
+ * Whether the favorite's (or group's) name or the favorite's host contains `filter` (ignoring case and accents).
+ */
+- (BOOL)_favoriteNode:(SPTreeNode *)node matchesFilter:(NSString *)filter
+{
+	NSString *name = nil;
+	NSString *host = nil;
+
+	SPPostgresFavorite *postgresFavorite = [postgresAdapter favoriteForNode:node];
+	if (postgresFavorite) {
+		name = [postgresFavorite name];
+		host = [postgresFavorite host];
+	}
+	else if ([node isGroup]) {
+		name = [[node representedObject] nodeName];
+	}
+	else {
+		NSDictionary *favorite = [[node representedObject] nodeFavorite];
+		name = [favorite objectForKey:SPFavoriteNameKey];
+		host = [favorite objectForKey:SPFavoriteHostKey];
+	}
+
+	NSStringCompareOptions options = NSCaseInsensitiveSearch | NSDiacriticInsensitiveSearch;
+	for (id text in @[name ?: @"", host ?: @""]) {
+		if ([text isKindOfClass:[NSString class]] && [(NSString *)text rangeOfString:filter options:options].location != NSNotFound) return YES;
+	}
+	return NO;
+}
+
+/**
+ * Adds the shown nodes under `node` to visibleFavoriteNodes: the matching favorites and groups, everything in a
+ * matching group (or all, with `showAll`), and the groups holding any of them. Returns whether any was added.
+ */
+- (BOOL)_addVisibleFavoriteNodesUnder:(SPTreeNode *)node showAll:(BOOL)showAll
+{
+	BOOL anyShown = NO;
+
+	for (SPTreeNode *child in [node childNodes]) {
+		BOOL matches = showAll || [self _favoriteNode:child matchesFilter:favoritesFilter];
+		BOOL shown = matches;
+		if ([child isGroup]) shown = [self _addVisibleFavoriteNodesUnder:child showAll:matches] || matches;
+		if (shown) {
+			[visibleFavoriteNodes addObject:child];
+			anyShown = YES;
+		}
+	}
+
+	return anyShown;
+}
+
+/**
+ * Works out which nodes the filter shows; `selectedNodes` (and the groups they are in) are always shown.
+ */
+- (void)_updateVisibleFavoriteNodesKeeping:(NSArray *)selectedNodes
+{
+	SPClear(visibleFavoriteNodes);
+	if (!favoritesFilter) return;
+
+	visibleFavoriteNodes = [[NSMutableSet alloc] init];
+
+	for (SPTreeNode *section in [favoritesRoot childNodes]) {
+		[visibleFavoriteNodes addObject:section];
+		[self _addVisibleFavoriteNodesUnder:section showAll:NO];
+	}
+
+	for (SPTreeNode *node in selectedNodes) {
+		if (node == quickConnectItem) continue;
+		for (SPTreeNode *shown = node; shown && shown != favoritesRoot; shown = (SPTreeNode *)[shown parentNode]) {
+			[visibleFavoriteNodes addObject:shown];
+		}
+	}
+}
+
+/**
+ * The children of `node` the list shows: all of them, or while filtering, those the filter shows.
+ */
+- (NSArray *)_shownChildNodesOfNode:(SPTreeNode *)node
+{
+	if (!visibleFavoriteNodes) return [node childNodes];
+
+	NSMutableArray *shown = [NSMutableArray array];
+	for (SPTreeNode *child in [node childNodes]) {
+		if ([visibleFavoriteNodes containsObject:child]) [shown addObject:child];
+	}
+	return shown;
+}
+
+#endif
+
 #pragma mark - SPConnectionControllerDataSource
 
 #ifndef SP_CODA
@@ -3702,10 +3956,10 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 
 	// If at the root, return the count plus one for the "Quick Connect" entry
 	if (!item) {
-		return [[node childNodes] count] + 1;
+		return [[self _shownChildNodesOfNode:node] count] + 1;
 	}
 
-	return [[node childNodes] count];
+	return [[self _shownChildNodesOfNode:node] count];
 }
 
 /**
@@ -3727,7 +3981,7 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 
 	SPTreeNode *node = (item == nil ? favoritesRoot : (SPTreeNode *)item);
 
-	return NSArrayObjectAtIndex([node childNodes], childIndex);
+	return NSArrayObjectAtIndex([self _shownChildNodesOfNode:node], childIndex);
 }
 
 - (id)outlineView:(NSOutlineView *)outlineView objectValueForTableColumn:(NSTableColumn *)tableColumn byItem:(id)item
@@ -3779,6 +4033,12 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 {
 	[postgresAdapter invalidate];
 	SPClear(postgresAdapter);
+#ifndef SP_CODA
+	[favoritesFilterField setTarget:nil];
+	SPClear(favoritesFilterField);
+	SPClear(favoritesFilter);
+	SPClear(visibleFavoriteNodes);
+#endif
 	if (newMySQLFavoriteNode) SPClear(newMySQLFavoriteNode);
 
 	[[NSNotificationCenter defaultCenter] removeObserver:self];
@@ -3910,6 +4170,8 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
 
 - (void)postgresSelectOutlineItem:(id)item
 {
+	if (visibleFavoriteNodes && item != quickConnectItem && ![visibleFavoriteNodes containsObject:item]) [self _clearFavoritesFilter];
+
 	// Expand the groups it is in, outermost first
 	NSMutableArray *ancestors = [NSMutableArray array];
 	for (SPTreeNode *parent = (SPTreeNode *)[item parentNode]; parent && parent != favoritesRoot; parent = (SPTreeNode *)[parent parentNode]) {

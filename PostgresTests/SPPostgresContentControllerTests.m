@@ -1096,4 +1096,187 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
 }
 
+#pragma mark - New row with a required column
+
+/// A table whose username is required (NOT NULL, no default), and selects it.
+- (void)selectRequiredTable
+{
+	XCTAssertNotNil([self.other execute:@"CREATE TABLE content_test.sp_required (id serial PRIMARY KEY, username text NOT NULL, note text, created timestamptz NOT NULL DEFAULT now())"]);
+	XCTAssertNotNil([self.other execute:@"INSERT INTO content_test.sp_required (username) VALUES ('bob')"]);
+	[self selectTable:@"sp_required"];
+	[self useInlineRunner];
+	XCTAssertEqual([[self grid] numberOfRows], 1);
+}
+
+/// Add on a table with a required column adds the row in the grid only, editing the required column; it is inserted
+/// with the value typed when the row is left (Return), the other columns getting their defaults.
+- (void)testAddRowWithRequiredColumnIsInsertedOnReturn
+{
+	[self selectRequiredTable];
+	SPPostgresContentController *content = self.content;
+	[content addRow:nil];
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
+	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.sp_required"], @1, @"nothing sent yet");
+	XCTAssertEqual([[self grid] numberOfRows], 2);
+	XCTAssertEqual([[self grid] editedRow], 1);
+	XCTAssertEqual([[self grid] editedColumn], (NSInteger)[[[self grid] tableColumns] indexOfObject:[self columnNamed:@"username"]], @"the required column");
+
+	[[[self grid] currentEditor] setString:@"alice"];
+	XCTAssertTrue([[[self grid] window] makeFirstResponder:nil]);
+	XCTAssertEqualObjects([self valueAtRow:1 column:@"username"], @"alice");
+	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.sp_required"], @1, @"Tab or a click in the row: still the row's edit");
+
+	[content controlTextDidEndEditing:[NSNotification notificationWithName:NSControlTextDidEndEditingNotification object:[self grid]
+																 userInfo:@{@"NSTextMovement": @(NSReturnTextMovement)}]];
+	[self spinFor:0.1];
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
+	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.sp_required WHERE username = 'alice' AND note IS NULL AND created IS NOT NULL"], @1);
+	XCTAssertEqualObjects([self valueAtRow:1 column:@"id"], @"2", @"shown as the server has it");
+	XCTAssertNotEqualObjects([self valueAtRow:1 column:@"created"], SPContentTestNull);
+}
+
+/// Without the required value the insert fails with Postgres's error and the row stays, with what was typed, to be
+/// finished; a reload (leaving it) inserts it once it has the value.
+- (void)testPendingRowWithoutRequiredValueStaysToBeFinished
+{
+	[self selectRequiredTable];
+	SPPostgresContentController *content = self.content;
+	[content addRow:nil];
+	[[[self grid] currentEditor] setString:@"<null-placeholder>"]; // passed over: not a value
+	XCTAssertTrue([[[self grid] window] makeFirstResponder:nil]);
+	[self typeInCellAtRow:1 column:@"note" text:@"first"];
+	XCTAssertTrue([[[self grid] window] makeFirstResponder:nil]);
+
+	// Another add (or anything that leaves the row) tries the insert first
+	[content addRow:nil];
+	XCTAssertEqual(self.alerts.count, 1u);
+	XCTAssertTrue([[self.alerts[0] informativeText] containsString:@"username"], @"%@", [self.alerts[0] informativeText]);
+	XCTAssertEqual([[self grid] numberOfRows], 2, @"no second new row");
+	XCTAssertEqualObjects([self valueAtRow:1 column:@"note"], @"first", @"kept");
+	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.sp_required"], @1);
+
+	[self typeInCellAtRow:1 column:@"username" text:@"carol"];
+	[content reload];
+	[self waitForContent];
+	XCTAssertEqual(self.alerts.count, 1u, @"%@", [self.alerts.lastObject informativeText]);
+	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.sp_required WHERE username = 'carol' AND note = 'first'"], @1);
+	XCTAssertEqual([[self grid] numberOfRows], 2);
+}
+
+/// Selecting another row leaves the new row: it is inserted.
+- (void)testSelectingAnotherRowInsertsThePendingRow
+{
+	[self selectRequiredTable];
+	[self.content addRow:nil];
+	[[[self grid] currentEditor] setString:@"dave"];
+	XCTAssertTrue([[[self grid] window] makeFirstResponder:nil]);
+	[[self grid] selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
+	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.sp_required WHERE username = 'dave'"], @1);
+	XCTAssertEqualObjects([self valueAtRow:1 column:@"id"], @"2");
+}
+
+/// Removing the new row drops it without asking or sending anything.
+- (void)testRemovingThePendingRowSendsNothing
+{
+	[self selectRequiredTable];
+	SPPostgresContentController *content = self.content;
+	__block NSUInteger asked = 0;
+	content.confirmationPresenter = ^(NSAlert *alert, void (^completion)(BOOL)) { asked++; completion(NO); };
+	[content addRow:nil];
+	[[[self grid] currentEditor] setString:@"erin"];
+	[content removeRows:nil];
+	XCTAssertEqual(asked, 0u);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts.firstObject informativeText]);
+	XCTAssertEqual([[self grid] numberOfRows], 1);
+	XCTAssertEqualObjects([self serverValue:@"SELECT count(*) FROM content_test.sp_required"], @1);
+
+	// A later add starts a new one
+	[content addRow:nil];
+	XCTAssertEqual([[self grid] numberOfRows], 2);
+	XCTAssertEqualObjects([self valueAtRow:1 column:@"username"], SPContentTestNull);
+}
+
+#pragma mark - Copy as SQL INSERT
+
+/// Edit ▸ Copy as SQL INSERT copies the selected rows as an INSERT into the table (generated columns left out); Copy
+/// and Copy with Column Names aren't offered. The statement runs: it adds copies of the rows.
+- (void)testCopyAsSQLInsert
+{
+	XCTAssertNotNil([self.other execute:@"CREATE TABLE content_test.sp_copy (id int PRIMARY KEY, name text, note text, twice int GENERATED ALWAYS AS (id * 2) STORED)"]);
+	XCTAssertNotNil([self.other execute:@"INSERT INTO content_test.sp_copy (id, name, note) VALUES (1, 'it''s', NULL), (2, 'b', 'bee')"]);
+	[self selectTable:@"sp_copy"];
+	[self useInlineRunner];
+	NSPasteboard *board = [NSPasteboard pasteboardWithUniqueName];
+	[self addTeardownBlock:^{ [board releaseGlobally]; }];
+	self.content.pasteboard = board;
+
+	NSMenuItem *copy = [[NSMenuItem alloc] initWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
+	[copy setTag:2001];
+	NSMenuItem *withNames = [[NSMenuItem alloc] initWithTitle:@"Copy with Column Names" action:@selector(copy:) keyEquivalent:@"c"];
+	[withNames setTag:2002];
+	NSMenuItem *asSQL = [[NSMenuItem alloc] initWithTitle:@"Copy as SQL INSERT" action:@selector(copy:) keyEquivalent:@"c"];
+	[asSQL setTag:2003];
+	XCTAssertFalse([[self grid] validateMenuItem:asSQL], @"nothing selected");
+
+	XCTAssertFalse([[self grid] validateMenuItem:copy]);
+
+	[[self grid] selectRowIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, 2)] byExtendingSelection:NO];
+	XCTAssertTrue([[self grid] validateMenuItem:copy]);
+	XCTAssertTrue([[self grid] validateMenuItem:withNames]);
+	XCTAssertTrue([[self grid] validateMenuItem:asSQL]);
+
+	// Copy: tab-separated, every shown column (the generated one too), NULL as the placeholder; as tabular text too
+	[(id)[self grid] copy:copy];
+	NSString *text = [NSString stringWithFormat:@"1\tit's\t%@\t2\n2\tb\tbee\t4", SPContentTestNull];
+	XCTAssertEqualObjects([board stringForType:NSPasteboardTypeString], text);
+	XCTAssertEqualObjects([board stringForType:NSPasteboardTypeTabularText], text);
+	[(id)[self grid] copy:withNames];
+	XCTAssertEqualObjects([board stringForType:NSPasteboardTypeString], ([@"id\tname\tnote\ttwice\n" stringByAppendingString:text]));
+	XCTAssertFalse([[self grid] respondsToSelector:@selector(paste:)], @"no Paste");
+	XCTAssertTrue([[self grid] validateMenuItem:[[NSMenuItem alloc] initWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"]], @"other items as before");
+
+	[(id)[self grid] copy:asSQL];
+	NSString *sql = [board stringForType:NSPasteboardTypeString];
+	XCTAssertEqualObjects(sql, @"INSERT INTO \"content_test\".\"sp_copy\" (\"id\", \"name\", \"note\")\nVALUES\n\t('1', 'it''s', NULL),\n\t('2', 'b', 'bee');");
+
+	XCTAssertNotNil([self.other execute:@"DELETE FROM content_test.sp_copy"]);
+	XCTAssertNotNil([self.other execute:sql], @"%@", [[self.other lastError] errorPrimaryMessage]);
+	XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(id || ':' || name || ':' || coalesce(note, '-') || ':' || twice, ',' ORDER BY id) FROM content_test.sp_copy"], @"1:it's:-:2,2:b:bee:4");
+}
+
+- (void)testGridRightClickMenuIsMySQLs
+{
+	[self selectTable:@"items"];
+	[self useInlineRunner];
+	id<NSMenuItemValidation> content = (id<NSMenuItemValidation>)self.content;
+	NSMenu *menu = [[self grid] menu];
+	NSMutableArray *titles = [NSMutableArray array];
+	for (NSMenuItem *item in [menu itemArray]) [titles addObject:[item isSeparatorItem] ? @"-" : [item title]];
+	XCTAssertEqualObjects(titles, (@[@"Copy", @"Copy with Column Names", @"Copy as SQL INSERT", @"-", @"Add New Row", @"-", @"Duplicate Row", @"Delete Row"]));
+	XCTAssertEqual([[menu itemAtIndex:2] tag], 2003);
+	XCTAssertEqual([[menu itemAtIndex:0] target], [self grid]);
+
+	NSMenuItem *add = [menu itemWithTitle:@"Add New Row"];
+	NSMenuItem *duplicate = [menu itemWithTitle:@"Duplicate Row"];
+	NSMenuItem *delete = [menu itemWithTitle:@"Delete Row"];
+	XCTAssertEqual([add target], self.content);
+	XCTAssertEqual([delete action], @selector(removeRows:));
+
+	[[self grid] deselectAll:nil];
+	XCTAssertTrue([content validateMenuItem:add]);
+	XCTAssertFalse([content validateMenuItem:duplicate], @"no row selected");
+	XCTAssertFalse([content validateMenuItem:delete]);
+	XCTAssertFalse([[self grid] validateMenuItem:[menu itemAtIndex:0]]);
+
+	[[self grid] selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+	XCTAssertTrue([content validateMenuItem:duplicate]);
+	XCTAssertTrue([content validateMenuItem:delete]);
+	XCTAssertTrue([[self grid] validateMenuItem:[menu itemAtIndex:0]]);
+
+	[[self grid] selectRowIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, 2)] byExtendingSelection:NO];
+	XCTAssertFalse([content validateMenuItem:duplicate], @"one row only, as the bar's button");
+	XCTAssertTrue([content validateMenuItem:delete]);
+}
+
 @end

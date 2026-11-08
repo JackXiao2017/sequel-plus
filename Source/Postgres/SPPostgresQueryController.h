@@ -122,7 +122,8 @@ __attribute__((visibility("default")))
  */
 @property (nonatomic, retain) SPPostgresQueryStore *historyStore;
 
-/// Where Copy History puts the history. Default: the general pasteboard.
+/// Where Copy History puts the history, and Copy as SQL INSERT in the results grid the selected rows. Default: the
+/// general pasteboard.
 @property (nonatomic, retain) NSPasteboard *pasteboard;
 
 /// Save History…'s destination: called with the suggested file name ("history.sql"), returns the path to write or nil

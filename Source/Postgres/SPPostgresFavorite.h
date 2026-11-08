@@ -24,6 +24,9 @@ __attribute__((visibility("default")))
 @property (nonatomic, copy) NSString *database;
 @property (nonatomic, copy) NSString *socketPath;
 @property (nonatomic, assign) BOOL useSSL;
+/// The tab's database selector lists every database the user can connect to (YES, the default), or only the
+/// connection's database (NO).
+@property (nonatomic, assign) BOOL showAllDatabases;
 @property (nonatomic, copy) NSString *sslCACertPath;
 @property (nonatomic, copy) NSString *sslCertPath;
 @property (nonatomic, copy) NSString *sslKeyPath;
