@@ -3,6 +3,7 @@
 #import "SPPostgresTestServers.h"
 #import "SPTestPrefsGuard.h"
 #import "../Source/SPWindowController.h"
+#import "../Source/Postgres/SPPostgresNameSheet.h"
 #import "../Source/Postgres/SPPostgresDocument.h"
 #import "../Source/Postgres/SPPostgresSidebarController.h"
 #import "../Source/Postgres/SPPostgresStructureController.h"
@@ -1210,6 +1211,55 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	return nil;
 }
 
+/// As MySQL's: "Choose Database...", Add Database... and Refresh Databases above the databases. Choosing one of the
+/// first three leaves the tab in its database (the pop-up shows it again); Add Database... asks for the name.
+- (void)testDatabasePopupHasAddAndRefreshAsMySQL
+{
+	NSPopUpButton *popup = [self databasePopup];
+	NSArray *items = popup.itemArray;
+	XCTAssertGreaterThan(items.count, 5u);
+	XCTAssertEqualObjects([items[0] title], @"Choose Database...");
+	XCTAssertTrue([items[1] isSeparatorItem]);
+	XCTAssertEqualObjects([items[2] title], @"Add Database...");
+	XCTAssertEqual([items[2] action], @selector(addDatabase:));
+	XCTAssertEqual([items[2] target], self.document);
+	XCTAssertEqualObjects([items[3] title], @"Refresh Databases");
+	XCTAssertEqual([items[3] action], @selector(refreshDatabases:));
+	XCTAssertEqual([items[3] target], self.document);
+	XCTAssertTrue([items[4] isSeparatorItem]);
+	NSArray *databases = [[popup itemTitles] subarrayWithRange:NSMakeRange(5, items.count - 5)];
+	XCTAssertTrue([databases containsObject:@"pgkit_test"]);
+	XCTAssertTrue([databases containsObject:@"pgkit_nopublic"]);
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"pgkit_test");
+	XCTAssertTrue([self.document validateMenuItem:items[2]], @"Add Database... is enabled when idle");
+	XCTAssertTrue([self.document validateMenuItem:items[3]]);
+
+	// "Choose Database...": no switch, the tab's database shown again
+	[popup selectItemAtIndex:0];
+	[popup sendAction:[popup action] to:[popup target]];
+	XCTAssertFalse(self.document.isProcessing);
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"pgkit_test");
+
+	// Refresh Databases, as chosen in the pop-up: the list read again, the tab's database shown
+	[popup selectItemAtIndex:3];
+	[NSApp sendAction:[items[3] action] to:[items[3] target] from:items[3]];
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"pgkit_test");
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertEqualObjects([[popup itemTitles] subarrayWithRange:NSMakeRange(5, popup.numberOfItems - 5)], databases);
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"pgkit_test");
+
+	// Add Database..., as chosen in the pop-up: the name sheet, the tab's database shown
+	[popup selectItemAtIndex:2];
+	[NSApp sendAction:[popup.itemArray[2] action] to:[popup.itemArray[2] target] from:popup.itemArray[2]];
+	XCTAssertEqualObjects(popup.titleOfSelectedItem, @"pgkit_test");
+	SPPostgresNameSheet *sheet = [SPPostgresNameSheet currentSheet];
+	XCTAssertNotNil(sheet, @"the Add Database sheet");
+	XCTAssertEqualObjects(sheet.sheet.title, @"Add Database");
+	[sheet cancel:nil];
+	XCTAssertNil([SPPostgresNameSheet currentSheet]);
+	XCTAssertFalse(self.document.isProcessing, @"cancelled: nothing created");
+}
+
 /// The connection's "Show all databases" off: the database selector lists only the tab's database.
 - (void)testDatabasePopupListsOnlyTheConnectionsDatabaseWhenNotShowingAll
 {
@@ -1220,7 +1270,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	[self.document refreshDatabases:nil];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	NSPopUpButton *popup = [self databasePopup];
-	XCTAssertEqualObjects([popup itemTitles], (@[@"pgkit_test", @"", @"Refresh Databases"]));
+	XCTAssertEqualObjects([popup itemTitles], (@[@"Choose Database...", @"", @"Add Database...", @"Refresh Databases", @"", @"pgkit_test"]));
 	XCTAssertEqualObjects([popup titleOfSelectedItem], @"pgkit_test");
 
 	[(SPPostgresFavorite *)[self.document valueForKey:@"favorite"] setShowAllDatabases:YES];
