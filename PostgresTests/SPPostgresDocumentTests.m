@@ -582,7 +582,7 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	XCTAssertTrue([popup.itemTitles containsObject:@"Sales Data"]);
 	XCTAssertGreaterThan(NSMinY([popup convertRect:popup.bounds toView:nil]), NSMaxY([outline.enclosingScrollView convertRect:outline.enclosingScrollView.bounds toView:nil]) - 1);
 
-	// Section rows appear in order with Extensions last (every section starts collapsed: expanded to see its rows)
+	// Section rows appear in order with Extensions last (sections but TABLES start collapsed: expanded to see their rows)
 	for (NSString *section in @[@"TABLES", @"VIEWS", @"SEQUENCES", @"EXTENSIONS"]) XCTAssertTrue([sidebar setSection:section collapsed:NO]);
 	NSMutableArray *groupTitles = [NSMutableArray array];
 	for (NSInteger row = 0; row < outline.numberOfRows; row++) {
@@ -1590,7 +1590,7 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 		XCTAssertEqual([sidebar menuForRow:-1], menu);
 		XCTAssertTrue([menu itemWithTitle:@"Drop Extension…"].hidden);
 
-		// On a table: the table menu, unchanged (TABLES starts collapsed)
+		// On a table: the table menu, unchanged (TABLES expanded, as it starts)
 		XCTAssertTrue([sidebar setSection:@"TABLES" collapsed:NO]);
 		XCTAssertEqual([sidebar menuForRow:[self rowTitled:@"sp_t5_items" group:NO in:sidebar]], sidebar.tableMenu);
 		XCTAssertEqual([sidebar.tableMenu indexOfItemWithTarget:sidebar andAction:NSSelectorFromString(@"renameTable:")], 0);

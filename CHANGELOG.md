@@ -31,6 +31,10 @@ Upgrading from 2.0.0.
 - If the insert fails (e.g. a required value is still missing), the error is shown and the row stays, with what you typed, so you can finish it. Deleting the new row (−) just removes it, with nothing sent to the server.
 - Tables without a required column work as before: the row is inserted at once with every column's default.
 
+### PostgreSQL: TABLES expanded in the sidebar
+- The sidebar's **TABLES** is now expanded in a new connection tab, and after choosing another database or schema or refreshing. Views, Sequences and Extensions still start collapsed.
+- After choosing a database or schema, or refreshing, the other sections keep the state you left them in.
+
 ### PostgreSQL: copying rows, and a right-click menu in the grids
 - **Right-click menu**, as MySQL's, in Content's grid and in Query's results. Right-clicking a row selects it first.
   - **Content:** Copy, Copy with Column Names, Copy as SQL INSERT, Add New Row, Duplicate Row and Delete Row. The row items are enabled as the bottom bar's buttons are: Duplicate Row needs exactly one selected row.

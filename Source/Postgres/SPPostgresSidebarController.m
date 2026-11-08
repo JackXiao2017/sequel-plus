@@ -377,8 +377,8 @@ typedef NS_ENUM(NSInteger, SPPostgresSidebarItemKind) {
 		selectedRelationNames = [@[] retain];
 		filterString = @"";
 		displayedChildren = [[NSMutableDictionary alloc] init];
-		// Every section starts collapsed (selecting an item by name expands its section)
-		collapsedSections = [[NSMutableSet alloc] initWithObjects:SPPostgresSidebarTables, SPPostgresSidebarViews, SPPostgresSidebarSequences, SPPostgresSidebarExtensions, nil];
+		// TABLES starts expanded, the other sections collapsed (selecting an item by name expands its section)
+		collapsedSections = [[NSMutableSet alloc] initWithObjects:SPPostgresSidebarViews, SPPostgresSidebarSequences, SPPostgresSidebarExtensions, nil];
 		defaults = [[NSUserDefaults standardUserDefaults] retain];
 		actionsEnabled = YES;
 
@@ -969,6 +969,7 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 		// database, lists that can't be read are shown empty, with no schema
 		BOOL listsRead = [read objectForKey:@"schema"] && [read objectForKey:@"tables"] && [read objectForKey:@"views"] && [read objectForKey:@"sequences"];
 		[self _applySchemaRead:(emptying && !listsRead) ? @{} : read];
+		[self _expandTablesSection];
 
 		BOOL loaded = ![[read objectForKey:@"failures"] count];
 		[self _endReload];
@@ -1013,6 +1014,7 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 
 		holdingSelectionChanges = YES;
 		[self _applySchemaRead:read];
+		[self _expandTablesSection];
 		// The same schema (not the default one standing in for a schema that is gone): its tables and views (those
 		// still listed) or sequence again
 		if ([relations count] && [previousSchema isEqualToString:selectedSchema]) [self selectRelationsNamed:relations];
@@ -1083,6 +1085,7 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 		[self _beginReload];
 		[self _rememberFailuresOfRead:read];
 		BOOL loaded = [self _applySchemaRead:read];
+		[self _expandTablesSection];
 		[self _endReload];
 
 		if (!holding) return loaded;
@@ -1104,6 +1107,19 @@ static void SPPostgresSidebarClearMenuTargets(NSMenu *menu)
 		}
 		if (theCompletion) theCompletion(loaded);
 	}];
+}
+
+/// TABLES expanded, and remembered so: every reload (a database, a schema, a refresh) shows it expanded, as a new tab
+/// does. The other sections keep their state.
+- (void)_expandTablesSection
+{
+	[collapsedSections removeObject:SPPostgresSidebarTables];
+	SPPostgresSidebarItem *section = [self _sectionNamed:SPPostgresSidebarTables];
+	if (!section || ![[self _visibleSections] containsObject:section]) return;
+	BOOL wasReloading = reloading;
+	reloading = YES;
+	[outlineView expandItem:section];
+	reloading = wasReloading;
 }
 
 - (NSString *)pendingSchema
