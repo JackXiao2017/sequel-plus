@@ -8,8 +8,8 @@
  * Rows, Table size, Index size, Total size), an editable Comments box, and the read-only, monospaced Create
  * syntax (SPPostgresCreateStatement) in MySQL's query editor font. Built in code. Use on the main thread.
  *
- * Rows is the planner's estimate, `~N`, or `Unknown (not analyzed)` when there is none. The sizes are the
- * server's pg_size_pretty.
+ * Rows is the planner's estimate, `~N`, or `Unknown (not analyzed)` when there is none. The sizes are written
+ * by +[SPPostgresCatalog stringForSize:], as the table list writes them.
  *
  * The comment is saved when its edit ends (the box loses the focus, or -commitPendingEdits): COMMENT ON … IS
  * through -[SPPostgresTableStructure setTableComment:error:] (SPPostgresRunStructureChange). If that fails, an

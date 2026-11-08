@@ -188,4 +188,7 @@
 - (BOOL)isTableNameValid:(nullable NSString *)tableName forType:(SPTableType)tableType ignoringSelectedTable:(BOOL)ignoreSelectedTable;
 - (BOOL)selectionShouldChangeInTableView:(nullable NSTableView *)aTableView;
 
+// A table's size as the table list shows it (each unit up to 1024 of it: 1,023.9 MiB, then 1.0 GiB)
++ (NSString *)listStringForTableSize:(long long)bytes;
+
 @end

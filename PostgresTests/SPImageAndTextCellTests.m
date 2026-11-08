@@ -5,6 +5,7 @@
 - (void)setTrailingText:(NSString *)text;
 - (NSString *)trailingText;
 - (void)setIndentationLevel:(NSInteger)level;
++ (NSString *)listStringForTableSize:(long long)bytes;
 @end
 
 /// The table size the MySQL table list shows after a table's name: ImageAndTextCell's trailing text.
@@ -88,6 +89,26 @@
 		longestGap = MAX(longestGap, gap);
 	}
 	XCTAssertGreaterThanOrEqual(longestGap, 4);
+}
+
+/// The MySQL table list writes sizes in Table Information's units, moving up a unit at 1024
+- (void)testListSizeMovesUpAUnitAt1024
+{
+	Class list = NSClassFromString(@"SPTablesList");
+	XCTAssertNotNil(list);
+	long long MiB = 1024LL * 1024LL;
+	XCTAssertEqualObjects([list listStringForTableSize:0], @"0 B");
+	XCTAssertEqualObjects([list listStringForTableSize:1023], @"1,023 B");
+	XCTAssertEqualObjects([list listStringForTableSize:1024], @"1.0 KiB");
+	XCTAssertEqualObjects([list listStringForTableSize:16 * 1024], @"16.0 KiB");
+	XCTAssertEqualObjects([list listStringForTableSize:1023 * 1024], @"1,023.0 KiB");
+	XCTAssertEqualObjects([list listStringForTableSize:1024 * 1024], @"1.0 MiB");
+	XCTAssertEqualObjects([list listStringForTableSize:1000 * MiB], @"1,000.0 MiB");
+	XCTAssertEqualObjects([list listStringForTableSize:1023 * MiB], @"1,023.0 MiB");
+	XCTAssertEqualObjects([list listStringForTableSize:1024 * MiB - 1024], @"1.0 GiB", @"never 1,024.0 MiB");
+	XCTAssertEqualObjects([list listStringForTableSize:1536 * MiB], @"1.5 GiB");
+	XCTAssertEqualObjects([list listStringForTableSize:1000LL * 1024LL * MiB], @"1,000.0 GiB");
+	XCTAssertEqualObjects([list listStringForTableSize:1024LL * 1024LL * MiB], @"1.0 TiB");
 }
 
 @end

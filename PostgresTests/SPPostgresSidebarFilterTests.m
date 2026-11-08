@@ -7,6 +7,7 @@
 #import "../Source/Postgres/SPPostgresSidebarController.h"
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
+#import "../Source/Postgres/SPPostgresCatalog.h"
 
 static const NSUInteger SPSidebarFilterTestPort = 55418;
 
@@ -457,7 +458,8 @@ static const NSUInteger SPSidebarFilterTestPort = 55418;
 - (void)testTableRowsShowTheirSizeRightAligned
 {
 	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPSidebarFilterTestPort];
-	NSString *expected = [[[admin execute:@"SELECT pg_size_pretty(pg_total_relation_size('public.spf_alpha'))::text AS n"] rowAsDictionary] objectForKey:@"n"];
+	NSString *bytes = [[[admin execute:@"SELECT pg_total_relation_size('public.spf_alpha')::text AS n"] rowAsDictionary] objectForKey:@"n"];
+	NSString *expected = bytes ? [SPPostgresCatalog stringForSize:[bytes longLongValue]] : nil;
 	[admin disconnect];
 
 	NSTableCellView *cell = [self cellOfRowTitled:@"spf_alpha"];
