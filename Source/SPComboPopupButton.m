@@ -224,10 +224,29 @@
 @implementation SPComboPopupButtonCell
 
 /**
- * Indent the title slightly to take account of the additional divider
+ * Where the title may go: from where the cell puts it to the divider (minus a margin). NSPopUpButtonCell keeps the
+ * width of the menu's key-equivalent column (the run menu's ⌘R and ⌥⌘R) free in the button too, which left
+ * "Run Current" truncated in a 180 pt button.
+ */
+- (NSRect)_titleRect:(NSRect)titleRect inBounds:(NSRect)bounds controlView:(NSView *)controlView
+{
+	NSUInteger lineOffset = [controlView isKindOfClass:[SPComboPopupButton class]] ? [(SPComboPopupButton *)controlView lineOffset] : 0;
+	CGFloat right = NSMaxX(bounds) - lineOffset - 4;
+	if (right - NSMinX(titleRect) > NSWidth(titleRect)) titleRect.size.width = right - NSMinX(titleRect);
+	return titleRect;
+}
+
+- (NSRect)titleRectForBounds:(NSRect)bounds
+{
+	return [self _titleRect:[super titleRectForBounds:bounds] inBounds:bounds controlView:[self controlView]];
+}
+
+/**
+ * The title uses the button's width up to the divider, indented slightly to take account of the additional divider
  */
 - (NSRect)drawTitle:(NSAttributedString *)title withFrame:(NSRect)frame inView:(NSView *)controlView
 {
+	frame = [self _titleRect:frame inBounds:[controlView bounds] controlView:controlView];
 	frame.size.width -= 1;
 	return [super drawTitle:title withFrame:frame inView:controlView];
 }

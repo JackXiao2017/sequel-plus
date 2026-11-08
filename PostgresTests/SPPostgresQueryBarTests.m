@@ -271,8 +271,23 @@ static NSString * const SPQueryBarScratchSuite = @"SPPostgresStage11Tests";
 	XCTAssertNotNil(query.infoPaneText);
 	XCTAssertFalse([query.infoPaneText isEditable]);
 
-	// The run button's title
+	// The run button's title, all of it: the cell doesn't keep the menu's key-equivalent column free in the button
 	XCTAssertEqualObjects([query.runButton title], @"Run Current");
+	NSRect titleRect = [[query.runButton cell] titleRectForBounds:[query.runButton bounds]];
+	for (NSString *title in @[@"Run Current", @"Run Previous", @"Run Selection", @"Run All"]) {
+		CGFloat needed = [title sizeWithAttributes:@{NSFontAttributeName: [query.runButton font]}].width;
+		XCTAssertGreaterThanOrEqual(NSWidth(titleRect), needed + 8, @"%@ fits", title);
+	}
+	XCTAssertLessThanOrEqual(NSMaxX(titleRect), NSWidth([query.runButton bounds]) - [query.runButton lineOffset], @"left of the divider");
+
+	// Screenshots of the top bar, for a look
+	NSString *directory = [[NSProcessInfo processInfo] environment][@"SP_FORM_SNAPSHOT_DIR"];
+	if (directory.length) {
+		[topBar displayIfNeeded];
+		NSBitmapImageRep *rep = [topBar bitmapImageRepForCachingDisplayInRect:topBar.bounds];
+		[topBar cacheDisplayInRect:topBar.bounds toBitmapImageRep:rep];
+		[[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:[directory stringByAppendingPathComponent:@"query-top-bar.png"] atomically:YES];
+	}
 
 	// The run button keeps its distance from the right edge as the view widens
 	[root setFrameSize:NSMakeSize(rootWidth + 200, NSHeight([root frame]))];
@@ -282,6 +297,33 @@ static NSString * const SPQueryBarScratchSuite = @"SPPostgresStage11Tests";
 }
 
 #pragma mark - Run pop-up button
+
+/// MySQL's run button (DBView.xib: SPComboPopupButton, 180 × 22, small, centred, pull-down, the hidden title item, then
+/// Run Current Query ⌘R, a separator, Run All Queries ⌥⌘R and Switch Default): its titles fit, left of the divider.
+- (void)testMySQLRunButtonShowsItsWholeTitle
+{
+	SPComboPopupButton *button = [[NSClassFromString(@"SPComboPopupButton") alloc] initWithFrame:NSMakeRect(0, 0, 180, 22) pullsDown:YES];
+	XCTAssertTrue([[button cell] isKindOfClass:NSClassFromString(@"SPComboPopupButtonCell")]);
+	[button setBezelStyle:NSBezelStyleRoundRect];
+	[[button cell] setControlSize:NSControlSizeSmall];
+	[button setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+	[button setAlignment:NSTextAlignmentCenter];
+	[[button cell] setLineBreakMode:NSLineBreakByTruncatingTail];
+	NSMenu *menu = [button menu];
+	[[menu addItemWithTitle:@"Run Current" action:NULL keyEquivalent:@""] setHidden:YES];
+	[menu addItemWithTitle:@"Run Current Query" action:@selector(runPrimaryQueryAction:) keyEquivalent:@"r"];
+	[menu addItem:[NSMenuItem separatorItem]];
+	NSMenuItem *all = [menu addItemWithTitle:@"Run All Queries" action:@selector(runSecondaryQueryAction:) keyEquivalent:@"r"];
+	[all setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
+	[menu addItemWithTitle:@"Switch Default" action:NULL keyEquivalent:@""];
+
+	NSRect titleRect = [[button cell] titleRectForBounds:[button bounds]];
+	for (NSString *title in @[@"Run Current", @"Run Previous", @"Run Selection", @"Run All"]) {
+		CGFloat needed = [title sizeWithAttributes:@{NSFontAttributeName: [button font]}].width;
+		XCTAssertGreaterThanOrEqual(NSWidth(titleRect), needed + 8, @"%@ fits", title);
+	}
+	XCTAssertLessThanOrEqual(NSMaxX(titleRect), NSWidth([button bounds]) - [button lineOffset], @"left of the divider");
+}
 
 - (void)testRunMenuItemsAndSwitchDefault
 {

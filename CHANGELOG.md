@@ -31,6 +31,9 @@ Upgrading from 2.0.0.
 - If the insert fails (e.g. a required value is still missing), the error is shown and the row stays, with what you typed, so you can finish it. Deleting the new row (−) just removes it, with nothing sent to the server.
 - Tables without a required column work as before: the row is inserted at once with every column's default.
 
+### Query's run button shows its whole title (MySQL and PostgreSQL)
+- The run button above the results (**Run Current**, **Run Previous**, **Run Selection**, **Run All**) shows its full title, centred. It was cut off ("Run Curre…") because the button kept room for the menu's ⌘R and ⌥⌘R shortcuts.
+
 ### PostgreSQL: Add Database and Refresh Databases in the database selector
 - The toolbar's database selector is laid out as MySQL's: **Choose Database...**, then **Add Database...** and **Refresh Databases**, then the databases.
   - **Add Database...** asks for the name, creates the database and switches to it, as Database ▸ Add Database… does.
