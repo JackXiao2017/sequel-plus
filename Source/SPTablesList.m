@@ -85,6 +85,34 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 
 @implementation SPTablesList
 
+/**
+ * A table's size as the list shows it, in Table Information's units (B, KiB, MiB, GiB, TiB) and formats, moving up a
+ * unit at 1024 of the smaller one: "1,023 B", "1.0 KiB", "1,023.9 MiB", "1.0 GiB".
+ */
++ (NSString *)listStringForTableSize:(long long)bytes
+{
+	NSNumberFormatter *formatter = [[[NSNumberFormatter alloc] init] autorelease];
+	[formatter setNumberStyle:NSNumberFormatterDecimalStyle];
+
+	if (bytes < 1024) {
+		[formatter setFormat:@"#,##0 B"];
+		return [formatter stringFromNumber:@(bytes)];
+	}
+
+	double size = (double)bytes / 1024.0;
+	for (NSString *unit in @[@"KiB", @"MiB", @"GiB"]) {
+		// One decimal: a value that would be written 1,024.0 is in the next unit
+		if (size < 1023.95) {
+			[formatter setFormat:[NSString stringWithFormat:@"#,##0.0 %@", unit]];
+			return [formatter stringFromNumber:@(size)];
+		}
+		size /= 1024.0;
+	}
+
+	[formatter setFormat:@"#,##0.0 TiB"];
+	return [formatter stringFromNumber:@(size)];
+}
+
 #pragma mark -
 #pragma mark Initialisation
 
@@ -1867,7 +1895,7 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 				[aCell setIndentationLevel:1];
 				[aCell setFont:smallSystemFont];
 				NSNumber *size = [tableSizes objectForKey:item];
-				[aCell setTrailingText:size ? [NSString stringForByteSize:[size longLongValue]] : nil];
+				[aCell setTrailingText:size ? [SPTablesList listStringForTableSize:[size longLongValue]] : nil];
 				return;
 			}
 			case SPTableTypeProc:

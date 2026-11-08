@@ -39,9 +39,14 @@ __attribute__((visibility("default")))
 - (NSArray *)sequenceNamesInSchema:(NSString *)schema error:(NSError **)error;
 
 /// The total size of each of the schema's tables (relkind r), by table name, as the table info pane's "total size:"
-/// shows it: pg_size_pretty(pg_total_relation_size), the data, TOAST and indexes (e.g. @"32 kB"). A partitioned table (relkind p)
-/// has no storage of its own and isn't included.
+/// shows it: pg_total_relation_size, the data, TOAST and indexes, written by +stringForSize: (e.g. @"32 kB"). A
+/// partitioned table (relkind p) has no storage of its own and isn't included.
 - (NSDictionary<NSString *, NSString *> *)tableSizesInSchema:(NSString *)schema error:(NSError **)error;
+
+/// A size in bytes as the table list and Table Info write it, in pg_size_pretty's units (bytes, kB, MB, GB, TB, of 1024)
+/// but moving up a unit at 1024 of the smaller one: under 1024 in bytes (@"0 bytes"), then kB and MB rounded to whole
+/// numbers up to 1023 (@"8 kB", @"17 MB"), then GB (up to 1023.9) and TB with one decimal (@"1.5 GB").
++ (NSString *)stringForSize:(long long)bytes;
 
 /// The column names of the schema's tables, views, materialized views, foreign and partitioned tables (relkind r, p,
 /// v, m, f), by relation name, each in column order (no dropped or system columns). One query (the Query editor's

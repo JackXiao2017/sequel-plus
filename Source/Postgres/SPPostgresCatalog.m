@@ -119,9 +119,24 @@
 	return [self relationNamesInSchema:schema kinds:@"'S'" error:error];
 }
 
++ (NSString *)stringForSize:(long long)bytes
+{
+	if (bytes < 1024) return [NSString stringWithFormat:@"%lld bytes", bytes];
+
+	double kilobytes = (double)bytes / 1024.0;
+	if (llround(kilobytes) < 1024) return [NSString stringWithFormat:@"%lld kB", (long long)llround(kilobytes)];
+
+	double megabytes = kilobytes / 1024.0;
+	if (llround(megabytes) < 1024) return [NSString stringWithFormat:@"%lld MB", (long long)llround(megabytes)];
+
+	double gigabytes = megabytes / 1024.0;
+	if (gigabytes < 1023.95) return [NSString stringWithFormat:@"%.1f GB", gigabytes];
+	return [NSString stringWithFormat:@"%.1f TB", gigabytes / 1024.0];
+}
+
 - (NSDictionary<NSString *, NSString *> *)tableSizesInSchema:(NSString *)schema error:(NSError **)error
 {
-	PGPostgresResult *result = [self run:@"SELECT c.relname::text AS r, pg_catalog.pg_size_pretty(pg_catalog.pg_total_relation_size(c.oid))::text AS n "
+	PGPostgresResult *result = [self run:@"SELECT c.relname::text AS r, pg_catalog.pg_total_relation_size(c.oid)::text AS b "
 										  "FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace ns ON ns.oid = c.relnamespace "
 										  "WHERE ns.nspname = $1::text AND c.relkind = 'r'"
 								  values:@[schema ?: @""] error:error];
@@ -130,9 +145,9 @@
 	NSMutableDictionary *sizes = [NSMutableDictionary dictionary];
 	for (NSDictionary *row in result) {
 		id relation = [row objectForKey:@"r"];
-		id size = [row objectForKey:@"n"];
-		if (![relation isKindOfClass:[NSString class]] || ![size isKindOfClass:[NSString class]]) continue;
-		[sizes setObject:size forKey:relation];
+		id bytes = [row objectForKey:@"b"];
+		if (![relation isKindOfClass:[NSString class]] || ![bytes isKindOfClass:[NSString class]]) continue;
+		[sizes setObject:[SPPostgresCatalog stringForSize:[bytes longLongValue]] forKey:relation];
 	}
 	return sizes;
 }
