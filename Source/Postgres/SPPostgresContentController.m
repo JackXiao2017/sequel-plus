@@ -92,6 +92,8 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	BOOL reloadOwed;                // a commit inside -_endEditing wants the rows reloaded
 	BOOL committingInGrid;          // reloading from inside the grid's own commit (which must not be ended again)
 	BOOL reloadPending;             // a grid commit's reload waits for the grid's editing to end (background runner)
+	BOOL hasPendingRow;             // the last row is a new row not yet on the server (see -addRow:)
+	NSMutableIndexSet *pendingEditedColumns; // the pending row's columns given a value (sent with the insert)
 
 	SPPostgresFilter *filter;       // nil: no filter
 	NSString *sortColumn;           // nil: primary-key order
@@ -177,6 +179,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 		connection = [theConnection retain];
 		defaults = [[NSUserDefaults standardUserDefaults] retain];
 		rows = [[NSMutableArray alloc] init];
+		pendingEditedColumns = [[NSMutableIndexSet alloc] init];
 		columns = [@[] retain];
 		currentPage = 1;
 		pageCount = 1;
@@ -202,6 +205,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	[tableData release];
 	[columns release];
 	[rows release];
+	[pendingEditedColumns release];
 	[filter release];
 	[sortColumn release];
 	[schema release];
@@ -649,6 +653,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	[columns release];
 	columns = [@[] retain];
 	[rows removeAllObjects];
+	[self _clearPendingRow];
 	[filter release];
 	filter = nil;
 	[sortColumn release];
@@ -818,6 +823,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	loaded = YES;
 
 	[rows setArray:[page rows]];
+	[self _clearPendingRow]; // a pending row not inserted by now (its insert failed) is dropped with the old rows
 
 	// Keep the selection where it still fits
 	NSIndexSet *selection = [[[tableView selectedRowIndexes] copy] autorelease];
@@ -1055,10 +1061,14 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 - (BOOL)_endEditing
 {
 	reloadOwed = NO;
-	if (![tableView currentEditor]) return NO;
-	endingEdit = YES;
-	if (![[tableView window] makeFirstResponder:tableView]) [tableView abortEditing];
-	endingEdit = NO;
+	if ([tableView currentEditor]) {
+		endingEdit = YES;
+		if (![[tableView window] makeFirstResponder:tableView]) [tableView abortEditing];
+		endingEdit = NO;
+	}
+
+	// A new row not on the server yet is inserted now (on failure the error is shown and it stays pending)
+	[self _insertPendingRow];
 	return reloadOwed;
 }
 
@@ -1189,24 +1199,45 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 		if ([taskRunner isInline]) [self reload];
 		else reloadPending = YES;
 	}
-
-	// Every column gets its default (as MySQL's new row), then the user edits it in place
-	NSError *error = nil;
-	NSArray *row = [tableData insertRowWithValues:@{} error:&error];
-	if (!row) {
-		[self _presentError:error title:NSLocalizedString(@"Could not add a row", @"Postgres content: insert failed")];
+	// A previous new row that couldn't be inserted is still being filled in
+	if (hasPendingRow) {
 		[self _reloadIfPending];
 		return;
 	}
 
-	// Shown at the end of this page, to be edited in place (or in the sheet, in edit mode)
-	NSInteger newRow = [self _showInsertedRow:row];
+	// A table with a required column (NOT NULL, no default): the row is added in the grid only, as MySQL's new row,
+	// and inserted with the values given when the user leaves it (-_insertPendingRow). Otherwise every column gets its
+	// default now, and the user edits the row in place.
+	BOOL required = NO;
+	for (SPPostgresColumn *column in columns) required = required || [self _columnIsRequired:column];
 
-	// Start editing the first column that can be edited
+	NSInteger newRow;
+	if (required) {
+		NSMutableArray *row = [NSMutableArray array];
+		for (NSUInteger index = 0; index < [columns count]; index++) [row addObject:[NSNull null]];
+		newRow = [self _showInsertedRow:row];
+		hasPendingRow = YES;
+		[pendingEditedColumns removeAllIndexes];
+	}
+	else {
+		NSError *error = nil;
+		NSArray *row = [tableData insertRowWithValues:@{} error:&error];
+		if (!row) {
+			[self _presentError:error title:NSLocalizedString(@"Could not add a row", @"Postgres content: insert failed")];
+			[self _reloadIfPending];
+			return;
+		}
+
+		// Shown at the end of this page, to be edited in place (or in the sheet, in edit mode)
+		newRow = [self _showInsertedRow:row];
+	}
+
+	// Start editing the first column that can be edited (of a pending row, the first required one)
 	BOOL inSheet = [self _editsInSheet];
 	if (inSheet || [tableView window]) {
 		for (NSTableColumn *tableColumn in [tableView tableColumns]) {
 			if (![self _canEditTableColumn:tableColumn row:newRow]) continue;
+			if (required && ![self _columnIsRequired:[self _columnForTableColumn:tableColumn]]) continue;
 			if (inSheet) {
 				[self _editInSheetTableColumn:tableColumn row:newRow];
 			}
@@ -1233,6 +1264,10 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	if ([self _endEditing]) {
 		if ([taskRunner isInline]) [self reload];
 		else reloadPending = YES;
+	}
+	if (hasPendingRow) {
+		[self _reloadIfPending];
+		return;
 	}
 
 	NSInteger selected = [tableView numberOfSelectedRows];
@@ -1280,6 +1315,14 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 {
 	if (invalidated || !tableData || !editable || !loaded) return;
 	if ([self _refuseWriteWhileBusy]) return;
+
+	// A selected new row not on the server yet is just dropped (as MySQL cancels a new row's edit)
+	NSInteger pendingIndex = [self _pendingRowIndex];
+	if (pendingIndex >= 0 && [[tableView selectedRowIndexes] containsIndex:(NSUInteger)pendingIndex]) {
+		[self _dropPendingRow];
+		if (![tableView numberOfSelectedRows]) return;
+	}
+
 	BOOL editWantsReload = [self _endEditing];
 
 	NSIndexSet *selection = [tableView selectedRowIndexes];
@@ -1337,6 +1380,75 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	[self reload];
 }
 
+#pragma mark - New row not on the server yet
+
+/// Whether a new row must be given a value for the column: NOT NULL with no default (and not generated or numbered).
+- (BOOL)_columnIsRequired:(SPPostgresColumn *)column
+{
+	return column && ![column nullable] && ![[column defaultExpression] length] && ![column isGenerated] && ![column isAutoNumbered];
+}
+
+/// The pending new row's index in the grid (always the last row), or -1.
+- (NSInteger)_pendingRowIndex
+{
+	return (hasPendingRow && [rows count]) ? (NSInteger)[rows count] - 1 : -1;
+}
+
+- (void)_clearPendingRow
+{
+	hasPendingRow = NO;
+	[pendingEditedColumns removeAllIndexes];
+}
+
+/// Removes the pending new row from the grid, sending nothing.
+- (void)_dropPendingRow
+{
+	NSInteger index = [self _pendingRowIndex];
+	if (index < 0) return;
+	if ([tableView currentEditor]) [tableView abortEditing];
+	[self _clearPendingRow];
+	[rows removeObjectAtIndex:(NSUInteger)index];
+	if (matchingRowCount > 0) matchingRowCount--;
+	if (tableRowCount > 0) tableRowCount--;
+	[tableView deselectRow:index];
+	[tableView reloadData];
+	[self _updateBottomBar];
+}
+
+/**
+ * Inserts the pending new row with the values given to it (the other columns get their defaults), and shows the row
+ * as the server has it. On failure the error is shown and the row stays pending, with its values. YES when there is
+ * no pending row any more.
+ */
+- (BOOL)_insertPendingRow
+{
+	NSInteger index = [self _pendingRowIndex];
+	if (index < 0) return YES;
+	if (invalidated || !tableData) return NO;
+	if ([self _refuseWriteWhileBusy]) return NO;
+
+	NSArray *row = [rows objectAtIndex:(NSUInteger)index];
+	NSMutableDictionary *values = [NSMutableDictionary dictionary];
+	[pendingEditedColumns enumerateIndexesUsingBlock:^(NSUInteger columnIndex, BOOL *stop) {
+		if (columnIndex < [columns count] && columnIndex < [row count]) {
+			[values setObject:[row objectAtIndex:columnIndex] forKey:[(SPPostgresColumn *)[columns objectAtIndex:columnIndex] name]];
+		}
+	}];
+
+	NSError *error = nil;
+	NSArray *inserted = [tableData insertRowWithValues:values error:&error];
+	if (!inserted) {
+		[self _presentError:error title:NSLocalizedString(@"Could not add a row", @"Postgres content: insert failed")];
+		return NO;
+	}
+
+	[self _clearPendingRow];
+	[rows replaceObjectAtIndex:(NSUInteger)index withObject:inserted];
+	[tableView reloadData];
+	[self _updateBottomBar];
+	return YES;
+}
+
 #pragma mark - Table view data source
 
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)theTableView
@@ -1382,6 +1494,17 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 
 	// Unchanged: nothing to send
 	if ([newValue isEqual:oldValue]) return;
+
+	// The new row not on the server yet: kept in the grid, sent with its insert (a required column passed over
+	// still shows the NULL placeholder: not a value)
+	if (rowIndex == [self _pendingRowIndex]) {
+		if ([oldValue isKindOfClass:[NSNull class]] && [newValue isEqual:[self _nullPlaceholder]]) return;
+		NSMutableArray *changedRow = [[originalRow mutableCopy] autorelease];
+		[changedRow replaceObjectAtIndex:columnIndex withObject:newValue];
+		[rows replaceObjectAtIndex:(NSUInteger)rowIndex withObject:changedRow];
+		[pendingEditedColumns addIndex:columnIndex];
+		return;
+	}
 
 	// An edit ending while a load runs (something outside this view started one, as edits end before every load
 	// here) is not sent: the grid goes on showing the row's loaded value
@@ -1434,7 +1557,16 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 /// The grid's editing ended (NSTableView, as an NSControl, tells its delegate).
 - (void)controlTextDidEndEditing:(NSNotification *)notification
 {
-	if (!reloadPending || [notification object] != tableView) return;
+	if ([notification object] != tableView) return;
+
+	// Return on the new row (not Tab, which moves to its next cell): the row is done, so it is inserted
+	if (hasPendingRow && [[[notification userInfo] objectForKey:@"NSTextMovement"] integerValue] == NSReturnTextMovement) {
+		dispatch_async(dispatch_get_main_queue(), ^{
+			if (!invalidated && hasPendingRow && ![tableView currentEditor]) [self _insertPendingRow];
+		});
+	}
+
+	if (!reloadPending) return;
 	dispatch_async(dispatch_get_main_queue(), ^{
 		[self _reloadIfPending];
 	});
@@ -1593,6 +1725,15 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 - (void)tableViewSelectionDidChange:(NSNotification *)notification
 {
 	[self _updateBottomBar];
+
+	// Leaving the new row (another row selected): it is inserted; if that fails it is selected again, to be fixed
+	NSInteger pendingIndex = [self _pendingRowIndex];
+	if (pendingIndex < 0 || [tableView currentEditor]) return;
+	NSIndexSet *selection = [tableView selectedRowIndexes];
+	if ([selection count] == 1 && [selection containsIndex:(NSUInteger)pendingIndex]) return;
+	if (![self _insertPendingRow] && hasPendingRow) {
+		[tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)[self _pendingRowIndex]] byExtendingSelection:NO];
+	}
 }
 
 @end

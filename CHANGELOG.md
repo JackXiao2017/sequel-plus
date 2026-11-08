@@ -18,6 +18,12 @@ Upgrading from 2.0.0.
 - Clearing the field shows the whole list again, with groups expanded or collapsed as you left them.
 - While filtering, favorites can't be dragged to new places. Adding a favorite or group clears the filter, so the new item is visible.
 
+### PostgreSQL: adding a row to a table with a required column
+- **Fixed:** in Content, **Add row** (+) on a table with a NOT NULL column that has no default failed at once ("null value in column … violates not-null constraint"). It inserted the row before you could type anything.
+- On such a table the new row is now added in the grid only, as MySQL does, and editing starts in the first required column. The row is inserted when you leave it: Return, selecting another row, adding another row, refreshing, sorting, filtering or changing page. Only the values you typed are sent; the other columns get their defaults.
+- If the insert fails (e.g. a required value is still missing), the error is shown and the row stays, with what you typed, so you can finish it. Deleting the new row (−) just removes it, with nothing sent to the server.
+- Tables without a required column work as before: the row is inserted at once with every column's default.
+
 ### App
 - Version **2.0.1**.
 
