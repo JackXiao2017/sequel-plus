@@ -6,6 +6,25 @@ Upgrading from 2.0.1.
 
 - Version **2.0.2**.
 
+### Reduce Storage in the table list (MySQL and PostgreSQL)
+Rows deleted with `DELETE` (or replaced by `UPDATE`) leave their space inside the table: the database keeps it for new rows rather than giving it back to the disk. Reduce Storage gives it back.
+
+- Two items in the table list's right-click and gear menus, after **Truncate Table**:
+  - **Reduce Storage…** for the selected tables (one or more, not views).
+  - **Reduce Storage of All Tables…** for every table of the database (MySQL) or of the schema shown (PostgreSQL), whatever is selected.
+- It asks first, saying what happens and what it costs. It runs in the background with **Cancel**, which stops it on the server. Afterwards it shows each table's size before and after, e.g. "orders: 5 MB → 304 kB" (for several tables, the total first), and the table sizes shown are read again.
+- For the selected tables, the first problem stops it. For all tables, a table that can't be done is listed as skipped, with the reason, and the others are done.
+
+**PostgreSQL:** `VACUUM (FULL, ANALYZE)` on each table: it is rewritten without the unused space and its statistics are updated. No rows change. The table is locked while it is rewritten, so nothing can read or write it until it is done, and the rewrite needs free disk space about the size of the table.
+- It isn't run, and says why, when a transaction is open on the tab's connection (VACUUM can't run inside one).
+- You must own the table (or, from PostgreSQL 17, have MAINTAIN on it); the server would otherwise skip it with only a warning. For the selected tables nothing is changed then; for all tables those tables are skipped.
+- If a table's lock can't be had within 5 seconds, it stops with the server's message.
+
+**MySQL:** `OPTIMIZE TABLE` on each table. An InnoDB table is rebuilt ("recreate + analyze"); it stays readable and writable except briefly at the start and end, and needs free disk space about its size. The space goes back to the disk when the table has its own file (`innodb_file_per_table`, the default); otherwise it stays in the shared tablespace for new rows. MyISAM tables are locked while they are optimized.
+- Sizes are data plus indexes from `information_schema.TABLES`, read fresh for the run (MySQL 8 otherwise caches them).
+- A table MySQL reports an error for (for example, no rights on it) stops the selected tables' run, or is skipped for all tables.
+- Like MySQL's Truncate, it commits a transaction open on the connection.
+
 ## Sequel Plus 2.0.1
 
 Upgrading from 2.0.0.
