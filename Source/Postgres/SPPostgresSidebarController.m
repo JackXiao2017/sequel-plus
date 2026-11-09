@@ -1683,6 +1683,8 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 	[menu addItem:separator];
 
 	SPPostgresSidebarAddMenuItem(menu, NSLocalizedString(@"Truncate Table", @"PostgreSQL sidebar: truncate table menu item"), @selector(truncateTables:), NSLocalizedString(@"Delete all records of selected table(s)", @"PostgreSQL sidebar: truncate table menu item tooltip"), self);
+	SPPostgresSidebarAddMenuItem(menu, NSLocalizedString(@"Reduce Storage…", @"PostgreSQL sidebar: reduce storage menu item"), @selector(reduceStorage:), NSLocalizedString(@"Give the space of deleted rows back to the disk (VACUUM FULL)", @"PostgreSQL sidebar: reduce storage menu item tooltip"), self);
+	SPPostgresSidebarAddMenuItem(menu, NSLocalizedString(@"Reduce Storage of All Tables…", @"PostgreSQL sidebar: reduce storage of all tables menu item"), @selector(reduceStorageOfAllTables:), NSLocalizedString(@"Give the space of deleted rows back to the disk for every table of the schema (VACUUM FULL)", @"PostgreSQL sidebar: reduce storage of all tables menu item tooltip"), self);
 	SPPostgresSidebarAddMenuItem(menu, NSLocalizedString(@"Delete Table", @"PostgreSQL sidebar: delete table menu item"), @selector(removeRelations:), NSLocalizedString(@"Remove the selected item(s)", @"PostgreSQL sidebar: delete table menu item tooltip"), self);
 	separator = [NSMenuItem separatorItem];
 	[separator setTag:SPPostgresSidebarOpenSeparatorTag];
@@ -1771,7 +1773,7 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 /**
  * Titles and shows the relation items of menu for targets, as -[SPTablesList setSelectionState:]: one table or view
  * names its kind; several hide Rename, Duplicate and the Open items (and the separators that go with them) and use
- * the plural titles. Truncate is hidden unless every target is a table.
+ * the plural titles. Truncate and Reduce Storage are hidden unless every target is a table.
  */
 - (void)_updateRelationItemsOfMenu:(NSMenu *)menu forTargets:(NSArray<NSString *> *)targets
 {
@@ -1799,6 +1801,9 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 		}
 		else if (action == @selector(truncateTables:)) {
 			[item setTitle:several ? NSLocalizedString(@"Truncate Tables", @"PostgreSQL sidebar: truncate tables menu item") : NSLocalizedString(@"Truncate Table", @"PostgreSQL sidebar: truncate table menu item")];
+			[item setHidden:(views > 0)];
+		}
+		else if (action == @selector(reduceStorage:)) {
 			[item setHidden:(views > 0)];
 		}
 		else if (action == @selector(removeRelations:)) {
@@ -1891,7 +1896,12 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 		return [[self _itemTargetForMenuItem:item] kind] == SPPostgresSidebarExtension && [delegate respondsToSelector:@selector(sidebar:dropExtensionNamed:)];
 	}
 
-	BOOL relationAction = (action == @selector(renameTable:) || action == @selector(duplicateTable:) || action == @selector(truncateTables:) || action == @selector(removeRelations:) || action == @selector(openRelationInNewTab:) || action == @selector(openRelationInNewWindow:) || action == @selector(exportRelations:) || action == @selector(showCreateSyntax:) || action == @selector(copyCreateSyntax:));
+	// Every table of the schema, whatever is selected (nothing, a view): there must be one
+	if (action == @selector(reduceStorageOfAllTables:)) {
+		return actionsEnabled && [[self itemTitlesInSection:SPPostgresSidebarTables] count] > 0 && [delegate respondsToSelector:@selector(sidebar:reduceStorageOfAllTables:)];
+	}
+
+	BOOL relationAction = (action == @selector(renameTable:) || action == @selector(duplicateTable:) || action == @selector(truncateTables:) || action == @selector(reduceStorage:) || action == @selector(removeRelations:) || action == @selector(openRelationInNewTab:) || action == @selector(openRelationInNewWindow:) || action == @selector(exportRelations:) || action == @selector(showCreateSyntax:) || action == @selector(copyCreateSyntax:));
 	if (!relationAction) return YES;
 
 	NSArray<NSString *> *targets = [self _relationTargetsForMenuItem:item];
@@ -1910,6 +1920,7 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 	if (action == @selector(renameTable:)) return oneTable && [delegate respondsToSelector:@selector(sidebar:renameTableNamed:)];
 	if (action == @selector(duplicateTable:)) return oneTable && [delegate respondsToSelector:@selector(sidebar:duplicateTableNamed:)];
 	if (action == @selector(truncateTables:)) return allTables && [delegate respondsToSelector:@selector(sidebar:truncateTables:)];
+	if (action == @selector(reduceStorage:)) return allTables && [delegate respondsToSelector:@selector(sidebar:reduceStorageOfTables:)];
 	if (action == @selector(removeRelations:)) return count && [delegate respondsToSelector:@selector(sidebar:removeRelations:)];
 	if (action == @selector(openRelationInNewTab:) || action == @selector(openRelationInNewWindow:)) return count == 1 && [delegate respondsToSelector:@selector(sidebar:openRelation:inNewWindow:)];
 	// An export takes tables only (a view would leave the sheet with nothing checked)
@@ -1952,6 +1963,23 @@ static NSMenuItem *SPPostgresSidebarAddMenuItem(NSMenu *menu, NSString *title, S
 		if ([self relationIsView:name]) return;
 	}
 	if ([delegate respondsToSelector:@selector(sidebar:truncateTables:)]) [delegate sidebar:self truncateTables:targets];
+}
+
+- (void)reduceStorage:(id)sender
+{
+	NSArray<NSString *> *targets = [self _enabledRelationTargetsForMenuItem:sender];
+	if (![targets count]) return;
+	for (NSString *name in targets) {
+		if ([self relationIsView:name]) return;
+	}
+	if ([delegate respondsToSelector:@selector(sidebar:reduceStorageOfTables:)]) [delegate sidebar:self reduceStorageOfTables:targets];
+}
+
+- (void)reduceStorageOfAllTables:(id)sender
+{
+	if (!actionsEnabled) return;
+	NSArray<NSString *> *tables = [self itemTitlesInSection:SPPostgresSidebarTables];
+	if ([tables count] && [delegate respondsToSelector:@selector(sidebar:reduceStorageOfAllTables:)]) [delegate sidebar:self reduceStorageOfAllTables:tables];
 }
 
 - (void)removeRelations:(id)sender
