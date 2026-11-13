@@ -57,6 +57,8 @@ static NSString * const SPPostgresDocumentToolbarIdentifier = @"TableWindowToolb
 // The MySQL split view's size in DBView.xib, so both panes start (and grow with the window) alike
 static const CGFloat SPPostgresSidebarDefaultWidth = 214;
 static const NSSize SPPostgresSplitViewSize = {943, 549};
+/// Seconds Reduce Storage waits for a table's lock before failing (as the other structure changes)
+static const NSTimeInterval SPPostgresReduceStorageLockTimeout = 5;
 
 /// The KVO context for observing the tab's runner (isProcessing follows its busy)
 static void *SPPostgresDocumentRunnerContext = &SPPostgresDocumentRunnerContext;
@@ -2315,6 +2317,120 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	if ([schema isEqualToString:[contentController schema]] && [tables containsObject:[contentController table] ?: @""]) contentNeedsReset = YES;
 	if ([schema isEqualToString:[infoController schema]] && [tables containsObject:[infoController table] ?: @""]) infoNeedsReset = YES;
 	[self _relationsDidChangeInSchema:schema];
+}
+
+/**
+ * "Reduce Storage…": a question (after the shown pane's edits are applied, once the tab is idle) saying what it does
+ * and that the tables are locked meanwhile, then `VACUUM (FULL, ANALYZE)` on each table in the tab's runner (Cancel
+ * stops it on the server), then each table's size before and after. Plain VACUUM keeps the space for new rows; FULL
+ * rewrites the table and gives the space back to the disk.
+ */
+- (void)sidebar:(SPPostgresSidebarController *)theSidebar reduceStorageOfTables:(NSArray<NSString *> *)tables
+{
+	[self _askToReduceStorageOfTables:tables all:NO];
+}
+
+/// "Reduce Storage of All Tables…": the same for every table of the schema; a table the user doesn't own (or that is
+/// gone by then) is skipped and listed in the result, rather than stopping the others.
+- (void)sidebar:(SPPostgresSidebarController *)theSidebar reduceStorageOfAllTables:(NSArray<NSString *> *)tables
+{
+	[self _askToReduceStorageOfTables:tables all:YES];
+}
+
+- (void)_askToReduceStorageOfTables:(NSArray<NSString *> *)tables all:(BOOL)all
+{
+	if (tornDown || ![tables count] || isProcessing || !parentWindow || [parentWindow attachedSheet]) return;
+	if (![self _endPaneEditing]) return;
+
+	NSString *schema = [[[sidebar selectedSchema] copy] autorelease];
+	NSArray *names = [[tables copy] autorelease];
+
+	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+	[alert addButtonWithTitle:NSLocalizedString(@"Reduce Storage", @"PostgreSQL reduce storage button")];
+	[alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"cancel button")];
+	[[[alert buttons] objectAtIndex:1] setKeyEquivalent:@"\r"];
+	[alert setAlertStyle:NSAlertStyleWarning];
+	if (all) {
+		[alert setMessageText:[NSString stringWithFormat:NSLocalizedString(@"Reduce the storage of all %lu tables in schema '%@'?", @"PostgreSQL reduce storage of all tables message"), (unsigned long)[names count], schema]];
+	}
+	else if ([names count] == 1) {
+		[alert setMessageText:[NSString stringWithFormat:NSLocalizedString(@"Reduce the storage of table '%@'?", @"PostgreSQL reduce storage message"), [names firstObject]]];
+	}
+	else {
+		[alert setMessageText:NSLocalizedString(@"Reduce the storage of the selected tables?", @"PostgreSQL reduce storage tables message")];
+	}
+	[alert setInformativeText:NSLocalizedString(@"The space left by deleted and updated rows is given back to the disk, and the statistics are updated (VACUUM FULL, ANALYZE). No rows are changed.\n\nEach table is rewritten and locked while that happens: nothing can read or write it until it is done, which can take a long time for a big table. The rewrite needs free disk space about the size of the table.", @"PostgreSQL reduce storage informative message")];
+
+	[self _presentWhenIdle:^{
+		if (![self _canAskAbout:names inSchema:schema sections:@[@"TABLES"]]) {
+			NSBeep();
+			return;
+		}
+		[self retain];
+		[self _confirm:alert completion:^(BOOL confirmed) {
+			if (confirmed && !tornDown) [self _reduceStorageOfTables:names inSchema:schema all:all];
+			[self release];
+		}];
+	}];
+}
+
+- (void)_reduceStorageOfTables:(NSArray *)tables inSchema:(NSString *)schema all:(BOOL)all
+{
+	if ([self _refuseWriteWhileBusy]) {
+		[self _presentBusyRefusal:NSLocalizedString(@"The tab is busy, so the storage was not reduced.", @"PostgreSQL reduce storage refused while the tab is busy")];
+		return;
+	}
+	NSArray *theTables = [[tables copy] autorelease];
+	NSString *theSchema = [[schema copy] autorelease];
+	NSString *description;
+	if (all) description = [NSString stringWithFormat:NSLocalizedString(@"Reducing the storage of all tables in '%@'...", @"PostgreSQL reduce storage of all tables task"), theSchema];
+	else if ([theTables count] == 1) description = [NSString stringWithFormat:NSLocalizedString(@"Reducing the storage of '%@'...", @"PostgreSQL reduce storage task"), [theTables firstObject]];
+	else description = NSLocalizedString(@"Reducing the storage of the selected tables...", @"PostgreSQL reduce storage tables task");
+	[taskRunner runTaskWithDescription:description cancelTitle:NSLocalizedString(@"Cancel", @"cancel button") work:^id(PGPostgresConnection *theConnection, NSError **error) {
+		return [SPPostgresTableActions reduceStorageOfTables:theTables inSchema:theSchema skippingTablesNotAllowed:all lockTimeout:SPPostgresReduceStorageLockTimeout connection:theConnection error:error];
+	} completion:^(id result, NSError *error, BOOL cancelled) {
+		if (tornDown) return;
+		// Sizes and statistics changed (also for the tables done before a failure or a cancel)
+		if ([theSchema isEqualToString:[infoController schema]] && [theTables containsObject:[infoController table] ?: @""]) infoNeedsReset = YES;
+		[self _relationsDidChangeInSchema:theSchema];
+		if (cancelled) return;
+		if (!result) {
+			[self _presentTableActionError:error title:NSLocalizedString(@"Error reducing storage", @"PostgreSQL reduce storage error title")];
+			return;
+		}
+
+		NSMutableArray *lines = [NSMutableArray array];
+		NSMutableArray *skipped = [NSMutableArray array];
+		long long before = 0, after = 0;
+		for (NSDictionary *size in result) {
+			NSString *reason = [size objectForKey:@"skipped"];
+			if (reason) {
+				[skipped addObject:[NSString stringWithFormat:NSLocalizedString(@"%@: skipped (%@)", @"PostgreSQL reduce storage result line: table skipped, reason"), [size objectForKey:@"table"], reason]];
+				continue;
+			}
+			before += [[size objectForKey:@"before"] longLongValue];
+			after += [[size objectForKey:@"after"] longLongValue];
+			[lines addObject:[NSString stringWithFormat:NSLocalizedString(@"%@: %@ → %@", @"PostgreSQL reduce storage result line: table, size before, size after"),
+							  [size objectForKey:@"table"],
+							  [SPPostgresCatalog stringForSize:[[size objectForKey:@"before"] longLongValue]],
+							  [SPPostgresCatalog stringForSize:[[size objectForKey:@"after"] longLongValue]]]];
+		}
+		BOOL anyReduced = ([lines count] > 0);
+		NSAlert *done = [[[NSAlert alloc] init] autorelease];
+		[done setAlertStyle:NSAlertStyleInformational];
+		[done setMessageText:anyReduced ? NSLocalizedString(@"Storage reduced", @"PostgreSQL reduce storage done title") : NSLocalizedString(@"No table's storage was reduced", @"PostgreSQL reduce storage: every table skipped")];
+		// Several tables: the total first; the skipped ones last
+		if ([lines count] > 1) {
+			[lines insertObject:[NSString stringWithFormat:NSLocalizedString(@"Total: %@ → %@", @"PostgreSQL reduce storage result total: size before, size after"), [SPPostgresCatalog stringForSize:before], [SPPostgresCatalog stringForSize:after]] atIndex:0];
+			[lines insertObject:@"" atIndex:1];
+		}
+		if ([skipped count]) {
+			if ([lines count]) [lines addObject:@""];
+			[lines addObjectsFromArray:skipped];
+		}
+		[done setInformativeText:[lines componentsJoinedByString:@"\n"]];
+		[self _presentAlert:done];
+	}];
 }
 
 /// "Delete Table/View/Tables/Views/Items": MySQL's question (after the shown pane's edits are applied, once the tab

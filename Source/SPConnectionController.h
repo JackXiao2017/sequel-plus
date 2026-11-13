@@ -189,6 +189,7 @@
 	NSString *favoritesFilter;
 	NSMutableSet *visibleFavoriteNodes;
 	BOOL isApplyingFavoritesFilter;
+	BOOL isLayingOutConnectionDetails;
 #endif
 }
 

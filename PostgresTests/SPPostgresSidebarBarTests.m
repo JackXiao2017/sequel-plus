@@ -665,12 +665,12 @@ static NSInteger SPTestClickedRow(id self, SEL _cmd)
 /// The relation menus' order and titles, "-" for a separator.
 static NSArray *SPOneTableTitles(void)
 {
-	return @[@"Rename Table…", @"Duplicate Table…", @"-", @"Truncate Table", @"Delete Table", @"-", @"Open Table in New Tab", @"Open Table in New Window", @"-", @"Export", @"-", @"Show Create Table Syntax…", @"Copy Create Table Syntax"];
+	return @[@"Rename Table…", @"Duplicate Table…", @"-", @"Truncate Table", @"Reduce Storage…", @"Reduce Storage of All Tables…", @"Delete Table", @"-", @"Open Table in New Tab", @"Open Table in New Window", @"-", @"Export", @"-", @"Show Create Table Syntax…", @"Copy Create Table Syntax"];
 }
 
 static NSArray *SPOneViewTitles(void)
 {
-	return @[@"Rename View…", @"Duplicate View…", @"-", @"Delete View", @"-", @"Open View in New Tab", @"Open View in New Window", @"-", @"Export", @"-", @"Show Create View Syntax…", @"Copy Create View Syntax"];
+	return @[@"Rename View…", @"Duplicate View…", @"-", @"Reduce Storage of All Tables…", @"Delete View", @"-", @"Open View in New Tab", @"Open View in New Window", @"-", @"Export", @"-", @"Show Create View Syntax…", @"Copy Create View Syntax"];
 }
 
 /// Validates every item of menu (and its submenus) as AppKit does before showing it, setting each one's enabled state.
@@ -769,7 +769,7 @@ static NSArray *SPOneViewTitles(void)
 			NSMenuItem *item = [menu itemAtIndex:i];
 			[actions addObject:item.isSeparatorItem ? @"-" : (item.submenu ? @"submenu" : NSStringFromSelector(item.action))];
 		}
-		XCTAssertEqualObjects(actions, (@[@"renameTable:", @"duplicateTable:", @"-", @"truncateTables:", @"removeRelations:", @"-", @"openRelationInNewTab:", @"openRelationInNewWindow:", @"-", @"submenu", @"-", @"showCreateSyntax:", @"copyCreateSyntax:"]));
+		XCTAssertEqualObjects(actions, (@[@"renameTable:", @"duplicateTable:", @"-", @"truncateTables:", @"reduceStorage:", @"reduceStorageOfAllTables:", @"removeRelations:", @"-", @"openRelationInNewTab:", @"openRelationInNewWindow:", @"-", @"submenu", @"-", @"showCreateSyntax:", @"copyCreateSyntax:"]));
 
 		// Open in New Window is the Option alternate of Open in New Tab
 		NSMenuItem *newWindow = [self itemWithAction:@selector(openRelationInNewWindow:) inMenu:menu];
@@ -805,15 +805,15 @@ static NSArray *SPOneViewTitles(void)
 	XCTAssertEqualObjects([self visibleTitlesOfMenu:gear from:1], SPOneViewTitles());
 	XCTAssertEqualObjects([self visibleTitlesOfMenu:sidebar.tableMenu from:0], SPOneViewTitles());
 
-	// A table and a view: Delete Items, no Truncate, Rename, Duplicate or Open
-	NSArray *mixed = @[@"Delete Items", @"-", @"Export", @"-", @"Show Create Syntaxes…", @"Copy Create Syntaxes"];
+	// A table and a view: Delete Items, no Truncate, Reduce Storage, Rename, Duplicate or Open (Reduce Storage of All Tables stays)
+	NSArray *mixed = @[@"Reduce Storage of All Tables…", @"Delete Items", @"-", @"Export", @"-", @"Show Create Syntaxes…", @"Copy Create Syntaxes"];
 	XCTAssertTrue(([sidebar selectRelationsNamed:@[@"customers", @"v_customers"]]));
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self visibleTitlesOfMenu:gear from:1], mixed);
 	XCTAssertEqualObjects([self visibleTitlesOfMenu:sidebar.tableMenu from:0], mixed);
 
-	// Two tables: Truncate Tables and Delete Tables
-	NSArray *tables = @[@"Truncate Tables", @"Delete Tables", @"-", @"Export", @"-", @"Show Create Syntaxes…", @"Copy Create Syntaxes"];
+	// Two tables: Truncate Tables, both Reduce Storage items and Delete Tables
+	NSArray *tables = @[@"Truncate Tables", @"Reduce Storage…", @"Reduce Storage of All Tables…", @"Delete Tables", @"-", @"Export", @"-", @"Show Create Syntaxes…", @"Copy Create Syntaxes"];
 	XCTAssertTrue(([sidebar selectRelationsNamed:@[@"customers", @"sp9_a"]]));
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	XCTAssertEqualObjects([self visibleTitlesOfMenu:gear from:1], tables);
@@ -822,7 +822,7 @@ static NSArray *SPOneViewTitles(void)
 	// Two views: Delete Views
 	XCTAssertTrue(([sidebar selectRelationsNamed:@[@"v_customers", @"sp9_v"]]));
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
-	XCTAssertEqualObjects([self visibleTitlesOfMenu:gear from:1], (@[@"Delete Views", @"-", @"Export", @"-", @"Show Create Syntaxes…", @"Copy Create Syntaxes"]));
+	XCTAssertEqualObjects([self visibleTitlesOfMenu:gear from:1], (@[@"Reduce Storage of All Tables…", @"Delete Views", @"-", @"Export", @"-", @"Show Create Syntaxes…", @"Copy Create Syntaxes"]));
 
 	// Back to one table: its titles again, everything shown
 	XCTAssertTrue([sidebar selectTableNamed:@"customers"]);
@@ -881,7 +881,7 @@ static NSArray *SPOneViewTitles(void)
 
 	// The gear acts on the selection
 	NSMenu *gear = sidebar.gearButton.menu;
-	XCTAssertEqualObjects([self visibleTitlesOfMenu:gear from:1], (@[@"Truncate Tables", @"Delete Tables", @"-", @"Export", @"-", @"Show Create Syntaxes…", @"Copy Create Syntaxes"]));
+	XCTAssertEqualObjects([self visibleTitlesOfMenu:gear from:1], (@[@"Truncate Tables", @"Reduce Storage…", @"Reduce Storage of All Tables…", @"Delete Tables", @"-", @"Export", @"-", @"Show Create Syntaxes…", @"Copy Create Syntaxes"]));
 	XCTAssertTrue([self choose:@selector(removeRelations:) inMenu:gear]);
 	XCTAssertTrue([self choose:@selector(truncateTables:) inMenu:gear]);
 	XCTAssertTrue([self choose:@selector(copyCreateSyntax:) inMenu:gear]);

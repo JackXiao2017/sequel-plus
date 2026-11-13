@@ -21,9 +21,9 @@
 - Add files to the project only with `ruby Scripts/pg-xcodeproj.rb add-app|add-test <paths>`.
 - Commit trailer: `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Never touch the untracked `start_clause.sh`.
 - Test commands (servers: `bash Scripts/pg-test-servers.sh up`):
-  - one class: `timeout 900 xcodebuild test -project sequel-pro.xcodeproj -scheme "Postgres Tests" -derivedDataPath build/DerivedData ARCHS=arm64 -only-testing:"Postgres Tests"/<Class>`
+  - one class: `timeout 900 xcodebuild test -project sequel-plus.xcodeproj -scheme "Postgres Tests" -derivedDataPath build/DerivedData ARCHS=arm64 -only-testing:"Postgres Tests"/<Class>`
   - full suite: same without `-only-testing`, `timeout 1500`
-  - app: `xcodebuild -project sequel-pro.xcodeproj -scheme "Sequel Pro" -configuration Debug -derivedDataPath build/DerivedData ARCHS=arm64 build`
+  - app: `xcodebuild -project sequel-plus.xcodeproj -scheme "Sequel Plus" -configuration Debug -derivedDataPath build/DerivedData ARCHS=arm64 build`
 
 ### Rulings on the spec (made while planning)
 

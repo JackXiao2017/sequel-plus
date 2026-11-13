@@ -30,6 +30,7 @@
 //  More info at <https://github.com/sequelpro/sequelpro>
 
 #import "SPTablesList.h"
+#import "SPMySQLStorageReducer.h"
 #import "SPDatabaseDocument.h"
 #import "SPTableStructure.h"
 #import "SPDatabaseStructure.h"
@@ -84,6 +85,9 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 @end
 
 @implementation SPTablesList
+
+@synthesize reduceStorageConfirmationPresenter;
+@synthesize reduceStorageResultPresenter;
 
 /**
  * A table's size as the list shows it, in Table Information's units (B, KiB, MiB, GiB, TiB) and formats, moving up a
@@ -172,6 +176,26 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 
 	//create the charset helper
 	addTableCharsetHelper = [[SPCharsetCollationHelper alloc] initWithCharsetButton:tableEncodingButton CollationButton:tableCollationButton];
+
+	// Reduce Storage (the selected tables) and Reduce Storage of All Tables, after Truncate in both menus
+	reduceStorageMenuItem = [[self _insertReduceStorageItemAfter:truncateTableButton all:NO] retain];
+	reduceStorageOfAllTablesMenuItem = [[self _insertReduceStorageItemAfter:reduceStorageMenuItem all:YES] retain];
+	reduceStorageContextMenuItem = [[self _insertReduceStorageItemAfter:truncateTableContextMenuItem all:NO] retain];
+	reduceStorageOfAllTablesContextMenuItem = [[self _insertReduceStorageItemAfter:reduceStorageContextMenuItem all:YES] retain];
+}
+
+/// A Reduce Storage item (all: of every table) put right after item in its menu (nil when item has no menu).
+- (NSMenuItem *)_insertReduceStorageItemAfter:(NSMenuItem *)item all:(BOOL)all
+{
+	NSMenu *menu = [item menu];
+	if (!menu) return nil;
+	NSMenuItem *reduce = [[[NSMenuItem alloc] initWithTitle:all ? NSLocalizedString(@"Reduce Storage of All Tables…", @"MySQL table list: reduce storage of all tables menu item") : NSLocalizedString(@"Reduce Storage…", @"MySQL table list: reduce storage menu item")
+													 action:all ? @selector(reduceStorageOfAllTables:) : @selector(reduceStorage:)
+											  keyEquivalent:@""] autorelease];
+	[reduce setTarget:self];
+	[reduce setToolTip:all ? NSLocalizedString(@"Give the space of deleted rows back to the disk for every table of the database (OPTIMIZE TABLE)", @"MySQL table list: reduce storage of all tables tooltip") : NSLocalizedString(@"Give the space of deleted rows back to the disk (OPTIMIZE TABLE)", @"MySQL table list: reduce storage tooltip")];
+	[menu insertItem:reduce atIndex:[menu indexOfItem:item] + 1];
+	return reduce;
 }
 
 #pragma mark -
@@ -1974,6 +1998,167 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 /**
  * Menu item interface validation
  */
+#pragma mark -
+#pragma mark Reduce Storage
+
+/// The selected base tables (nil if anything else is selected).
+- (NSArray<NSString *> *)_selectedTableNamesForReduceStorage
+{
+	NSIndexSet *indexes = [tablesListView selectedRowIndexes];
+	NSMutableArray *names = [NSMutableArray arrayWithCapacity:[indexes count]];
+	__block BOOL onlyTables = YES;
+	[indexes enumerateIndexesUsingBlock:^(NSUInteger index, BOOL *stop) {
+		if (index >= [filteredTables count] || [[filteredTableTypes objectAtIndex:index] integerValue] != SPTableTypeTable) {
+			onlyTables = NO;
+			*stop = YES;
+			return;
+		}
+		[names addObject:[filteredTables objectAtIndex:index]];
+	}];
+	return onlyTables ? names : nil;
+}
+
+/**
+ * Reduce Storage…: the selected tables' unused space goes back to the disk (OPTIMIZE TABLE), after a question. The
+ * first failure stops (tables done before it stay done).
+ */
+- (IBAction)reduceStorage:(id)sender
+{
+	NSArray *names = [self _selectedTableNamesForReduceStorage];
+	if (![names count]) return;
+	[self _askToReduceStorageOfTables:names all:NO];
+}
+
+/// Reduce Storage of All Tables…: the same for every table of the database; a table that fails is skipped and listed.
+- (IBAction)reduceStorageOfAllTables:(id)sender
+{
+	NSArray *names = [self allTableNames];
+	if (![names count]) return;
+	[self _askToReduceStorageOfTables:names all:YES];
+}
+
+- (void)_askToReduceStorageOfTables:(NSArray *)names all:(BOOL)all
+{
+	if ([tableDocumentInstance isWorking]) return;
+	NSWindow *window = [tableDocumentInstance parentWindow];
+	if (!window || [window attachedSheet]) return;
+
+	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+	[alert addButtonWithTitle:NSLocalizedString(@"Reduce Storage", @"MySQL reduce storage button")];
+	[alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"cancel button")];
+	[[[alert buttons] objectAtIndex:1] setKeyEquivalent:@"\r"];
+	[alert setAlertStyle:NSAlertStyleWarning];
+	if (all) {
+		[alert setMessageText:[NSString stringWithFormat:NSLocalizedString(@"Reduce the storage of all %lu tables in database '%@'?", @"MySQL reduce storage of all tables message"), (unsigned long)[names count], [tableDocumentInstance database] ?: @""]];
+	}
+	else if ([names count] == 1) {
+		[alert setMessageText:[NSString stringWithFormat:NSLocalizedString(@"Reduce the storage of table '%@'?", @"MySQL reduce storage message"), [names firstObject]]];
+	}
+	else {
+		[alert setMessageText:NSLocalizedString(@"Reduce the storage of the selected tables?", @"MySQL reduce storage tables message")];
+	}
+	[alert setInformativeText:NSLocalizedString(@"The space left by deleted and updated rows is given back to the disk, and the statistics are updated (OPTIMIZE TABLE). No rows are changed.\n\nEach InnoDB table is rebuilt, which needs free disk space about the size of the table; it can be read and written meanwhile, except briefly at the start and end. MyISAM tables are locked while they are optimized. The space goes back to the disk when the table has its own file (innodb_file_per_table, the default); otherwise it stays in the shared tablespace for new rows.", @"MySQL reduce storage informative message")];
+
+	NSArray *theNames = [[names copy] autorelease];
+	if (reduceStorageConfirmationPresenter) {
+		reduceStorageConfirmationPresenter(alert, ^(BOOL confirmed) {
+			if (confirmed) [self _reduceStorageOfTables:theNames all:all];
+		});
+		return;
+	}
+	[alert beginSheetModalForWindow:window completionHandler:^(NSModalResponse response) {
+		if (response == NSAlertFirstButtonReturn) [self _reduceStorageOfTables:theNames all:all];
+	}];
+}
+
+- (void)_reduceStorageOfTables:(NSArray *)names all:(BOOL)all
+{
+	if ([tableDocumentInstance isWorking]) {
+		NSBeep();
+		return;
+	}
+	NSString *description;
+	if (all) description = [NSString stringWithFormat:NSLocalizedString(@"Reducing the storage of all tables in '%@'...", @"MySQL reduce storage of all tables task"), [tableDocumentInstance database] ?: @""];
+	else if ([names count] == 1) description = [NSString stringWithFormat:NSLocalizedString(@"Reducing the storage of '%@'...", @"MySQL reduce storage task"), [names firstObject]];
+	else description = NSLocalizedString(@"Reducing the storage of the selected tables...", @"MySQL reduce storage tables task");
+
+	reduceStorageCancelled = NO;
+	[tableDocumentInstance startTaskWithDescription:description];
+	[tableDocumentInstance enableTaskCancellationWithTitle:NSLocalizedString(@"Cancel", @"cancel button") callbackObject:self callbackFunction:@selector(_cancelReduceStorage)];
+
+	NSDictionary *details = @{@"names": names, @"all": @(all)};
+	[NSThread detachNewThreadWithName:SPCtxt(@"SPTablesList reduce storage task", tableDocumentInstance)
+							   target:self
+							 selector:@selector(_reduceStorageWithDetails:)
+							   object:details];
+}
+
+/// The task's Cancel (the document has already stopped the running OPTIMIZE on the server): no further table starts.
+- (void)_cancelReduceStorage
+{
+	reduceStorageCancelled = YES;
+}
+
+- (void)_reduceStorageWithDetails:(NSDictionary *)details
+{
+	@autoreleasepool
+	{
+		NSArray *names = [details objectForKey:@"names"];
+		BOOL all = [[details objectForKey:@"all"] boolValue];
+		SPMySQLConnection *connection = mySQLConnection;
+
+		NSString *errorMessage = nil;
+		NSArray *results = [SPMySQLStorageReducer reduceStorageOfTables:names skippingFailures:all query:^NSArray *(NSString *sql, NSString **message) {
+			SPMySQLResult *result = [connection queryString:sql];
+			if ([connection queryErrored]) {
+				if (message) *message = [connection lastErrorMessage];
+				return nil;
+			}
+			[result setReturnDataAsStrings:YES];
+			return [result getAllRows] ?: @[];
+		} isCancelled:^BOOL{
+			return reduceStorageCancelled;
+		} errorMessage:&errorMessage];
+
+		BOOL cancelled = reduceStorageCancelled;
+		SPMainQSync(^{
+			[tableDocumentInstance disableTaskCancellation];
+			[tableDocumentInstance endTask];
+
+			// Sizes changed (also for tables done before a failure or a cancel): the list and Table Information read again
+			[tableDataInstance resetStatusData];
+			[self updateTables:self];
+
+			if (cancelled) return;
+			NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+			if (!results) {
+				[alert setAlertStyle:NSAlertStyleCritical];
+				[alert setMessageText:NSLocalizedString(@"Error reducing storage", @"MySQL reduce storage error title")];
+				[alert setInformativeText:[NSString stringWithFormat:NSLocalizedString(@"MySQL said: %@", @"MySQL reduce storage error: server message"), errorMessage ?: @""]];
+			}
+			else {
+				NSArray *lines = [SPMySQLStorageReducer resultLinesFor:results sizeFormatter:^NSString *(long long bytes) {
+					return [SPTablesList listStringForTableSize:bytes];
+				}];
+				BOOL anyReduced = NO;
+				for (NSDictionary *result in results) {
+					if (![result objectForKey:@"skipped"]) anyReduced = YES;
+				}
+				[alert setAlertStyle:NSAlertStyleInformational];
+				[alert setMessageText:anyReduced ? NSLocalizedString(@"Storage reduced", @"MySQL reduce storage done title") : NSLocalizedString(@"No table's storage was reduced", @"MySQL reduce storage: every table skipped")];
+				[alert setInformativeText:[lines componentsJoinedByString:@"\n"]];
+			}
+			if (reduceStorageResultPresenter) {
+				reduceStorageResultPresenter(alert);
+				return;
+			}
+			NSWindow *window = [tableDocumentInstance parentWindow];
+			if (window && ![window attachedSheet]) [alert beginSheetModalForWindow:window completionHandler:nil];
+			else [alert runModal];
+		});
+	}
+}
+
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem
 {
 	SEL action = [menuItem action];
@@ -1991,6 +2176,16 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 		action == @selector(truncateTable:))
 	{
 		return selectedRows > 0;
+	}
+
+	// Reduce Storage: shown when Truncate is (one or more tables, nothing else, selected)
+	if (action == @selector(reduceStorage:)) {
+		NSMenuItem *truncate = ([menuItem menu] == [truncateTableContextMenuItem menu]) ? truncateTableContextMenuItem : truncateTableButton;
+		[menuItem setHidden:[truncate isHidden]];
+		return selectedRows > 0 && ![truncate isHidden] && [[self _selectedTableNamesForReduceStorage] count] > 0;
+	}
+	if (action == @selector(reduceStorageOfAllTables:)) {
+		return [[self allTableNames] count] > 0;
 	}
 
 	//Default to YES (like Apple)
@@ -2888,6 +3083,12 @@ static NSString *SPNewTableCollation    = @"SPNewTableCollation";
 	
 	SPClear(tables);
 	SPClear(tableTypes);
+	SPClear(reduceStorageMenuItem);
+	SPClear(reduceStorageOfAllTablesMenuItem);
+	SPClear(reduceStorageContextMenuItem);
+	SPClear(reduceStorageOfAllTablesContextMenuItem);
+	if (reduceStorageConfirmationPresenter) SPClear(reduceStorageConfirmationPresenter);
+	if (reduceStorageResultPresenter) SPClear(reduceStorageResultPresenter);
 	if (tableSizes) SPClear(tableSizes);
 
 	if (isTableListFiltered && filteredTables)     SPClear(filteredTables);

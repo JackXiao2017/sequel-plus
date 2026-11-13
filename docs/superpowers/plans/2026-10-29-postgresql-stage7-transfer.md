@@ -140,7 +140,7 @@ Docker test servers: PG 12 on 55412, PG 18 on 55418.
 
 - **Never break MySQL.** No MySQL source file changes. `SPMainToolbar.m`, `SPToolbarTransferItem.*` and
   `SPDatabaseDocument.*` are untouched, and MySQL's Transfer item stays an always-disabled `SPDisabledToolbarItem`.
-  The only non-Postgres change is additive `sequel-pro.xcodeproj/project.pbxproj` entries.
+  The only non-Postgres change is additive `sequel-plus.xcodeproj/project.pbxproj` entries.
 - PostgreSQL **12 through 18**. Every data-layer test runs on both 55412 and 55418; cross-version tests copy
   12 → 18 and 18 → 12.
 - **Quoting:** identifiers through `SPPostgresQuoteIdentifier`, values through `SPPostgresQuoteLiteral` or `$n`
@@ -158,9 +158,9 @@ Docker test servers: PG 12 on 55412, PG 18 on 55418.
 - **Code conventions:** MRC in app sources; ARC in `Postgres Tests`. Add files only with
   `ruby Scripts/pg-xcodeproj.rb add-app|add-test`. Exported classes and functions need
   `__attribute__((visibility("default")))`.
-- **Test command:** `timeout 900 xcodebuild test -project sequel-pro.xcodeproj -scheme "Postgres Tests"
+- **Test command:** `timeout 900 xcodebuild test -project sequel-plus.xcodeproj -scheme "Postgres Tests"
   -derivedDataPath build/DerivedData ARCHS=arm64` (after `bash Scripts/pg-test-servers.sh up`).
-- **App build:** `xcodebuild -project sequel-pro.xcodeproj -scheme "Sequel Pro" -configuration Debug
+- **App build:** `xcodebuild -project sequel-plus.xcodeproj -scheme "Sequel Plus" -configuration Debug
   -derivedDataPath build/DerivedData ARCHS=arm64 build`.
 - **Agent sessions:** implementers never launch the GUI app; never kill processes you didn't start; never touch
   the owner's untracked `start_clause.sh`; stage only your own files.

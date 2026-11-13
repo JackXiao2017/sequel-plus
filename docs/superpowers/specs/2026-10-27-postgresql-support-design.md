@@ -196,7 +196,7 @@ MySQL's:
 
 - Objective-C, mostly manual retain/release (non-ARC), AppKit, deployment target macOS 12.0,
   `ARCHS=arm64`. Built with
-  `xcodebuild -project sequel-pro.xcodeproj -scheme "Sequel Pro" -configuration Debug -derivedDataPath build/DerivedData ARCHS=arm64 build`.
+  `xcodebuild -project sequel-plus.xcodeproj -scheme "Sequel Plus" -configuration Debug -derivedDataPath build/DerivedData ARCHS=arm64 build`.
 - **No version control on the project itself**: it sits inside a git repo rooted at the user's
   home directory. Initialise a project-level repo before starting, so the MySQL side can be
   compared and rolled back. This directly serves the anti-goal.

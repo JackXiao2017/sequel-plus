@@ -32,7 +32,7 @@ window of its own. MySQL-only code keeps receiving only `SPDatabaseDocument`s:
   into real prefs or the login keychain.
 - MRC in app sources; ARC in `Postgres Tests`. Add files only with `ruby Scripts/pg-xcodeproj.rb
   add-app|add-test`; exported classes and constants need `__attribute__((visibility("default")))`.
-- Test command: `timeout 900 xcodebuild test -project sequel-pro.xcodeproj -scheme "Postgres Tests"
+- Test command: `timeout 900 xcodebuild test -project sequel-plus.xcodeproj -scheme "Postgres Tests"
   -derivedDataPath build/DerivedData ARCHS=arm64`. Docker servers: `bash Scripts/pg-test-servers.sh up`.
 - Don't launch the GUI app from implementer sessions: it restores the owner's live MySQL session.
   The controller does the visual checks.

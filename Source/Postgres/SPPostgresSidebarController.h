@@ -24,6 +24,10 @@
 - (void)sidebar:(SPPostgresSidebarController *)sidebar renameTableNamed:(NSString *)table;
 /// "Truncate Table(s)" was chosen for `tables`, tables (no view) of the selected schema.
 - (void)sidebar:(SPPostgresSidebarController *)sidebar truncateTables:(NSArray<NSString *> *)tables;
+/// "Reduce Storage…" was chosen for `tables`, tables (no view) of the selected schema.
+- (void)sidebar:(SPPostgresSidebarController *)sidebar reduceStorageOfTables:(NSArray<NSString *> *)tables;
+/// "Reduce Storage of All Tables…" was chosen: `tables` are every table of the selected schema (whatever is selected).
+- (void)sidebar:(SPPostgresSidebarController *)sidebar reduceStorageOfAllTables:(NSArray<NSString *> *)tables;
 /// "Delete Table/View/Tables/Views/Items" was chosen for `names`, tables and views of the selected schema.
 - (void)sidebar:(SPPostgresSidebarController *)sidebar removeRelations:(NSArray<NSString *> *)names;
 /// "Open Table/View in New Tab" (newWindow NO) or "… in New Window" (the Option alternate, YES) was chosen for `name`,
