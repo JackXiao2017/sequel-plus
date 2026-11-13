@@ -2,7 +2,7 @@
 # Edits sequel-plus.xcodeproj for the PostgreSQL work. The only supported way to touch project.pbxproj.
 #
 #   ruby Scripts/pg-xcodeproj.rb setup               one-time (idempotent) wiring of PostgresKit + "Postgres Tests"
-#   ruby Scripts/pg-xcodeproj.rb add-app  <files...>  add sources to the "Sequel Pro" target (group Source/Postgres)
+#   ruby Scripts/pg-xcodeproj.rb add-app  <files...>  add sources to the "Sequel Plus" target (group Source/Postgres)
 #   ruby Scripts/pg-xcodeproj.rb add-test <files...>  add sources to the "Postgres Tests" target (group PostgresTests)
 #   ruby Scripts/pg-xcodeproj.rb remove   <files...>  remove files from the project (every target's build phases
 #                                                     and their group); the files on disk are left alone
@@ -16,7 +16,7 @@ require 'fileutils'
 
 ROOT      = File.expand_path('..', __dir__)
 PROJ_PATH = File.join(ROOT, 'sequel-plus.xcodeproj')
-APP       = 'Sequel Pro'
+APP       = 'Sequel Plus'
 TESTS     = 'Postgres Tests'
 KIT_PROJ  = 'Frameworks/PostgresKit/PostgresKit.xcodeproj'
 KIT_TARGET_ID  = '8DC2EF4F0486A6940098B216'

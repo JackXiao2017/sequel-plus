@@ -663,7 +663,7 @@
 			containerPortal = 2A37F4A9FDCFA73011CA2CEA /* Project object */;
 			proxyType = 1;
 			remoteGlobalIDString = 8D15AC270486D014006FF6A4;
-			remoteInfo = "Sequel Pro";
+			remoteInfo = "Sequel Plus";
 		};
 		1798AB401267731F000D946A /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -761,7 +761,7 @@
 			containerPortal = 2A37F4A9FDCFA73011CA2CEA /* Project object */;
 			proxyType = 1;
 			remoteGlobalIDString = 8D15AC270486D014006FF6A4;
-			remoteInfo = "Sequel Pro";
+			remoteInfo = "Sequel Plus";
 		};
 		F48D99F5B03F517BCF03A4BA /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -3401,9 +3401,9 @@
 			productReference = 58CDB3360FCE13C900F8ACA3 /* SequelProTunnelAssistant */;
 			productType = "com.apple.product-type.tool";
 		};
-		8D15AC270486D014006FF6A4 /* Sequel Pro */ = {
+		8D15AC270486D014006FF6A4 /* Sequel Plus */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = C05733C708A9546B00998B17 /* Build configuration list for PBXNativeTarget "Sequel Pro" */;
+			buildConfigurationList = C05733C708A9546B00998B17 /* Build configuration list for PBXNativeTarget "Sequel Plus" */;
 			buildPhases = (
 				8D15AC300486D014006FF6A4 /* Sources */,
 				8D15AC330486D014006FF6A4 /* Frameworks */,
@@ -3423,7 +3423,7 @@
 				586AAB1014FAD3A2007F82BF /* PBXTargetDependency */,
 				B0B25A5668E3D5729665A22C /* PBXTargetDependency */,
 			);
-			name = "Sequel Pro";
+			name = "Sequel Plus";
 			productInstallPath = "$(HOME)/Applications";
 			productName = "sequel-pro";
 			productReference = 8D15AC370486D014006FF6A4 /* Sequel Plus.app */;
@@ -3486,7 +3486,7 @@
 			);
 			projectRoot = "";
 			targets = (
-				8D15AC270486D014006FF6A4 /* Sequel Pro */,
+				8D15AC270486D014006FF6A4 /* Sequel Plus */,
 				380F4ED80FC0B50500B0BFD7 /* Unit Tests */,
 				58CDB3350FCE13C900F8ACA3 /* SequelProTunnelAssistant */,
 				58B906E511BD989A000826E5 /* PSMTabBar */,
@@ -4219,7 +4219,7 @@
 /* Begin PBXTargetDependency section */
 		1798AB2812676F14000D946A /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			target = 8D15AC270486D014006FF6A4 /* Sequel Pro */;
+			target = 8D15AC270486D014006FF6A4 /* Sequel Plus */;
 			targetProxy = 1798AB2712676F14000D946A /* PBXContainerItemProxy */;
 		};
 		1798AB411267731F000D946A /* PBXTargetDependency */ = {
@@ -4269,8 +4269,8 @@
 		};
 		FE1686362647DE03904E5001 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
-			name = "Sequel Pro";
-			target = 8D15AC270486D014006FF6A4 /* Sequel Pro */;
+			name = "Sequel Plus";
+			target = 8D15AC270486D014006FF6A4 /* Sequel Plus */;
 			targetProxy = C93A2902D792A2CBE3BB4F2B /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
@@ -5358,7 +5358,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		C05733C708A9546B00998B17 /* Build configuration list for PBXNativeTarget "Sequel Pro" */ = {
+		C05733C708A9546B00998B17 /* Build configuration list for PBXNativeTarget "Sequel Plus" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				C05733C808A9546B00998B17 /* Debug */,

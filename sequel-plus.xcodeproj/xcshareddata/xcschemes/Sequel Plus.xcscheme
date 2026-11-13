@@ -16,7 +16,7 @@
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "8D15AC270486D014006FF6A4"
                BuildableName = "Sequel Plus.app"
-               BlueprintName = "Sequel Pro"
+               BlueprintName = "Sequel Plus"
                ReferencedContainer = "container:sequel-plus.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -44,7 +44,7 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "8D15AC270486D014006FF6A4"
             BuildableName = "Sequel Plus.app"
-            BlueprintName = "Sequel Pro"
+            BlueprintName = "Sequel Plus"
             ReferencedContainer = "container:sequel-plus.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
@@ -74,7 +74,7 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "8D15AC270486D014006FF6A4"
             BuildableName = "Sequel Plus.app"
-            BlueprintName = "Sequel Pro"
+            BlueprintName = "Sequel Plus"
             ReferencedContainer = "container:sequel-plus.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
@@ -93,7 +93,7 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "8D15AC270486D014006FF6A4"
             BuildableName = "Sequel Plus.app"
-            BlueprintName = "Sequel Pro"
+            BlueprintName = "Sequel Plus"
             ReferencedContainer = "container:sequel-plus.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
