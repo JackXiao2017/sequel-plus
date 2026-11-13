@@ -12,15 +12,15 @@
 
 ## Global Constraints
 
-- Never break or change existing MySQL features. MySQL source files are not modified in this stage, except `sequel-pro.xcodeproj/project.pbxproj` (additive, via `ruby Scripts/pg-xcodeproj.rb add-app|add-test`). `ProgressIndicatorLayer.xib` is loaded, not edited.
+- Never break or change existing MySQL features. MySQL source files are not modified in this stage, except `sequel-plus.xcodeproj/project.pbxproj` (additive, via `ruby Scripts/pg-xcodeproj.rb add-app|add-test`). `ProgressIndicatorLayer.xib` is loaded, not edited.
 - One query at a time on a Postgres connection: nothing may use a tab's connection on the main thread while its runner is busy.
 - Never write `~/Library/Application Support/Sequel Pro/Data/Favorites.plist` from Postgres code; tests never persist into real preferences or the login keychain.
 - Short writes stay synchronous on the main thread (saving a cell, adding/deleting rows, rename, duplicate, comment, structure edits, sequence/extension changes); they refuse to start (`NSBeep()`, return) while the runner is busy.
 - A cancelled load never shows an error alert.
 - MRC in `Source/Postgres` (`__block` for self captures that must not retain; blocks copied when stored); ARC in `PostgresTests`. Exported classes carry `__attribute__((visibility("default")))`.
 - Implementer agents never launch the GUI app and never kill processes they didn't start; never touch the owner's untracked `start_clause.sh`.
-- Tests: `timeout 900 xcodebuild test -project sequel-pro.xcodeproj -scheme "Postgres Tests" -derivedDataPath build/DerivedData ARCHS=arm64`; servers via `bash Scripts/pg-test-servers.sh up`. Single class: append `-only-testing:"Postgres Tests"/<Class>`.
-- App build: `xcodebuild -project sequel-pro.xcodeproj -scheme "Sequel Pro" -configuration Debug -derivedDataPath build/DerivedData ARCHS=arm64 build`.
+- Tests: `timeout 900 xcodebuild test -project sequel-plus.xcodeproj -scheme "Postgres Tests" -derivedDataPath build/DerivedData ARCHS=arm64`; servers via `bash Scripts/pg-test-servers.sh up`. Single class: append `-only-testing:"Postgres Tests"/<Class>`.
+- App build: `xcodebuild -project sequel-plus.xcodeproj -scheme "Sequel Plus" -configuration Debug -derivedDataPath build/DerivedData ARCHS=arm64 build`.
 - Commit messages end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 
 ## MySQL behaviour to copy (from `Source/SPDatabaseDocument.m`, `SPTableContent.m`, `SPCustomQuery.m`)
@@ -52,7 +52,7 @@
 - Create: `Source/Postgres/SPPostgresTaskRunner.h`, `Source/Postgres/SPPostgresTaskRunner.m`
 - Create: `PostgresTests/SPPostgresTaskRunnerTests.m`
 - Modify: `PostgresTests/SPPostgresTestServers.h/.m` (wait helper)
-- Modify: `sequel-pro.xcodeproj/project.pbxproj` (via `Scripts/pg-xcodeproj.rb`)
+- Modify: `sequel-plus.xcodeproj/project.pbxproj` (via `Scripts/pg-xcodeproj.rb`)
 
 **Interfaces:**
 - Produces:

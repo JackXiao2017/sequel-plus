@@ -56,9 +56,9 @@ builder's calls on USING, dependent columns and transactions) as amended by
   - MRC in app sources; ARC in `Postgres Tests`.
   - Add files only with `ruby Scripts/pg-xcodeproj.rb add-app|add-test`.
   - Exported classes need `__attribute__((visibility("default")))`.
-- **Test command:** `timeout 900 xcodebuild test -project sequel-pro.xcodeproj -scheme "Postgres Tests"
+- **Test command:** `timeout 900 xcodebuild test -project sequel-plus.xcodeproj -scheme "Postgres Tests"
   -derivedDataPath build/DerivedData ARCHS=arm64`. Run `bash Scripts/pg-test-servers.sh up` first.
-- **App build:** `xcodebuild -project sequel-pro.xcodeproj -scheme "Sequel Pro" -configuration Debug -derivedDataPath
+- **App build:** `xcodebuild -project sequel-plus.xcodeproj -scheme "Sequel Plus" -configuration Debug -derivedDataPath
   build/DerivedData ARCHS=arm64 build`.
 - **Agent sessions:**
   - Implementer sessions never launch the GUI app; the controller does the visual checks.

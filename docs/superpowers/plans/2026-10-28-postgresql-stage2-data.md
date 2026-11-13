@@ -42,7 +42,7 @@ toolbar item) as amended by `docs/superpowers/specs/2026-10-27-postgresql-tabs-d
   (`PostgresTests/SPTestPrefsGuard.m` stays effective).
 - MRC in app sources; ARC in `Postgres Tests`. Add files only with
   `ruby Scripts/pg-xcodeproj.rb add-app|add-test`. Exported classes need `__attribute__((visibility("default")))`.
-- Test command: `timeout 900 xcodebuild test -project sequel-pro.xcodeproj -scheme "Postgres Tests"
+- Test command: `timeout 900 xcodebuild test -project sequel-plus.xcodeproj -scheme "Postgres Tests"
   -derivedDataPath build/DerivedData ARCHS=arm64` (`bash Scripts/pg-test-servers.sh up` first).
 - Implementer sessions never launch the GUI app; the controller does the visual checks.
 - Never touch the owner's untracked `start_clause.sh`; stage only your own files.

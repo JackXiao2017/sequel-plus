@@ -80,7 +80,7 @@ look exactly as MySQL's disabled items do.
 
 ## Verification
 
-- `timeout 900 xcodebuild test -project sequel-pro.xcodeproj -scheme "Postgres Tests" -derivedDataPath build/DerivedData ARCHS=arm64`
+- `timeout 900 xcodebuild test -project sequel-plus.xcodeproj -scheme "Postgres Tests" -derivedDataPath build/DerivedData ARCHS=arm64`
   passes. Run `bash Scripts/pg-test-servers.sh up` first if needed.
 - App build succeeds.
 - Before/after PNGs exist in the scratchpad folder above, and the report lists the remaining differences

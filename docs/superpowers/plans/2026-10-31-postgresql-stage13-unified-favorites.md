@@ -42,13 +42,13 @@ dragging (between MySQL favorites, in MySQL groups), remembered across launches,
 - Commit trailer: `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 - **Test command:**
   ```
-  timeout 1500 xcodebuild test -project sequel-pro.xcodeproj -scheme "Postgres Tests" -derivedDataPath build/DerivedData ARCHS=arm64
+  timeout 1500 xcodebuild test -project sequel-plus.xcodeproj -scheme "Postgres Tests" -derivedDataPath build/DerivedData ARCHS=arm64
   ```
   - For one class, add `-only-testing:"Postgres Tests/<Class>"`.
   - Start the servers first with `bash Scripts/pg-test-servers.sh up`; existing classes need them.
 - **App build:**
   ```
-  xcodebuild -project sequel-pro.xcodeproj -scheme "Sequel Pro" -configuration Debug -derivedDataPath build/DerivedData ARCHS=arm64 build
+  xcodebuild -project sequel-plus.xcodeproj -scheme "Sequel Plus" -configuration Debug -derivedDataPath build/DerivedData ARCHS=arm64 build
   ```
 
 ## Placement record (shared by Tasks 1–4)
