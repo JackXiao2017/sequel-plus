@@ -262,7 +262,7 @@ static NSString * const SPScopeTransfer = @"TransferToolbarItemIdentifier";
 		enabled[NSStringFromSelector([item action])] = @([sidebar validateMenuItem:item]);
 	}
 
-	for (NSString *action in @[@"renameTable:", @"duplicateTable:", @"truncateTables:", @"removeRelations:", @"openRelationInNewTab:",
+	for (NSString *action in @[@"renameTable:", @"duplicateTable:", @"truncateTables:", @"reduceStorage:", @"reduceStorageOfAllTables:", @"removeRelations:", @"openRelationInNewTab:",
 							   @"openRelationInNewWindow:", @"exportRelations:", @"showCreateSyntax:", @"copyCreateSyntax:"]) {
 		XCTAssertEqualObjects(enabled[action], @YES, @"%@", action);
 	}

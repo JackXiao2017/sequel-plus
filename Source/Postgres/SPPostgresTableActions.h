@@ -18,6 +18,24 @@ __attribute__((visibility("default")))
 + (BOOL)truncateTables:(NSArray<NSString *> *)tables inSchema:(NSString *)schema restartIdentity:(BOOL)restartIdentity connection:(PGPostgresConnection *)connection error:(NSError **)error;
 
 /**
+ * Reduce Storage: one `VACUUM (FULL, ANALYZE) "s"."t"` per table, in order. Each rewrites its table without the space
+ * left by deleted and updated rows, gives that space back to the disk, and updates the statistics; the table is locked
+ * (ACCESS EXCLUSIVE) while it runs. VACUUM can't run in a transaction block, so nothing is sent while the connection
+ * is in one. Every table is checked first (it exists, and the user owns it or, from PostgreSQL 17, has MAINTAIN on
+ * it: otherwise the server would skip it with a warning): if one fails, nothing is vacuumed. The lock wait is
+ * limited by lockTimeout (seconds, 0 no limit) for the session while it runs, then the session's own value is set
+ * back. Returns one dictionary per table: @"table", @"before" and @"after" (NSNumber, pg_total_relation_size in
+ * bytes); nil with *error if a check or a VACUUM failed (tables vacuumed before it stay vacuumed).
+ */
++ (NSArray<NSDictionary *> *)reduceStorageOfTables:(NSArray<NSString *> *)tables inSchema:(NSString *)schema lockTimeout:(NSTimeInterval)lockTimeout connection:(PGPostgresConnection *)connection error:(NSError **)error;
+/**
+ * The same; with skipping YES (all the tables of a schema), a table the user may not vacuum or that no longer exists
+ * is left out rather than failing the whole change: its dictionary has @"table" and @"skipped" (NSString, why), and
+ * the others are vacuumed.
+ */
++ (NSArray<NSDictionary *> *)reduceStorageOfTables:(NSArray<NSString *> *)tables inSchema:(NSString *)schema skippingTablesNotAllowed:(BOOL)skipping lockTimeout:(NSTimeInterval)lockTimeout connection:(PGPostgresConnection *)connection error:(NSError **)error;
+
+/**
  * Drops tables, views and materialized views (and foreign tables) with one DROP per relkind that names every object
  * of that kind (materialized views, then views, foreign tables, tables), all in one structure change: either all are
  * dropped or none. An object goes with what depends on it when that is named too (an FK child with its parent, a

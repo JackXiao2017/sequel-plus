@@ -36,6 +36,8 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 - (BOOL)sidebarShouldChangeSelection:(SPPostgresSidebarController *)sidebar;
 - (void)sidebar:(SPPostgresSidebarController *)sidebar dropExtensionNamed:(NSString *)name;
 - (void)sidebar:(SPPostgresSidebarController *)sidebar truncateTables:(NSArray<NSString *> *)tables;
+- (void)sidebar:(SPPostgresSidebarController *)sidebar reduceStorageOfTables:(NSArray<NSString *> *)tables;
+- (void)sidebar:(SPPostgresSidebarController *)sidebar reduceStorageOfAllTables:(NSArray<NSString *> *)tables;
 - (void)sidebar:(SPPostgresSidebarController *)sidebar removeRelations:(NSArray<NSString *> *)names;
 - (void)closeAddTableSheet:(id)sender;
 @end
@@ -2541,6 +2543,141 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	XCTAssertEqualObjects([self value:@"INSERT INTO public.sp9_a (v) VALUES ('f') RETURNING id::text" on:admin], @"2");
 	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
 	XCTAssertEqual(self.document.connection.transactionStatus, PGPostgresTransactionIdle);
+}
+
+- (void)testReduceStorageGivesSpaceBackAndShowsSizes
+{
+	PGPostgresConnection *admin = [self sp9AdminRunning:@[@"CREATE TABLE public.sp9_a (id integer PRIMARY KEY, v text)",
+														  @"INSERT INTO public.sp9_a SELECT g, repeat('x', 200) FROM generate_series(1, 20000) g",
+														  @"DELETE FROM public.sp9_a WHERE id % 20 <> 0",
+														  @"VACUUM public.sp9_a",
+														  @"CREATE VIEW public.sp9_v AS SELECT id FROM public.sp9_a"]];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	NSMutableArray<NSAlert *> *asked = [self answerConfirmationsWith:YES];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+
+	// In the right-click menu after Truncate; tables only
+	NSMenu *menu = sidebar.tableMenu;
+	NSInteger truncateIndex = [menu indexOfItemWithTarget:sidebar andAction:NSSelectorFromString(@"truncateTables:")];
+	NSMenuItem *reduce = [menu itemAtIndex:truncateIndex + 1];
+	XCTAssertEqual(reduce.action, NSSelectorFromString(@"reduceStorage:"));
+	XCTAssertTrue([sidebar selectTableNamed:@"sp9_v"]);
+	[self waitForTab];
+	XCTAssertFalse([sidebar validateMenuItem:reduce]);
+	XCTAssertTrue(reduce.hidden);
+	XCTAssertTrue([sidebar selectTableNamed:@"sp9_a"]);
+	[self waitForTab];
+	XCTAssertTrue([sidebar validateMenuItem:reduce]);
+	XCTAssertFalse(reduce.hidden);
+	XCTAssertEqualObjects(reduce.title, @"Reduce Storage…");
+
+	[self.document showPane:SPPostgresPaneInfo];
+	[self waitForTab];
+	NSString *before = self.document.infoController.totalSizeField.stringValue;
+	long long beforeBytes = [[self value:@"SELECT pg_total_relation_size('public.sp9_a')::text" on:admin] longLongValue];
+
+	[NSApp sendAction:reduce.action to:reduce.target from:reduce];
+	[self waitForTabAndQuestions];
+	[self waitForTab];
+	XCTAssertEqual(asked.count, 1u);
+	XCTAssertEqualObjects(asked[0].messageText, @"Reduce the storage of table 'sp9_a'?");
+	XCTAssertTrue([asked[0].informativeText containsString:@"VACUUM FULL"]);
+	XCTAssertEqualObjects([asked[0].buttons valueForKey:@"title"], (@[@"Reduce Storage", @"Cancel"]));
+	XCTAssertEqualObjects(asked[0].buttons[1].keyEquivalent, @"\r");
+
+	// Done: the rows stay, the space is given back, the sizes shown are the new ones
+	long long afterBytes = [[self value:@"SELECT pg_total_relation_size('public.sp9_a')::text" on:admin] longLongValue];
+	XCTAssertLessThan(afterBytes, beforeBytes / 5);
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_a" on:admin], @"1000");
+	NSString *after = [SPPostgresCatalog stringForSize:afterBytes];
+	XCTAssertEqual(alerts.count, 1u);
+	XCTAssertEqualObjects(alerts[0].messageText, @"Storage reduced");
+	XCTAssertEqualObjects(alerts[0].informativeText, ([NSString stringWithFormat:@"sp9_a: %@ → %@", [SPPostgresCatalog stringForSize:beforeBytes], after]));
+	XCTAssertNotEqualObjects(before, after);
+	XCTAssertEqualObjects(self.document.infoController.totalSizeField.stringValue, after);
+	XCTAssertTrue([sidebar.infoPane.lines containsObject:[@"total size: " stringByAppendingString:after]], @"%@", sidebar.infoPane.lines);
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"sp9_a");
+	XCTAssertEqual(self.document.connection.transactionStatus, PGPostgresTransactionIdle);
+}
+
+- (void)testReduceStorageOfAllTables
+{
+	PGPostgresConnection *admin = [self sp9AdminRunning:@[@"CREATE TABLE public.sp9_a (id integer PRIMARY KEY, v text)",
+														  @"INSERT INTO public.sp9_a SELECT g, repeat('x', 200) FROM generate_series(1, 20000) g",
+														  @"DELETE FROM public.sp9_a WHERE id % 20 <> 0",
+														  @"CREATE TABLE public.sp9_b (id integer)",
+														  @"CREATE VIEW public.sp9_v AS SELECT id FROM public.sp9_a"]];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	NSMutableArray<NSAlert *> *asked = [self answerConfirmationsWith:YES];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	NSArray<NSString *> *tables = [sidebar itemTitlesInSection:@"TABLES"];
+	XCTAssertTrue([tables containsObject:@"sp9_a"] && [tables containsObject:@"sp9_b"], @"%@", tables);
+	XCTAssertFalse([tables containsObject:@"sp9_v"]);
+
+	// After Reduce Storage…; offered whatever is selected, a view included
+	NSMenu *menu = sidebar.tableMenu;
+	NSInteger reduceIndex = [menu indexOfItemWithTarget:sidebar andAction:NSSelectorFromString(@"reduceStorage:")];
+	NSMenuItem *all = [menu itemAtIndex:reduceIndex + 1];
+	XCTAssertEqual(all.action, NSSelectorFromString(@"reduceStorageOfAllTables:"));
+	XCTAssertEqualObjects(all.title, @"Reduce Storage of All Tables…");
+	XCTAssertTrue([sidebar selectTableNamed:@"sp9_v"]);
+	[self waitForTab];
+	XCTAssertTrue([sidebar validateMenuItem:all]);
+	XCTAssertFalse(all.hidden);
+	long long beforeBytes = [[self value:@"SELECT pg_total_relation_size('public.sp9_a')::text" on:admin] longLongValue];
+
+	[NSApp sendAction:all.action to:all.target from:all];
+	[self waitForTabAndQuestions];
+	[self waitForTab];
+	XCTAssertEqual(asked.count, 1u);
+	XCTAssertEqualObjects(asked[0].messageText, ([NSString stringWithFormat:@"Reduce the storage of all %lu tables in schema 'public'?", (unsigned long)tables.count]));
+	XCTAssertEqualObjects([asked[0].buttons valueForKey:@"title"], (@[@"Reduce Storage", @"Cancel"]));
+
+	// Every table done: the total first, then each table; the view stays selected
+	long long afterBytes = [[self value:@"SELECT pg_total_relation_size('public.sp9_a')::text" on:admin] longLongValue];
+	XCTAssertLessThan(afterBytes, beforeBytes / 5);
+	XCTAssertEqual(alerts.count, 1u);
+	XCTAssertEqualObjects(alerts[0].messageText, @"Storage reduced");
+	NSArray<NSString *> *lines = [alerts[0].informativeText componentsSeparatedByString:@"\n"];
+	XCTAssertTrue([lines[0] hasPrefix:@"Total: "], @"%@", lines);
+	XCTAssertEqualObjects(lines[1], @"");
+	XCTAssertEqual(lines.count, tables.count + 2, @"%@", lines);
+	XCTAssertTrue([lines containsObject:([NSString stringWithFormat:@"sp9_a: %@ → %@", [SPPostgresCatalog stringForSize:beforeBytes], [SPPostgresCatalog stringForSize:afterBytes]])], @"%@", lines);
+	XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_a" on:admin], @"1000");
+	XCTAssertEqualObjects(sidebar.selectedTableName, @"sp9_v");
+	XCTAssertEqual(self.document.connection.transactionStatus, PGPostgresTransactionIdle);
+}
+
+- (void)testReduceStorageCancelledOrInsideTransaction
+{
+	PGPostgresConnection *admin = [self sp9AdminRunning:@[@"CREATE TABLE public.sp9_a (id integer)", @"INSERT INTO public.sp9_a VALUES (1), (2)"]];
+	NSMutableArray<NSAlert *> *alerts = [self captureAlerts];
+	NSMutableArray<NSAlert *> *asked = [self answerConfirmationsWith:NO];
+	SPPostgresSidebarController *sidebar = self.document.sidebar;
+	XCTAssertTrue([sidebar selectTableNamed:@"sp9_a"]);
+	[self waitForTab];
+	NSString *relfilenode = [self value:@"SELECT relfilenode::text FROM pg_class WHERE oid = 'public.sp9_a'::regclass" on:admin];
+
+	// Cancel in the question: nothing is sent
+	[self.document sidebar:sidebar reduceStorageOfTables:@[@"sp9_a"]];
+	[self waitForTabAndQuestions];
+	XCTAssertEqual(asked.count, 1u);
+	XCTAssertEqualObjects([self value:@"SELECT relfilenode::text FROM pg_class WHERE oid = 'public.sp9_a'::regclass" on:admin], relfilenode);
+	XCTAssertEqual(alerts.count, 0u);
+
+	// A transaction open on the tab's connection: refused with the reason, the transaction kept
+	asked = [self answerConfirmationsWith:YES];
+	XCTAssertNotNil([self.document.connection execute:@"BEGIN"]);
+	[self.document sidebar:sidebar reduceStorageOfTables:@[@"sp9_a"]];
+	[self waitForTabAndQuestions];
+	[self waitForTab];
+	XCTAssertEqual(asked.count, 1u);
+	XCTAssertEqual(alerts.count, 1u);
+	XCTAssertEqualObjects(alerts[0].messageText, @"Error reducing storage");
+	XCTAssertTrue([alerts[0].informativeText containsString:@"A transaction is open"], @"%@", alerts[0].informativeText);
+	XCTAssertEqual(self.document.connection.transactionStatus, PGPostgresTransactionInTransaction);
+	XCTAssertNotNil([self.document.connection execute:@"ROLLBACK"]);
+	XCTAssertEqualObjects([self value:@"SELECT relfilenode::text FROM pg_class WHERE oid = 'public.sp9_a'::regclass" on:admin], relfilenode);
 }
 
 - (void)testTruncateCancelledKeepsRows

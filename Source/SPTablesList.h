@@ -108,6 +108,16 @@
 	IBOutlet NSMenuItem *separatorTableContextMenuItem2;
 	IBOutlet NSMenuItem *separatorTableContextMenuItem3;
 
+	// Reduce Storage items, added after Truncate in the gear and context menus (see -awakeFromNib)
+	NSMenuItem *reduceStorageMenuItem;
+	NSMenuItem *reduceStorageOfAllTablesMenuItem;
+	NSMenuItem *reduceStorageContextMenuItem;
+	NSMenuItem *reduceStorageOfAllTablesContextMenuItem;
+	/// Set (main thread) when the running Reduce Storage task is cancelled; read by its thread before each table
+	volatile BOOL reduceStorageCancelled;
+	void (^reduceStorageConfirmationPresenter)(NSAlert *alert, void (^completion)(BOOL confirmed));
+	void (^reduceStorageResultPresenter)(NSAlert *alert);
+
 	NSMutableArray *tables;
 	NSMutableArray *filteredTables;
 	NSMutableArray *tableTypes;
@@ -134,6 +144,8 @@
 - (IBAction)copyTable:(nullable id)sender;
 - (IBAction)renameTable:(nullable id)sender;
 - (IBAction)truncateTable:(nullable id)sender;
+- (IBAction)reduceStorage:(nullable id)sender;
+- (IBAction)reduceStorageOfAllTables:(nullable id)sender;
 - (IBAction)openTableInNewTab:(nullable id)sender;
 - (IBAction)openTableInNewWindow:(nullable id)sender;
 - (IBAction)togglePaneCollapse:(nullable id)sender;
@@ -190,5 +202,10 @@
 
 // A table's size as the table list shows it (each unit up to 1024 of it: 1,023.9 MiB, then 1.0 GiB)
 + (NSString *)listStringForTableSize:(long long)bytes;
+
+/// For tests: when set, Reduce Storage's question is handed here instead of shown (completion(YES) confirms)...
+@property (nonatomic, copy, nullable) void (^reduceStorageConfirmationPresenter)(NSAlert *alert, void (^completion)(BOOL confirmed));
+/// ...and its result or error alert.
+@property (nonatomic, copy, nullable) void (^reduceStorageResultPresenter)(NSAlert *alert);
 
 @end

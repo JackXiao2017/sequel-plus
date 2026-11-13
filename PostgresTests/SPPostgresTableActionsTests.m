@@ -34,6 +34,10 @@ static NSString * const SPQuotedOrders = @"\"Sales Data\".\"Orders \"\"x\"\" 202
 		[connection execute:@"ROLLBACK"];
 		[connection execute:@"SET lock_timeout = '10s'"];
 		for (NSString *sql in [[self class] cleanupStatements]) [connection execute:sql];
+		[connection execute:@"RESET ROLE"];
+		// A grant left by a failed test would keep the role from being dropped (fails harmlessly when there is no role)
+		[connection execute:@"REVOKE ALL ON SCHEMA public FROM sp9_vacuum_role"];
+		[connection execute:@"DROP ROLE IF EXISTS sp9_vacuum_role"];
 		[connection disconnect];
 	}
 }
@@ -131,6 +135,123 @@ static NSString * const SPQuotedOrders = @"\"Sales Data\".\"Orders \"\"x\"\" 202
 		[self run:@"INSERT INTO public.sp9_b VALUES (DEFAULT)" on:connection];
 		XCTAssertEqualObjects([self value:@"SELECT id::text FROM public.sp9_a" on:connection], @"1");
 		XCTAssertEqualObjects([self value:@"SELECT id::text FROM public.sp9_b" on:connection], @"1");
+	}];
+}
+
+#pragma mark - Reduce Storage
+
+- (void)testReduceStorageGivesDeletedRowsSpaceBack
+{
+	[self forEachServer:^(PGPostgresConnection *connection, NSNumber *port) {
+		[self run:@"CREATE TABLE public.sp9_a (id integer PRIMARY KEY, v text)" on:connection];
+		[self run:@"CREATE TABLE public.sp9_b (id integer)" on:connection];
+		[self run:@"INSERT INTO public.sp9_a SELECT g, repeat('x', 200) FROM generate_series(1, 20000) g" on:connection];
+		[self run:@"INSERT INTO public.sp9_b SELECT g FROM generate_series(1, 10) g" on:connection];
+		// Deleted with DELETE, spread over the table: a plain VACUUM keeps the space (only empty pages at the end go back)
+		[self run:@"DELETE FROM public.sp9_a WHERE id % 20 <> 0" on:connection];
+		[self run:@"VACUUM public.sp9_a" on:connection];
+		long long deleted = [[self value:@"SELECT pg_total_relation_size('public.sp9_a')::text" on:connection] longLongValue];
+		XCTAssertGreaterThan(deleted, 4LL * 1024 * 1024, @"%d", port.intValue);
+		// The session's own lock_timeout comes back afterwards
+		[self run:@"SET lock_timeout = '7s'" on:connection];
+
+		NSError *error = nil;
+		NSArray<NSDictionary *> *sizes = [SPPostgresTableActions reduceStorageOfTables:@[@"sp9_a", @"sp9_b"] inSchema:@"public" lockTimeout:5 connection:connection error:&error];
+		XCTAssertNotNil(sizes, @"%d: %@", port.intValue, error);
+		XCTAssertEqual(sizes.count, 2u);
+		XCTAssertEqualObjects(sizes[0][@"table"], @"sp9_a");
+		XCTAssertEqualObjects(sizes[1][@"table"], @"sp9_b");
+		XCTAssertEqual([sizes[0][@"before"] longLongValue], deleted);
+
+		long long after = [[self value:@"SELECT pg_total_relation_size('public.sp9_a')::text" on:connection] longLongValue];
+		XCTAssertEqual([sizes[0][@"after"] longLongValue], after);
+		XCTAssertLessThan(after, deleted / 5, @"%d: %lld of %lld", port.intValue, after, deleted);
+		// No row changed; the statistics are up to date
+		XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_a" on:connection], @"1000");
+		XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM public.sp9_b" on:connection], @"10");
+		XCTAssertEqualObjects([self value:@"SELECT reltuples::bigint::text FROM pg_class WHERE oid = 'public.sp9_a'::regclass" on:connection], @"1000");
+		XCTAssertEqualObjects([self value:@"SHOW lock_timeout" on:connection], @"7s");
+		XCTAssertEqual(connection.transactionStatus, PGPostgresTransactionIdle);
+	}];
+}
+
+- (void)testReduceStorageRefusedInsideTransaction
+{
+	[self forEachServer:^(PGPostgresConnection *connection, NSNumber *port) {
+		[self run:@"CREATE TABLE public.sp9_a (id integer)" on:connection];
+		[self run:@"BEGIN" on:connection];
+		NSError *error = nil;
+		XCTAssertNil([SPPostgresTableActions reduceStorageOfTables:@[@"sp9_a"] inSchema:@"public" lockTimeout:5 connection:connection error:&error]);
+		XCTAssertTrue([error.localizedDescription containsString:@"A transaction is open"], @"%@", error.localizedDescription);
+		// The user's transaction is left as it was
+		XCTAssertEqual(connection.transactionStatus, PGPostgresTransactionInTransaction);
+		[self run:@"ROLLBACK" on:connection];
+	}];
+}
+
+- (void)testReduceStorageChecksEveryTableBeforeVacuuming
+{
+	[self forEachServer:^(PGPostgresConnection *connection, NSNumber *port) {
+		[self run:@"CREATE TABLE public.sp9_a (id integer)" on:connection];
+		[self run:@"INSERT INTO public.sp9_a SELECT g FROM generate_series(1, 5000) g" on:connection];
+		[self run:@"DELETE FROM public.sp9_a" on:connection];
+		NSString *relfilenode = [self value:@"SELECT relfilenode::text FROM pg_class WHERE oid = 'public.sp9_a'::regclass" on:connection];
+
+		// A missing table: nothing is vacuumed (the table before it keeps its file)
+		NSError *error = nil;
+		XCTAssertNil(([SPPostgresTableActions reduceStorageOfTables:@[@"sp9_a", @"sp9_missing"] inSchema:@"public" lockTimeout:5 connection:connection error:&error]));
+		XCTAssertTrue([error.localizedDescription containsString:@"sp9_missing"], @"%@", error.localizedDescription);
+		XCTAssertEqualObjects([self value:@"SELECT relfilenode::text FROM pg_class WHERE oid = 'public.sp9_a'::regclass" on:connection], relfilenode);
+
+		// Not the owner: refused with a message (the server would only skip it with a warning)
+		[self run:@"CREATE ROLE sp9_vacuum_role NOLOGIN" on:connection];
+		[self run:@"SET ROLE sp9_vacuum_role" on:connection];
+		error = nil;
+		XCTAssertNil([SPPostgresTableActions reduceStorageOfTables:@[@"sp9_a"] inSchema:@"public" lockTimeout:5 connection:connection error:&error]);
+		XCTAssertTrue([error.localizedDescription containsString:@"Only the owner of the table “sp9_a”"], @"%@", error.localizedDescription);
+		[self run:@"RESET ROLE" on:connection];
+		XCTAssertEqualObjects([self value:@"SELECT relfilenode::text FROM pg_class WHERE oid = 'public.sp9_a'::regclass" on:connection], relfilenode);
+
+		// The owner: rewritten (a new file)
+		XCTAssertNotNil([SPPostgresTableActions reduceStorageOfTables:@[@"sp9_a"] inSchema:@"public" lockTimeout:5 connection:connection error:&error], @"%@", error);
+		XCTAssertNotEqualObjects([self value:@"SELECT relfilenode::text FROM pg_class WHERE oid = 'public.sp9_a'::regclass" on:connection], relfilenode);
+	}];
+}
+
+- (void)testReduceStorageOfAllTablesSkipsTablesNotOwned
+{
+	[self forEachServer:^(PGPostgresConnection *connection, NSNumber *port) {
+		[self run:@"CREATE ROLE sp9_vacuum_role NOLOGIN" on:connection];
+		[self run:@"CREATE TABLE public.sp9_a (id integer)" on:connection];
+		[self run:@"CREATE TABLE public.sp9_b (id integer)" on:connection];
+		[self run:@"INSERT INTO public.sp9_a SELECT g FROM generate_series(1, 5000) g" on:connection];
+		[self run:@"INSERT INTO public.sp9_b SELECT g FROM generate_series(1, 5000) g" on:connection];
+		// The session acts as sp9_vacuum_role, which owns sp9_a but not sp9_b
+		[self run:@"ALTER TABLE public.sp9_a OWNER TO sp9_vacuum_role" on:connection];
+		[self run:@"GRANT USAGE ON SCHEMA public TO sp9_vacuum_role" on:connection];
+		NSString *fileA = [self value:@"SELECT relfilenode::text FROM pg_class WHERE oid = 'public.sp9_a'::regclass" on:connection];
+		NSString *fileB = [self value:@"SELECT relfilenode::text FROM pg_class WHERE oid = 'public.sp9_b'::regclass" on:connection];
+
+		[self run:@"SET ROLE sp9_vacuum_role" on:connection];
+		NSError *error = nil;
+		// Strict (the selected tables): refused, nothing vacuumed
+		XCTAssertNil(([SPPostgresTableActions reduceStorageOfTables:@[@"sp9_a", @"sp9_b"] inSchema:@"public" lockTimeout:5 connection:connection error:&error]));
+		XCTAssertTrue([error.localizedDescription containsString:@"sp9_b"], @"%@", error.localizedDescription);
+		// All tables: sp9_b (and a table gone meanwhile) skipped, sp9_a vacuumed
+		NSArray<NSDictionary *> *results = [SPPostgresTableActions reduceStorageOfTables:@[@"sp9_a", @"sp9_b", @"sp9_missing"] inSchema:@"public" skippingTablesNotAllowed:YES lockTimeout:5 connection:connection error:&error];
+		[self run:@"RESET ROLE" on:connection];
+		XCTAssertNotNil(results, @"%d: %@", port.intValue, error);
+		XCTAssertEqual(results.count, 3u);
+		XCTAssertEqualObjects(results[0][@"table"], @"sp9_a");
+		XCTAssertNil(results[0][@"skipped"]);
+		XCTAssertNotNil(results[0][@"before"]);
+		XCTAssertNotNil(results[0][@"after"]);
+		XCTAssertEqualObjects(results[1], (@{@"table": @"sp9_b", @"skipped": @"not the owner"}));
+		XCTAssertEqualObjects(results[2], (@{@"table": @"sp9_missing", @"skipped": @"no longer exists"}));
+		XCTAssertNotEqualObjects([self value:@"SELECT relfilenode::text FROM pg_class WHERE oid = 'public.sp9_a'::regclass" on:connection], fileA);
+		XCTAssertEqualObjects([self value:@"SELECT relfilenode::text FROM pg_class WHERE oid = 'public.sp9_b'::regclass" on:connection], fileB);
+		[self run:@"DROP TABLE public.sp9_a" on:connection];
+		[self run:@"REVOKE USAGE ON SCHEMA public FROM sp9_vacuum_role" on:connection];
 	}];
 }
 
