@@ -3172,6 +3172,25 @@ static NSComparisonResult _compareFavoritesUsingKey(id favorite1, id favorite2, 
  */
 - (void)scrollViewFrameChanged:(NSNotification *)aNotification
 {
+	// The layout below sets frames, each posting a frame change that comes back here; and a frame it sets can make
+	// the scroller appear or go, changing the visible width again. Re-entered, that never settled once a display
+	// change (the screen waking after the app sat idle) switched the scrollers: the stack overflowed. So it never
+	// runs inside itself; instead it runs again (a few times at most) while the visible width keeps changing.
+	if (isLayingOutConnectionDetails) return;
+	isLayingOutConnectionDetails = YES;
+	for (NSUInteger pass = 0; pass < 3; pass++) {
+		CGFloat visibleWidth = [connectionDetailsScrollView contentSize].width;
+		[self _layOutConnectionDetails];
+		if ([connectionDetailsScrollView contentSize].width == visibleWidth) break;
+	}
+	isLayingOutConnectionDetails = NO;
+}
+
+/**
+ * The layout of -scrollViewFrameChanged:.
+ */
+- (void)_layOutConnectionDetails
+{
 	NSRect scrollViewFrame = [connectionDetailsScrollView frame];
 	NSRect scrollDocumentFrame = [[connectionDetailsScrollView documentView] frame];
 	NSRect connectionDetailsFrame = [connectionResizeContainer frame];
