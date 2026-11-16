@@ -89,6 +89,7 @@
 	
 #ifndef SP_CODA /* ivars */
     SPUserManager *userManagerInstance;
+    BOOL userManagerLoading; // "Loading users…" is up (see -showUserManager:)
 #endif
 	SPServerSupport *serverSupport;
 	
@@ -398,6 +399,7 @@
 - (IBAction)closePasswordSheet:(id)sender;
 - (IBAction)backForwardInHistory:(id)sender;
 - (IBAction)showUserManager:(id)sender;
+- (IBAction)showTransfer:(id)sender;
 - (IBAction)copyChecksumFromSheet:(id)sender;
 - (IBAction)showNavigator:(id)sender;
 - (IBAction)toggleNavigator:(id)sender;

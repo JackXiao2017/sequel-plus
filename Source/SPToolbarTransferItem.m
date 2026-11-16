@@ -26,6 +26,7 @@ void SPConfigureTransferToolbarItem(NSToolbarItem *item)
 {
 	[item setLabel:NSLocalizedString(@"Transfer", @"PostgreSQL toolbar: Transfer")];
 	[item setPaletteLabel:[item label]];
+	[item setToolTip:NSLocalizedString(@"Copy this database, or some of its tables, to another connection", @"tooltip for the Transfer toolbar item")];
 	[item setImage:SPTransferToolbarImage()];
 }
 
@@ -41,7 +42,8 @@ BOOL SPInsertTransferToolbarItemIfNeeded(NSToolbar *toolbar, NSUserDefaults *def
 	BOOL inserted = NO;
 
 	if (![identifiers containsObject:SPMainToolbarTransfer]) {
-		NSUInteger index = [identifiers indexOfObject:SPMainToolbarUserManager];
+		NSUInteger index = [identifiers indexOfObject:SPMainToolbarCustomQuery];
+		if (index == NSNotFound) index = [identifiers indexOfObject:SPMainToolbarUserManager];
 
 		if (index != NSNotFound) {
 			index++;
@@ -58,6 +60,67 @@ BOOL SPInsertTransferToolbarItemIfNeeded(NSToolbar *toolbar, NSUserDefaults *def
 	[defaults setBool:YES forKey:SPToolbarTransferItemAdded];
 
 	return inserted;
+}
+
+BOOL SPMoveTransferToolbarItemAfterQueryIfNeeded(NSToolbar *toolbar, NSUserDefaults *defaults)
+{
+	if (!toolbar || [defaults boolForKey:SPToolbarTransferItemMovedAfterQuery]) return NO;
+
+	NSArray *identifiers = [[toolbar items] valueForKey:@"itemIdentifier"];
+
+	// No items yet: the layout isn't loaded (a toolbar loads it once it is in a window)
+	if (![identifiers count]) return NO;
+
+	BOOL moved = NO;
+	NSUInteger transfer = [identifiers indexOfObject:SPMainToolbarTransfer];
+	NSUInteger query = [identifiers indexOfObject:SPMainToolbarCustomQuery];
+
+	if (transfer != NSNotFound && query != NSNotFound && transfer != query + 1) {
+		[toolbar removeItemAtIndex:(NSInteger)transfer];
+		if (transfer < query) query--;
+		[toolbar insertItemWithItemIdentifier:SPMainToolbarTransfer atIndex:(NSInteger)(query + 1)];
+		moved = YES;
+	}
+
+	[defaults setBool:YES forKey:SPToolbarTransferItemMovedAfterQuery];
+
+	return moved;
+}
+
+BOOL SPPlaceUsersToolbarItemAfterTransferIfNeeded(NSToolbar *toolbar, NSUserDefaults *defaults)
+{
+	if (!toolbar || [defaults boolForKey:SPToolbarUsersItemPlacedAfterTransfer]) return NO;
+
+	NSArray *identifiers = [[toolbar items] valueForKey:@"itemIdentifier"];
+
+	// No items yet: the layout isn't loaded (a toolbar loads it once it is in a window)
+	if (![identifiers count]) return NO;
+
+	BOOL changed = NO;
+	NSUInteger users = [identifiers indexOfObject:SPMainToolbarUserManager];
+	NSUInteger anchor = [identifiers indexOfObject:SPMainToolbarTransfer];
+	if (anchor == NSNotFound) anchor = [identifiers indexOfObject:SPMainToolbarCustomQuery];
+
+	if (anchor != NSNotFound) {
+		if (users != anchor + 1) {
+			if (users != NSNotFound) {
+				[toolbar removeItemAtIndex:(NSInteger)users];
+				if (users < anchor) anchor--;
+			}
+			[toolbar insertItemWithItemIdentifier:SPMainToolbarUserManager atIndex:(NSInteger)(anchor + 1)];
+			changed = YES;
+		}
+	}
+	else if (users == NSNotFound) {
+		NSUInteger index = [identifiers indexOfObject:SPMainToolbarShowConsole];
+		if (index == NSNotFound) index = [identifiers count];
+		[toolbar insertItemWithItemIdentifier:SPMainToolbarUserManager atIndex:(NSInteger)index];
+		changed = YES;
+	}
+
+	[defaults setBool:YES forKey:SPToolbarUsersItemPlacedAfterTransfer];
+
+	return changed;
 }
 
 @implementation SPDisabledToolbarItem

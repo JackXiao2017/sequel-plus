@@ -22,6 +22,10 @@ extern PGPostgresResult *SPPostgresExecute(PGPostgresConnection *connection, NSS
 /// (SPPostgresErrorDetailLines).
 extern PGPostgresResult *SPPostgresExecuteWithDetails(PGPostgresConnection *connection, NSString *sql, NSArray *values, NSError **error) __attribute__((visibility("default")));
 
+/// As SPPostgresExecuteWithDetails, for sql holding several statements, sent in one round trip (no parameters, no
+/// COPY): nil with the failing statement's error when one fails (those after it aren't run).
+extern PGPostgresResult *SPPostgresExecuteStatementsWithDetails(PGPostgresConnection *connection, NSString *sql, NSError **error) __attribute__((visibility("default")));
+
 /**
  * Runs body all or nothing on a connection that may be shared with the Query view, where the user may have a
  * transaction open: when idle, in a transaction of its own (BEGIN, then COMMIT, or ROLLBACK if body fails);
@@ -142,6 +146,13 @@ __attribute__((visibility("default")))
 
 /// Why the rows can't be edited, or nil when they can.
 - (NSString *)readOnlyReason;
+
+/**
+ * The foreign keys of the relation, as MySQL's Content link arrows: column name → @{@"schema", @"table", @"column"},
+ * the referenced table and column, for each column that is the first column of a FOREIGN KEY constraint (the first
+ * such constraint by name, when there are several). Empty for a relation without any; nil on failure.
+ */
+- (NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *)foreignKeyReferences:(NSError **)error;
 
 /// A page of rows; limit 0 means no limit. column may be nil for no explicit sort; rows are then in primary-key order (if any), and the
 /// primary key also breaks ties after the sort column, so paging is stable. filter may be nil.

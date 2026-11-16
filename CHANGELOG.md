@@ -1,5 +1,93 @@
 # Changelog
 
+## Sequel Plus 2.0.3
+
+Upgrading from 2.0.2.
+
+- Version **2.0.3**.
+
+### Check for Updates
+Sequel Plus now checks GitHub for newer releases. **Sequel Plus ▸ Check for Updates…** (and **Check Now** in Preferences ▸ Auto Update) asks for the latest release of github.com/JackXiao2017/sequel-plus. If it's newer than the running version, a dialog shows its version and release notes:
+- **Download** opens the release's zip in your browser. Unzip it and replace the app in Applications; the app doesn't install anything itself.
+- **Remind Me Later** closes the dialog, and **Skip This Version** stops automatic checks from offering that version again.
+- When you check yourself, it also says when you're up to date, or why the check failed (offline, GitHub busy, no release found).
+- Automatic checks are on by default, once a day; Preferences ▸ Auto Update turns them off or sets them hourly, daily or weekly. They only show something when there's a new version.
+- Pre-releases and drafts are never offered. A release is found by its tag (e.g. `2.0.4`, or `v2.0.4`) and its `.zip` asset.
+- The old Sparkle updater (Sequel Pro's feed) stays switched off, and "Send anonymous system information" is gone from Preferences.
+
+### New Folder and New Favorite on a folder's right-click menu
+Right-clicking a folder in the favorites list now offers **New Folder** and **New Favorite** at the top of the menu. Both add the new item inside that folder and start editing its name, as the + and folder buttons below the list do with the folder selected. They don't appear when you right-click a favorite or an empty part of the list.
+
+### "Loading users…" before the User Manager, and a MySQL 8 fix
+Clicking **Users** now shows a small **Loading users…** sheet with a spinner while the user list is fetched, instead of a window that seems frozen. It has a **Cancel** button.
+- **MySQL:** the sheet appears at once. The access check runs in the background, and the sheet stays up until the User Manager replaces it.
+- **PostgreSQL:** the Users sheet opens its own connection (possibly through SSH) and reads the roles. If that takes more than 0.3 seconds, the loading sheet appears; an SSH password prompt goes on top of it.
+- **MySQL 8:** the User Manager could fail to open at all when a user had privileges on a single database. It stopped at the "create temporary tables" privilege, which it stored under a name the app didn't recognise. Database privileges are now read correctly, and a privilege column the app doesn't know about is skipped instead of stopping it.
+
+### Users toolbar button
+The toolbar's **Users** button now sits right after **Transfer**, with the other buttons, and has a new icon: two people in black, the one behind lighter, like the Transfer icon (white in Dark Mode). It no longer sits in a round button background.
+- A toolbar you set up before gets Users after Transfer once (added if it wasn't there, moved if it was on the right). If you remove or move it afterwards with Customize Toolbar, that sticks.
+
+### Foreign key links in Content (PostgreSQL)
+In the Content view, a column that is a foreign key now shows a small arrow after each value, as MySQL's Content view does. Click it to open the table the key points to, showing just the matching row.
+- The other table is selected in the left panel (switching schema when it's in another one) and its filter bar is shown holding the filter (for example `id = 2`), so you can change or clear it. Clearing it shows every row again.
+- A key into the same table (such as `parent_id`) filters this table. A key over several columns follows its first column.
+- There's no arrow on NULL values, on the row being edited, or on a new row that isn't saved yet.
+- Following a link is a place in History, so Back returns to the table you came from.
+
+### Filters in Transfer's To: and Database: menus (PostgreSQL)
+A **Filter** field beside each of the Transfer sheet's **To:** and **Database:** menus narrows that menu to the names containing what you type (upper or lower case, with or without accents).
+- When you pause typing (half a second), the menu opens showing the matches; choose one, or press Esc to type more. It doesn't open when nothing matches.
+- A connection or database the filter leaves out is unset: the connection is closed and its databases cleared, or the database is no longer chosen, and **Transfer** stays disabled until you choose one the menu lists. Clearing the filter doesn't choose again, and typing never opens a connection.
+- **New Database…** always stays in the Database: menu, and the database filter also applies to the databases of another connection you choose. A database you make with New Database… clears the database filter and is chosen.
+
+### Transfer for MySQL
+The toolbar's **Transfer** button now works on MySQL tabs too: it copies this tab's database, or some of its tables, to a database of another MySQL favorite. The sheet is the same as PostgreSQL's: **Whole database** or **Selected tables**, the **To:** and **Database:** menus with their filters and **New Database…**, **Empty the target database first** (confirmed by typing its name) or **Overwrite tables that already exist on the target**, and the task list.
+- The source is read in one consistent snapshot and its rows are sent in batches of multi-row INSERTs.
+- **Your target is safe until the very end.** MySQL can't undo table changes the way PostgreSQL rolls back a transaction, so the tables are first copied into the target under temporary names while the real ones stay untouched. Only once every table has been copied are they swapped in, all at once. A failure or cancel before then leaves the target exactly as it was.
+- After the swap, foreign keys, CHECK constraints, views (in the order they depend on each other), triggers, routines and events are created. If one of them can't be, the sheet lists which.
+- Definers aren't copied: views, routines, triggers and events are created with the To: connection's user as their definer, and the sheet says so. Selected tables bring their triggers; views, routines and events come with the whole database.
+
+### Faster Transfer, especially over a network (PostgreSQL)
+- **Read** no longer asks the source about each table one at a time. It used to send about 13 queries per table before any data, and over a network each query waits a round trip, so a database with 1,000 tables spent minutes just waiting. It now reads every table's definition, columns, constraints, indexes and triggers in a few queries for all of them (about 55 queries in all, however many tables), and the sequences' values a few hundred at a time.
+- The target gets the structure's statements a few hundred at a time instead of one round trip each.
+- Reading the source and writing to the target now run at the same time: the target starts loading while the source is still being read, so a transfer takes about as long as the slower of the two instead of both added together. In the task list, **Read** keeps running beside the other steps until the source has been read whole.
+- Nothing else changes: the source is still read in one consistent snapshot, the target is still written in one transaction, and if either side fails or you cancel, the target is left unchanged. If reading the source fails, the **Read** step is marked as the one that failed.
+
+### Transfer shows its steps as a task list (PostgreSQL)
+While a transfer runs, its sheet lists eight steps:
+1. **Connect to the source and the target**
+2. **Check the source and the target**
+3. **Read** the source database
+4. **Empty** the target (in Overwrite mode: **Drop what will be replaced**)
+5. **Create the structure**: schemas, types, functions, tables, views
+6. **Write the data**
+7. **Create indexes, foreign keys and triggers**
+8. **Commit**
+
+- Each step shows a spinner while it runs, a green check when it's done, and a red cross if it fails; the steps after a failure are marked as not run.
+- Under the running step, a line says what it's doing, with a count, for example *Reading table 3 of 12: orders*, *1 of 2: DROP SCHEMA IF EXISTS "old", public CASCADE*, *14 of 85: CREATE TABLE public.orders* or *Table 3 of 12: public.orders — 12,000 of 50,000 rows*. The bar under the list is that step's.
+- A finished step keeps a line saying what it did: how many objects there are to copy, how many tables and rows were read, which schemas and extensions were dropped (or which objects will be replaced), how many statements ran, how many rows were written.
+- Before, reading the source's structure and the whole load showed only *Checking the target…* and *Writing to …*.
+- When it ends, the sheet stays open with the result: **Transfer complete** and what was copied, or why it failed (the target is left unchanged), next to the step that failed and what it was doing. Click **Close** when you're done. This replaces the separate message shown before. Cancel still closes the sheet straight away.
+
+### Transfer says who owns the copy (PostgreSQL)
+Transfer doesn't copy owners or privileges, and the sheet now says so under the mode choice. Everything the transfer creates is owned by the user the **To:** connection logs in as, and the note names that user. Grants for other roles need to be made again afterwards. The **Transfer complete** message ends with the same information.
+
+### Transfer moved beside Query in the toolbar
+The toolbar's **Transfer** button now comes right after **Query** instead of after **Users**. A toolbar you already have is updated once when a window opens. After that, wherever you put Transfer with Customize Toolbar stays, and if you removed it, it isn't added back.
+
+### Fixed: crash after the app sat open
+The app could quit by itself after being left open with no activity: when the screen woke from sleep, or a display was connected or disconnected, a window showing the connection screen crashed the app. The connection details' layout ran again for every view it resized, and once the scroll bar started appearing and disappearing it never stopped. It now settles.
+
+### Fixed: editing after a column is dragged (MySQL)
+In a MySQL table's Content, or a query's results, dragging a column to another position could make editing act on the wrong column:
+- Typing in a cell could be checked against another column's type: the key was dropped and the edit cancelled, or the pop-up sheet opened for a plain single-line value.
+- Editing a long value in place could start from its shortened 150-character preview rather than the whole value.
+- The hexadecimal check for binary columns, and the check of which row an edit of a view or a query result will update, looked at the wrong column.
+
+Editing now always acts on the column being edited, wherever it is in the grid.
+
 ## Sequel Plus 2.0.2
 
 Upgrading from 2.0.1.
