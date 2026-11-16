@@ -8,6 +8,8 @@
 #import "SPPostgresTestServers.h"
 #import "../Source/NSWindow+SPCompactChrome.h"
 #import "../Source/SPToolbarTransferItem.h"
+// SPMainToolbar.h
+extern NSImage *SPUsersToolbarImage(void);
 #import "../Source/SPWindowController.h"
 #import "../Source/Postgres/SPPostgresDocument.h"
 #import "../Source/Postgres/SPPostgresConnector.h"
@@ -234,7 +236,6 @@ static NSData *SPImageData(NSImage *image)
 		SPParityTableInfo: @[@"Table Info", @"Table Info", @"Switch to the Table Info tab", @"toolbar-switch-to-table-info", @"viewStatus:"],
 		SPParityRelations: @[@"Relations", @"Table Relations", @"Switch to the Table Relations tab", @"toolbar-switch-to-table-relations", @"viewRelations:"],
 		SPParityTriggers: @[@"Triggers", @"Table Triggers", @"Switch to the Table Triggers tab", @"toolbar-switch-to-table-triggers", @"viewTriggers:"],
-		SPParityUsers: @[@"Users", @"Users", @"Switch to the User Manager tab", NSImageNameEveryone, @"showUserManager:"],
 	};
 
 	for (NSString *identifier in expected) {
@@ -251,15 +252,31 @@ static NSData *SPImageData(NSImage *image)
 		XCTAssertNil([item view], @"%@", identifier);
 	}
 
-	// Transfer: never enabled, no target or action
+	// Users: its own drawing (two people in black, a template image), unbordered at 28 points as Transfer
+	NSToolbarItem *users = [mysql toolbar:toolbar itemForItemIdentifier:SPParityUsers willBeInsertedIntoToolbar:NO];
+	XCTAssertEqualObjects([users class], [NSToolbarItem class]);
+	XCTAssertEqualObjects([users label], @"Users");
+	XCTAssertEqualObjects([users paletteLabel], @"Users");
+	XCTAssertEqualObjects([users toolTip], @"Switch to the User Manager tab");
+	XCTAssertEqualObjects(SPImageData([users image]), SPImageData(SPCompactToolbarImage(SPUsersToolbarImage())));
+	XCTAssertNotEqualObjects(SPImageData([users image]), SPImageData(SPCompactToolbarImage([NSImage imageNamed:NSImageNameEveryone])));
+	XCTAssertTrue(NSEqualSizes([[users image] size], NSMakeSize(24, 24)));
+	XCTAssertTrue([[users image] isTemplate]);
+	XCTAssertEqual([users target], mysql);
+	XCTAssertEqualObjects(NSStringFromSelector([users action]), @"showUserManager:");
+	XCTAssertFalse([users isBordered]);
+	XCTAssertNil([users view]);
+
+	// Transfer: MySQL → MySQL (the document's -showTransfer:), unbordered at 28 points as on PostgreSQL tabs
 	NSToolbarItem *transfer = [mysql toolbar:toolbar itemForItemIdentifier:SPParityTransfer willBeInsertedIntoToolbar:NO];
-	XCTAssertEqualObjects([transfer class], [SPDisabledToolbarItem class]);
+	XCTAssertEqualObjects([transfer class], [NSToolbarItem class]);
 	XCTAssertEqualObjects([transfer label], @"Transfer");
 	XCTAssertEqualObjects([transfer paletteLabel], @"Transfer");
-	XCTAssertNil([transfer toolTip]);
+	XCTAssertEqualObjects([transfer toolTip], @"Copy this database, or some of its tables, to another connection");
 	XCTAssertEqualObjects(SPImageData([transfer image]), SPImageData(SPCompactToolbarImage(SPTransferToolbarImage())));
-	XCTAssertNil([transfer target]);
-	XCTAssertTrue([transfer action] == NULL);
+	XCTAssertEqual([transfer target], mysql);
+	XCTAssertEqualObjects(NSStringFromSelector([transfer action]), @"showTransfer:");
+	XCTAssertFalse([transfer isBordered]);
 
 	XCTAssertNil([mysql toolbar:toolbar itemForItemIdentifier:@"SPNoSuchItem" willBeInsertedIntoToolbar:NO]);
 }
@@ -324,18 +341,8 @@ static NSData *SPImageData(NSImage *image)
 		XCTAssertEqualObjects(SPImageData([theirs image]), SPImageData([mine image]), @"%@", identifier);
 		XCTAssertEqualObjects([theirs paletteLabel], [mine paletteLabel], @"%@", identifier);
 		XCTAssertEqual([theirs isBordered], [mine isBordered], @"%@", identifier);
-		if ([identifier isEqualToString:SPParityTransfer]) {
-			// Transfer works on Postgres tabs only: there a plain item with an action, on MySQL tabs an always-disabled
-			// SPDisabledToolbarItem without one; they look the same
-			XCTAssertEqualObjects([theirs class], [NSToolbarItem class]);
-			XCTAssertEqualObjects([mine class], [SPDisabledToolbarItem class]);
-			XCTAssertTrue([theirs action] != NULL);
-			XCTAssertTrue([mine action] == NULL);
-		}
-		else {
-			XCTAssertEqualObjects([theirs class], [mine class], @"%@", identifier);
-			XCTAssertEqual([theirs action] == NULL, [mine action] == NULL, @"%@: both have an action, or neither", identifier);
-		}
+		XCTAssertEqualObjects([theirs class], [mine class], @"%@", identifier);
+		XCTAssertEqual([theirs action] == NULL, [mine action] == NULL, @"%@: both have an action, or neither", identifier);
 
 		// The console items say which commands they show
 		if (![identifier isEqualToString:SPParityShowConsole] && ![identifier isEqualToString:SPParityClearConsole]) {
