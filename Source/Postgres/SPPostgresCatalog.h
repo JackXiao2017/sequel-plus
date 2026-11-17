@@ -77,6 +77,14 @@ __attribute__((visibility("default")))
 /// CREATE on the database) and to superusers.
 - (BOOL)setOwner:(NSString *)owner ofSchema:(NSString *)schema error:(NSError **)error;
 
+/**
+ * As -setOwner:ofSchema:error:, and with contents also the schema's tables (partitioned and foreign too), views,
+ * materialized views and sequences not owned by another role already: `ALTER <kind> … OWNER TO <owner>` for each
+ * (a table's indexes, and the sequences of its serial and identity columns, follow the table). Objects belonging to an
+ * extension are left alone. All or nothing: one transaction (a savepoint inside the user's), a 5 s lock timeout.
+ */
+- (BOOL)setOwner:(NSString *)owner ofSchema:(NSString *)schema includingContents:(BOOL)contents error:(NSError **)error;
+
 /// `CREATE DATABASE <name> TEMPLATE <source>` (Duplicate Database): the server refuses while any other session is
 /// connected to source. The name is checked as -createDatabase:error:'s.
 - (BOOL)copyDatabase:(NSString *)source toName:(NSString *)name error:(NSError **)error;
@@ -99,6 +107,14 @@ __attribute__((visibility("default")))
 /// `ALTER DATABASE <name> OWNER TO <owner>`: the server allows it to the owner (when a member of the new owner, with
 /// CREATEDB) and to superusers.
 - (BOOL)setOwner:(NSString *)owner ofDatabase:(NSString *)name error:(NSError **)error;
+
+/**
+ * As -setOwner:ofDatabase:error:, and with contents also the database's schemas (but the system ones, those belonging
+ * to an extension, and those owned by pg_database_owner, which follow the database's owner already) and every schema's
+ * tables, views and sequences, as -setOwner:ofSchema:includingContents:error:. The connection must be to that
+ * database. All or nothing, as that method.
+ */
+- (BOOL)setOwner:(NSString *)owner ofDatabase:(NSString *)name includingContents:(BOOL)contents error:(NSError **)error;
 
 /// `COMMENT ON DATABASE <name> IS <comment>` (an empty comment removes it: IS NULL).
 - (BOOL)setComment:(NSString *)comment ofDatabase:(NSString *)name error:(NSError **)error;

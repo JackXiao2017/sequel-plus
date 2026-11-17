@@ -711,6 +711,53 @@ static NSString *SPPostgresStructureSize(id value)
 	return names;
 }
 
+/// SQL: the connected user may SET ROLE to the role whose OID is the expression (is a member of, before PostgreSQL 16).
+static NSString *SPPostgresMaySetRole(NSString *role)
+{
+	return [NSString stringWithFormat:@"(CASE WHEN pg_catalog.current_setting('server_version_num')::int >= 160000"
+		" THEN pg_catalog.pg_has_role(%1$@, 'SET') ELSE pg_catalog.pg_has_role(%1$@, 'MEMBER') END)", role];
+}
+
+/// SQL: the connected user may grant itself the role whose OID is the expression: ADMIN OPTION on it (PostgreSQL 16+),
+/// or CREATEROLE and the role isn't a superuser (before 16), as a cloud service's main user (RDS…) can with the users
+/// it created.
+static NSString *SPPostgresMayGrantRole(NSString *role)
+{
+	return [NSString stringWithFormat:@"(CASE WHEN pg_catalog.current_setting('server_version_num')::int >= 160000"
+		" THEN pg_catalog.pg_has_role(%1$@, 'MEMBER WITH ADMIN OPTION')"
+		" ELSE (SELECT u.rolcreaterole FROM pg_catalog.pg_roles u WHERE u.rolname = current_user)"
+		"  AND NOT (SELECT x.rolsuper FROM pg_catalog.pg_roles x WHERE x.oid = %1$@) END)", role];
+}
+
+- (NSDictionary *)ownerChoices:(NSError **)error
+{
+	NSArray *rows = [self rows:[NSString stringWithFormat:
+		@"SELECT (u.rolsuper OR ((pg_catalog.pg_has_role(c.relowner, 'USAGE') OR %@)"
+		"  AND pg_catalog.has_schema_privilege(c.relnamespace, 'USAGE')))::text"
+		" FROM rel JOIN pg_catalog.pg_class c ON c.oid = rel.oid"
+		" JOIN pg_catalog.pg_roles u ON u.rolname = current_user", SPPostgresMayGrantRole(@"c.relowner")] values:nil error:error];
+	if (!rows) return nil;
+	BOOL canChange = [rows count] && [SPPostgresStructureText(rows[0][0]) isEqualToString:@"true"];
+
+	NSMutableArray *names = [NSMutableArray array];
+	if (canChange) {
+		NSArray *roleRows = [self rows:[NSString stringWithFormat:
+			@"SELECT r.rolname::text FROM rel JOIN pg_catalog.pg_class c ON c.oid = rel.oid, pg_catalog.pg_roles r"
+			" WHERE (r.rolname !~ '^pg_' OR r.rolname = 'pg_database_owner')" // pg_database_owner: PostgreSQL 14+
+			"  AND ((SELECT u.rolsuper FROM pg_catalog.pg_roles u WHERE u.rolname = current_user)"
+			"  OR ((%@ OR %@)"
+			"   AND (pg_catalog.has_schema_privilege(r.oid, c.relnamespace, 'CREATE')"
+			"    OR pg_catalog.has_schema_privilege(c.relnamespace, 'CREATE WITH GRANT OPTION'))))"
+			" ORDER BY r.rolname COLLATE \"C\"", SPPostgresMaySetRole(@"r.oid"), SPPostgresMayGrantRole(@"r.oid")] values:nil error:error];
+		if (!roleRows) return nil;
+		for (NSArray *row in roleRows) {
+			NSString *name = SPPostgresStructureText(row[0]);
+			if ([name length]) [names addObject:name];
+		}
+	}
+	return @{@"canChange": @(canChange), @"roles": names};
+}
+
 #pragma mark - Columns
 
 - (BOOL)addColumn:(SPPostgresColumnDefinition *)definition error:(NSError **)error
@@ -1093,7 +1140,41 @@ static NSString *SPPostgresStructureSize(id value)
 	return [self change:^BOOL(NSError **bodyError) {
 		NSString *keyword = [self objectKeyword:bodyError];
 		if (!keyword) return NO;
-		return [self run:[NSString stringWithFormat:@"ALTER %@ %@ OWNER TO %@", keyword, [self qualifiedName], SPPostgresQuoteIdentifier(owner)] error:bodyError];
+		// Not a superuser: the server wants the user to have the owning role's privileges, to be able to SET ROLE to
+		// the new owner, and the new owner to have CREATE on the schema. What's missing and the user may grant
+		// (ADMIN OPTION or CREATEROLE on the roles, the schema's grant option) is granted for this change only, and
+		// revoked right after, in its transaction.
+		NSArray *needs = [self rows:[NSString stringWithFormat:
+			@"SELECT u.rolsuper::text, pg_catalog.pg_get_userbyid(c.relowner)::text, pg_catalog.pg_has_role(c.relowner, 'USAGE')::text,"
+			"  (SELECT %@ FROM pg_catalog.pg_roles o WHERE o.rolname = $3::text)::text,"
+			"  (SELECT pg_catalog.has_schema_privilege(o.oid, c.relnamespace, 'CREATE') FROM pg_catalog.pg_roles o WHERE o.rolname = $3::text)::text,"
+			"  pg_catalog.quote_ident(n.nspname)"
+			" FROM rel JOIN pg_catalog.pg_class c ON c.oid = rel.oid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
+			" JOIN pg_catalog.pg_roles u ON u.rolname = current_user", SPPostgresMaySetRole(@"o.oid")] values:@[owner] error:bodyError];
+		if (!needs) return NO;
+		NSMutableArray *grants = [NSMutableArray array], *revokes = [NSMutableArray array];
+		NSArray *need = [needs firstObject];
+		// (a role that doesn't exist: the ALTER says so)
+		if (need && ![SPPostgresStructureText(need[0]) isEqualToString:@"true"] && SPPostgresStructureText(need[3])) {
+			BOOL modern = [_connection serverVersion] >= 160000;
+			NSString *withOptions = modern ? @" WITH INHERIT TRUE, SET TRUE" : @"";
+			NSString *currentOwner = SPPostgresStructureText(need[1]);
+			NSMutableArray *roles = [NSMutableArray array];
+			if (![SPPostgresStructureText(need[2]) isEqualToString:@"true"] && [currentOwner length]) [roles addObject:currentOwner];
+			if (![SPPostgresStructureText(need[3]) isEqualToString:@"true"] && ![roles containsObject:owner]) [roles addObject:owner];
+			for (NSString *role in roles) {
+				[grants addObject:[NSString stringWithFormat:@"GRANT %@ TO CURRENT_USER%@", SPPostgresQuoteIdentifier(role), withOptions]];
+				[revokes insertObject:[NSString stringWithFormat:@"REVOKE %@ FROM CURRENT_USER", SPPostgresQuoteIdentifier(role)] atIndex:0];
+			}
+			if (![SPPostgresStructureText(need[4]) isEqualToString:@"true"]) {
+				[grants addObject:[NSString stringWithFormat:@"GRANT CREATE ON SCHEMA %@ TO %@", need[5], SPPostgresQuoteIdentifier(owner)]];
+				[revokes insertObject:[NSString stringWithFormat:@"REVOKE CREATE ON SCHEMA %@ FROM %@", need[5], SPPostgresQuoteIdentifier(owner)] atIndex:0];
+			}
+		}
+		for (NSString *sql in grants) if (![self run:sql error:bodyError]) return NO;
+		if (![self run:[NSString stringWithFormat:@"ALTER %@ %@ OWNER TO %@", keyword, [self qualifiedName], SPPostgresQuoteIdentifier(owner)] error:bodyError]) return NO;
+		for (NSString *sql in revokes) if (![self run:sql error:bodyError]) return NO;
+		return YES;
 	} error:error];
 }
 

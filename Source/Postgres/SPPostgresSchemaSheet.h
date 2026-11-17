@@ -6,7 +6,8 @@
  * - Add Schema (+): a Name field and an Owner pop-up (the server's roles, `owner` selected: the connected user).
  *   Add is enabled when the name isn't empty.
  * - Edit Schema (pencil): the schema's name (not editable) and its Owner pop-up, the current owner selected.
- *   Save is enabled when another owner is chosen.
+ *   Save is enabled when another owner is chosen. A checkbox (on by default) gives the schema's tables, views and
+ *   sequences the new owner too: the values then have @"ownerOfContents" (@"YES" or @"NO").
  *
  * An owner not among the roles is added to the pop-up. Return presses the default button, Escape cancels. Use on the
  * main thread. completion is called exactly once, after the sheet closes: with @{@"name", @"owner"} (name trimmed),
@@ -34,6 +35,8 @@ __attribute__((visibility("default")))
 @property (readonly) BOOL editing;
 @property (readonly) NSTextField *nameField;
 @property (readonly) NSPopUpButton *ownerPopup;
+/// Edit Schema's "Change the owner of its tables, views and sequences too" (nil when adding).
+@property (readonly) NSButton *contentsCheckbox;
 @property (readonly) NSButton *actionButton;
 @property (readonly) NSButton *cancelButton;
 

@@ -37,6 +37,7 @@ __attribute__((visibility("default")))
 	void (^itemObserver)(SPPostgresDumpItem *item);
 	void (^copyDataObserver)(NSData *data);
 	void (^commitObserver)(void);
+	BOOL (^beforeCommit)(NSError **error);
 	BOOL batchesStatements;
 }
 
@@ -70,6 +71,11 @@ __attribute__((visibility("default")))
 @property (copy) void (^itemObserver)(SPPostgresDumpItem *item);
 @property (copy) void (^copyDataObserver)(NSData *data);
 @property (copy) void (^commitObserver)(void);
+
+/// With singleTransaction: called on the caller's thread once the file has loaded, inside the transaction, before
+/// commitObserver and the COMMIT; it may run statements on the connection. NO (with an error) rolls everything back and
+/// fails the run with that error. nil: nothing.
+@property (copy) BOOL (^beforeCommit)(NSError **error);
 
 /// Asked after a failed item when singleTransaction is NO (error as -run: would report it). nil means Stop.
 @property (copy) SPPostgresImportErrorChoice (^errorHandler)(NSError *error, SPPostgresDumpItem *item);
