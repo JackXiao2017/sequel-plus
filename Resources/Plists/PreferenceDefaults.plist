@@ -111,6 +111,8 @@
 	<false/>
 	<key>EditInSheetEnabled</key>
 	<false/>
+	<key>ForeignKeyPickerEnabled</key>
+	<true/>
 	<key>FavoriteColorList</key>
 	<array>
 		<data>BAtzdHJlYW10eXBlZIHoA4QBQISEhAdOU0NvbG9yAISECE5TT2JqZWN0AIWEAWMChARmZmZmg+XkZD+D6ejoPoPNzMw+AYY=</data>
