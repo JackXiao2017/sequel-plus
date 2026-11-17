@@ -549,6 +549,7 @@
 		B5E2C5FA0F2353B5007446E0 /* table-property.png in Resources */ = {isa = PBXBuildFile; fileRef = B5E2C5F90F2353B5007446E0 /* table-property.png */; };
 		B5E92F190F75B2D100012500 /* ExportDialog.xib in Resources */ = {isa = PBXBuildFile; fileRef = B5E92F170F75B2D100012500 /* ExportDialog.xib */; };
 		B5E92F1C0F75B2E800012500 /* SPExportController.m in Sources */ = {isa = PBXBuildFile; fileRef = B5E92F1B0F75B2E800012500 /* SPExportController.m */; };
+		B7AD1BBF3D2CDD92F587093A /* SPForeignKeyPickerPreferenceTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 0D70261AFC3B8D067BA0332B /* SPForeignKeyPickerPreferenceTests.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 		B7DB510017AD0DBCC2FBA5E6 /* SPForeignKeyPickerSettings.m in Sources */ = {isa = PBXBuildFile; fileRef = 52345C2DED30279EFC0ED7FD /* SPForeignKeyPickerSettings.m */; };
 		B88CC48ED610B3A9391AC368 /* SPPostgresStatementSplitterTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 4C759EB7091FEC6D31929FF7 /* SPPostgresStatementSplitterTests.m */; settings = {COMPILER_FLAGS = "-fobjc-arc"; }; };
 		BA6B043D20A4FB0B00B012E1 /* button_filter_active@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = BA6B043920A4FB0A00B012E1 /* button_filter_active@2x.png */; };
@@ -863,6 +864,7 @@
 		0CFA98BE58F0033E08762156 /* SPTestPrefsGuard.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPTestPrefsGuard.m; path = PostgresTests/SPTestPrefsGuard.m; sourceTree = SOURCE_ROOT; };
 		0D176A45B7F7154591C35073 /* SPMySQLFieldEditorSheetTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPMySQLFieldEditorSheetTests.m; path = PostgresTests/SPMySQLFieldEditorSheetTests.m; sourceTree = SOURCE_ROOT; };
 		0D296F297DB46DA64EDAD4FE /* SPMySQLFavoriteConnector.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; path = Source/SPMySQLFavoriteConnector.m; sourceTree = SOURCE_ROOT; };
+		0D70261AFC3B8D067BA0332B /* SPForeignKeyPickerPreferenceTests.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPForeignKeyPickerPreferenceTests.m; path = PostgresTests/SPForeignKeyPickerPreferenceTests.m; sourceTree = SOURCE_ROOT; };
 		0D738DE5F6932DC6C7A5C79B /* SPPostgresQueryStore.m */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.objc; name = SPPostgresQueryStore.m; path = Source/Postgres/SPPostgresQueryStore.m; sourceTree = SOURCE_ROOT; };
 		0F602980C1EBFB7E4315A2C2 /* SPPostgresProgressSheet.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; name = SPPostgresProgressSheet.h; path = Source/Postgres/SPPostgresProgressSheet.h; sourceTree = SOURCE_ROOT; };
 		1058C7A7FEA54F5311CA2CBB /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = /System/Library/Frameworks/Cocoa.framework; sourceTree = "<absolute>"; };
@@ -3320,6 +3322,7 @@
 				F01CB2A678EE60277006E0DD /* SPForeignKeyPickerTests.m */,
 				7D3BB0ABA26BE4D5E2207C3D /* SPPostgresForeignKeyPickerHookTests.m */,
 				C8D1FED852537D84DAD6CC2C /* SPMySQLForeignKeyPickerHookTests.m */,
+				0D70261AFC3B8D067BA0332B /* SPForeignKeyPickerPreferenceTests.m */,
 			);
 			name = PostgresTests;
 			sourceTree = "<group>";
@@ -4332,6 +4335,7 @@
 				9ECA4C82C6C379D224FF778D /* SPForeignKeyPickerTests.m in Sources */,
 				C0C328732DE891600FDD8FEB /* SPPostgresForeignKeyPickerHookTests.m in Sources */,
 				E1077CA10C9EE8E6A6AE28CE /* SPMySQLForeignKeyPickerHookTests.m in Sources */,
+				B7AD1BBF3D2CDD92F587093A /* SPForeignKeyPickerPreferenceTests.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -224,6 +224,8 @@ static NSString * const SPFKHookSuite = @"SPPostgresForeignKeyPickerHookTests";
 	XCTAssertNotNil([[self grid] currentEditor]);
 	[[[self grid] window] makeFirstResponder:[self grid]];
 	XCTAssertNil([[self grid] currentEditor]);
+	// The reload after a grid commit is queued for the next run loop turn: let it start before waiting
+	[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
 	[self waitForTab];
 }
 

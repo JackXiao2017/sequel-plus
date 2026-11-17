@@ -244,6 +244,9 @@ static NSString * const SPDateTimePickerSuiteName = @"SPPostgresDateTimePickerTe
 	XCTAssertNotNil([grid currentEditor]);
 	[[grid window] makeFirstResponder:grid];
 	XCTAssertNil([grid currentEditor]);
+	// The reload after a grid commit is queued for the next run loop turn: let it start, so that a following
+	// -waitForRunner: waits for it (else it starts inside a later step, which then finds the runner busy)
+	[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
 }
 
 - (void)testContentOpensThePickerOnDateCells

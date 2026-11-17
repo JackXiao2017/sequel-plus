@@ -547,14 +547,14 @@ Gw
             <point key="canvasLocation" x="230" y="459"/>
         </customView>
         <customView id="512" userLabel="Tables">
-            <rect key="frame" x="0.0" y="0.0" width="580" height="319"/>
+            <rect key="frame" x="0.0" y="0.0" width="580" height="339"/>
             <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMinY="YES"/>
             <userGuides>
                 <userLayoutGuide location="195" affinity="minX"/>
             </userGuides>
             <subviews>
                 <button id="950">
-                    <rect key="frame" x="203" y="181" width="359" height="18"/>
+                    <rect key="frame" x="203" y="201" width="359" height="18"/>
                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMinY="YES"/>
                     <buttonCell key="cell" type="check" title="New fields should allow nulls" bezelStyle="regularSquare" imagePosition="left" alignment="left" state="on" inset="2" id="951">
                         <behavior key="behavior" changeContents="YES" doesNotDimImage="YES" lightByContents="YES"/>
@@ -562,6 +562,17 @@ Gw
                     </buttonCell>
                     <connections>
                         <binding destination="117" name="value" keyPath="values.NewFieldsAllowNulls" id="953"/>
+                    </connections>
+                </button>
+                <button id="FKP-pk-chk">
+                    <rect key="frame" x="203" y="181" width="359" height="18"/>
+                    <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMinY="YES"/>
+                    <buttonCell key="cell" type="check" title="Open the value picker when editing a foreign key" bezelStyle="regularSquare" imagePosition="left" alignment="left" state="on" inset="2" id="FKP-pk-cel">
+                        <behavior key="behavior" changeContents="YES" doesNotDimImage="YES" lightByContents="YES"/>
+                        <font key="font" metaFont="system"/>
+                    </buttonCell>
+                    <connections>
+                        <binding destination="117" name="value" keyPath="values.ForeignKeyPickerEnabled" id="FKP-pk-bnd"/>
                     </connections>
                 </button>
                 <box autoresizesSubviews="NO" verticalHuggingPriority="750" title="Box" boxType="separator" titlePosition="noTitle" id="554">
@@ -579,7 +590,7 @@ Gw
                     <font key="titleFont" metaFont="system"/>
                 </box>
                 <box autoresizesSubviews="NO" verticalHuggingPriority="750" title="Box" boxType="separator" titlePosition="noTitle" id="552">
-                    <rect key="frame" x="205" y="227" width="355" height="5"/>
+                    <rect key="frame" x="205" y="247" width="355" height="5"/>
                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMinY="YES"/>
                     <color key="borderColor" white="0.0" alpha="0.41999999999999998" colorSpace="calibratedWhite"/>
                     <color key="fillColor" white="0.0" alpha="0.0" colorSpace="calibratedWhite"/>
@@ -593,7 +604,7 @@ Gw
                     <font key="titleFont" metaFont="system"/>
                 </box>
                 <button id="535">
-                    <rect key="frame" x="203" y="201" width="359" height="18"/>
+                    <rect key="frame" x="203" y="221" width="359" height="18"/>
                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMinY="YES"/>
                     <buttonCell key="cell" type="check" title="Don't load blob and text fields until needed" bezelStyle="regularSquare" imagePosition="left" alignment="left" inset="2" id="538">
                         <behavior key="behavior" changeContents="YES" doesNotDimImage="YES" lightByContents="YES"/>
@@ -655,7 +666,7 @@ Gw
                     </connections>
                 </stepper>
                 <button id="518">
-                    <rect key="frame" x="203" y="261" width="359" height="18"/>
+                    <rect key="frame" x="203" y="281" width="359" height="18"/>
                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMinY="YES"/>
                     <buttonCell key="cell" type="check" title="Editing a row" bezelStyle="regularSquare" imagePosition="left" alignment="left" state="on" inset="2" id="524">
                         <behavior key="behavior" changeContents="YES" doesNotDimImage="YES" lightByContents="YES"/>
@@ -677,7 +688,7 @@ Gw
                     </connections>
                 </button>
                 <button id="516">
-                    <rect key="frame" x="203" y="281" width="359" height="18"/>
+                    <rect key="frame" x="203" y="301" width="359" height="18"/>
                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMinY="YES"/>
                     <buttonCell key="cell" type="check" title="Adding a row" bezelStyle="regularSquare" imagePosition="left" alignment="left" state="on" inset="2" id="526">
                         <behavior key="behavior" changeContents="YES" doesNotDimImage="YES" lightByContents="YES"/>
@@ -700,7 +711,7 @@ Gw
                     </connections>
                 </textField>
                 <textField verticalHuggingPriority="750" id="514">
-                    <rect key="frame" x="17" y="280" width="183" height="17"/>
+                    <rect key="frame" x="17" y="300" width="183" height="17"/>
                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMinY="YES"/>
                     <textFieldCell key="cell" lineBreakMode="clipping" sendsActionOnEndEditing="YES" alignment="right" title="Reload Table After:" id="528">
                         <font key="font" metaFont="system"/>
@@ -709,7 +720,7 @@ Gw
                     </textFieldCell>
                 </textField>
                 <button id="513">
-                    <rect key="frame" x="203" y="241" width="359" height="18"/>
+                    <rect key="frame" x="203" y="261" width="359" height="18"/>
                     <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMinY="YES"/>
                     <buttonCell key="cell" type="check" title="Removing a row" bezelStyle="regularSquare" imagePosition="left" alignment="left" inset="2" id="529">
                         <behavior key="behavior" changeContents="YES" doesNotDimImage="YES" lightByContents="YES"/>
