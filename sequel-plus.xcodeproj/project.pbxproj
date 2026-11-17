@@ -4728,7 +4728,7 @@
 		380F4EDB0FC0B50600B0BFD7 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				BUNDLE_LOADER = "$(BUILT_PRODUCTS_DIR)/Sequel Plus.app/Contents/MacOS/Sequel Pro";
+				BUNDLE_LOADER = "$(BUILT_PRODUCTS_DIR)/Sequel Plus.app/Contents/MacOS/Sequel Plus";
 				COMBINE_HIDPI_IMAGES = YES;
 				COPY_PHASE_STRIP = NO;
 				FRAMEWORK_SEARCH_PATHS = (
@@ -4757,7 +4757,7 @@
 		380F4EDC0FC0B50600B0BFD7 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				BUNDLE_LOADER = "$(BUILT_PRODUCTS_DIR)/Sequel Plus.app/Contents/MacOS/Sequel Pro";
+				BUNDLE_LOADER = "$(BUILT_PRODUCTS_DIR)/Sequel Plus.app/Contents/MacOS/Sequel Plus";
 				COMBINE_HIDPI_IMAGES = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(SRCROOT)/Frameworks",
@@ -4783,7 +4783,7 @@
 		380F4EDD0FC0B50600B0BFD7 /* Distribution */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				BUNDLE_LOADER = "$(BUILT_PRODUCTS_DIR)/Sequel Plus.app/Contents/MacOS/Sequel Pro";
+				BUNDLE_LOADER = "$(BUILT_PRODUCTS_DIR)/Sequel Plus.app/Contents/MacOS/Sequel Plus";
 				COMBINE_HIDPI_IMAGES = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(SRCROOT)/Frameworks",
@@ -4910,7 +4910,7 @@
 			buildSettings = {
 				ARCHS = arm64;
 				COPY_PHASE_STRIP = NO;
-				EXECUTABLE_NAME = "Sequel Pro";
+				EXECUTABLE_NAME = "Sequel Plus";
 				FRAMEWORK_SEARCH_PATHS = "$(SRCROOT)/Frameworks";
 				GCC_GENERATE_DEBUGGING_SYMBOLS = NO;
 				GCC_MODEL_TUNING = G5;
@@ -5124,7 +5124,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.sequelpro.PostgresTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sequel Plus.app/Contents/MacOS/Sequel Pro";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sequel Plus.app/Contents/MacOS/Sequel Plus";
 			};
 			name = Release;
 		};
@@ -5132,8 +5132,9 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ARCHS = arm64;
+				CODE_SIGN_IDENTITY = "Sequel Plus Signing";
 				COPY_PHASE_STRIP = NO;
-				EXECUTABLE_NAME = "Sequel Pro";
+				EXECUTABLE_NAME = "Sequel Plus";
 				FRAMEWORK_SEARCH_PATHS = "$(SRCROOT)/Frameworks";
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_MODEL_TUNING = G5;
@@ -5154,9 +5155,10 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ARCHS = arm64;
+				CODE_SIGN_IDENTITY = "Sequel Plus Signing";
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				EXECUTABLE_NAME = "Sequel Pro";
+				EXECUTABLE_NAME = "Sequel Plus";
 				FRAMEWORK_SEARCH_PATHS = "$(SRCROOT)/Frameworks";
 				GCC_GENERATE_DEBUGGING_SYMBOLS = NO;
 				GCC_MODEL_TUNING = G5;
@@ -5314,7 +5316,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.sequelpro.PostgresTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sequel Plus.app/Contents/MacOS/Sequel Pro";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sequel Plus.app/Contents/MacOS/Sequel Plus";
 			};
 			name = Distribution;
 		};
@@ -5348,7 +5350,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.sequelpro.PostgresTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sequel Plus.app/Contents/MacOS/Sequel Pro";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sequel Plus.app/Contents/MacOS/Sequel Plus";
 			};
 			name = Debug;
 		};
