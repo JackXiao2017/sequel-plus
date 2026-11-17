@@ -251,6 +251,108 @@ static NSString * const SPInfoTestEditorFontKey = @"CustomQueryEditorFont";
 	XCTAssertEqualObjects([info.typeField stringValue], @"");
 }
 
+/// Owner: a pop-up of the roles the table can be given to when the user may change it; else plain text.
+- (void)testOwnerPopupChangesOwner
+{
+	for (NSString *role in @[@"sp_info_owner", @"sp_info_plain", @"sp_info_gone", @"sp_info_nocreate"]) {
+		[self.other execute:[NSString stringWithFormat:@"DROP OWNED BY %@", role]];
+		[self.other execute:[@"DROP ROLE IF EXISTS " stringByAppendingString:role]];
+		[self serverRun:[NSString stringWithFormat:@"CREATE ROLE %@ NOLOGIN", role]];
+	}
+	PGPostgresConnection *other = self.other;
+	[self addTeardownBlock:^{
+		for (NSString *role in @[@"sp_info_owner", @"sp_info_plain", @"sp_info_gone", @"sp_info_nocreate"]) {
+			[other execute:[NSString stringWithFormat:@"DROP OWNED BY %@", role]];
+			[other execute:[@"DROP ROLE IF EXISTS " stringByAppendingString:role]];
+		}
+	}];
+	[self serverRun:@"CREATE TABLE structure_test.owned (id serial PRIMARY KEY)"];
+	[self showInfoOf:@"owned"];
+	SPPostgresTableInfoController *info = self.info;
+
+	// The test user is a superuser: any role
+	XCTAssertTrue(info.canChangeOwner);
+	XCTAssertFalse(info.ownerPopup.isHidden);
+	XCTAssertTrue(info.ownerField.isHidden);
+	XCTAssertEqualObjects(info.ownerPopup.titleOfSelectedItem, @"pgkit_test");
+	XCTAssertTrue([info.ownerPopup.itemTitles containsObject:@"sp_info_owner"], @"%@", info.ownerPopup.itemTitles);
+	XCTAssertFalse([info.ownerPopup.itemTitles containsObject:@"pg_monitor"], @"no built-in roles");
+	BOOL hasDatabaseOwnerRole = [[self serverValue:@"SELECT (current_setting('server_version_num')::int >= 140000)::text"] isEqualToString:@"true"];
+	XCTAssertEqual([info.ownerPopup.itemTitles containsObject:@"pg_database_owner"], hasDatabaseOwnerRole, @"but pg_database_owner, on PostgreSQL 14+");
+	XCTAssertEqual(info.ownerPopup.superview, info.ownerField.superview);
+	XCTAssertEqualWithAccuracy(NSMidY(info.ownerPopup.frame), NSMidY(info.ownerField.frame), 2, @"on the Owner row");
+
+	// pg_database_owner (PostgreSQL 14+): the table goes to whoever owns the database
+	if (hasDatabaseOwnerRole) {
+		[info.ownerPopup selectItemWithTitle:@"pg_database_owner"];
+		[info changeOwner:info.ownerPopup];
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+		XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts valueForKey:@"informativeText"]);
+		XCTAssertEqualObjects([self serverValue:@"SELECT pg_get_userbyid(relowner)::text FROM pg_class WHERE oid = 'structure_test.owned'::regclass"], @"pg_database_owner");
+		XCTAssertEqualObjects(info.ownerPopup.titleOfSelectedItem, @"pg_database_owner");
+		XCTAssertEqualObjects([info.ownerField stringValue], @"pg_database_owner");
+	}
+
+	// Choosing a role: the table (and its serial's sequence) is given to it
+	[info.ownerPopup selectItemWithTitle:@"sp_info_owner"];
+	[info changeOwner:info.ownerPopup];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts valueForKey:@"informativeText"]);
+	XCTAssertEqualObjects([self serverValue:@"SELECT pg_get_userbyid(relowner)::text FROM pg_class WHERE oid = 'structure_test.owned'::regclass"], @"sp_info_owner");
+	XCTAssertEqualObjects([self serverValue:@"SELECT pg_get_userbyid(relowner)::text FROM pg_class WHERE oid = 'structure_test.owned_id_seq'::regclass"], @"sp_info_owner");
+	XCTAssertEqualObjects(info.ownerPopup.titleOfSelectedItem, @"sp_info_owner");
+	XCTAssertEqualObjects([info.ownerField stringValue], @"sp_info_owner");
+	XCTAssertTrue([self flag:@"structureNeedsReset"], @"Structure shows the owner too");
+
+	// A failure (the role went meanwhile): the alert, and the pop-up back on the owner
+	[self serverRun:@"DROP ROLE sp_info_gone"];
+	[info.ownerPopup selectItemWithTitle:@"sp_info_gone"];
+	[info changeOwner:info.ownerPopup];
+	XCTAssertEqual(self.alerts.count, 1u);
+	XCTAssertEqualObjects(self.alerts[0].messageText, @"Could not change the owner of “owned”");
+	XCTAssertEqualObjects(info.ownerPopup.titleOfSelectedItem, @"sp_info_owner");
+	[self.alerts removeAllObjects];
+
+	// A user neither superuser nor in the owning role: plain text
+	[self runQuery:@"SET ROLE sp_info_plain"];
+	[self.document viewStatus:nil];
+	[info reload];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts valueForKey:@"informativeText"]);
+	XCTAssertFalse(info.canChangeOwner);
+	XCTAssertTrue(info.ownerPopup.isHidden);
+	XCTAssertFalse(info.ownerField.isHidden);
+	XCTAssertEqualObjects([info.ownerField stringValue], @"sp_info_owner");
+
+	// In the owning role: the roles it may SET ROLE to that have CREATE on the schema (the server refuses the others:
+	// sp_info_nocreate, though sp_info_plain is in it), and the owner
+	[self serverRun:@"GRANT sp_info_owner TO sp_info_plain"];
+	[self serverRun:@"GRANT sp_info_nocreate TO sp_info_plain"];
+	[info reload];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertFalse(info.canChangeOwner, @"no USAGE on the schema: the table can't be named");
+	[self serverRun:@"GRANT USAGE ON SCHEMA structure_test TO sp_info_plain"];
+	[info reload];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertTrue(info.canChangeOwner);
+	XCTAssertEqualObjects(info.ownerPopup.itemTitles, (@[@"sp_info_owner"]), @"no role has CREATE on the schema yet");
+	[self serverRun:@"GRANT CREATE ON SCHEMA structure_test TO sp_info_plain"];
+	[info reload];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertEqualObjects(info.ownerPopup.itemTitles, (@[@"sp_info_owner", @"sp_info_plain"]));
+
+	// Each one listed is accepted: giving it to sp_info_plain works as that user
+	[info.ownerPopup selectItemWithTitle:@"sp_info_plain"];
+	[info changeOwner:info.ownerPopup];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts valueForKey:@"informativeText"]);
+	XCTAssertEqualObjects([self serverValue:@"SELECT pg_get_userbyid(relowner)::text FROM pg_class WHERE oid = 'structure_test.owned'::regclass"], @"sp_info_plain");
+	[self runQuery:@"RESET ROLE"];
+	[self.document viewStatus:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	[self serverRun:@"REVOKE USAGE, CREATE ON SCHEMA structure_test FROM sp_info_plain"];
+}
+
 - (void)testCommentEditPersists
 {
 	[self showInfoOf:@"t"];

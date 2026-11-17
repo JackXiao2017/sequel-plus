@@ -6,7 +6,8 @@
  *
  * Alter is enabled when something changed and the name is not empty. Return in the name field presses it, Escape
  * cancels. Use on the main thread. completion is called exactly once, after the sheet closes: with the values (Alter)
- * as @{@"name", @"owner", @"comment"} (name trimmed), or nil (Cancel, or when the sheet can't be shown).
+ * as @{@"name", @"owner", @"comment", @"ownerOfContents"} (name trimmed; ownerOfContents @"YES" or @"NO": the checkbox,
+ * on by default, giving a new owner the database's schemas and their tables, views and sequences too), or nil (Cancel, or when the sheet can't be shown).
  */
 __attribute__((visibility("default")))
 @interface SPPostgresAlterDatabaseSheet : NSObject <NSTextFieldDelegate, NSTextViewDelegate>
@@ -24,6 +25,8 @@ __attribute__((visibility("default")))
 @property (readonly) NSWindow *sheet;
 @property (readonly) NSTextField *nameField;
 @property (readonly) NSPopUpButton *ownerPopup;
+/// "Change the owner of its schemas, tables, views and sequences too".
+@property (readonly) NSButton *contentsCheckbox;
 @property (readonly) NSTextView *commentView;
 @property (readonly) NSButton *alterButton;
 @property (readonly) NSButton *cancelButton;

@@ -484,6 +484,127 @@ static NSString * const SPTestTransferIdentifier = @"TransferToolbarItemIdentifi
 	XCTAssertEqualObjects([SPPostgresTransferController ownershipNoteForFavorite:nil], generic);
 }
 
+/// Drops the test's roles: what they own in pgkit_io_dst goes back to the test user first (nothing is dropped with them).
+- (void)dropOwnerRoles:(NSArray<NSString *> *)roles on:(PGPostgresConnection *)target
+{
+	for (NSString *role in roles) {
+		NSString *exists = [self value:[NSString stringWithFormat:@"SELECT count(*)::text FROM pg_roles WHERE rolname = '%@'", role] on:target];
+		if (![exists isEqualToString:@"1"]) continue;
+		[self run:[NSString stringWithFormat:@"REASSIGN OWNED BY %@ TO pgkit_test", role] on:target];
+		[self run:[NSString stringWithFormat:@"DROP OWNED BY %@", role] on:target];
+		[self run:[NSString stringWithFormat:@"DROP ROLE %@", role] on:target];
+	}
+}
+
+/// Owner: the target's roles, the To: connection's user selected (the note as before); choosing another role says it is
+/// given the copy. A user who isn't a superuser is offered the roles it may SET ROLE to.
+- (void)testOwnerMenuListsTheTargetsRoles
+{
+	[self onEachPort:^(NSNumber *port, PGPostgresConnection *target) {
+		NSArray *roles = @[@"sp_tr_plain", @"sp_tr_owner"];
+		[self dropOwnerRoles:roles on:target];
+		[self run:@"CREATE ROLE sp_tr_owner NOLOGIN" on:target];
+		[self run:@"CREATE ROLE sp_tr_plain NOLOGIN" on:target];
+		SPPostgresTransferController *controller = [self openSheet];
+		NSPopUpButton *owners = controller.ownerPopup;
+		XCTAssertTrue(owners.isEnabled);
+		XCTAssertEqualObjects(owners.titleOfSelectedItem, @"pgkit_test", @"the To: connection's user");
+		XCTAssertEqualObjects(controller.selectedOwner, @"pgkit_test");
+		XCTAssertTrue([owners.itemTitles containsObject:@"sp_tr_owner"], @"%@", owners.itemTitles);
+		XCTAssertFalse([owners.itemTitles containsObject:@"pg_monitor"], @"no built-in roles");
+		BOOL hasDatabaseOwnerRole = [[self value:@"SELECT (current_setting('server_version_num')::int >= 140000)::text" on:target] isEqualToString:@"true"];
+		XCTAssertEqual([owners.itemTitles containsObject:@"pg_database_owner"], hasDatabaseOwnerRole, @"but pg_database_owner, on PostgreSQL 14+");
+		NSString *defaultNote = @"Owners and privileges aren't copied: the tables, views and other objects the transfer creates are owned by “pgkit_test”, the user the To: connection logs in as. Grant other roles access afterwards if they need it.";
+		XCTAssertEqualObjects(controller.ownershipNoteField.stringValue, defaultNote);
+
+		// On the sheet, between the mode and the note
+		NSRect bounds = controller.sheet.contentView.bounds;
+		XCTAssertTrue(NSContainsRect(bounds, owners.frame));
+		XCTAssertFalse(NSIntersectsRect(owners.frame, controller.ownershipNoteField.frame));
+		XCTAssertFalse(NSIntersectsRect(owners.frame, controller.overwriteModeRadio.frame));
+		XCTAssertFalse(NSIntersectsRect(controller.retryButton.frame, controller.emptyModeRadio.frame));
+		XCTAssertFalse(NSIntersectsRect(controller.tablesList.tableView.enclosingScrollView.frame, controller.favoritePopup.frame));
+
+		[owners selectItemWithTitle:@"sp_tr_owner"];
+		[NSApp sendAction:owners.action to:owners.target from:owners];
+		XCTAssertEqualObjects(controller.selectedOwner, @"sp_tr_owner");
+		XCTAssertEqualObjects(controller.ownershipNoteField.stringValue, @"Owners and privileges aren't copied: the tables, views and other objects the transfer creates are given to “sp_tr_owner” (they're created by “pgkit_test”, the user the To: connection logs in as, then given to it before the commit). Grant other roles access afterwards if they need it.");
+		[owners selectItemWithTitle:@"pgkit_test"];
+		[NSApp sendAction:owners.action to:owners.target from:owners];
+		XCTAssertEqualObjects(controller.ownershipNoteField.stringValue, defaultNote);
+
+		// Not a superuser: the roles it may SET ROLE to, itself included
+		[self run:@"GRANT sp_tr_owner TO sp_tr_plain" on:target];
+		PGPostgresConnection *plain = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_io_dst"];
+		[self.openConnections addObject:plain];
+		[self run:@"SET ROLE sp_tr_plain" on:plain];
+		NSString *user = nil;
+		NSArray *offered = [SPPostgresTransferController ownersOnConnection:plain user:&user];
+		XCTAssertEqualObjects(user, @"sp_tr_plain");
+		XCTAssertEqualObjects(offered, (@[@"sp_tr_owner", @"sp_tr_plain"]));
+		[plain disconnect];
+
+		[controller cancel:nil];
+		XCTAssertTrue([self spinUntil:^BOOL{ return self.ended && [self window].attachedSheet == nil; } timeout:5]);
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+		[self dropOwnerRoles:roles on:target];
+	}];
+}
+
+/// A role chosen as Owner is given everything the transfer created, before the commit; what was there before keeps its
+/// owner. A role the server refuses fails the transfer, the target unchanged.
+- (void)testTransferGivesTheCopyToTheChosenOwner
+{
+	[self onEachPort:^(NSNumber *port, PGPostgresConnection *target) {
+		NSArray *roles = @[@"sp_tr_owner", @"sp_tr_gone"];
+		[self dropOwnerRoles:roles on:target];
+		[self run:@"CREATE ROLE sp_tr_owner NOLOGIN" on:target];
+		[self run:@"CREATE ROLE sp_tr_gone NOLOGIN" on:target];
+		NSString *leftWithTheUser =
+			@"SELECT coalesce(string_agg(x, ', ' ORDER BY x), '') FROM ("
+			" SELECT 'schema ' || n.nspname AS x, n.oid FROM pg_namespace n WHERE pg_get_userbyid(n.nspowner) = 'pgkit_test' AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'"
+			" UNION ALL SELECT 'relation ' || c.oid::regclass::text, c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE pg_get_userbyid(c.relowner) = 'pgkit_test' AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'"
+			" UNION ALL SELECT 'routine ' || p.oid::regprocedure::text, p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE pg_get_userbyid(p.proowner) = 'pgkit_test' AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'"
+			" UNION ALL SELECT 'type ' || t.oid::regtype::text, t.oid FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE pg_get_userbyid(t.typowner) = 'pgkit_test' AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'"
+			"  AND NOT (t.typtype = 'b' AND t.typelem <> 0)" // an array follows its element type (an extension's, on PostgreSQL 12, isn't one of its members)
+			") z WHERE NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid = z.oid AND d.deptype = 'e')";
+
+		// Empty mode, the whole database
+		SPPostgresTransferController *controller = [self openSheet];
+		controller.emptyConfirmation = ^(NSString *database, NSString *targetDescription, void (^answer)(BOOL)) { answer(YES); };
+		[controller.ownerPopup selectItemWithTitle:@"sp_tr_owner"];
+		[NSApp sendAction:controller.ownerPopup.action to:controller.ownerPopup.target from:controller.ownerPopup];
+		[self transferWith:controller];
+		XCTAssertNil(controller.lastErrorMessage);
+		XCTAssertTrue([controller.completionNote hasSuffix:@"\n\nWhat was created is owned by “sp_tr_owner”. The source's owners and privileges weren't copied."], @"%@", controller.completionNote);
+		XCTAssertEqualObjects([self value:leftWithTheUser on:target], @"", @"port %@: everything created was given away", port);
+		XCTAssertEqualObjects([self value:@"SELECT pg_get_userbyid(relowner)::text FROM pg_class WHERE oid = '\"Sales Data\".\"Orders 2026\"'::regclass" on:target], @"sp_tr_owner");
+		XCTAssertEqualObjects([self value:@"SELECT pg_get_userbyid(nspowner)::text FROM pg_namespace WHERE nspname = 'Sales Data'" on:target], @"sp_tr_owner");
+		XCTAssertEqualObjects([self value:@"SELECT pg_get_userbyid(typowner)::text FROM pg_type WHERE oid = 'public.mood'::regtype" on:target], @"sp_tr_owner");
+		PGPostgresConnection *source = [SPPostgresTestServers connectedConnectionOnPort:port.unsignedIntegerValue database:@"pgkit_io_src"];
+		[self.openConnections addObject:source];
+		XCTAssertEqualObjects([self rowsOf:target], [self rowsOf:source], @"port %@", port);
+		[self assertTemporaryDirectoryEmpty];
+
+		// Again, to a role gone by then: the load is done, but the owner change fails, so nothing changed (the marker,
+		// made after the first copy, is still there and still the user's)
+		[self addMarkerTo:target];
+		controller = [self openSheet];
+		controller.emptyConfirmation = ^(NSString *database, NSString *targetDescription, void (^answer)(BOOL)) { answer(YES); };
+		[controller.ownerPopup selectItemWithTitle:@"sp_tr_gone"];
+		[NSApp sendAction:controller.ownerPopup.action to:controller.ownerPopup.target from:controller.ownerPopup];
+		[self run:@"DROP ROLE sp_tr_gone" on:target];
+		NSString *ordersBefore = [self value:@"SELECT '\"Sales Data\".\"Orders 2026\"'::regclass::oid::text" on:target];
+		[self transferWith:controller];
+		XCTAssertTrue([controller.lastErrorMessage containsString:@"\"sp_tr_gone\" does not exist"], @"%@", controller.lastErrorMessage);
+		XCTAssertEqualObjects([self value:@"SELECT '\"Sales Data\".\"Orders 2026\"'::regclass::oid::text" on:target], ordersBefore, @"not replaced");
+		XCTAssertEqualObjects([self value:@"SELECT string_agg(note, ',') FROM public.marker" on:target], @"still here");
+		XCTAssertEqualObjects([self value:@"SELECT pg_get_userbyid(relowner)::text FROM pg_class WHERE oid = 'public.marker'::regclass" on:target], @"pgkit_test");
+		[self assertTemporaryDirectoryEmpty];
+		[self dropOwnerRoles:roles on:target];
+	}];
+}
+
 - (void)testTargetDescriptions
 {
 	SPPostgresFavorite *favorite = [[SPPostgresFavorite alloc] init];

@@ -240,6 +240,17 @@ __attribute__((visibility("default")))
 - (NSString *)tableOwner:(NSError **)error;
 /// The roles (logins and groups) the table can be given to, without the built-in pg_* roles, sorted; nil on failure.
 - (NSArray *)roleNames:(NSError **)error;
+
+/**
+ * Whether the connected user may change the relation's owner, and to which roles: @{@"canChange": NSNumber (BOOL),
+ * @"roles": the role names, sorted, without the built-in pg_* roles but pg_database_owner}. A superuser may, to any
+ * role. Otherwise a user with USAGE on the schema (to name the table) who has the owning role's privileges or may grant
+ * itself that role, to the roles it may SET ROLE to (is a member of, before PostgreSQL 16) or grant itself (ADMIN
+ * OPTION from 16; CREATEROLE, for a role that isn't a superuser, before) that have CREATE on the schema or that the
+ * user may grant it to: as a cloud service's main user (RDS…) can with the users it created. -setTableOwner:error:
+ * grants what's missing for the change only. nil on failure (a missing relation, as the other reads).
+ */
+- (NSDictionary *)ownerChoices:(NSError **)error;
 /// @"table", @"partitioned table", @"view", @"materialized view" or @"foreign table"; nil on failure.
 - (NSString *)relationKind:(NSError **)error;
 /**

@@ -8,6 +8,7 @@ static SPPostgresSchemaSheet *SPPostgresCurrentSchemaSheet = nil;
 	BOOL editing;
 	NSTextField *nameField;
 	NSPopUpButton *ownerPopup;
+	NSButton *contentsCheckbox;
 	NSButton *actionButton;
 	NSButton *cancelButton;
 	NSString *originalName;
@@ -15,7 +16,7 @@ static SPPostgresSchemaSheet *SPPostgresCurrentSchemaSheet = nil;
 	void (^completion)(NSDictionary *);
 }
 
-@synthesize sheet, editing, nameField, ownerPopup, actionButton, cancelButton;
+@synthesize sheet, editing, nameField, ownerPopup, contentsCheckbox, actionButton, cancelButton;
 
 + (SPPostgresSchemaSheet *)currentSheet
 {
@@ -64,7 +65,7 @@ static NSTextField *SPSchemaSheetLabel(NSString *title, NSRect frame)
 	originalOwner = [(owner ?: @"") copy];
 	completion = [theCompletion copy];
 
-	CGFloat width = 420, height = 160, labelWidth = 60, fieldX = 20 + labelWidth + 8, fieldWidth = width - fieldX - 20;
+	CGFloat width = 420, height = isEditing ? 186 : 160, labelWidth = 60, fieldX = 20 + labelWidth + 8, fieldWidth = width - fieldX - 20;
 	sheet = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, width, height) styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:YES];
 	[sheet setReleasedWhenClosed:NO];
 	[sheet setTitle:(editing ? NSLocalizedString(@"Edit Schema", @"PostgreSQL edit schema sheet title") : NSLocalizedString(@"Add Schema", @"PostgreSQL add schema sheet title"))];
@@ -104,6 +105,14 @@ static NSTextField *SPSchemaSheetLabel(NSString *title, NSRect frame)
 	[ownerPopup setAction:@selector(_controlChanged:)];
 	[content addSubview:ownerPopup];
 
+	// Editing: the schema's tables, views and sequences get the new owner too (on by default)
+	if (editing) {
+		contentsCheckbox = [[NSButton checkboxWithTitle:NSLocalizedString(@"Change the owner of its tables, views and sequences too", @"PostgreSQL edit schema: change the owner of the schema's contents checkbox") target:nil action:NULL] retain];
+		[contentsCheckbox setState:NSControlStateValueOn];
+		[contentsCheckbox setFrame:NSMakeRect(fieldX, height - 138, fieldWidth, 18)];
+		[content addSubview:contentsCheckbox];
+	}
+
 	// Buttons
 	NSString *actionTitle = editing ? NSLocalizedString(@"Save", @"PostgreSQL edit schema: save button") : NSLocalizedString(@"Add", @"PostgreSQL add schema: add button");
 	actionButton = [[NSButton buttonWithTitle:actionTitle target:self action:@selector(performAction:)] retain];
@@ -133,6 +142,7 @@ static NSTextField *SPSchemaSheetLabel(NSString *title, NSRect frame)
 	[sheet release];
 	[nameField release];
 	[ownerPopup release];
+	[contentsCheckbox release];
 	[actionButton release];
 	[cancelButton release];
 	[originalName release];
@@ -144,7 +154,9 @@ static NSTextField *SPSchemaSheetLabel(NSString *title, NSRect frame)
 - (NSDictionary *)_values
 {
 	NSString *name = [[nameField stringValue] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-	return @{@"name": name, @"owner": [ownerPopup titleOfSelectedItem] ?: @""};
+	NSMutableDictionary *values = [NSMutableDictionary dictionaryWithObjectsAndKeys:name, @"name", [ownerPopup titleOfSelectedItem] ?: @"", @"owner", nil];
+	if (contentsCheckbox) [values setObject:([contentsCheckbox state] == NSControlStateValueOn ? @"YES" : @"NO") forKey:@"ownerOfContents"];
+	return values;
 }
 
 - (void)validate

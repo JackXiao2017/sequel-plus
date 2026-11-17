@@ -1,5 +1,25 @@
 # Changelog
 
+## Sequel Plus 2.0.4
+
+Upgrading from 2.0.3.
+
+- Version **2.0.4**.
+
+### PostgreSQL: change owners from Table Info, and with a schema or database
+- **Table Info ▸ Owner** is now a pop-up when you're allowed to change the table's owner: as a superuser, or as a user with the owning role's privileges and USAGE on the schema. It lists only the roles the server will accept: any role for a superuser; otherwise the roles you can switch to (are a member of; from PostgreSQL 16, may SET ROLE to) that also have CREATE on the table's schema, which the new owner needs. On PostgreSQL 14+ the list also offers `pg_database_owner`, so the table belongs to whoever owns the database (as `public` does from PostgreSQL 15), under the same rules: a database's owner can give it to `pg_database_owner` in `public`. A cloud service's main user (Amazon RDS, Cloud SQL, Azure), which isn't a real superuser, is also offered the roles it can grant itself (CREATEROLE before PostgreSQL 16, ADMIN OPTION from 16), such as the users it created, and can change tables those users own. Whatever the change needs that you're allowed to grant (membership in the old or new owner, CREATE on the schema for the new owner) is granted just for the change and revoked straight after, in the same transaction. The current owner is always listed. Choosing one runs `ALTER … OWNER TO`; the indexes and the serial or identity sequences follow the table. Without that right, Owner stays plain text.
+- **Edit Schema** (the pencil by the schema pop-up) has a new checkbox, on by default: **Change the owner of its tables, views and sequences too**. Saving then gives the schema's tables (partitioned and foreign too), views, materialized views and sequences the new owner along with the schema.
+- **Database ▸ Alter Database…** has the same kind of checkbox, on by default: **Change the owner of its schemas, tables, views and sequences too**. A new owner then goes to every schema in the database and everything in them as well. System schemas are left alone, and so is a schema owned by `pg_database_owner` (`public` from PostgreSQL 15), which already follows the database's owner.
+- Objects that belong to an extension keep their owner. The whole change runs in one transaction: if any object can't be changed (for example, your role isn't allowed to), nothing is changed and the server's message is shown.
+
+### PostgreSQL: choose who owns a transfer's copy
+- The **Transfer** sheet has a new **Owner** pop-up, below the mode. It lists the target server's roles once the To: connection is open, with the user that connection logs in as selected, which is the default and works as before. A superuser is offered every role (and `pg_database_owner` on PostgreSQL 14+). Anyone else is offered the roles they can switch to (are a member of; from PostgreSQL 16, may SET ROLE to) and the roles they can grant themselves: with CREATEROLE before PostgreSQL 16, or ADMIN OPTION from 16. That covers a cloud service's main user (Amazon RDS, Cloud SQL, Azure), which isn't a real superuser but can manage the users it created.
+- With another role chosen, the copy is still created by the login user. Then, just before the commit and in the same transaction, everything the transfer created is given to that role with `ALTER … OWNER TO`: schemas, tables (partitions too), views, materialized views, standalone sequences, functions, procedures, aggregates, types and domains. Indexes and a column's sequences follow their table. Objects that were already on the target keep their owner, and so do an extension's own objects.
+- PostgreSQL only lets a user who isn't a superuser give objects to a role it can switch to, and the new owner needs CREATE on a schema that was already there (such as `public` from PostgreSQL 15). When either is missing and you're allowed to grant it, the transfer grants it (`GRANT <role> TO CURRENT_USER`, `GRANT CREATE ON SCHEMA …`) just for the owner change and revokes it straight after, in the same transaction. Afterwards roles and privileges are as they were.
+- Giving a schema away means your login no longer has access to it unless it has been granted some. Grant your login access afterwards if it still needs to read the copy.
+- If the server refuses the new owner (for example, the role no longer exists, or isn't one you may give objects to), the whole transfer fails and the target is left unchanged.
+- The note under it, and the completion message, name the owner.
+
 ## Sequel Plus 2.0.3
 
 Upgrading from 2.0.2.

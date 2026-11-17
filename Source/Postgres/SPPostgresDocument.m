@@ -119,6 +119,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 - (void)_reloadDeferredSidebar;
 - (void)_relationsDidChange;
 - (void)_tableInfoDidChange;
+- (void)_ownersChanged;
 - (void)_refreshContentIfStale;
 - (void)_refreshStructureIfStale;
 - (void)_refreshCurrentPaneIfStale;
@@ -1462,6 +1463,19 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	structureNeedsReset = YES;
 	// The information pane under the table list shows the saved comment (patched: nothing is read)
 	[[sidebar infoPane] setComment:[[infoController commentView] string] forRelation:[infoController table] inSchema:[infoController schema]];
+}
+
+/// A schema's or the database's objects were given a new owner: the panes showing an owner (Structure, Table Info,
+/// Sequence) read again when next shown, and the shown one once the tab is idle.
+- (void)_ownersChanged
+{
+	if (tornDown) return;
+	structureNeedsReset = YES;
+	infoNeedsReset = YES;
+	sequenceNeedsReset = YES;
+	[self _whenIdle:^{
+		if (!tornDown) [self _refreshCurrentPaneIfStale];
+	}];
 }
 
 /// The shown pane reloads if it may be stale.
@@ -3940,7 +3954,8 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 
 /**
  * The pencil before the +: the shown pane's edits are saved, the shown schema's owner and the server's roles are read,
- * then a sheet offers its owner. Save sends ALTER SCHEMA … OWNER TO; a server error is shown.
+ * then a sheet offers its owner. Save sends ALTER SCHEMA … OWNER TO (and, with the sheet's checkbox, gives the schema's
+ * tables, views and sequences the new owner too, all or nothing); a server error is shown.
  */
 - (void)sidebarEditSchema:(SPPostgresSidebarController *)theSidebar
 {
@@ -3964,22 +3979,26 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 		[self _whenIdle:^{
 			if (tornDown || !parentWindow || [parentWindow attachedSheet]) return;
 			[SPPostgresSchemaSheet beginEditOnWindow:parentWindow schema:schema owner:result[@"owner"] roles:result[@"roles"] completion:^(NSDictionary *values) {
-				if (values && !tornDown) [self _setOwner:values[@"owner"] ofSchema:schema];
+				if (values && !tornDown) [self _setOwner:values[@"owner"] ofSchema:schema includingContents:[values[@"ownerOfContents"] isEqualToString:@"YES"]];
 			}];
 		}];
 	}];
 }
 
-- (void)_setOwner:(NSString *)owner ofSchema:(NSString *)schema
+- (void)_setOwner:(NSString *)owner ofSchema:(NSString *)schema includingContents:(BOOL)contents
 {
 	if ([self _refuseWriteWhileBusy]) return;
 	NSString *theOwner = [[owner copy] autorelease];
 	NSString *theSchema = [[schema copy] autorelease];
 	[taskRunner runTaskWithDescription:NSLocalizedString(@"Changing owner...", @"PostgreSQL edit schema task") cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
 		SPPostgresCatalog *writer = [[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease];
-		return [writer setOwner:theOwner ofSchema:theSchema error:error] ? @YES : nil;
+		return [writer setOwner:theOwner ofSchema:theSchema includingContents:contents error:error] ? @YES : nil;
 	} completion:^(id result, NSError *error, BOOL cancelled) {
-		if (tornDown || cancelled || result) return;
+		if (tornDown || cancelled) return;
+		if (result) {
+			if (contents) [self _ownersChanged];
+			return;
+		}
 		[self _alertTitle:[NSString stringWithFormat:NSLocalizedString(@"Could not change the owner of the schema “%@”", @"PostgreSQL edit schema failed"), theSchema] error:error];
 	}];
 }
@@ -4661,7 +4680,8 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 
 /**
  * Database ▸ Alter Database…: the tab's database's name, owner and comment (read on the tab's runner, with the server's
- * roles). Owner and comment are changed on this connection (ALTER DATABASE … OWNER TO, COMMENT ON DATABASE); a new
+ * roles). Owner and comment are changed on this connection (ALTER DATABASE … OWNER TO, with the sheet's checkbox also
+ * for its schemas, tables, views and sequences, all or nothing; COMMENT ON DATABASE); a new
  * name then goes through Rename Database's flow (from another database). The first failure is shown and stops the rest.
  */
 - (IBAction)alterDatabase:(id)sender
@@ -4697,6 +4717,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	NSString *owner = values[@"owner"];
 	NSString *comment = values[@"comment"];
 	NSString *newName = values[@"name"];
+	BOOL ownerOfContents = [values[@"ownerOfContents"] isEqualToString:@"YES"];
 	BOOL ownerChanged = [owner length] && ![owner isEqualToString:details[@"owner"]];
 	BOOL commentChanged = ![comment isEqualToString:details[@"comment"]];
 
@@ -4717,7 +4738,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	void (^then)(void) = [[rename copy] autorelease];
 	[taskRunner runTaskWithDescription:NSLocalizedString(@"Altering database...", @"PostgreSQL alter database task") cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
 		SPPostgresCatalog *writer = [[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease];
-		if (ownerChanged && ![writer setOwner:owner ofDatabase:database error:error]) return nil;
+		if (ownerChanged && ![writer setOwner:owner ofDatabase:database includingContents:ownerOfContents error:error]) return nil;
 		if (commentChanged && ![writer setComment:comment ofDatabase:database error:error]) return nil;
 		return @YES;
 	} completion:^(id result, NSError *error, BOOL cancelled) {
@@ -4726,6 +4747,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 			[self _alertTitle:[NSString stringWithFormat:NSLocalizedString(@"Could not alter the database “%@”", @"PostgreSQL alter database failed"), database] error:error];
 			return;
 		}
+		if (ownerChanged && ownerOfContents) [self _ownersChanged];
 		[self _whenIdle:then];
 	}];
 }
