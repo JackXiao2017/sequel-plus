@@ -183,6 +183,66 @@ static NSString * const SPFKPickerMySQLDatabase = @"sp_fkpicker_test";
 	XCTAssertEqualObjects(([self ids:nil in:@[] conditions:quoted]), (@[@"5"]));
 }
 
+- (void)testSearchEscapesWildcardsUnderNoBackslashEscapes
+{
+	[self skipWithoutServer];
+	// With NO_BACKSLASH_ESCAPES, \ is no LIKE escape character: %, _ and \ must still match literally
+	[self run:@"SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',NO_BACKSLASH_ESCAPES')"];
+	[self run:@"INSERT INTO sp_fkpicker_test.`customer list` VALUES (6, 'back\\slash', 'b@x', NULL, NULL)"];
+	XCTAssertEqualObjects(([self ids:@"%" in:@[@"name", @"email"] conditions:@[]]), (@[@"4"]));
+	XCTAssertEqualObjects(([self ids:@"_" in:@[@"name", @"email"] conditions:@[]]), (@[@"4"]));
+	XCTAssertEqualObjects(([self ids:@"'" in:@[@"name", @"email"] conditions:@[]]), (@[@"5"]));
+	XCTAssertEqualObjects(([self ids:@"\\" in:@[@"name", @"email"] conditions:@[]]), (@[@"6"]));
+	XCTAssertEqualObjects(([self ids:@"!" in:@[@"name", @"email"] conditions:@[]]), (@[]));
+	NSArray *contains = @[[SPForeignKeyCondition conditionWithColumn:@"name" op:SPForeignKeyOpContains value:@"0%" secondValue:nil]];
+	XCTAssertEqualObjects(([self ids:nil in:@[] conditions:contains]), (@[@"4"]));
+	NSArray *starts = @[[SPForeignKeyCondition conditionWithColumn:@"name" op:SPForeignKeyOpStartsWith value:@"back\\" secondValue:nil]];
+	XCTAssertEqualObjects(([self ids:nil in:@[] conditions:starts]), (@[@"6"]));
+	// And in the default mode too
+	[self run:@"SET SESSION sql_mode = REPLACE(@@SESSION.sql_mode, 'NO_BACKSLASH_ESCAPES', '')"];
+	XCTAssertEqualObjects(([self ids:@"\\" in:@[@"name", @"email"] conditions:@[]]), (@[@"6"]));
+	XCTAssertEqualObjects(([self ids:@"!" in:@[@"name", @"email"] conditions:@[]]), (@[]));
+}
+
+- (void)testQueuedFetchesSupersededByANewerOneAreSkipped
+{
+	[self skipWithoutServer];
+	dispatch_queue_t queue = dispatch_queue_create("test.fkpicker.mysql", DISPATCH_QUEUE_SERIAL);
+	self.source = [[SPMySQLForeignKeyPickerSource alloc] initWithConnection:self.connection database:SPFKPickerMySQLDatabase table:@"customer list" keyColumn:@"id" queue:queue];
+	dispatch_suspend(queue);
+	__block NSUInteger answered = 0;
+	__block NSArray *last = nil;
+	for (NSString *search in @[@"a", @"an", @"ann"]) {
+		[self.source fetchRowsWithSearch:search inColumns:@[@"name"] conditions:@[] columns:@[@"id"] offset:0 limit:10 completion:^(NSArray *rows, NSString *errorMessage) {
+			answered++;
+			last = rows;
+		}];
+	}
+	[self.recorder.statements removeAllObjects];
+	dispatch_resume(queue);
+	BOOL done = NO;
+	NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:10];
+	while (answered < 3 && [deadline timeIntervalSinceNow] > 0) [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+	done = answered == 3;
+	XCTAssertTrue(done, @"every completion is still called");
+	XCTAssertEqualObjects(last, (@[@[@"1"]]));
+	NSUInteger searches = 0;
+	for (NSString *statement in self.recorder.statements) if ([statement rangeOfString:@" LIKE "].location != NSNotFound) searches++;
+	XCTAssertEqual(searches, 1u, @"only the newest search reaches the server: %@", self.recorder.statements);
+
+	// Cancelling skips what is still queued
+	dispatch_suspend(queue);
+	answered = 0;
+	[self.source fetchRowsWithSearch:@"x" inColumns:@[@"name"] conditions:@[] columns:@[@"id"] offset:0 limit:10 completion:^(NSArray *rows, NSString *errorMessage) { answered++; }];
+	[self.source cancelPendingFetches];
+	[self.recorder.statements removeAllObjects];
+	dispatch_resume(queue);
+	deadline = [NSDate dateWithTimeIntervalSinceNow:10];
+	while (answered < 1 && [deadline timeIntervalSinceNow] > 0) [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+	XCTAssertEqual(answered, 1u);
+	XCTAssertEqual(self.recorder.statements.count, 0u, @"%@", self.recorder.statements);
+}
+
 - (void)testPagingOrderedByKey
 {
 	[self skipWithoutServer];

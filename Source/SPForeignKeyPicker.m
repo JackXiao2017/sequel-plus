@@ -156,6 +156,9 @@ static SPForeignKeyPicker *SPCurrentForeignKeyPicker = nil;
 	BOOL _hasMore;
 	BOOL _loadingMore;
 	NSUInteger _generation;      // bumped by every new search: older results are dropped
+	BOOL _debouncing;            // a new search waits for typing to pause
+	BOOL _pendingFetch;          // a new search is debounced or on its way: the list is about to be replaced
+	BOOL _chooseAfterFetch;      // Choose / Return came while a search was pending: choose from its first row
 	BOOL _done;
 	NSInteger _currentRow;        // the row holding the current value, or -1
 	NSString *_statusText;
@@ -392,6 +395,7 @@ static SPForeignKeyPicker *SPCurrentForeignKeyPicker = nil;
 	_done = YES;
 	_generation++;
 	[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(fetchFromStart) object:nil];
+	[_source cancelPendingFetches];
 	void (^handler)(SPForeignKeyPickerOutcome, NSString *) = [[_completion retain] autorelease];
 	[_completion release];
 	_completion = nil;
@@ -473,15 +477,22 @@ static SPForeignKeyPicker *SPCurrentForeignKeyPicker = nil;
 {
 	[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(fetchFromStart) object:nil];
 	if (_searchDelay <= 0) [self fetchFromStart];
-	else [self performSelector:@selector(fetchFromStart) withObject:nil afterDelay:_searchDelay];
+	else {
+		_debouncing = YES;
+		_pendingFetch = YES;
+		[self performSelector:@selector(fetchFromStart) withObject:nil afterDelay:_searchDelay];
+	}
 }
 
 /// A new search: the first page for the current text, conditions and columns.
 - (void)fetchFromStart
 {
+	[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(fetchFromStart) object:nil];
+	_debouncing = NO;
 	if (_done || !_allColumns) return;
 	_generation++;
 	_loadingMore = NO;
+	_pendingFetch = YES;
 	[self fetchFromOffset:0];
 }
 
@@ -492,7 +503,14 @@ static SPForeignKeyPicker *SPCurrentForeignKeyPicker = nil;
 	[_source fetchRowsWithSearch:search inColumns:_shown conditions:[self conditions] columns:_shown
 						  offset:offset limit:SPForeignKeyPickerPageSize + 1 completion:^(NSArray<NSArray *> *rows, NSString *errorMessage) {
 		if (_done || generation != _generation) return;
+		if (!rows && !errorMessage) return; // skipped by the source: superseded before it ran
 		_loadingMore = NO;
+		BOOL chooseNow = NO;
+		if (offset == 0) {
+			_pendingFetch = NO;
+			chooseNow = _chooseAfterFetch;
+			_chooseAfterFetch = NO;
+		}
 		if (!rows) {
 			[self showError:errorMessage];
 			return;
@@ -519,12 +537,15 @@ static SPForeignKeyPicker *SPCurrentForeignKeyPicker = nil;
 			}
 		}
 		[self updateStatus];
+		// Choose / Return while this search was pending: its first row, if it found any
+		if (chooseNow && [_rows count]) [self chooseRow:0];
 	}];
 }
 
 - (void)loadMore
 {
-	if (_done || !_hasMore || _loadingMore) return;
+	// While a new search is pending, the next page of the list it replaces would be the wrong rows
+	if (_done || !_hasMore || _loadingMore || _pendingFetch) return;
 	_loadingMore = YES;
 	[self fetchFromOffset:[_rows count]];
 }
@@ -721,9 +742,20 @@ static SPForeignKeyPicker *SPCurrentForeignKeyPicker = nil;
 
 #pragma mark - Outcomes
 
+/// Chooses the selected row; while a new search is pending, the first row it finds instead (at once, not after the pause).
 - (void)choose
 {
-	NSInteger row = [_resultsTable selectedRow];
+	if (_done) return;
+	if (_pendingFetch) {
+		_chooseAfterFetch = YES;
+		if (_debouncing) [self fetchFromStart];
+		return;
+	}
+	[self chooseRow:[_resultsTable selectedRow]];
+}
+
+- (void)chooseRow:(NSInteger)row
+{
 	if (_done || row < 0 || (NSUInteger)row >= [_rows count]) return;
 	id key = [[_rows objectAtIndex:(NSUInteger)row] firstObject];
 	if (![key isKindOfClass:[NSString class]]) {
@@ -761,9 +793,10 @@ static SPForeignKeyPicker *SPCurrentForeignKeyPicker = nil;
 
 - (IBAction)tableDoubleClicked:(id)sender
 {
+	// The row double-clicked is one on screen: chosen as it is, even while a search is pending
 	NSInteger clicked = [_resultsTable clickedRow];
 	if (clicked >= 0) [_resultsTable selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)clicked] byExtendingSelection:NO];
-	[self choose];
+	[self chooseRow:[_resultsTable selectedRow]];
 }
 
 #pragma mark - Search field and condition fields

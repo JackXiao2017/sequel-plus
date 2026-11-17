@@ -803,8 +803,8 @@ typedef enum {
 @synthesize chooser;
 
 /**
- * Shows the "Choose…" button, right of the Open… button, when a chooser is set and the value is editable text; hides
- * it otherwise.
+ * Shows the "Choose…" button, left of the Cancel button, when a chooser is set and the value is editable text; hides
+ * it otherwise. (The image and QuickLook controls that also live there are hidden for such text.)
  */
 - (void)_updateChooseButtonForData:(id)data blob:(BOOL)isFieldBlob
 {
@@ -819,12 +819,14 @@ typedef enum {
 		[editSheetChooseButton setTarget:self];
 		[editSheetChooseButton setAction:@selector(chooseValue:)];
 		[editSheetChooseButton sizeToFit];
+		NSView *cancel = editSheetCancelButton;
+		NSRect anchor = cancel ? [cancel frame] : [open frame];
 		NSRect frame = [editSheetChooseButton frame];
-		frame.origin = NSMakePoint(NSMaxX([open frame]) + 4, NSMinY([open frame]));
-		frame.size.height = NSHeight([open frame]);
+		frame.size.height = NSHeight(anchor);
+		frame.origin = NSMakePoint(NSMinX(anchor) - 4 - NSWidth(frame), NSMinY(anchor));
 		[editSheetChooseButton setFrame:frame];
-		[editSheetChooseButton setAutoresizingMask:[open autoresizingMask]];
-		[[open superview] addSubview:editSheetChooseButton];
+		[editSheetChooseButton setAutoresizingMask:cancel ? [cancel autoresizingMask] : [open autoresizingMask]];
+		[(cancel ? [cancel superview] : [open superview]) addSubview:editSheetChooseButton];
 	}
 	[editSheetChooseButton setHidden:!wanted];
 }

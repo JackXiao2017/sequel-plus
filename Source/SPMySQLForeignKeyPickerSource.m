@@ -15,20 +15,38 @@
 	NSString *_keyColumn;
 	dispatch_queue_t _queue;
 	NSArray<NSString *> *_primaryKey; // read on the first fetch (queue only)
+	NSUInteger _fetchToken;           // bumped by every fetch and by -cancelPendingFetches (main); read on the queue
 }
+
+/// LIKE's escape character, named in every LIKE: \ is no escape under NO_BACKSLASH_ESCAPES, and ! needs no escaping in a string literal.
+static const unichar SPFKPickerMySQLLikeEscape = '!';
 
 @synthesize keyColumn = _keyColumn;
 
 - (instancetype)initWithConnection:(SPMySQLConnection *)connection database:(NSString *)database table:(NSString *)table keyColumn:(NSString *)keyColumn
+{
+	dispatch_queue_t queue = dispatch_queue_create("com.sequelplus.fkpicker.mysql", DISPATCH_QUEUE_SERIAL);
+	self = [self initWithConnection:connection database:database table:table keyColumn:keyColumn queue:queue];
+	dispatch_release(queue);
+	return self;
+}
+
+- (instancetype)initWithConnection:(SPMySQLConnection *)connection database:(NSString *)database table:(NSString *)table keyColumn:(NSString *)keyColumn queue:(dispatch_queue_t)queue
 {
 	if ((self = [super init])) {
 		_connection = [connection retain];
 		_database = [database copy];
 		_table = [table copy];
 		_keyColumn = [keyColumn copy];
-		_queue = dispatch_queue_create("com.sequelplus.fkpicker.mysql", DISPATCH_QUEUE_SERIAL);
+		dispatch_retain(queue);
+		_queue = queue;
 	}
 	return self;
+}
+
+- (void)cancelPendingFetches
+{
+	__atomic_add_fetch(&_fetchToken, 1, __ATOMIC_SEQ_CST);
 }
 
 - (void)dealloc
@@ -116,10 +134,9 @@
 	if ([op isEqualToString:SPForeignKeyOpIsNull]) return [NSString stringWithFormat:@"%@ IS NULL", column];
 	if ([op isEqualToString:SPForeignKeyOpIsNotNull]) return [NSString stringWithFormat:@"%@ IS NOT NULL", column];
 	if ([op isEqualToString:SPForeignKeyOpContains] || [op isEqualToString:SPForeignKeyOpStartsWith]) {
-		NSString *pattern = SPForeignKeyEscapeLikePattern(value);
+		NSString *pattern = SPForeignKeyEscapeLikePattern(value, SPFKPickerMySQLLikeEscape);
 		pattern = [op isEqualToString:SPForeignKeyOpContains] ? [NSString stringWithFormat:@"%%%@%%", pattern] : [pattern stringByAppendingString:@"%"];
-		// LIKE's default escape character is \ (in every sql_mode)
-		return [NSString stringWithFormat:@"CAST(%@ AS CHAR) LIKE %@", column, [_connection escapeAndQuoteString:pattern]];
+		return [NSString stringWithFormat:@"CAST(%@ AS CHAR) LIKE %@ ESCAPE '!'", column, [_connection escapeAndQuoteString:pattern]];
 	}
 	if ([op isEqualToString:SPForeignKeyOpBetween]) {
 		return [NSString stringWithFormat:@"%@ BETWEEN %@ AND %@", column, [_connection escapeAndQuoteString:value], [_connection escapeAndQuoteString:[condition secondValue] ?: @""]];
@@ -136,9 +153,9 @@
 {
 	NSMutableArray *where = [NSMutableArray array];
 	if ([search length] && [searchColumns count]) {
-		NSString *pattern = [_connection escapeAndQuoteString:[NSString stringWithFormat:@"%%%@%%", SPForeignKeyEscapeLikePattern(search)]];
+		NSString *pattern = [_connection escapeAndQuoteString:[NSString stringWithFormat:@"%%%@%%", SPForeignKeyEscapeLikePattern(search, SPFKPickerMySQLLikeEscape)]];
 		NSMutableArray *matches = [NSMutableArray array];
-		for (NSString *column in searchColumns) [matches addObject:[NSString stringWithFormat:@"CAST(%@ AS CHAR) LIKE %@", [column backtickQuotedString], pattern]];
+		for (NSString *column in searchColumns) [matches addObject:[NSString stringWithFormat:@"CAST(%@ AS CHAR) LIKE %@ ESCAPE '!'", [column backtickQuotedString], pattern]];
 		[where addObject:[NSString stringWithFormat:@"(%@)", [matches componentsJoinedByString:@" OR "]]];
 	}
 	for (SPForeignKeyCondition *condition in conditions) [where addObject:[self sqlForCondition:condition]];
@@ -146,8 +163,12 @@
 	for (NSString *column in columns) [selected addObject:[column backtickQuotedString]];
 	NSString *whereClause = [where count] ? [@" WHERE " stringByAppendingString:[where componentsJoinedByString:@" AND "]] : @"";
 	NSString *selectList = [selected componentsJoinedByString:@", "];
+	NSUInteger token = __atomic_add_fetch(&_fetchToken, 1, __ATOMIC_SEQ_CST);
+	void (^done)(NSArray *, NSString *) = [[completion copy] autorelease];
 
 	[self perform:^id(NSString **error) {
+		// A newer fetch (or -cancelPendingFetches) superseded this one before it started: skip the query
+		if (__atomic_load_n(&_fetchToken, __ATOMIC_SEQ_CST) != token) return [NSNull null];
 		if (!_primaryKey) {
 			NSArray *keys = [self rowsForQuery:[NSString stringWithFormat:@"SHOW KEYS FROM %@ WHERE Key_name = 'PRIMARY'", [self qualifiedTable]] error:error];
 			if (!keys) return nil;
@@ -161,7 +182,10 @@
 		NSString *sql = [NSString stringWithFormat:@"SELECT %@ FROM %@%@ ORDER BY %@ LIMIT %lu OFFSET %lu", selectList, [self qualifiedTable],
 						 whereClause, [order componentsJoinedByString:@", "], (unsigned long)limit, (unsigned long)offset];
 		return [self rowsForQuery:sql error:error];
-	} completion:completion];
+	} completion:^(id result, NSString *errorMessage) {
+		if (result == [NSNull null]) done(nil, nil);
+		else done(result, errorMessage);
+	}];
 }
 
 @end

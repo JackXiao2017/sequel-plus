@@ -21,6 +21,7 @@ static NSString * const SPFKPickerTestSuite = @"SPForeignKeyPickerTests";
 @property (strong) NSMutableArray<NSNumber *> *delays;          // seconds for the next fetches, in order
 @property (copy) NSArray<NSArray *> *(^rowsProvider)(SPFKFakeFetch *fetch); // nil: the 255-row table
 @property (copy) NSString *errorMessage;
+@property NSUInteger cancels;
 @end
 
 @implementation SPFKFakeSource
@@ -30,6 +31,7 @@ static NSString * const SPFKPickerTestSuite = @"SPForeignKeyPickerTests";
 	return self;
 }
 - (NSString *)keyColumn { return @"id"; }
+- (void)cancelPendingFetches { self.cancels++; }
 + (NSArray *)allColumns
 {
 	return @[[SPForeignKeyPickerColumn columnWithName:@"id" kind:SPForeignKeyColumnNumber],
@@ -38,7 +40,7 @@ static NSString * const SPFKPickerTestSuite = @"SPForeignKeyPickerTests";
 			 [SPForeignKeyPickerColumn columnWithName:@"city" kind:SPForeignKeyColumnText],
 			 [SPForeignKeyPickerColumn columnWithName:@"created_at" kind:SPForeignKeyColumnDateTime]];
 }
-- (void)loadColumnsWithCompletion:(void (^)(NSArray *, NSString *))completion
+- (void)loadColumnsWithCompletion:(void (^)(NSArray<SPForeignKeyPickerColumn *> *, NSString *))completion
 {
 	dispatch_async(dispatch_get_main_queue(), ^{ completion([[self class] allColumns], nil); });
 }
@@ -469,6 +471,58 @@ static NSString * const SPFKPickerTestSuite = @"SPForeignKeyPickerTests";
 	[self.picker cancel];
 	[self spin:0.4];
 	XCTAssertEqual(self.outcomes.count, 1u);
+}
+
+- (void)testReturnWhileSearchPendingChoosesFromTheNewList
+{
+	[self open];
+	self.picker.searchDelay = 0.3;
+	[self type:@"Person 255"];
+	[self key:@selector(insertNewline:)];
+	XCTAssertEqual(self.outcomes.count, 0u, @"nothing chosen from the list the search is replacing");
+	[self spinUntil:^BOOL{ return self.outcomes.count == 1; }];
+	XCTAssertEqualObjects(self.outcomes, (@[@[@(SPForeignKeyPickerChose), @"255"]]));
+	XCTAssertEqual(self.source.fetches.count, 2u, @"the search ran at once, not after the debounce");
+}
+
+- (void)testChooseWhileFetchInFlightWaitsForIt
+{
+	[self open];
+	[self.source.delays addObject:@0.2];
+	[self type:@"Person 254"];
+	[self.picker choose];
+	XCTAssertEqual(self.outcomes.count, 0u);
+	[self spinUntil:^BOOL{ return self.outcomes.count == 1; }];
+	XCTAssertEqualObjects(self.outcomes, (@[@[@(SPForeignKeyPickerChose), @"254"]]));
+}
+
+- (void)testPendingChoiceWithNoMatchChoosesNothing
+{
+	[self open];
+	self.picker.searchDelay = 0.3;
+	[self type:@"nobody"];
+	[self key:@selector(insertNewline:)];
+	[self spin:0.2];
+	XCTAssertEqual(self.picker.rows.count, 0u);
+	XCTAssertEqual(self.outcomes.count, 0u);
+}
+
+- (void)testLoadMoreWaitsForAPendingSearch
+{
+	[self open];
+	self.picker.searchDelay = 0.3;
+	[self type:@"Person 1"];
+	NSUInteger before = self.source.fetches.count;
+	[self.picker loadMore];
+	XCTAssertEqual(self.source.fetches.count, before, @"no page of the old list added under a new search");
+}
+
+- (void)testFinishingCancelsQueuedFetches
+{
+	[self open];
+	XCTAssertEqual(self.source.cancels, 0u);
+	[self.picker cancel];
+	XCTAssertEqual(self.source.cancels, 1u);
 }
 
 #pragma mark - List

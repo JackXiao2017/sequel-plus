@@ -202,6 +202,44 @@
 	}];
 }
 
+- (void)testQueuedFetchesSupersededByANewerOneAreSkipped
+{
+	[self eachPort:^(NSUInteger port) {
+		SPPostgresTaskRunner *runner = [[SPPostgresTaskRunner alloc] initWithConnection:self.connection];
+		self.source = [[SPPostgresForeignKeyPickerSource alloc] initWithTaskRunner:runner schema:@"FK Picker Data" table:@"Customer List" keyColumn:@"id"];
+		[SPPostgresTestServers queueSleep:0.3 onRunner:runner];
+		__block NSUInteger answered = 0;
+		__block NSArray *last = nil;
+		for (NSString *search in @[@"a", @"an", @"anna"]) {
+			[self.source fetchRowsWithSearch:search inColumns:@[@"name"] conditions:@[] columns:@[@"id"] offset:0 limit:10 completion:^(NSArray *rows, NSString *errorMessage) {
+				answered++;
+				last = rows;
+			}];
+		}
+		[self.recorder.statements removeAllObjects];
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+		XCTAssertEqual(answered, 3u, @"every completion is still called");
+		XCTAssertEqualObjects(last, (@[@[@"1"]]));
+		NSUInteger searches = 0;
+		for (NSString *statement in self.recorder.statements) if ([statement rangeOfString:@"ILIKE"].location != NSNotFound) searches++;
+		XCTAssertEqual(searches, 1u, @"only the newest search reaches the server: %@", self.recorder.statements);
+
+		// Cancelling skips what is still queued
+		[SPPostgresTestServers queueSleep:0.2 onRunner:runner];
+		answered = 0;
+		[self.source fetchRowsWithSearch:@"x" inColumns:@[@"name"] conditions:@[] columns:@[@"id"] offset:0 limit:10 completion:^(NSArray *rows, NSString *errorMessage) { answered++; }];
+		[self.source cancelPendingFetches];
+		[self.recorder.statements removeAllObjects];
+		XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:10]);
+		XCTAssertEqual(answered, 1u);
+		for (NSString *statement in self.recorder.statements) XCTAssertEqual([statement rangeOfString:@"ILIKE"].location, (NSUInteger)NSNotFound, @"%@", statement);
+		__block BOOL idle = NO;
+		[runner invalidateWithCompletion:^{ idle = YES; }];
+		NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:10];
+		while (!idle && [deadline timeIntervalSinceNow] > 0) [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
+	}];
+}
+
 - (void)testOnlySelects
 {
 	[self eachPort:^(NSUInteger port) {

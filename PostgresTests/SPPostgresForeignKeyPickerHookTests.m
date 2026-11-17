@@ -367,6 +367,37 @@ static NSString * const SPFKHookSuite = @"SPPostgresForeignKeyPickerHookTests";
 	XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(coalesce(manager_id::text, '-'), ',' ORDER BY id) FROM sp_fkp.employees"], @"-,1,1");
 }
 
+- (void)testChoiceAfterReloadNeverLandsOnAnotherRow
+{
+	[self selectTable:@"orders"];
+	XCTAssertEqual([self rowWhereColumn:@"id" is:@"10"], 0);
+	XCTAssertFalse([self shouldEdit:@"customer_id" row:0]);
+	SPForeignKeyPicker *picker = [self loadedPicker];
+	// Another order of the same customer now sorts first
+	[self run:@"INSERT INTO sp_fkp.orders VALUES (9, 1, 'z')"];
+	[self.content reload];
+	[self waitForTab];
+	XCTAssertEqual([self rowWhereColumn:@"id" is:@"9"], 0);
+	[self selectKey:@"3" inPicker:picker];
+	[picker choose];
+	[self waitForTab];
+	if ([[self grid] currentEditor]) {
+		XCTAssertEqual([self grid].editedRow, [self rowWhereColumn:@"id" is:@"10"], @"only ever the row it was opened on");
+		[[self grid] abortEditing];
+	}
+	XCTAssertEqualObjects([self serverValue:@"SELECT string_agg(id || ':' || coalesce(customer_id::text, '-'), ',' ORDER BY id) FROM sp_fkp.orders"], @"9:1,10:1,11:-");
+}
+
+/// Choose… covers none of the sheet's visible controls.
+- (void)assertChooseButtonClear:(NSButton *)choose
+{
+	for (NSView *sibling in [[choose superview] subviews]) {
+		if (sibling == choose || [sibling isHidden] || ![sibling isKindOfClass:[NSControl class]]) continue;
+		XCTAssertFalse(NSIntersectsRect([sibling frame], [choose frame]), @"Choose… overlaps %@", sibling);
+	}
+	XCTAssertTrue(NSContainsRect([[choose superview] bounds], [choose frame]));
+}
+
 - (void)testSheetChooseReplacesSheetText
 {
 	[self.scratch setBool:YES forKey:@"EditInSheetEnabled"];
@@ -380,6 +411,7 @@ static NSString * const SPFKHookSuite = @"SPPostgresForeignKeyPickerHookTests";
 	XCTAssertNotNil(choose);
 	XCTAssertFalse(choose.hidden);
 	XCTAssertEqualObjects(choose.title, @"Choose…");
+	[self assertChooseButtonClear:choose];
 	[choose performClick:nil];
 	SPForeignKeyPicker *picker = [self loadedPicker];
 	XCTAssertEqual(picker.currentValueRow, 0);
