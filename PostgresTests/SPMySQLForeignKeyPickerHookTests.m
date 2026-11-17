@@ -18,6 +18,7 @@
 - (void)viewContent:(id)sender;
 - (id)tableContentInstance;
 - (void)updateTables:(id)sender;
+- (void)reloadTable:(id)sender;
 - (BOOL)tableView:(NSTableView *)tableView shouldEditTableColumn:(NSTableColumn *)column row:(NSInteger)row;
 - (id)tableView:(NSTableView *)tableView objectValueForTableColumn:(NSTableColumn *)column row:(NSInteger)row;
 - (void)setForeignKeyPickerPresenter:(void (^)(SPForeignKeyPicker *picker, NSView *view, NSRect rect))presenter;
@@ -391,6 +392,37 @@
 	XCTAssertEqualObjects([self value:@"SELECT GROUP_CONCAT(IFNULL(manager_id, '-') ORDER BY id) FROM fkp_employees"], @"-,1,1");
 }
 
+- (void)testChoiceAfterReloadPuttingAnotherRowThereIsDropped
+{
+	SKIP_WITHOUT_SERVER
+	[self showTable:@"fkp_orders" rows:2];
+	NSInteger row = [self rowWithId:@"10"];
+	XCTAssertEqual(row, 0);
+	XCTAssertFalse([self shouldEdit:@"customer_id" row:row]);
+	SPForeignKeyPicker *picker = [self loadedPicker];
+	// Another order of the same customer now sorts first: row 0 holds the same customer_id, but another order
+	[self run:@"INSERT INTO fkp_orders VALUES (9, 1, 'z', 'new', NULL)"];
+	[self.content reloadTable:nil];
+	__weak SPMySQLForeignKeyPickerHookTests *weakSelf = self;
+	XCTAssertTrue([self spinUntil:^BOOL{ return ![weakSelf.document isWorking] && [weakSelf.grid numberOfRows] == 3; } timeout:20]);
+	XCTAssertEqualObjects([self.content tableView:self.grid objectValueForTableColumn:[self column:@"id"] row:0], @"9");
+	[self selectKey:@"3" inPicker:picker];
+	[picker choose];
+	XCTAssertNil([self.grid currentEditor]);
+	[self spin:0.3];
+	XCTAssertEqualObjects([self value:@"SELECT GROUP_CONCAT(CONCAT(id, ':', IFNULL(customer_id, '-')) ORDER BY id) FROM fkp_orders"], @"9:1,10:1,11:-");
+}
+
+/// Choose… covers none of the sheet's visible controls.
+- (void)assertChooseButtonClear:(NSButton *)choose
+{
+	for (NSView *sibling in [[choose superview] subviews]) {
+		if (sibling == choose || [sibling isHidden] || ![sibling isKindOfClass:[NSControl class]]) continue;
+		XCTAssertFalse(NSIntersectsRect([sibling frame], [choose frame]), @"Choose… overlaps %@ %@", sibling, [sibling respondsToSelector:@selector(title)] ? [(id)sibling title] : @"");
+	}
+	XCTAssertTrue(NSContainsRect([[choose superview] bounds], [choose frame]));
+}
+
 - (void)testSheetChooseReplacesSheetText
 {
 	SKIP_WITHOUT_SERVER
@@ -403,6 +435,7 @@
 	NSButton *choose = [sheet valueForKey:@"editSheetChooseButton"];
 	XCTAssertNotNil(choose);
 	XCTAssertFalse(choose.hidden);
+	[self assertChooseButtonClear:choose];
 	[choose performClick:nil];
 	SPForeignKeyPicker *picker = [self loadedPicker];
 	XCTAssertEqual(picker.currentValueRow, 0);

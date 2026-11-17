@@ -50,8 +50,8 @@ __attribute__((visibility("default")))
 + (instancetype)conditionWithColumn:(NSString *)column op:(NSString *)op value:(nullable NSString *)value secondValue:(nullable NSString *)secondValue;
 @end
 
-/// Escapes \, % and _ in text so that LIKE / ILIKE … ESCAPE '\' matches it literally.
-extern NSString *SPForeignKeyEscapeLikePattern(NSString *text) __attribute__((visibility("default")));
+/// Escapes escape, % and _ in text so that LIKE / ILIKE … ESCAPE '<escape>' matches it literally.
+extern NSString *SPForeignKeyEscapeLikePattern(NSString *text, unichar escape) __attribute__((visibility("default")));
 
 @protocol SPForeignKeyPickerDataSource <NSObject>
 
@@ -71,6 +71,13 @@ extern NSString *SPForeignKeyEscapeLikePattern(NSString *text) __attribute__((vi
 				 conditions:(NSArray<SPForeignKeyCondition *> *)conditions columns:(NSArray<NSString *> *)columns
 					 offset:(NSUInteger)offset limit:(NSUInteger)limit
 				 completion:(void (^)(NSArray<NSArray *> * _Nullable rows, NSString * _Nullable errorMessage))completion;
+
+/**
+ * Fetches asked for earlier that haven't started are skipped (a running statement finishes): their completions are
+ * called with nil rows and nil errorMessage. The picker calls it when it closes; each new fetch does the same for
+ * the fetches queued before it.
+ */
+- (void)cancelPendingFetches;
 
 @end
 

@@ -17,12 +17,12 @@ NSString * const SPForeignKeyOpBetween = @"between";
 NSString * const SPForeignKeyOpIsNull = @"is NULL";
 NSString * const SPForeignKeyOpIsNotNull = @"is not NULL";
 
-NSString *SPForeignKeyEscapeLikePattern(NSString *text)
+NSString *SPForeignKeyEscapeLikePattern(NSString *text, unichar escape)
 {
 	NSMutableString *escaped = [NSMutableString stringWithCapacity:[text length]];
 	for (NSUInteger i = 0; i < [text length]; i++) {
 		unichar c = [text characterAtIndex:i];
-		if (c == '\\' || c == '%' || c == '_') [escaped appendString:@"\\"];
+		if (c == escape || c == '%' || c == '_') [escaped appendFormat:@"%C", escape];
 		[escaped appendFormat:@"%C", c];
 	}
 	return escaped;

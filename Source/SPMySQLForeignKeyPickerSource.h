@@ -18,6 +18,9 @@ __attribute__((visibility("default")))
 
 - (instancetype)initWithConnection:(SPMySQLConnection *)connection database:(NSString *)database table:(NSString *)table keyColumn:(NSString *)keyColumn;
 
+/// As above, on queue (a serial queue; tests suspend it) instead of a queue of its own.
+- (instancetype)initWithConnection:(SPMySQLConnection *)connection database:(NSString *)database table:(NSString *)table keyColumn:(NSString *)keyColumn queue:(dispatch_queue_t)queue;
+
 @end
 
 NS_ASSUME_NONNULL_END

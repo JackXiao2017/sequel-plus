@@ -18,6 +18,7 @@ static NSString * const SPFKPickerSavepoint = @"sp_fkpicker_read";
 	NSString *_keyColumn;
 	NSDictionary<NSString *, NSNumber *> *_kinds;   // column → SPForeignKeyColumnKind, once the columns are loaded
 	NSArray<NSString *> *_primaryKey;               // read on the first fetch (work queue only)
+	NSUInteger _fetchToken;                         // bumped by every fetch and by -cancelPendingFetches (main); read on the work queue
 }
 
 @synthesize keyColumn = _keyColumn;
@@ -31,6 +32,11 @@ static NSString * const SPFKPickerSavepoint = @"sp_fkpicker_read";
 		_keyColumn = [keyColumn copy];
 	}
 	return self;
+}
+
+- (void)cancelPendingFetches
+{
+	__atomic_add_fetch(&_fetchToken, 1, __ATOMIC_SEQ_CST);
 }
 
 - (void)dealloc
@@ -60,8 +66,16 @@ static NSString * const SPFKPickerSavepoint = @"sp_fkpicker_read";
 /// Runs body as one guarded read on the runner; completion gets body's result or the error's message, on main.
 - (void)read:(NSString *)description body:(id (^)(PGPostgresConnection *connection, NSError **error))body completion:(void (^)(id result, NSString *errorMessage))completion
 {
+	[self read:description unless:nil body:body completion:completion];
+}
+
+/// As -read:body:completion:, but when stale() is YES as the task starts, nothing runs and completion gets (nil, nil).
+- (void)read:(NSString *)description unless:(BOOL (^)(void))stale body:(id (^)(PGPostgresConnection *connection, NSError **error))body completion:(void (^)(id result, NSString *errorMessage))completion
+{
 	void (^done)(id, NSString *) = [[completion copy] autorelease];
+	BOOL (^skip)(void) = [[stale copy] autorelease];
 	[_runner runTaskWithDescription:description cancelTitle:nil work:^id(PGPostgresConnection *connection, NSError **error) {
+		if (skip && skip()) return [NSNull null];
 		__block id result = nil;
 		BOOL ok = SPPostgresRunGuardedRead(connection, SPFKPickerSavepoint, [[self class] abortedMessage], ^BOOL(NSError **readError) {
 			result = [body(connection, readError) retain];
@@ -70,7 +84,8 @@ static NSString * const SPFKPickerSavepoint = @"sp_fkpicker_read";
 		[result autorelease];
 		return ok ? result : nil;
 	} completion:^(id result, NSError *error, BOOL cancelled) {
-		if (result) done(result, nil);
+		if (result == [NSNull null]) done(nil, nil);
+		else if (result) done(result, nil);
 		else done(nil, cancelled ? NSLocalizedString(@"Cancelled.", @"foreign key picker: load cancelled") : ([error localizedDescription] ?: NSLocalizedString(@"The rows couldn't be read.", @"foreign key picker: unknown error")));
 	}];
 }
@@ -133,7 +148,7 @@ static NSString * const SPFKPickerSavepoint = @"sp_fkpicker_read";
 	if ([op isEqualToString:SPForeignKeyOpIsNull]) return [NSString stringWithFormat:@"%@ IS NULL", column];
 	if ([op isEqualToString:SPForeignKeyOpIsNotNull]) return [NSString stringWithFormat:@"%@ IS NOT NULL", column];
 	if ([op isEqualToString:SPForeignKeyOpContains] || [op isEqualToString:SPForeignKeyOpStartsWith]) {
-		NSString *pattern = SPForeignKeyEscapeLikePattern(value);
+		NSString *pattern = SPForeignKeyEscapeLikePattern(value, '\\');
 		[values addObject:[op isEqualToString:SPForeignKeyOpContains] ? [NSString stringWithFormat:@"%%%@%%", pattern] : [pattern stringByAppendingString:@"%"]];
 		return [NSString stringWithFormat:@"%@::text ILIKE $%lu ESCAPE E'\\\\'", column, (unsigned long)[values count]];
 	}
@@ -159,7 +174,7 @@ static NSString * const SPFKPickerSavepoint = @"sp_fkpicker_read";
 	NSMutableArray *values = [NSMutableArray array];
 	NSMutableArray *where = [NSMutableArray array];
 	if ([search length] && [searchColumns count]) {
-		[values addObject:[NSString stringWithFormat:@"%%%@%%", SPForeignKeyEscapeLikePattern(search)]];
+		[values addObject:[NSString stringWithFormat:@"%%%@%%", SPForeignKeyEscapeLikePattern(search, '\\')]];
 		NSMutableArray *matches = [NSMutableArray array];
 		for (NSString *column in searchColumns) [matches addObject:[NSString stringWithFormat:@"%@::text ILIKE $1 ESCAPE E'\\\\'", SPPostgresQuoteIdentifier(column)]];
 		[where addObject:[NSString stringWithFormat:@"(%@)", [matches componentsJoinedByString:@" OR "]]];
@@ -173,8 +188,12 @@ static NSString * const SPFKPickerSavepoint = @"sp_fkpicker_read";
 	NSString *whereClause = [where count] ? [@" WHERE " stringByAppendingString:[where componentsJoinedByString:@" AND "]] : @"";
 	NSString *keyColumn = _keyColumn;
 	NSUInteger columnCount = [columns count];
+	NSUInteger token = __atomic_add_fetch(&_fetchToken, 1, __ATOMIC_SEQ_CST);
 
-	[self read:NSLocalizedString(@"Loading rows…", @"foreign key picker: loading the referenced table's rows") body:^id(PGPostgresConnection *connection, NSError **error) {
+	// A newer fetch (or -cancelPendingFetches) that superseded this one before it started skips its query
+	[self read:NSLocalizedString(@"Loading rows…", @"foreign key picker: loading the referenced table's rows") unless:^BOOL{
+		return __atomic_load_n(&self->_fetchToken, __ATOMIC_SEQ_CST) != token;
+	} body:^id(PGPostgresConnection *connection, NSError **error) {
 		if (!_primaryKey) {
 			NSArray *primaryKey = [self primaryKeyOn:connection error:error];
 			if (!primaryKey) return nil;

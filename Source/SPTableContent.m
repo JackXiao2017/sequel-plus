@@ -4406,6 +4406,8 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 {
 	NSUInteger dataColumn = (NSUInteger)[[tableColumn identifier] integerValue];
 	id value = [tableValues cellDataAtRow:(NSUInteger)rowIndex column:dataColumn];
+	// The whole row, so a reload that puts another row with the same key here is caught
+	NSArray *rowContents = [[[tableValues rowContentsAtIndex:(NSUInteger)rowIndex] copy] autorelease];
 	NSString *table = [[selectedTable copy] autorelease];
 	datePickerOpen = YES;
 	[self retain]; // until the picker answers
@@ -4415,7 +4417,7 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 		[[tableContentView window] makeFirstResponder:tableContentView];
 		BOOL unchanged = outcome != SPForeignKeyPickerCancelled && ![tableDocumentInstance isWorking] && [selectedTable isEqualToString:table]
 			&& (NSUInteger)rowIndex < [tableValues count] && dataColumn < [tableValues columnCount]
-			&& [[tableValues cellDataAtRow:(NSUInteger)rowIndex column:dataColumn] isEqual:value];
+			&& [[tableValues rowContentsAtIndex:(NSUInteger)rowIndex] isEqualToArray:rowContents];
 		if (unchanged) {
 			NSInteger gridColumn = [tableContentView columnWithIdentifier:[tableColumn identifier]];
 			datePickerHandoff = YES;
