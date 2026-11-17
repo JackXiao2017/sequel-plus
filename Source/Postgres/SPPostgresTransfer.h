@@ -74,6 +74,8 @@ __attribute__((visibility("default")))
 	BOOL loadingTableRows;
 	BOOL loadTableRowCountKnown;
 	BOOL failedWhileReading;
+	NSString *targetOwner;
+	NSUInteger objectsGivenToOwner;
 }
 
 - (instancetype)initWithSource:(PGPostgresConnection *)source target:(PGPostgresConnection *)target;
@@ -87,6 +89,18 @@ __attribute__((visibility("default")))
 
 /// Where the dump is written (sequel-pro-transfer-<UUID>.sql); default NSTemporaryDirectory().
 @property (copy) NSString *temporaryDirectory;
+
+/// The role to own what the transfer creates on the target; nil or empty (the default), or the target connection's
+/// own user: left as created (owned by that user). Otherwise, once the load is done and before its COMMIT, what this
+/// run created and the target's user owns (schemas, tables, partitions, views, materialized views, sequences not
+/// belonging to a column, functions, procedures, aggregates, types and domains; never an extension's members) is given
+/// to it with ALTER … OWNER TO, in the load's transaction. A user who isn't a superuser needs to be able to SET ROLE to
+/// it, and it needs CREATE on the schemas that were already there: when missing, they're granted just for that (GRANT
+/// role TO CURRENT_USER, GRANT CREATE ON SCHEMA) and revoked right after, in the same transaction. Refused by the server
+/// (no such role, not one the user may grant itself, a schema it can't grant on) the whole transfer fails and the
+/// target is unchanged. "Created by this run"
+/// is an object whose OID wasn't on the target before the load. Other kinds of objects stay with the user.
+@property (copy) NSString *targetOwner;
 
 /**
  * Called one at a time, on the caller's thread or the reading thread: Checking (fraction 0, detail nil) while the
@@ -160,6 +174,8 @@ __attribute__((visibility("default")))
 @property (readonly) NSArray *foreignTablesSkipped;
 /// Settings the target didn't know (the importer's skippedSettings).
 @property (readonly) NSArray *skippedSettings;
+/// How many objects were given to targetOwner (0 when none was set).
+@property (readonly) NSUInteger objectsGivenToOwner;
 
 /// The names in the target's pg_available_extensions (installed extensions are always listed there). Called once
 /// per run; a test seam.

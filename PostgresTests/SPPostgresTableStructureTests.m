@@ -768,6 +768,73 @@
 	}
 }
 
+/// A cloud service's main user (RDS…): not a superuser, CREATEROLE, not a member of the users it created. Table Info
+/// offers them; the change grants the user both roles (and the new owner CREATE on the user's schema) for itself only.
+- (void)testOwnerChoicesForAMainUserThatIsntASuperuser
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *admin = [self connectOn:port];
+		NSArray *roles = @[@"sp_ts_app1", @"sp_ts_app2", @"sp_ts_master"];
+		void (^cleanUp)(void) = ^{
+			[admin execute:@"RESET ROLE"];
+			[admin execute:@"DROP TABLE IF EXISTS sp_ts_s.t"];
+			[admin execute:@"DROP TABLE IF EXISTS structure_test.by_app"];
+			[admin execute:@"DROP SCHEMA IF EXISTS sp_ts_s"];
+			for (NSString *role in roles) {
+				[admin execute:[NSString stringWithFormat:@"DROP OWNED BY %@", role]];
+				[admin execute:[NSString stringWithFormat:@"DROP ROLE IF EXISTS %@", role]];
+			}
+		};
+		cleanUp();
+		[self addTeardownBlock:cleanUp];
+		[admin execute:@"CREATE ROLE sp_ts_master NOLOGIN CREATEROLE"];
+		[admin execute:@"SET ROLE sp_ts_master"];
+		XCTAssertNotNil([admin execute:@"CREATE ROLE sp_ts_app1 NOLOGIN"]);
+		XCTAssertNotNil([admin execute:@"CREATE ROLE sp_ts_app2 NOLOGIN"]);
+		[admin execute:@"RESET ROLE"];
+		XCTAssertNotNil([admin execute:@"CREATE SCHEMA sp_ts_s AUTHORIZATION sp_ts_master"]);
+		XCTAssertNotNil([admin execute:@"CREATE TABLE sp_ts_s.t (id serial PRIMARY KEY)"]);
+		XCTAssertNotNil([admin execute:@"ALTER TABLE sp_ts_s.t OWNER TO sp_ts_app1"]);
+		XCTAssertNotNil([admin execute:@"CREATE TABLE structure_test.by_app (i int)"]);
+		XCTAssertNotNil([admin execute:@"ALTER TABLE structure_test.by_app OWNER TO sp_ts_app1"]);
+
+		PGPostgresConnection *master = [self connectOn:port];
+		XCTAssertNotNil([master execute:@"SET ROLE sp_ts_master"]);
+
+		// Its own schema: it may grant CREATE there, so either user it created
+		SPPostgresTableStructure *mine = [self structureOn:master schema:@"sp_ts_s" table:@"t"];
+		NSError *error = nil;
+		NSDictionary *choices = [mine ownerChoices:&error];
+		XCTAssertNotNil(choices, @"%@", error);
+		XCTAssertEqualObjects(choices[@"canChange"], @YES, @"port %@: it may grant itself the owner", port);
+		XCTAssertEqualObjects(choices[@"roles"], (@[@"sp_ts_app1", @"sp_ts_app2", @"sp_ts_master"]), @"port %@", port);
+		XCTAssertTrue([mine setTableOwner:@"sp_ts_app2" error:&error], @"port %@: %@", port, error);
+		XCTAssertEqualObjects([self value:@"SELECT pg_get_userbyid(relowner)::text FROM pg_class WHERE oid = 'sp_ts_s.t'::regclass" on:admin], @"sp_ts_app2");
+		XCTAssertEqualObjects([self value:@"SELECT pg_get_userbyid(relowner)::text FROM pg_class WHERE oid = 'sp_ts_s.t_id_seq'::regclass" on:admin], @"sp_ts_app2", @"its sequence too");
+		// Nothing granted is left
+		XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM pg_auth_members WHERE member = 'sp_ts_master'::regrole AND grantor = 'sp_ts_master'::regrole" on:admin], @"0", @"port %@", port);
+		XCTAssertEqualObjects([self value:@"SELECT has_schema_privilege('sp_ts_app2', 'sp_ts_s', 'CREATE')::text" on:admin], @"false");
+		XCTAssertEqual(master.transactionStatus, PGPostgresTransactionIdle);
+
+		// Someone else's schema: no USAGE, no change; with USAGE, only the users with CREATE there
+		SPPostgresTableStructure *theirs = [self structureOn:master schema:@"structure_test" table:@"by_app"];
+		choices = [theirs ownerChoices:&error];
+		XCTAssertEqualObjects(choices[@"canChange"], @NO, @"port %@: the table can't be named", port);
+		XCTAssertNotNil([admin execute:@"GRANT USAGE ON SCHEMA structure_test TO sp_ts_master"]);
+		XCTAssertNotNil([admin execute:@"GRANT CREATE ON SCHEMA structure_test TO sp_ts_app2"]);
+		choices = [theirs ownerChoices:&error];
+		XCTAssertEqualObjects(choices[@"canChange"], @YES);
+		XCTAssertEqualObjects(choices[@"roles"], (@[@"sp_ts_app2"]), @"port %@", port);
+		XCTAssertTrue([theirs setTableOwner:@"sp_ts_app2" error:&error], @"port %@: %@", port, error);
+		XCTAssertEqualObjects([self value:@"SELECT pg_get_userbyid(relowner)::text FROM pg_class WHERE oid = 'structure_test.by_app'::regclass" on:admin], @"sp_ts_app2");
+		XCTAssertEqualObjects([self value:@"SELECT has_schema_privilege('sp_ts_app2', 'structure_test', 'CREATE')::text" on:admin], @"true", @"its own grant is kept");
+		XCTAssertEqualObjects([self value:@"SELECT count(*)::text FROM pg_auth_members WHERE member = 'sp_ts_master'::regrole AND grantor = 'sp_ts_master'::regrole" on:admin], @"0");
+		[master execute:@"RESET ROLE"];
+		[admin execute:@"REVOKE USAGE ON SCHEMA structure_test FROM sp_ts_master"];
+		[admin execute:@"REVOKE CREATE ON SCHEMA structure_test FROM sp_ts_app2"];
+	}
+}
+
 #pragma mark - Transactions and locks
 
 - (void)testFailedChangeInsideUserTransactionKeepsItOpen

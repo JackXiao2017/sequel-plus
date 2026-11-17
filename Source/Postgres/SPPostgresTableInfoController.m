@@ -39,6 +39,8 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 	NSView *view;
 	NSTextField *typeField;
 	NSTextField *ownerField;
+	NSPopUpButton *ownerPopup;   // in the Owner field's place when the user may change the owner
+	NSString *savedOwner;        // the owner the server has (@"" for none)
 	NSTextField *rowsField;
 	NSTextField *tableSizeField;
 	NSTextField *indexSizeField;
@@ -56,7 +58,7 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 @synthesize alertPresenter;
 @synthesize tableInfoDidChange;
 @synthesize typeField, ownerField, rowsField, tableSizeField, indexSizeField, totalSizeField;
-@synthesize commentView, createSyntaxView;
+@synthesize commentView, createSyntaxView, ownerPopup;
 
 #pragma mark - Setup
 
@@ -66,6 +68,7 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 		connection = [theConnection retain];
 		loader = [[SPPostgresPaneLoader alloc] initWithConnection:theConnection];
 		savedComment = [@"" retain];
+		savedOwner = [@"" retain];
 		noticeText = [@"" copy];
 		lockTimeout = 5;
 		[self _buildView];
@@ -88,6 +91,8 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 	[view release];
 	[typeField release];
 	[ownerField release];
+	[ownerPopup release];
+	[savedOwner release];
 	[rowsField release];
 	[tableSizeField release];
 	[indexSizeField release];
@@ -106,6 +111,7 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 	[loader invalidate];
 
 	[commentView setDelegate:nil];
+	[ownerPopup setTarget:nil];
 
 	// The presenters may capture the tab
 	[alertPresenter release], alertPresenter = nil;
@@ -190,6 +196,18 @@ static const CGFloat SPPostgresInfoNoticeHeight = 22;
 	indexSizeField = [[fields objectAtIndex:4] retain];
 	totalSizeField = [[fields objectAtIndex:5] retain];
 
+	// The owner pop-up, over the Owner field (shown instead of it when the owner can be changed)
+	NSRect ownerFrame = [ownerField frame];
+	ownerPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(NSMinX(ownerFrame) - 3, NSMinY(ownerFrame) - 3, 220, 22) pullsDown:NO];
+	[ownerPopup setControlSize:NSControlSizeSmall];
+	[ownerPopup setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
+	[ownerPopup setToolTip:NSLocalizedString(@"The role that owns the table", @"Postgres table info: owner tooltip")];
+	[ownerPopup setTarget:self];
+	[ownerPopup setAction:@selector(changeOwner:)];
+	[ownerPopup setAutoresizingMask:NSViewMaxXMargin | NSViewMinYMargin];
+	[ownerPopup setHidden:YES];
+	[view addSubview:ownerPopup];
+
 	// Comments
 	y -= 6;
 	CGFloat commentTop = y + 17;
@@ -271,7 +289,9 @@ static NSDictionary *SPPostgresTableInfoRead(SPPostgresTableStructure *structure
 	if (!info) return nil;
 	NSString *syntax = [SPPostgresCreateStatement createStatementForTable:table inSchema:schema connection:connection error:error];
 	if (!syntax) return nil;
-	return @{@"info" : info, @"syntax" : syntax};
+	NSDictionary *owners = [structure ownerChoices:error];
+	if (!owners) return nil;
+	return @{@"info" : info, @"syntax" : syntax, @"owners" : owners};
 }
 
 // A load (a switch, -reload) drops a comment edit not saved (as it always has: the text is replaced), so the busy
@@ -355,6 +375,7 @@ static NSDictionary *SPPostgresTableInfoRead(SPPostgresTableStructure *structure
 {
 	if (result) {
 		[self _showInfo:[result objectForKey:@"info"] syntax:[result objectForKey:@"syntax"]];
+		[self _showOwnerChoices:[result objectForKey:@"owners"]];
 		[self setNoticeText:@""];
 		[noticeField setStringValue:@""];
 		return;
@@ -382,6 +403,9 @@ static NSDictionary *SPPostgresTableInfoRead(SPPostgresTableStructure *structure
 	}
 	[typeField setStringValue:[info objectForKey:@"kind"] ?: @""];
 	[ownerField setStringValue:[info objectForKey:@"owner"] ?: @""];
+	[savedOwner release];
+	savedOwner = [([info objectForKey:@"owner"] ?: @"") copy];
+	[self _showOwnerChoices:nil];
 	[rowsField setStringValue:rowsText];
 	[tableSizeField setStringValue:[info objectForKey:@"tableSize"] ?: @""];
 	[indexSizeField setStringValue:[info objectForKey:@"indexSize"] ?: @""];
@@ -398,6 +422,57 @@ static NSDictionary *SPPostgresTableInfoRead(SPPostgresTableStructure *structure
 	[createSyntaxView setFont:[SPPostgresQueryController editorFontFromPreferenceData:[[NSUserDefaults standardUserDefaults] dataForKey:SPCustomQueryEditorFont]]];
 	[createSyntaxView setString:syntax ?: @""];
 	[createSyntaxView scrollRangeToVisible:NSMakeRange(0, 0)];
+}
+
+#pragma mark - Owner
+
+/// The Owner pop-up (the roles the user may give the table to, and the owner, selected) when choices allow a change; else
+/// the read-only Owner field.
+- (void)_showOwnerChoices:(NSDictionary *)choices
+{
+	BOOL canChange = [[choices objectForKey:@"canChange"] boolValue] && [savedOwner length] > 0;
+	[ownerPopup removeAllItems];
+	if (canChange) {
+		NSMutableArray *roles = [NSMutableArray arrayWithArray:[choices objectForKey:@"roles"] ?: @[]];
+		if (![roles containsObject:savedOwner]) [roles insertObject:savedOwner atIndex:0];
+		[ownerPopup addItemsWithTitles:roles];
+		[ownerPopup selectItemWithTitle:savedOwner];
+	}
+	[ownerPopup setHidden:!canChange];
+	[ownerField setHidden:canChange];
+}
+
+- (BOOL)canChangeOwner
+{
+	return ![ownerPopup isHidden];
+}
+
+/**
+ * The Owner pop-up: ALTER … OWNER TO the chosen role (through -[SPPostgresTableStructure setTableOwner:error:]), then
+ * the information is read again. A comment edit is saved first. Refused while the runner is busy; on failure an alert
+ * shows the server's message. Either way the pop-up goes back to the owner the server has.
+ */
+- (IBAction)changeOwner:(id)sender
+{
+	NSString *chosen = [ownerPopup titleOfSelectedItem];
+	if (invalidated || !structure || ![self canChangeOwner] || ![chosen length] || [chosen isEqualToString:savedOwner]) return;
+	if ([loader refuseChangeWhileBusy] || ![self commitPendingEdits]) {
+		[ownerPopup selectItemWithTitle:savedOwner];
+		return;
+	}
+
+	NSError *error = nil;
+	if (![structure setTableOwner:chosen error:&error]) {
+		[ownerPopup selectItemWithTitle:savedOwner];
+		[self _presentError:error title:[NSString stringWithFormat:NSLocalizedString(@"Could not change the owner of “%@”", @"Postgres table info: owner change failed"), table]];
+		return;
+	}
+
+	[savedOwner release];
+	savedOwner = [chosen copy];
+	[ownerField setStringValue:chosen];
+	if (tableInfoDidChange) tableInfoDidChange();
+	[self reload];
 }
 
 #pragma mark - Comment

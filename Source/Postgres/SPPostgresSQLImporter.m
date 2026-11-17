@@ -24,6 +24,7 @@
 @synthesize itemObserver;
 @synthesize copyDataObserver;
 @synthesize commitObserver;
+@synthesize beforeCommit;
 @synthesize batchesStatements;
 
 /// A batch is sent once it holds this many statements, or this many characters
@@ -109,6 +110,7 @@ static const NSUInteger SPImportBatchCharacters = 1024 * 1024;
 	[itemObserver release];
 	[copyDataObserver release];
 	[commitObserver release];
+	[beforeCommit release];
 	[super dealloc];
 }
 
@@ -448,6 +450,14 @@ static NSString *SPConfigurationParameterSetBy(NSString *sql)
 	}
 
 	if (singleTransaction) {
+		if (beforeCommit) {
+			NSError *beforeError = nil;
+			if (!beforeCommit(&beforeError)) {
+				[self _rollBackIfInTransaction];
+				if (error) *error = beforeError ?: SPPostgresMakeError(SPPostgresErrorQueryFailed, NSLocalizedString(@"The import failed.", @"Postgres import: unknown failure before the commit"), nil);
+				return NO;
+			}
+		}
 		if (commitObserver) commitObserver();
 		NSError *commitError = nil;
 		if (!SPPostgresExecuteWithDetails(connection, @"COMMIT", nil, &commitError)) {

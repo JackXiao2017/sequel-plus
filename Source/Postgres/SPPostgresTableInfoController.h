@@ -8,6 +8,9 @@
  * Rows, Table size, Index size, Total size), an editable Comments box, and the read-only, monospaced Create
  * syntax (SPPostgresCreateStatement) in MySQL's query editor font. Built in code. Use on the main thread.
  *
+ * Owner is a pop-up of the roles the table can be given to when the connected user may change it (see
+ * -[SPPostgresTableStructure ownerChoices:]); otherwise it is plain text.
+ *
  * Rows is the planner's estimate, `~N`, or `Unknown (not analyzed)` when there is none. The sizes are written
  * by +[SPPostgresCatalog stringForSize:], as the table list writes them.
  *
@@ -37,6 +40,10 @@ __attribute__((visibility("default")))
 /// Reads the information again (dropping a comment edit that wasn't saved).
 - (void)reload;
 
+/// The Owner pop-up's action: ALTER … OWNER TO the chosen role, then reads the information again. Refused while the
+/// runner is busy; a failure is shown as an alert. The pop-up goes back to the server's owner when it isn't changed.
+- (IBAction)changeOwner:(id)sender;
+
 /// Saves a comment edit in progress. YES when there was none or it was saved; NO (after the alert) if it failed.
 - (BOOL)commitPendingEdits;
 
@@ -48,6 +55,11 @@ __attribute__((visibility("default")))
 
 @property (readonly) NSTextField *typeField;
 @property (readonly) NSTextField *ownerField;
+/// The owner as a pop-up of the roles it can be given to, shown instead of ownerField when the connected user may
+/// change the owner (a superuser, or a user with the owning role's privileges).
+@property (readonly) NSPopUpButton *ownerPopup;
+/// YES when the owner pop-up is shown.
+@property (readonly) BOOL canChangeOwner;
 @property (readonly) NSTextField *rowsField;
 @property (readonly) NSTextField *tableSizeField;
 @property (readonly) NSTextField *indexSizeField;

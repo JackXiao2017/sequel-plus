@@ -23,6 +23,9 @@
  *   favorite's session closed, a database no longer chosen), so Transfer is disabled until a listed one is chosen;
  *   clearing the filter doesn't choose again. A database made with New Database… clears the database filter. Once
  *   typing pauses (0.5 s) the menu opens, showing the matches (when there's text and at least one matching name).
+ * - Owner: who owns what the transfer creates, from the session's roles; the To: connection's user by default (as
+ *   created). Another role is given the copy with ALTER … OWNER TO before the load's COMMIT (SPPostgresTransfer's
+ *   targetOwner).
  * - Mode: "Empty the target database first" (default; confirmed first by typing the database's name, except for a
  *   database created in this sheet) or "Overwrite tables that already exist on the target".
  *
@@ -107,6 +110,12 @@ __attribute__((visibility("default")))
 /// Under the mode: owners and privileges aren't copied, and who owns the copy (the chosen favorite's user)
 @property (readonly) NSTextField *ownershipNoteField;
 @property (readonly) NSPopUpButton *databasePopup;
+/// Owner: who owns what the transfer creates. The roles of the target (see +ownersOnConnection:user:: any role for a superuser,
+/// pg_database_owner included on PostgreSQL 14+; otherwise the roles the user may SET ROLE to or grant itself), the To: connection's
+/// user selected; disabled (showing the favorite's user) until the session has connected.
+@property (readonly) NSPopUpButton *ownerPopup;
+/// The role chosen in the Owner menu; nil before the session has connected.
+@property (readonly, copy) NSString *selectedOwner;
 /// Narrows the To: menu (hidden items) as it's typed in; unsets the favorite it filters out
 @property (readonly) NSSearchField *favoriteFilterField;
 /// Narrows the Database: menu (hidden items, "New Database…" always shown) as it's typed in; unsets the database it
@@ -147,5 +156,14 @@ __attribute__((visibility("default")))
 /// The sheet's ownership note: the copy is owned by the favorite's user (or "the user the To: connection logs in as"
 /// without a favorite or user); owners and privileges aren't copied.
 + (NSString *)ownershipNoteForFavorite:(SPPostgresFavorite *)favorite;
+
+/// The Owner menu's roles on a target connection, its user (current_user) in user: any role for a superuser (with
+/// pg_database_owner, on PostgreSQL 14+), otherwise the roles it may SET ROLE to (is a member of, before PostgreSQL
+/// 16) and those it may grant itself (ADMIN OPTION; before 16, any but a superuser with CREATEROLE), itself included;
+/// sorted by name. nil when they can't be read.
++ (NSArray<NSString *> *)ownersOnConnection:(PGPostgresConnection *)connection user:(NSString **)user;
+
+/// The note when another role than the To: connection's user (user) is chosen to own the copy.
++ (NSString *)ownershipNoteForOwner:(NSString *)owner user:(NSString *)user;
 
 @end
