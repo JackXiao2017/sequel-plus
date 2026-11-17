@@ -7,6 +7,7 @@
 #import "../Source/Postgres/SPPostgresErrors.h"
 #import "../Source/Postgres/SPPostgresDocument.h"
 #import "../Source/Postgres/SPPostgresBackgroundJob.h"
+#import "../Source/Postgres/SPPostgresTransferController.h"
 
 /// A transfer whose target lacks one available extension.
 @interface SPPostgresTransferWithoutExtension : SPPostgresTransfer
@@ -384,6 +385,82 @@ static NSString *const SPPublicComment = @"schema public = standard public schem
 		XCTAssertEqual(transfer.replacedObjects.count, 4u);
 		XCTAssertEqualObjects(transfer.dependenciesCreated, @[], @"every dependency was already there");
 		XCTAssertEqual(transfer.tablesCopied, 2u);
+	}
+}
+
+/// Drops a test role: what it owns in the connection's database goes back to the test user first.
+- (void)dropRole:(NSString *)role on:(PGPostgresConnection *)connection
+{
+	NSString *exists = [self text:[NSString stringWithFormat:@"SELECT count(*)::text FROM pg_roles WHERE rolname = '%@'", role] on:connection];
+	if (![exists isEqualToString:@"1"]) return;
+	[self run:[NSString stringWithFormat:@"REASSIGN OWNED BY %@ TO pgkit_test", role] on:connection];
+	[self run:[NSString stringWithFormat:@"DROP OWNED BY %@", role] on:connection];
+	[self run:[NSString stringWithFormat:@"DROP ROLE %@", role] on:connection];
+}
+
+/// A cloud service's main user (RDS…): not a superuser, CREATEROLE, owns the database, and isn't a member of the users
+/// it created. The Owner menu offers them; the transfer grants itself the role and the owner CREATE on public for the
+/// owner change only, then revokes both, in the load's transaction.
+- (void)testTargetOwnerCreatedByAMainUserThatIsntASuperuser
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		PGPostgresConnection *source = [self sourceOn:port];
+		PGPostgresConnection *target = [self targetOn:port];
+		[self dropRole:@"sp_tr_app" on:target];
+		[self dropRole:@"sp_tr_master" on:target];
+		[self run:@"CREATE ROLE sp_tr_master NOLOGIN CREATEROLE" on:target];
+		[self run:@"SET ROLE sp_tr_master" on:target];
+		[self run:@"CREATE ROLE sp_tr_app NOLOGIN" on:target];
+		[self run:@"RESET ROLE" on:target];
+		// The database is the main user's; public as a fresh database has it
+		[self run:@"ALTER DATABASE pgkit_io_dst OWNER TO sp_tr_master" on:target];
+		NSInteger version = [[self text:@"SELECT current_setting('server_version_num')" on:target] integerValue];
+		if (version >= 150000) {
+			[self run:@"ALTER SCHEMA public OWNER TO pg_database_owner" on:target];
+			[self run:@"GRANT USAGE ON SCHEMA public TO PUBLIC" on:target];
+		} else {
+			[self run:@"GRANT CREATE, USAGE ON SCHEMA public TO PUBLIC" on:target];
+		}
+		// Before PostgreSQL 13 only a superuser creates citext (the tables use it): there already, as it would have to be
+		[self run:@"CREATE EXTENSION IF NOT EXISTS citext SCHEMA public" on:target];
+		[self run:@"SET ROLE sp_tr_master" on:target];
+
+		NSString *user = nil;
+		NSArray *offered = [SPPostgresTransferController ownersOnConnection:target user:&user];
+		XCTAssertEqualObjects(user, @"sp_tr_master");
+		XCTAssertTrue([offered containsObject:@"sp_tr_app"], @"port %@: %@", port, offered);
+		XCTAssertFalse([offered containsObject:@"pgkit_test"], @"not a superuser's");
+
+		SPPostgresTransfer *transfer = [self transferFrom:source to:target];
+		transfer.tables = @[[self orderTables], @[@"Sales Data", @"order_lines"]];
+		transfer.mode = SPPostgresTransferOverwrite;
+		transfer.targetOwner = @"sp_tr_app";
+		NSError *error = nil;
+		XCTAssertTrue([transfer run:&error], @"port %@: %@", port, error.localizedDescription);
+		[self assertIdle:target];
+		XCTAssertGreaterThan(transfer.objectsGivenToOwner, 0u);
+		// Checked as the test's superuser (the main user has no USAGE on the schema it gave away)
+		[self run:@"RESET ROLE" on:target];
+		[self run:@"RESET search_path" on:target];
+		XCTAssertEqualObjects([self text:@"SELECT pg_get_userbyid(relowner)::text FROM pg_class WHERE oid = '\"Sales Data\".\"Orders 2026\"'::regclass" on:target], @"sp_tr_app");
+		XCTAssertEqualObjects([self text:@"SELECT pg_get_userbyid(nspowner)::text FROM pg_namespace WHERE nspname = 'Sales Data'" on:target], @"sp_tr_app");
+		XCTAssertEqualObjects([self text:@"SELECT pg_get_userbyid(typowner)::text FROM pg_type WHERE oid = 'public.mood'::regtype" on:target], @"sp_tr_app", @"in public too");
+		// Nothing granted is left
+		XCTAssertEqualObjects([self text:@"SELECT count(*)::text FROM pg_auth_members m WHERE m.roleid = 'sp_tr_app'::regrole AND m.member = 'sp_tr_master'::regrole AND m.grantor = 'sp_tr_master'::regrole" on:target], @"0", @"port %@", port);
+		if (version >= 160000) {
+			XCTAssertEqualObjects([self text:@"SELECT (pg_has_role('sp_tr_master', 'sp_tr_app', 'SET'))::text" on:target], @"false");
+			XCTAssertEqualObjects([self text:@"SELECT (pg_has_role('sp_tr_master', 'sp_tr_app', 'MEMBER WITH ADMIN OPTION'))::text" on:target], @"true", @"the main user still administers it");
+		} else {
+			XCTAssertEqualObjects([self text:@"SELECT (pg_has_role('sp_tr_master', 'sp_tr_app', 'MEMBER'))::text" on:target], @"false");
+		}
+		if (version >= 150000) {
+			XCTAssertEqualObjects([self text:@"SELECT has_schema_privilege('sp_tr_app', 'public', 'CREATE')::text" on:target], @"false", @"CREATE on public was only for the change");
+		}
+		[self assertTemporaryDirectoryEmpty];
+
+		[self run:@"ALTER DATABASE pgkit_io_dst OWNER TO pgkit_test" on:target];
+		[self dropRole:@"sp_tr_app" on:target];
+		[self dropRole:@"sp_tr_master" on:target];
 	}
 }
 

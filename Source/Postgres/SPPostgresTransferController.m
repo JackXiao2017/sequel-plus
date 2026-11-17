@@ -235,6 +235,7 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 	NSPopUpButton *favoritePopup;
 	NSTextField *targetDescriptionField;
 	NSTextField *ownershipNoteField;
+	NSPopUpButton *ownerPopup;
 	NSPopUpButton *databasePopup;
 	NSSearchField *favoriteFilterField;
 	NSSearchField *databaseFilterField;
@@ -246,6 +247,10 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 	NSButton *cancelButton;
 
 	NSString *selectedDatabase;
+	/// The session's user (current_user), the Owner menu's default; nil until the session has connected
+	NSString *sessionUser;
+	/// The owner chosen when Transfer was clicked
+	NSString *transferOwner;
 
 	/// The session to the chosen favorite: lists its databases, creates one, and carries the transfer's connection
 	/// (its SSH tunnel and password). Open from choosing the favorite until the controller finishes.
@@ -296,6 +301,7 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 @synthesize favoritePopup;
 @synthesize targetDescriptionField;
 @synthesize ownershipNoteField;
+@synthesize ownerPopup;
 @synthesize databasePopup;
 @synthesize favoriteFilterField;
 @synthesize databaseFilterField;
@@ -344,6 +350,9 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 	[favoritePopup release];
 	[targetDescriptionField release];
 	[ownershipNoteField release];
+	[ownerPopup release];
+	[sessionUser release];
+	[transferOwner release];
 	[databasePopup release];
 	[favoriteFilterField release];
 	[databaseFilterField release];
@@ -465,7 +474,7 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 {
 	if (sheet) return;
 
-	CGFloat width = 520, height = 536;
+	CGFloat width = 520, height = 570;
 	sheet = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, width, height) styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:YES];
 	[sheet setReleasedWhenClosed:NO];
 	[sheet setContentMinSize:NSMakeSize(width, height)];
@@ -486,7 +495,7 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 	selectedTablesRadio = [self _radioWithFrame:NSMakeRect(20, height - 90, width - 40, 20) title:NSLocalizedString(@"Selected tables", @"Postgres transfer sheet: scope") action:@selector(_scopeChanged:) on:NO];
 	[content addSubview:selectedTablesRadio];
 
-	CGFloat listBottom = 294;
+	CGFloat listBottom = 328;
 	tablesList = [[SPPostgresCheckList alloc] initWithFrame:NSMakeRect(40, listBottom, width - 60, height - 98 - listBottom) inView:content];
 	[tablesList setGroupsByFirstElement:YES];
 	// Not capturing self: the list keeps the block, and the controller keeps the list
@@ -494,18 +503,18 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 	[tablesList setChecksChanged:^{ [controller _updateControls]; }];
 
 	// Target
-	NSTextField *toLabel = [self _labelWithFrame:NSMakeRect(20, 252, 80, 18) text:NSLocalizedString(@"To:", @"Postgres transfer sheet: target favorite label")];
+	NSTextField *toLabel = [self _labelWithFrame:NSMakeRect(20, 286, 80, 18) text:NSLocalizedString(@"To:", @"Postgres transfer sheet: target favorite label")];
 	[toLabel setAutoresizingMask:NSViewMaxYMargin];
 	[content addSubview:toLabel];
-	favoritePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(104, 247, 280, 26) pullsDown:NO];
+	favoritePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(104, 281, 280, 26) pullsDown:NO];
 	[favoritePopup setTarget:self];
 	[favoritePopup setAction:@selector(_favoriteChanged:)];
 	[favoritePopup setAutoresizingMask:NSViewMaxYMargin];
 	[content addSubview:favoritePopup];
-	favoriteFilterField = [self _filterFieldWithFrame:NSMakeRect(392, 249, width - 20 - 392, 22)];
+	favoriteFilterField = [self _filterFieldWithFrame:NSMakeRect(392, 283, width - 20 - 392, 22)];
 	[content addSubview:favoriteFilterField];
 
-	targetDescriptionField = [[self _labelWithFrame:NSMakeRect(108, 228, width - 128, 16) text:@""] retain];
+	targetDescriptionField = [[self _labelWithFrame:NSMakeRect(108, 262, width - 128, 16) text:@""] retain];
 	[targetDescriptionField setAlignment:NSTextAlignmentLeft];
 	[targetDescriptionField setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
 	[targetDescriptionField setTextColor:[NSColor secondaryLabelColor]];
@@ -513,20 +522,20 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 	[targetDescriptionField setAutoresizingMask:NSViewWidthSizable | NSViewMaxYMargin];
 	[content addSubview:targetDescriptionField];
 
-	NSTextField *databaseLabel = [self _labelWithFrame:NSMakeRect(20, 196, 80, 18) text:NSLocalizedString(@"Database:", @"Postgres transfer sheet: target database label")];
+	NSTextField *databaseLabel = [self _labelWithFrame:NSMakeRect(20, 230, 80, 18) text:NSLocalizedString(@"Database:", @"Postgres transfer sheet: target database label")];
 	[databaseLabel setAutoresizingMask:NSViewMaxYMargin];
 	[content addSubview:databaseLabel];
-	databasePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(104, 191, 280, 26) pullsDown:NO];
+	databasePopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(104, 225, 280, 26) pullsDown:NO];
 	[[databasePopup menu] setAutoenablesItems:NO];
 	[databasePopup setTarget:self];
 	[databasePopup setAction:@selector(_databaseChanged:)];
 	[databasePopup setAutoresizingMask:NSViewMaxYMargin];
 	[content addSubview:databasePopup];
-	databaseFilterField = [self _filterFieldWithFrame:NSMakeRect(392, 193, width - 20 - 392, 22)];
+	databaseFilterField = [self _filterFieldWithFrame:NSMakeRect(392, 227, width - 20 - 392, 22)];
 	[content addSubview:databaseFilterField];
 
 	// The session's error, and Retry next to it
-	targetStatusField = [[self _labelWithFrame:NSMakeRect(108, 154, width - 128 - 96, 32) text:@""] retain];
+	targetStatusField = [[self _labelWithFrame:NSMakeRect(108, 188, width - 128 - 96, 32) text:@""] retain];
 	[targetStatusField setAlignment:NSTextAlignmentLeft];
 	[targetStatusField setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
 	[targetStatusField setTextColor:[NSColor systemRedColor]];
@@ -534,7 +543,7 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 	[[targetStatusField cell] setTruncatesLastVisibleLine:YES];
 	[targetStatusField setAutoresizingMask:NSViewWidthSizable | NSViewMaxYMargin];
 	[content addSubview:targetStatusField];
-	retryButton = [[NSButton alloc] initWithFrame:NSMakeRect(width - 20 - 90, 156, 90, 28)];
+	retryButton = [[NSButton alloc] initWithFrame:NSMakeRect(width - 20 - 90, 190, 90, 28)];
 	[retryButton setBezelStyle:NSBezelStyleRounded];
 	[retryButton setTitle:NSLocalizedString(@"Retry", @"Postgres transfer sheet: connect to the target again")];
 	[retryButton setTarget:self];
@@ -544,12 +553,22 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 	[content addSubview:retryButton];
 
 	// Mode
-	emptyModeRadio = [self _radioWithFrame:NSMakeRect(20, 124, width - 40, 20) title:NSLocalizedString(@"Empty the target database first", @"Postgres transfer sheet: mode") action:@selector(_modeChanged:) on:YES];
+	emptyModeRadio = [self _radioWithFrame:NSMakeRect(20, 158, width - 40, 20) title:NSLocalizedString(@"Empty the target database first", @"Postgres transfer sheet: mode") action:@selector(_modeChanged:) on:YES];
 	[emptyModeRadio setAutoresizingMask:NSViewMaxYMargin];
 	[content addSubview:emptyModeRadio];
-	overwriteModeRadio = [self _radioWithFrame:NSMakeRect(20, 100, width - 40, 20) title:NSLocalizedString(@"Overwrite tables that already exist on the target", @"Postgres transfer sheet: mode") action:@selector(_modeChanged:) on:NO];
+	overwriteModeRadio = [self _radioWithFrame:NSMakeRect(20, 134, width - 40, 20) title:NSLocalizedString(@"Overwrite tables that already exist on the target", @"Postgres transfer sheet: mode") action:@selector(_modeChanged:) on:NO];
 	[overwriteModeRadio setAutoresizingMask:NSViewMaxYMargin];
 	[content addSubview:overwriteModeRadio];
+
+	// Who owns what the transfer creates: the To: connection's user, or a role of the target
+	NSTextField *ownerLabel = [self _labelWithFrame:NSMakeRect(20, 102, 80, 18) text:NSLocalizedString(@"Owner:", @"Postgres transfer sheet: owner of what the transfer creates label")];
+	[ownerLabel setAutoresizingMask:NSViewMaxYMargin];
+	[content addSubview:ownerLabel];
+	ownerPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(104, 97, 280, 26) pullsDown:NO];
+	[ownerPopup setTarget:self];
+	[ownerPopup setAction:@selector(_ownerChanged:)];
+	[ownerPopup setAutoresizingMask:NSViewMaxYMargin];
+	[content addSubview:ownerPopup];
 
 	// What happens to owners and privileges
 	ownershipNoteField = [[self _labelWithFrame:NSMakeRect(20, 50, width - 40, 34) text:[[self class] ownershipNoteForFavorite:nil]] retain];
@@ -646,6 +665,7 @@ static BOOL SPPostgresTransferErrorIs(NSError *error, NSInteger code)
 	[[tablesList tableView] setEnabled:![self _wholeDatabase]];
 	[favoritePopup setEnabled:[favorites count] > 0 && !prompting];
 	[databasePopup setEnabled:targetState != SPPostgresTransferTargetNone && !prompting];
+	[ownerPopup setEnabled:targetState == SPPostgresTransferTargetConnected && [sessionUser length] && !prompting];
 	[retryButton setHidden:targetState != SPPostgresTransferTargetFailed];
 	[transferButton setEnabled:[self _canTransfer]];
 }
@@ -730,7 +750,92 @@ static const NSTimeInterval SPPostgresTransferFilterMenuDelay = 0.5;
 - (void)_showFavorite
 {
 	[targetDescriptionField setStringValue:[[self class] targetDescriptionForFavorite:[self _selectedFavorite]]];
-	[ownershipNoteField setStringValue:[[self class] ownershipNoteForFavorite:[self _selectedFavorite]]];
+	[self _showOwnershipNote];
+}
+
+/// The owner chosen in the menu; nil before the session has connected (the To: connection's user then).
+- (NSString *)selectedOwner
+{
+	return [sessionUser length] ? [[ownerPopup selectedItem] representedObject] : nil;
+}
+
+- (void)_showOwnershipNote
+{
+	NSString *owner = [self selectedOwner];
+	if ([owner length] && ![owner isEqualToString:sessionUser]) {
+		[ownershipNoteField setStringValue:[[self class] ownershipNoteForOwner:owner user:sessionUser]];
+	}
+	else if ([sessionUser length]) {
+		SPPostgresFavorite *user = [[[SPPostgresFavorite alloc] init] autorelease];
+		[user setUser:sessionUser];
+		[ownershipNoteField setStringValue:[[self class] ownershipNoteForFavorite:user]];
+	}
+	else {
+		[ownershipNoteField setStringValue:[[self class] ownershipNoteForFavorite:[self _selectedFavorite]]];
+	}
+}
+
++ (NSString *)ownershipNoteForOwner:(NSString *)owner user:(NSString *)user
+{
+	return [NSString stringWithFormat:NSLocalizedString(@"Owners and privileges aren't copied: the tables, views and other objects the transfer creates are given to “%@” (they're created by “%@”, the user the To: connection logs in as, then given to it before the commit). Grant other roles access afterwards if they need it.", @"Postgres transfer sheet: ownership note (chosen owner, target user)"), owner ?: @"", user ?: @""];
+}
+
+/// The session's roles in the Owner menu (see +ownersOnConnection:user:), its user selected; or one disabled item: the
+/// favorite's user (or nothing) before the session has connected.
+- (void)_showOwners:(NSArray *)roles user:(NSString *)user
+{
+	[sessionUser release];
+	sessionUser = [user copy];
+	[ownerPopup removeAllItems];
+	NSMenu *menu = [ownerPopup menu];
+	if ([user length]) {
+		NSMutableArray *names = [NSMutableArray arrayWithArray:roles ?: @[]];
+		if (![names containsObject:user]) [names insertObject:user atIndex:0];
+		NSMenuItem *selected = nil;
+		for (NSString *name in names) {
+			NSMenuItem *item = [menu addItemWithTitle:name action:NULL keyEquivalent:@""];
+			[item setRepresentedObject:name];
+			if ([name isEqualToString:user]) selected = item;
+		}
+		[ownerPopup selectItem:selected];
+	}
+	else {
+		NSString *favoriteUser = [[self _selectedFavorite] user];
+		if ([favoriteUser length]) [ownerPopup selectItem:[menu addItemWithTitle:favoriteUser action:NULL keyEquivalent:@""]];
+	}
+	[self _showOwnershipNote];
+	[self _updateControls];
+}
+
+/// The roles the session's user may give what the transfer creates to: any role for a superuser (pg_database_owner too,
+/// on PostgreSQL 14+); otherwise the roles it may SET ROLE to (is a member of, before PostgreSQL 16) and those it may
+/// grant itself (ADMIN OPTION; before PostgreSQL 16, any role but a superuser with CREATEROLE), as a cloud service's
+/// main user (RDS, Cloud SQL, Azure) can with the users it created. nil on failure.
++ (NSArray *)ownersOnConnection:(PGPostgresConnection *)connection user:(NSString **)user
+{
+	PGPostgresResult *result = SPPostgresExecuteWithDetails(connection,
+		@"SELECT current_user::text AS me, r.rolname::text AS name FROM pg_catalog.pg_roles r"
+		" WHERE (SELECT u.rolsuper FROM pg_catalog.pg_roles u WHERE u.rolname = current_user)"
+		"  OR (r.rolname !~ '^pg_' AND CASE WHEN pg_catalog.current_setting('server_version_num')::int >= 160000"
+		"   THEN pg_catalog.pg_has_role(r.oid, 'SET') OR pg_catalog.pg_has_role(r.oid, 'MEMBER WITH ADMIN OPTION')"
+		"   ELSE pg_catalog.pg_has_role(r.oid, 'MEMBER')"
+		"    OR ((SELECT u.rolcreaterole FROM pg_catalog.pg_roles u WHERE u.rolname = current_user) AND NOT r.rolsuper) END)"
+		" ORDER BY r.rolname COLLATE \"C\"", nil, NULL);
+	if (!result) return nil;
+	NSMutableArray *names = [NSMutableArray array];
+	for (NSDictionary *row in result) {
+		id me = [row objectForKey:@"me"], name = [row objectForKey:@"name"];
+		if (user && !*user && [me isKindOfClass:[NSString class]]) *user = me;
+		if (![name isKindOfClass:[NSString class]]) continue;
+		if ([name hasPrefix:@"pg_"] && ![name isEqualToString:@"pg_database_owner"]) continue;
+		[names addObject:name];
+	}
+	return names;
+}
+
+- (void)_ownerChanged:(id)sender
+{
+	[self _showOwnershipNote];
 }
 
 + (NSString *)ownershipNoteForFavorite:(SPPostgresFavorite *)favorite
@@ -784,7 +889,7 @@ static const NSTimeInterval SPPostgresTransferFilterMenuDelay = 0.5;
 		[databasePopup selectItem:item];
 	}
 	[targetStatusField setStringValue:message ?: @""];
-	[self _updateControls];
+	[self _showOwners:nil user:nil];
 }
 
 /// The session's databases, a separator and "New Database…"; selects name when listed, else nothing (no database is
@@ -897,6 +1002,17 @@ static const NSTimeInterval SPPostgresTransferFilterMenuDelay = 0.5;
 		return;
 	}
 	[self _showDatabases:names selecting:[sessionFavorite database]];
+	NSString *user = nil;
+	NSArray *roles = [[self class] ownersOnConnection:connection user:&user];
+	if (!user) {
+		// The roles couldn't be read: the user alone (who owns the copy by default)
+		PGPostgresResult *me = SPPostgresExecuteWithDetails(connection, @"SELECT current_user::text AS me", nil, NULL);
+		for (NSDictionary *row in me) {
+			id value = [row objectForKey:@"me"];
+			if ([value isKindOfClass:[NSString class]]) user = value;
+		}
+	}
+	[self _showOwners:roles user:user ?: [sessionFavorite user]];
 }
 
 /// The server wants a password: ask (once per failed attempt); Cancel leaves "Not connected" with Retry.
@@ -1235,6 +1351,8 @@ static const NSTimeInterval SPPostgresTransferFilterMenuDelay = 0.5;
 	NSString *targetDatabase = [[selectedDatabase copy] autorelease];
 	SPPostgresTransferMode mode = [self _mode];
 	NSArray *tables = [self _wholeDatabase] ? nil : [[[tablesList checkedItems] copy] autorelease];
+	[transferOwner release];
+	transferOwner = [[self selectedOwner] copy];
 
 	// A database created in this sheet has nothing to lose: no confirmation
 	if (mode != SPPostgresTransferEmptyTarget || [createdDatabases containsObject:targetDatabase]) {
@@ -1348,8 +1466,10 @@ static NSError *SPPostgresTransferCancelledError(void)
 	NSString *directory = [[temporaryDirectory copy] autorelease];
 	void (^observer)(SPPostgresProgressSheet *) = [[progressObserver copy] autorelease];
 	NSMutableDictionary *results = [NSMutableDictionary dictionary];
-	// Who owns what the transfer creates (the target connection's user), for the completion note
-	if ([[favorite user] length]) [results setObject:[favorite user] forKey:@"owner"];
+	// Who owns what the transfer creates (the chosen role, or the target connection's user), for the completion note
+	NSString *owner = [[transferOwner copy] autorelease];
+	if ([owner length]) [results setObject:owner forKey:@"owner"];
+	else if ([[favorite user] length]) [results setObject:[favorite user] forKey:@"owner"];
 	BOOL (^work)(PGPostgresConnection *, PGPostgresConnection *, NSError **) = ^BOOL(PGPostgresConnection *source, PGPostgresConnection *target, NSError **error) {
 		if ([progress cancelled]) {
 			if (error) *error = SPPostgresTransferCancelledError();
@@ -1359,6 +1479,8 @@ static NSError *SPPostgresTransferCancelledError(void)
 		if (tables) [transfer setTables:tables];
 		else [transfer setWholeDatabase:YES];
 		[transfer setMode:mode];
+		// Given to the chosen role before the commit (nothing to do when it's the connection's user)
+		if ([owner length]) [transfer setTargetOwner:owner];
 		if (directory) [transfer setTemporaryDirectory:directory];
 		__block SPPostgresTransfer *engine = transfer; // the engine keeps the block
 		// The tasks before the running one get what they did

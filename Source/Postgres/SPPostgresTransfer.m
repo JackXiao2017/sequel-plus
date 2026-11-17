@@ -72,6 +72,8 @@ static NSString *SPTransferTableOfCopy(NSString *sql)
 @synthesize loadingTableRows;
 @synthesize loadTableRowCountKnown;
 @synthesize failedWhileReading;
+@synthesize targetOwner;
+@synthesize objectsGivenToOwner;
 
 + (NSString *)summaryOfStatement:(NSString *)sql
 {
@@ -112,6 +114,7 @@ static NSString *SPTransferTableOfCopy(NSString *sql)
 	[dependenciesCreated release];
 	[foreignTablesSkipped release];
 	[skippedSettings release];
+	[targetOwner release];
 	[emptiedSchemas release];
 	[emptiedExtensions release];
 	[objectsToReplace release];
@@ -379,6 +382,119 @@ static void SPTransferRollBack(PGPostgresConnection *connection)
 	return (NSUInteger)[SPTransferText(rows[0][0]) integerValue];
 }
 
+#pragma mark - Owner
+
+/// The OIDs of the target's objects not built in (schemas, relations, routines, types), comma-separated: what was there
+/// before the load. nil on failure.
+- (NSString *)_objectsBeforeLoad:(NSError **)error
+{
+	NSArray *rows = SPTransferRows(target,
+		@"SELECT coalesce(pg_catalog.string_agg(o.oid::text, ','), '') FROM ("
+		" SELECT oid FROM pg_catalog.pg_namespace WHERE oid >= 16384"
+		" UNION ALL SELECT oid FROM pg_catalog.pg_class WHERE oid >= 16384"
+		" UNION ALL SELECT oid FROM pg_catalog.pg_proc WHERE oid >= 16384"
+		" UNION ALL SELECT oid FROM pg_catalog.pg_type WHERE oid >= 16384) o", nil, error);
+	if (!rows) return nil;
+	return SPTransferText([[rows firstObject] firstObject]) ?: @"";
+}
+
+/// In the load's transaction: ALTER … OWNER TO targetOwner for what the load created that the target's user owns
+/// (not in before; see targetOwner), schemas first. Sent a few hundred statements per round trip.
+- (BOOL)_giveCreatedObjectsAfter:(NSString *)before error:(NSError **)error
+{
+	NSArray *rows = SPTransferRows(target,
+		@"WITH before AS (SELECT pg_catalog.unnest(pg_catalog.string_to_array($1::text, ','))::oid AS oid),"
+		" me AS (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = current_user),"
+		" members AS (SELECT d.classid, d.objid FROM pg_catalog.pg_depend d WHERE d.deptype = 'e')"
+		" SELECT k.kind, k.name, k.nsp::text, k.oid::text FROM ("
+		"  SELECT 0 AS rank, 'SCHEMA' AS kind, pg_catalog.quote_ident(n.nspname) AS name, n.oid, NULL::oid AS nsp FROM pg_catalog.pg_namespace n, me"
+		"   WHERE n.nspowner = me.oid AND n.oid >= 16384 AND n.oid NOT IN (SELECT oid FROM before)"
+		"    AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'"
+		"    AND (n.oid, 'pg_catalog.pg_namespace'::regclass) NOT IN (SELECT objid, classid FROM members)"
+		"  UNION ALL"
+		"  SELECT 1, CASE t.typtype WHEN 'd' THEN 'DOMAIN' ELSE 'TYPE' END, t.oid::regtype::text, t.oid, t.typnamespace FROM pg_catalog.pg_type t, me"
+		"   WHERE t.typowner = me.oid AND t.oid >= 16384 AND t.oid NOT IN (SELECT oid FROM before)"
+		"    AND (t.typtype IN ('d', 'e', 'r') OR (t.typtype = 'c' AND (SELECT c.relkind FROM pg_catalog.pg_class c WHERE c.oid = t.typrelid) = 'c'))"
+		"    AND (t.oid, 'pg_catalog.pg_type'::regclass) NOT IN (SELECT objid, classid FROM members)"
+		"  UNION ALL"
+		"  SELECT 2, CASE c.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'f' THEN 'FOREIGN TABLE'"
+		"    WHEN 'S' THEN 'SEQUENCE' ELSE 'TABLE' END, c.oid::regclass::text, c.oid, c.relnamespace FROM pg_catalog.pg_class c, me"
+		"   WHERE c.relowner = me.oid AND c.oid >= 16384 AND c.oid NOT IN (SELECT oid FROM before)"
+		"    AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') AND c.relpersistence <> 't'"
+		"    AND (c.oid, 'pg_catalog.pg_class'::regclass) NOT IN (SELECT objid, classid FROM members)"
+		"    AND NOT (c.relkind = 'S' AND EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_catalog.pg_class'::regclass"
+		"     AND d.objid = c.oid AND d.refclassid = 'pg_catalog.pg_class'::regclass AND d.deptype IN ('a', 'i')))"
+		"  UNION ALL"
+		"  SELECT 3, CASE WHEN pg_catalog.current_setting('server_version_num')::int >= 110000 THEN 'ROUTINE'"
+		"    WHEN (pg_catalog.to_jsonb(p) ->> 'proisagg')::boolean THEN 'AGGREGATE' ELSE 'FUNCTION' END,"
+		"    p.oid::regprocedure::text, p.oid, p.pronamespace FROM pg_catalog.pg_proc p, me"
+		"   WHERE p.proowner = me.oid AND p.oid >= 16384 AND p.oid NOT IN (SELECT oid FROM before)"
+		"    AND (p.oid, 'pg_catalog.pg_proc'::regclass) NOT IN (SELECT objid, classid FROM members)"
+		" ) k ORDER BY k.rank, k.oid", @[before ?: @""], error);
+	if (!rows) return NO;
+
+	NSString *owner = SPPostgresQuoteIdentifier(targetOwner);
+	NSMutableArray *statements = [NSMutableArray array];
+	NSMutableSet *givenSchemas = [NSMutableSet set], *schemasUsed = [NSMutableSet set];
+	for (NSArray *row in rows) {
+		NSString *kind = SPTransferText(row[0]), *name = SPTransferText(row[1]), *schema = SPTransferText(row[2]);
+		if (![kind length] || ![name length]) continue;
+		[statements addObject:[NSString stringWithFormat:@"ALTER %@ %@ OWNER TO %@", kind, name, owner]];
+		if ([schema length]) [schemasUsed addObject:schema];
+		if ([kind isEqualToString:@"SCHEMA"] && SPTransferText(row[3])) [givenSchemas addObject:row[3]];
+	}
+	if (![statements count]) return YES;
+	// The schemas given to the owner are its own: CREATE there goes with them
+	[schemasUsed minusSet:givenSchemas];
+
+	// Not a superuser: the server wants the user able to SET ROLE to the owner, and the owner to have CREATE on the
+	// schemas that already existed. A user who may grant them (CREATEROLE; ADMIN OPTION from PostgreSQL 16; a schema's
+	// owner) gets them for these statements only: granted first, revoked after, all in the load's transaction.
+	NSMutableArray *grants = [NSMutableArray array], *revokes = [NSMutableArray array];
+	BOOL modern = [target serverVersion] >= 160000;
+	NSArray *rights = SPTransferRows(target, [NSString stringWithFormat:
+		@"SELECT u.rolsuper::text, pg_catalog.pg_has_role(r.oid, '%@')::text FROM pg_catalog.pg_roles u, pg_catalog.pg_roles r"
+		" WHERE u.rolname = current_user AND r.rolname = $1::text", modern ? @"SET" : @"MEMBER"], @[targetOwner], error);
+	if (!rights) return NO;
+	// (no such role: the ALTERs say so)
+	if ([rights count] && ![SPTransferText(rights[0][0]) isEqualToString:@"true"]) {
+		if (![SPTransferText(rights[0][1]) isEqualToString:@"true"]) {
+			[grants addObject:[NSString stringWithFormat:@"GRANT %@ TO CURRENT_USER%@", owner, modern ? @" WITH SET TRUE" : @""]];
+			[revokes addObject:[NSString stringWithFormat:@"REVOKE %@ FROM CURRENT_USER", owner]];
+		}
+		if ([schemasUsed count]) {
+			NSArray *lacking = SPTransferRows(target,
+				@"SELECT pg_catalog.quote_ident(n.nspname) FROM pg_catalog.pg_namespace n"
+				" WHERE n.oid = ANY (pg_catalog.string_to_array($1::text, ',')::oid[]) AND NOT pg_catalog.has_schema_privilege($2::text, n.oid, 'CREATE')"
+				" ORDER BY n.oid", @[[[schemasUsed allObjects] componentsJoinedByString:@","], targetOwner], error);
+			if (!lacking) return NO;
+			for (NSArray *row in lacking) {
+				NSString *schema = SPTransferText(row[0]);
+				if (![schema length]) continue;
+				[grants addObject:[NSString stringWithFormat:@"GRANT CREATE ON SCHEMA %@ TO %@", schema, owner]];
+				[revokes insertObject:[NSString stringWithFormat:@"REVOKE CREATE ON SCHEMA %@ FROM %@", schema, owner] atIndex:0];
+			}
+		}
+	}
+
+	NSMutableArray *all = [NSMutableArray arrayWithArray:grants];
+	[all addObjectsFromArray:statements];
+	[all addObjectsFromArray:revokes];
+	NSMutableArray *batch = [NSMutableArray array];
+	for (NSUInteger index = 0; index < [all count]; index++) {
+		[batch addObject:all[index]];
+		if ([batch count] < 200 && index + 1 < [all count]) continue;
+		if (![self _report:SPPostgresTransferFinishing fraction:1 detail:[NSString stringWithFormat:@"ALTER … OWNER TO %@", owner]]) {
+			if (error) *error = [self _cancelledError];
+			return NO;
+		}
+		if (!SPPostgresExecuteStatementsWithDetails(target, [[batch componentsJoinedByString:@";\n"] stringByAppendingString:@";"], error)) return NO;
+		[batch removeAllObjects];
+	}
+	objectsGivenToOwner = [statements count];
+	return YES;
+}
+
 #pragma mark - Running
 
 - (BOOL)run:(NSError **)error
@@ -397,6 +513,7 @@ static void SPTransferRollBack(PGPostgresConnection *connection)
 	objectCount = readTableCount = structureItemCount = postDataItemCount = loadStepIndex = loadStepCount = 0;
 	readRowCount = loadRowsWritten = loadTableRowsWritten = loadTableRowCount = 0;
 	loadingTableRows = loadTableRowCountKnown = failedWhileReading = NO;
+	objectsGivenToOwner = 0;
 	[emptiedSchemas release];
 	emptiedSchemas = nil;
 	[emptiedExtensions release];
@@ -519,6 +636,17 @@ static void SPTransferRollBack(PGPostgresConnection *connection)
 	[writer setSkippedObjects:skipped];
 	[writer setFlushesOften:YES];
 
+	// A new owner for what is created: what is there now isn't given to it
+	NSString *objectsBefore = nil;
+	if ([targetOwner length]) {
+		NSArray *user = SPTransferRows(target, @"SELECT current_user::text", nil, error);
+		if (!user) return NO;
+		if (![targetOwner isEqualToString:SPTransferText([[user firstObject] firstObject]) ?: @""]) {
+			objectsBefore = [self _objectsBeforeLoad:error];
+			if (!objectsBefore) return NO;
+		}
+	}
+
 	// Empty mode reads what the target holds first
 	if (![self _report:SPPostgresTransferWriting fraction:0 detail:nil]) {
 		if (error) *error = [self _cancelledError];
@@ -579,6 +707,11 @@ static void SPTransferRollBack(PGPostgresConnection *connection)
 	// The structure's statements go a few hundred per round trip
 	[importer setBatchesStatements:YES];
 	[importer setStatementsBeforeImport:statementsBeforeImport];
+	if (objectsBefore) {
+		[importer setBeforeCommit:^BOOL(NSError **ownerError) {
+			return [self _giveCreatedObjectsAfter:objectsBefore error:ownerError];
+		}];
+	}
 
 	// Where the load is: each item's part (header, structure, data, structure after the data) as the writer wrote it
 	__block SPPostgresTransferPhase phase = SPPostgresTransferEmptying;
@@ -728,6 +861,7 @@ static void SPTransferRollBack(PGPostgresConnection *connection)
 	[importer setItemObserver:nil];
 	[importer setCopyDataObserver:nil];
 	[importer setCommitObserver:nil];
+	[importer setBeforeCommit:nil];
 	[writerError autorelease];
 	[loadError autorelease];
 	structureItemCount = [writer structureItemCount];

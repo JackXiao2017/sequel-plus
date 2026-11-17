@@ -67,6 +67,11 @@ static const NSUInteger SPDatabaseMenuTestPort = 55418;
 	}
 	// The schemas the + by the schema pop-up adds (empty), before the role that may own them
 	PGPostgresConnection *testDatabase = [SPPostgresTestServers connectedConnectionOnPort:port database:@"pgkit_test"];
+	// The objects the owner tests put in them, one by one (no CASCADE)
+	for (NSString *sql in @[@"DROP TABLE IF EXISTS sp_dbm_schema.t", @"DROP VIEW IF EXISTS sp_dbm_cascade.v",
+							@"DROP MATERIALIZED VIEW IF EXISTS sp_dbm_cascade.m", @"DROP TABLE IF EXISTS sp_dbm_cascade.parts",
+							@"DROP TABLE IF EXISTS sp_dbm_cascade.t", @"DROP SEQUENCE IF EXISTS sp_dbm_cascade.s",
+							@"DROP SCHEMA IF EXISTS sp_dbm_cascade"]) [testDatabase execute:sql];
 	[testDatabase execute:@"DROP SCHEMA IF EXISTS sp_dbm_schema"];
 	[testDatabase execute:@"DROP SCHEMA IF EXISTS sp_dbm_owned"];
 	// The role Alter Database's and the schema owner tests give a database or schema to (it owns nothing by now)
@@ -415,6 +420,111 @@ static const NSUInteger SPDatabaseMenuTestPort = 55418;
 	XCTAssertNotNil(error);
 }
 
+/// The owner of schema.name (a relation) as the server has it.
+- (NSString *)ownerOfRelation:(NSString *)name inSchema:(NSString *)schema connection:(PGPostgresConnection *)connection
+{
+	PGPostgresResult *result = [connection execute:@"SELECT pg_get_userbyid(c.relowner)::text AS n FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2" values:@[schema, name]];
+	return [[result rowAsArray] firstObject];
+}
+
+/// A schema's new owner given to its tables, views and sequences too (both servers): all or nothing.
+- (void)testCatalogSchemaOwnerIncludingContents
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		NSUInteger thePort = port.unsignedIntegerValue;
+		PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:thePort];
+		XCTAssertNotNil([admin execute:@"CREATE ROLE sp_dbm_owner NOLOGIN"], @"%@", admin.lastError.errorPrimaryMessage);
+		PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:thePort database:@"pgkit_test"];
+		for (NSString *sql in @[@"CREATE SCHEMA sp_dbm_cascade",
+								@"CREATE TABLE sp_dbm_cascade.t (id serial PRIMARY KEY, n int GENERATED ALWAYS AS IDENTITY)",
+								@"CREATE TABLE sp_dbm_cascade.parts (k int) PARTITION BY RANGE (k)",
+								@"CREATE TABLE sp_dbm_cascade.parts_1 PARTITION OF sp_dbm_cascade.parts FOR VALUES FROM (0) TO (10)",
+								@"CREATE VIEW sp_dbm_cascade.v AS SELECT id FROM sp_dbm_cascade.t",
+								@"CREATE MATERIALIZED VIEW sp_dbm_cascade.m AS SELECT 1 AS one",
+								@"CREATE SEQUENCE sp_dbm_cascade.s"]) {
+			XCTAssertNotNil([connection execute:sql], @"%@: %@", sql, connection.lastError.errorPrimaryMessage);
+		}
+		NSArray *relations = @[@"t", @"t_id_seq", @"t_n_seq", @"t_pkey", @"parts", @"parts_1", @"v", @"m", @"s"];
+		SPPostgresCatalog *catalog = [[SPPostgresCatalog alloc] initWithConnection:connection];
+		NSError *error = nil;
+
+		// Without the contents: the schema only
+		XCTAssertTrue([catalog setOwner:@"sp_dbm_owner" ofSchema:@"sp_dbm_cascade" includingContents:NO error:&error], @"%@", error);
+		XCTAssertEqualObjects([catalog ownerOfSchema:@"sp_dbm_cascade" error:NULL], @"sp_dbm_owner");
+		XCTAssertEqualObjects([self ownerOfRelation:@"t" inSchema:@"sp_dbm_cascade" connection:connection], @"pgkit_test");
+		XCTAssertTrue([catalog setOwner:@"pgkit_test" ofSchema:@"sp_dbm_cascade" error:&error], @"%@", error);
+
+		// With them: every table, partition, view, materialized view and sequence (indexes and the columns' sequences follow)
+		XCTAssertTrue([catalog setOwner:@"sp_dbm_owner" ofSchema:@"sp_dbm_cascade" includingContents:YES error:&error], @"%@ (port %lu)", error, (unsigned long)thePort);
+		XCTAssertEqualObjects([catalog ownerOfSchema:@"sp_dbm_cascade" error:NULL], @"sp_dbm_owner");
+		for (NSString *name in relations) {
+			XCTAssertEqualObjects([self ownerOfRelation:name inSchema:@"sp_dbm_cascade" connection:connection], @"sp_dbm_owner", @"%@ (port %lu)", name, (unsigned long)thePort);
+		}
+		XCTAssertEqualObjects([connection execute:@"SELECT 1"] ? @"ok" : connection.lastError.errorPrimaryMessage, @"ok", @"no transaction left open");
+
+		// A failure changes nothing: the schema keeps its owner too
+		error = nil;
+		XCTAssertFalse([catalog setOwner:@"sp_dbm_no_such_role" ofSchema:@"sp_dbm_cascade" includingContents:YES error:&error]);
+		XCTAssertTrue([error.localizedDescription containsString:@"does not exist"], @"%@", error.localizedDescription);
+		XCTAssertEqualObjects([catalog ownerOfSchema:@"sp_dbm_cascade" error:NULL], @"sp_dbm_owner");
+
+		// Back to the test user, so the role can go
+		XCTAssertTrue([catalog setOwner:@"pgkit_test" ofSchema:@"sp_dbm_cascade" includingContents:YES error:&error], @"%@", error);
+		for (NSString *name in relations) {
+			XCTAssertEqualObjects([self ownerOfRelation:name inSchema:@"sp_dbm_cascade" connection:connection], @"pgkit_test", @"%@", name);
+		}
+		for (NSString *sql in @[@"DROP VIEW sp_dbm_cascade.v", @"DROP MATERIALIZED VIEW sp_dbm_cascade.m", @"DROP TABLE sp_dbm_cascade.parts",
+								@"DROP TABLE sp_dbm_cascade.t", @"DROP SEQUENCE sp_dbm_cascade.s", @"DROP SCHEMA sp_dbm_cascade"]) {
+			XCTAssertNotNil([connection execute:sql], @"%@: %@", sql, connection.lastError.errorPrimaryMessage);
+		}
+		XCTAssertNotNil([admin execute:@"DROP ROLE sp_dbm_owner"], @"%@", admin.lastError.errorPrimaryMessage);
+	}
+}
+
+/// A database's new owner given to its schemas and their tables too (both servers), only from a connection to it.
+- (void)testCatalogDatabaseOwnerIncludingContents
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		NSUInteger thePort = port.unsignedIntegerValue;
+		PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:thePort];
+		XCTAssertNotNil([admin execute:@"CREATE ROLE sp_dbm_owner NOLOGIN"], @"%@", admin.lastError.errorPrimaryMessage);
+		XCTAssertNotNil([admin execute:@"CREATE DATABASE sp_dbm_cascade"], @"%@", admin.lastError.errorPrimaryMessage);
+		PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:thePort database:@"sp_dbm_cascade"];
+		for (NSString *sql in @[@"CREATE SCHEMA app", @"CREATE TABLE app.t (id serial PRIMARY KEY)", @"CREATE VIEW app.v AS SELECT id FROM app.t",
+								@"CREATE TABLE public.p (id int)"]) {
+			XCTAssertNotNil([connection execute:sql], @"%@: %@", sql, connection.lastError.errorPrimaryMessage);
+		}
+		NSString *publicOwner = [[[connection execute:@"SELECT pg_get_userbyid(nspowner)::text FROM pg_namespace WHERE nspname = 'public'"] rowAsArray] firstObject];
+		NSError *error = nil;
+
+		// From another database: refused, nothing changed
+		SPPostgresCatalog *elsewhere = [[SPPostgresCatalog alloc] initWithConnection:[SPPostgresTestServers connectedConnectionOnPort:thePort database:@"pgkit_test"]];
+		XCTAssertFalse([elsewhere setOwner:@"sp_dbm_owner" ofDatabase:@"sp_dbm_cascade" includingContents:YES error:&error]);
+		XCTAssertTrue([error.localizedDescription containsString:@"from a connection to it"], @"%@", error.localizedDescription);
+		XCTAssertEqualObjects([elsewhere databaseDetails:@"sp_dbm_cascade" error:NULL][@"owner"], @"pgkit_test");
+
+		// From a connection to it: the database, its schemas (public too, unless pg_database_owner has it) and their tables
+		SPPostgresCatalog *catalog = [[SPPostgresCatalog alloc] initWithConnection:connection];
+		error = nil;
+		XCTAssertTrue([catalog setOwner:@"sp_dbm_owner" ofDatabase:@"sp_dbm_cascade" includingContents:YES error:&error], @"%@ (port %lu)", error, (unsigned long)thePort);
+		XCTAssertEqualObjects([catalog databaseDetails:@"sp_dbm_cascade" error:NULL][@"owner"], @"sp_dbm_owner");
+		XCTAssertEqualObjects([catalog ownerOfSchema:@"app" error:NULL], @"sp_dbm_owner");
+		XCTAssertEqualObjects([catalog ownerOfSchema:@"public" error:NULL], [publicOwner isEqualToString:@"pg_database_owner"] ? @"pg_database_owner" : @"sp_dbm_owner", @"port %lu", (unsigned long)thePort);
+		for (NSArray *relation in @[@[@"app", @"t"], @[@"app", @"t_id_seq"], @[@"app", @"v"], @[@"public", @"p"]]) {
+			XCTAssertEqualObjects([self ownerOfRelation:relation[1] inSchema:relation[0] connection:connection], @"sp_dbm_owner", @"%@", relation);
+		}
+		XCTAssertEqualObjects([catalog ownerOfSchema:@"information_schema" error:NULL], [[[connection execute:@"SELECT pg_get_userbyid(nspowner)::text FROM pg_namespace WHERE nspname = 'pg_catalog'"] rowAsArray] firstObject], @"system schemas left alone");
+
+		// Without the contents: the database only
+		XCTAssertTrue([catalog setOwner:@"pgkit_test" ofDatabase:@"sp_dbm_cascade" includingContents:NO error:&error], @"%@", error);
+		XCTAssertEqualObjects([catalog databaseDetails:@"sp_dbm_cascade" error:NULL][@"owner"], @"pgkit_test");
+		XCTAssertEqualObjects([catalog ownerOfSchema:@"app" error:NULL], @"sp_dbm_owner");
+
+		[connection disconnect];
+		[self dropTestDatabasesOnPort:thePort];
+	}
+}
+
 /// Fills in the open Add Schema sheet and presses Add.
 - (void)answerAddSchemaSheet:(NSString *)name owner:(NSString *)owner
 {
@@ -504,6 +614,8 @@ static const NSUInteger SPDatabaseMenuTestPort = 55418;
 	SPPostgresCatalog *catalog = [[SPPostgresCatalog alloc] initWithConnection:[SPPostgresTestServers connectedConnectionOnPort:SPDatabaseMenuTestPort database:@"pgkit_test"]];
 	NSError *error = nil;
 	XCTAssertTrue([catalog createSchema:@"sp_dbm_schema" error:&error], @"%@", error);
+	PGPostgresConnection *testDatabase = [SPPostgresTestServers connectedConnectionOnPort:SPDatabaseMenuTestPort database:@"pgkit_test"];
+	XCTAssertNotNil([testDatabase execute:@"CREATE TABLE sp_dbm_schema.t (id int)"], @"%@", testDatabase.lastError.errorPrimaryMessage);
 
 	[self openDocument];
 	SPPostgresSidebarController *sidebar = self.document.sidebar;
@@ -527,6 +639,8 @@ static const NSUInteger SPDatabaseMenuTestPort = 55418;
 	XCTAssertFalse(sheet.nameField.isEditable);
 	XCTAssertEqualObjects(sheet.ownerPopup.titleOfSelectedItem, @"pgkit_test");
 	XCTAssertFalse(sheet.actionButton.isEnabled);
+	XCTAssertEqualObjects(sheet.contentsCheckbox.title, @"Change the owner of its tables, views and sequences too");
+	XCTAssertEqual(sheet.contentsCheckbox.state, NSControlStateValueOn, @"on by default");
 
 	// Cancel changes nothing
 	[sheet.ownerPopup selectItemWithTitle:@"sp_dbm_owner"];
@@ -547,6 +661,21 @@ static const NSUInteger SPDatabaseMenuTestPort = 55418;
 	XCTAssertTrue([self waitIdle]);
 	XCTAssertEqual(self.alerts.count, 0u, @"%@", [self.alerts valueForKey:@"informativeText"]);
 	XCTAssertEqualObjects(sidebar.selectedSchema, @"sp_dbm_schema");
+	XCTAssertEqualObjects([self ownerOfRelation:@"t" inSchema:@"sp_dbm_schema" connection:testDatabase], @"sp_dbm_owner", @"its table follows");
+
+	// The checkbox off: the schema only
+	[pencil performClick:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [SPPostgresSchemaSheet currentSheet] != nil; } timeout:30]);
+	sheet = [SPPostgresSchemaSheet currentSheet];
+	[sheet.ownerPopup selectItemWithTitle:@"pgkit_test"];
+	sheet.contentsCheckbox.state = NSControlStateValueOff;
+	[sheet validate];
+	[sheet performAction:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [[catalog ownerOfSchema:@"sp_dbm_schema" error:NULL] isEqualToString:@"pgkit_test"]; } timeout:30]);
+	XCTAssertTrue([self waitIdle]);
+	XCTAssertEqualObjects([self ownerOfRelation:@"t" inSchema:@"sp_dbm_schema" connection:testDatabase], @"sp_dbm_owner");
+	XCTAssertNotNil([testDatabase execute:@"ALTER TABLE sp_dbm_schema.t OWNER TO pgkit_test"]);
+	XCTAssertTrue([catalog setOwner:@"sp_dbm_owner" ofSchema:@"sp_dbm_schema" error:&error], @"%@", error);
 
 	// The sheet now shows the new owner
 	[pencil performClick:nil];
@@ -665,8 +794,18 @@ static const NSUInteger SPDatabaseMenuTestPort = 55418;
 	sheet.commentView.string = @"new\ntwo lines";
 	[sheet validate];
 	[sheet alter:nil];
-	XCTAssertEqualObjects(answer, (@{@"name": @"shop_2", @"owner": @"bob", @"comment": @"new\ntwo lines"}));
+	XCTAssertEqualObjects(answer, (@{@"name": @"shop_2", @"owner": @"bob", @"comment": @"new\ntwo lines", @"ownerOfContents": @"YES"}));
 	XCTAssertNil([SPPostgresAlterDatabaseSheet currentSheet]);
+
+	// The contents checkbox: on by default, off when unticked
+	sheet = [SPPostgresAlterDatabaseSheet beginOnWindow:[self sheetWindow] database:@"shop" owner:@"alice" comment:@"" roles:@[@"alice", @"bob"] completion:^(NSDictionary *values) { answer = values; }];
+	XCTAssertEqualObjects(sheet.contentsCheckbox.title, @"Change the owner of its schemas, tables, views and sequences too");
+	XCTAssertEqual(sheet.contentsCheckbox.state, NSControlStateValueOn);
+	[sheet.ownerPopup selectItemWithTitle:@"bob"];
+	sheet.contentsCheckbox.state = NSControlStateValueOff;
+	[sheet validate];
+	[sheet alter:nil];
+	XCTAssertEqualObjects(answer[@"ownerOfContents"], @"NO");
 
 	sheet = [SPPostgresAlterDatabaseSheet beginOnWindow:[self sheetWindow] database:@"shop" owner:@"alice" comment:@"" roles:@[@"alice"] completion:^(NSDictionary *values) { answer = values; }];
 	[sheet cancel:nil];
@@ -678,6 +817,9 @@ static const NSUInteger SPDatabaseMenuTestPort = 55418;
 	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPDatabaseMenuTestPort];
 	XCTAssertNotNil([admin execute:@"CREATE ROLE sp_dbm_owner NOLOGIN"], @"%@", admin.lastError.errorPrimaryMessage);
 	XCTAssertNotNil([admin execute:@"CREATE DATABASE sp_dbm_alter"], @"%@", admin.lastError.errorPrimaryMessage);
+	PGPostgresConnection *alterDatabase = [SPPostgresTestServers connectedConnectionOnPort:SPDatabaseMenuTestPort database:@"sp_dbm_alter"];
+	XCTAssertNotNil([alterDatabase execute:@"CREATE SCHEMA app"], @"%@", alterDatabase.lastError.errorPrimaryMessage);
+	XCTAssertNotNil([alterDatabase execute:@"CREATE TABLE app.t (id int)"], @"%@", alterDatabase.lastError.errorPrimaryMessage);
 	[self openDocument];
 	SPPostgresDocument *document = self.document;
 	[document switchToDatabase:@"sp_dbm_alter"];
@@ -698,6 +840,8 @@ static const NSUInteger SPDatabaseMenuTestPort = 55418;
 	SPPostgresCatalog *catalog = [[SPPostgresCatalog alloc] initWithConnection:[SPPostgresTestServers connectedConnectionOnPort:SPDatabaseMenuTestPort database:@"pgkit_test"]];
 	XCTAssertEqualObjects([catalog databaseDetails:@"sp_dbm_alter" error:NULL], (@{@"owner": @"sp_dbm_owner", @"comment": @"Alter Database test"}));
 	XCTAssertEqualObjects(document.currentDatabase, @"sp_dbm_alter");
+	XCTAssertEqualObjects([self ownerOfRelation:@"t" inSchema:@"app" connection:alterDatabase], @"sp_dbm_owner", @"its schemas' tables follow (the checkbox is on)");
+	[alterDatabase disconnect];
 
 	// A new name (and the comment cleared): renamed from another database, the tab on the new name
 	[document alterDatabase:nil];

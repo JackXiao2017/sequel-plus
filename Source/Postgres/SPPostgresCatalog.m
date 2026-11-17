@@ -1,6 +1,7 @@
 #import "SPPostgresCatalog.h"
 #import "SPPostgresErrors.h"
 #import "SPPostgresTableData.h"
+#import "SPPostgresTableStructure.h"
 #import <PostgresKit/PostgresKit.h>
 
 @implementation SPPostgresCatalog
@@ -245,6 +246,80 @@ static BOOL SPPostgresCheckDatabaseName(NSString *name, NSError **error)
 {
 	NSString *sql = [NSString stringWithFormat:@"ALTER SCHEMA %@ OWNER TO %@", SPPostgresQuoteIdentifier(schema ?: @""), SPPostgresQuoteIdentifier(owner ?: @"")];
 	return SPPostgresExecuteWithDetails(_connection, sql, nil, error) != nil;
+}
+
+/// Seconds an owner change waits for a lock held elsewhere before it fails.
+static const NSTimeInterval SPPostgresOwnerChangeLockTimeout = 5;
+
+/// ALTER … OWNER TO owner for the schema's tables, views, materialized views, foreign tables and sequences not owned by
+/// owner already, but those of an extension and the sequences linked to a column (they follow their table).
+- (BOOL)_giveContentsOfSchema:(NSString *)schema to:(NSString *)owner error:(NSError **)error
+{
+	PGPostgresResult *result = [self run:
+		@"SELECT CASE c.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW' WHEN 'f' THEN 'FOREIGN TABLE'"
+		"  WHEN 'S' THEN 'SEQUENCE' ELSE 'TABLE' END AS keyword, c.relname::text AS name"
+		" FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace"
+		" WHERE n.nspname = $1::text AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')"
+		"  AND c.relowner IS DISTINCT FROM (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = $2::text)"
+		"  AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = c.oid"
+		"   AND (d.deptype = 'e' OR (c.relkind = 'S' AND d.refclassid = 'pg_catalog.pg_class'::regclass AND d.deptype IN ('a', 'i'))))"
+		" ORDER BY c.relname COLLATE \"C\""
+		values:@[schema ?: @"", owner ?: @""] error:error];
+	if (!result) return NO;
+	NSMutableArray *statements = [NSMutableArray array];
+	for (NSDictionary *row in result) {
+		id keyword = [row objectForKey:@"keyword"], name = [row objectForKey:@"name"];
+		if (![keyword isKindOfClass:[NSString class]] || ![name isKindOfClass:[NSString class]]) continue;
+		[statements addObject:[NSString stringWithFormat:@"ALTER %@ %@.%@ OWNER TO %@", keyword, SPPostgresQuoteIdentifier(schema), SPPostgresQuoteIdentifier(name), SPPostgresQuoteIdentifier(owner)]];
+	}
+	for (NSString *sql in statements) {
+		if (!SPPostgresExecuteWithDetails(_connection, sql, nil, error)) return NO;
+	}
+	return YES;
+}
+
+- (BOOL)setOwner:(NSString *)owner ofSchema:(NSString *)schema includingContents:(BOOL)contents error:(NSError **)error
+{
+	if (!contents) return [self setOwner:owner ofSchema:schema error:error];
+	return SPPostgresRunStructureChange(_connection, SPPostgresOwnerChangeLockTimeout, ^BOOL(NSError **bodyError) {
+		return [self setOwner:owner ofSchema:schema error:bodyError] && [self _giveContentsOfSchema:schema to:owner error:bodyError];
+	}, error);
+}
+
+- (BOOL)setOwner:(NSString *)owner ofDatabase:(NSString *)name includingContents:(BOOL)contents error:(NSError **)error
+{
+	if (!contents) return [self setOwner:owner ofDatabase:name error:error];
+	return SPPostgresRunStructureChange(_connection, SPPostgresOwnerChangeLockTimeout, ^BOOL(NSError **bodyError) {
+		NSError *readError = nil;
+		NSArray *current = [self firstColumnOf:@"SELECT pg_catalog.current_database()::text AS n" values:nil error:&readError];
+		if (!current) {
+			if (bodyError) *bodyError = readError;
+			return NO;
+		}
+		if (![[current firstObject] isEqual:name]) {
+			if (bodyError) *bodyError = SPPostgresMakeError(SPPostgresErrorInvalidSettings, [NSString stringWithFormat:NSLocalizedString(@"The objects of “%@” can only be given a new owner from a connection to it.", @"Postgres alter database: owner of contents from another database"), name], nil);
+			return NO;
+		}
+		if (![self setOwner:owner ofDatabase:name error:bodyError]) return NO;
+
+		PGPostgresResult *schemas = [self run:
+			@"SELECT n.nspname::text AS name, (pg_catalog.pg_get_userbyid(n.nspowner) IN ($1::text, 'pg_database_owner'))::text AS keep"
+			" FROM pg_catalog.pg_namespace n"
+			" WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'"
+			"  AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.classid = 'pg_catalog.pg_namespace'::regclass AND d.objid = n.oid AND d.deptype = 'e')"
+			" ORDER BY n.nspname COLLATE \"C\""
+			values:@[owner ?: @""] error:bodyError];
+		if (!schemas) return NO;
+		NSMutableArray *rows = [NSMutableArray array];
+		for (NSDictionary *row in schemas) [rows addObject:row];
+		for (NSDictionary *row in rows) {
+			id schema = [row objectForKey:@"name"];
+			if (![schema isKindOfClass:[NSString class]]) continue;
+			if (![[row objectForKey:@"keep"] isEqual:@"true"] && ![self setOwner:owner ofSchema:schema error:bodyError]) return NO;
+			if (![self _giveContentsOfSchema:schema to:owner error:bodyError]) return NO;
+		}
+		return YES;
+	}, error);
 }
 
 - (BOOL)renameDatabase:(NSString *)name toName:(NSString *)newName error:(NSError **)error

@@ -7,6 +7,7 @@ static SPPostgresAlterDatabaseSheet *SPPostgresCurrentAlterDatabaseSheet = nil;
 	NSWindow *sheet;
 	NSTextField *nameField;
 	NSPopUpButton *ownerPopup;
+	NSButton *contentsCheckbox;
 	NSTextView *commentView;
 	NSButton *alterButton;
 	NSButton *cancelButton;
@@ -16,7 +17,7 @@ static SPPostgresAlterDatabaseSheet *SPPostgresCurrentAlterDatabaseSheet = nil;
 	void (^completion)(NSDictionary *);
 }
 
-@synthesize sheet, nameField, ownerPopup, commentView, alterButton, cancelButton;
+@synthesize sheet, nameField, ownerPopup, contentsCheckbox, commentView, alterButton, cancelButton;
 
 + (SPPostgresAlterDatabaseSheet *)currentSheet
 {
@@ -53,7 +54,7 @@ static NSTextField *SPAlterDatabaseLabel(NSString *title, NSRect frame)
 	originalComment = [(comment ?: @"") copy];
 	completion = [theCompletion copy];
 
-	CGFloat width = 460, height = 300, labelWidth = 80, fieldX = 20 + labelWidth + 8, fieldWidth = width - fieldX - 20;
+	CGFloat width = 460, height = 326, labelWidth = 80, fieldX = 20 + labelWidth + 8, fieldWidth = width - fieldX - 20;
 	sheet = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, width, height) styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:YES];
 	[sheet setReleasedWhenClosed:NO];
 	[sheet setTitle:NSLocalizedString(@"Alter Database", @"PostgreSQL alter database sheet title")];
@@ -95,11 +96,18 @@ static NSTextField *SPAlterDatabaseLabel(NSString *title, NSRect frame)
 	[ownerPopup setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
 	[content addSubview:ownerPopup];
 
+	// A new owner is given to the database's schemas and their tables, views and sequences too (on by default)
+	contentsCheckbox = [[NSButton checkboxWithTitle:NSLocalizedString(@"Change the owner of its schemas, tables, views and sequences too", @"PostgreSQL alter database: change the owner of the database's contents checkbox") target:nil action:NULL] retain];
+	[contentsCheckbox setState:NSControlStateValueOn];
+	[contentsCheckbox setFrame:NSMakeRect(fieldX, height - 138, fieldWidth, 18)];
+	[contentsCheckbox setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+	[content addSubview:contentsCheckbox];
+
 	// Comment
-	NSTextField *commentLabel = SPAlterDatabaseLabel(NSLocalizedString(@"Comment:", @"PostgreSQL alter database: comment label"), NSMakeRect(20, height - 140, labelWidth, 17));
+	NSTextField *commentLabel = SPAlterDatabaseLabel(NSLocalizedString(@"Comment:", @"PostgreSQL alter database: comment label"), NSMakeRect(20, height - 166, labelWidth, 17));
 	[commentLabel setAutoresizingMask:NSViewMinYMargin];
 	[content addSubview:commentLabel];
-	NSScrollView *scrollView = [[[NSScrollView alloc] initWithFrame:NSMakeRect(fieldX, 56, fieldWidth, height - 56 - 122)] autorelease];
+	NSScrollView *scrollView = [[[NSScrollView alloc] initWithFrame:NSMakeRect(fieldX, 56, fieldWidth, height - 56 - 148)] autorelease];
 	[scrollView setBorderType:NSBezelBorder];
 	[scrollView setHasVerticalScroller:YES];
 	[scrollView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
@@ -152,6 +160,7 @@ static NSTextField *SPAlterDatabaseLabel(NSString *title, NSRect frame)
 	[sheet release];
 	[nameField release];
 	[ownerPopup release];
+	[contentsCheckbox release];
 	[commentView release];
 	[alterButton release];
 	[cancelButton release];
@@ -165,7 +174,8 @@ static NSTextField *SPAlterDatabaseLabel(NSString *title, NSRect frame)
 - (NSDictionary *)_values
 {
 	NSString *name = [[nameField stringValue] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-	return @{@"name": name, @"owner": [ownerPopup titleOfSelectedItem] ?: @"", @"comment": [[[commentView string] copy] autorelease] ?: @""};
+	return @{@"name": name, @"owner": [ownerPopup titleOfSelectedItem] ?: @"", @"comment": [[[commentView string] copy] autorelease] ?: @"",
+			 @"ownerOfContents": [contentsCheckbox state] == NSControlStateValueOn ? @"YES" : @"NO"};
 }
 
 - (void)validate
