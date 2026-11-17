@@ -1,5 +1,11 @@
 # Changelog
 
+## Sequel Plus 2.0.5
+
+Upgrading from 2.0.4.
+
+- Version **2.0.5**.
+
 ## Sequel Plus 2.0.4
 
 Upgrading from 2.0.3.
@@ -19,6 +25,12 @@ Upgrading from 2.0.3.
 - Giving a schema away means your login no longer has access to it unless it has been granted some. Grant your login access afterwards if it still needs to read the copy.
 - If the server refuses the new owner (for example, the role no longer exists, or isn't one you may give objects to), the whole transfer fails and the target is left unchanged.
 - The note under it, and the completion message, name the owner.
+
+### Signing: the Keychain stops asking after every update
+- Sequel Plus is now signed with its own certificate, "Sequel Plus Signing", instead of ad-hoc. macOS remembers an app's Keychain access by its signature. An ad-hoc signature changed with every build, so each new version had to ask again for every saved password. The new signature stays the same from version to version.
+- The first time 2.0.4 opens, macOS asks once more for each saved password, because the signature changed. Choose **Always Allow**; later updates won't ask again.
+- The certificate is self-signed, so a downloaded copy still shows the usual warning for an app from an unidentified developer.
+- The app's executable is now named `Sequel Plus` (it was `Sequel Pro`).
 
 ## Sequel Plus 2.0.3
 
