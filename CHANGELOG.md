@@ -6,6 +6,17 @@ Upgrading from 2.0.4.
 
 - Version **2.0.5**.
 
+### MySQL and PostgreSQL: pick a foreign key's value from the referenced table
+- In the **Content** view, editing a cell of a foreign key opens a pop-up under the cell listing rows of the referenced table, as in DataGrip. You no longer have to look the key up. The referenced (key) column comes first, in bold, and the row holding the cell's current value is tinted.
+- Type in the **search box** to narrow the list. It matches what you type anywhere in the shown columns, ignoring case, and highlights the matches. `%`, `_` and quotes are matched as typed. **+ Condition** adds column / operator / value rows, and every condition must match along with the search. Text columns offer contains, starts with, = and ≠. Numbers, dates and times offer =, ≠, <, ≤, >, ≥ and between. Every column offers is NULL and is not NULL.
+- The **⚙︎** menu chooses which columns the list shows. Ticking or unticking takes effect at once, and the menu stays open. **Show All Columns** and **Reset to Default** are at the bottom. The choice is remembered for that table on that server and database, whichever foreign key opens it.
+- Rows load 200 at a time, in key order. **Load more**, or moving down past the last row, fetches the next 200. ↑/↓ move the selection, and Return or a double-click chooses.
+- **Choose** puts the key into the cell's editor. Return saves it, or Escape drops it, as with any edit. **NULL** (when the column allows it) puts the NULL placeholder there instead. **Type a value…** edits the cell as text. **Cancel**, Escape or a click outside leaves the cell as it was.
+- With **Edit All Fields in Pop-up Sheet** on, the field editor sheet of a foreign key cell has a **Choose…** button. It opens the same pop-up, and the chosen value replaces the sheet's text.
+- The pop-up only reads the referenced table. It runs in the background on the tab's own connection, so a big table never blocks the window. If the table can't be read, the server's message takes the list's place.
+- Keys over more than one column, and binary keys (MySQL BINARY, VARBINARY and BLOB; PostgreSQL bytea), keep the normal in-cell editor. So does every cell that isn't a foreign key.
+- To turn it off, clear **Preferences ▸ Tables ▸ Open the value picker when editing a foreign key** (on by default). Foreign key cells then edit exactly as before, and the sheet has no Choose….
+
 ## Sequel Plus 2.0.4
 
 Upgrading from 2.0.3.
