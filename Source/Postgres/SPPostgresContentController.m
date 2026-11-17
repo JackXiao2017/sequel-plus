@@ -10,6 +10,10 @@
 #import "SPPostgresPaginationView.h"
 #import "SPPostgresRowsGrid.h"
 #import "SPTextAndLinkCell.h"
+#import "SPForeignKeyPicker.h"
+#import "SPForeignKeyPickerSettings.h"
+#import "SPPostgresForeignKeyPickerSource.h"
+#import <PostgresKit/PostgresKit.h>
 
 // MySQL's Content tab (DBView.xib): 23 pt button bar, 32 x 25 textured buttons
 static const CGFloat SPPostgresContentBottomBarHeight = 23;
@@ -150,6 +154,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 @synthesize confirmationPresenter;
 @synthesize fieldEditorPresenter;
 @synthesize foreignKeyFollower;
+@synthesize foreignKeyPickerPresenter;
 @synthesize taskRunner;
 @synthesize pasteboard;
 @synthesize stale;
@@ -278,6 +283,8 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	fieldEditorPresenter = nil;
 	[foreignKeyFollower release];
 	foreignKeyFollower = nil;
+	[foreignKeyPickerPresenter release];
+	foreignKeyPickerPresenter = nil;
 	// The link arrows' cells keep a plain pointer to this controller
 	for (NSTableColumn *tableColumn in [tableView tableColumns]) {
 		id cell = [tableColumn dataCell];
@@ -1724,6 +1731,11 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	}
 	if (![self _canEditTableColumn:tableColumn row:rowIndex]) return NO;
 	SPPostgresColumn *column = [self _columnForTableColumn:tableColumn];
+	NSDictionary *reference = pickerHandoff ? nil : [self _pickerReferenceForColumn:column];
+	if (reference) {
+		[self _editInForeignKeyPickerTableColumn:tableColumn row:rowIndex reference:reference];
+		return NO;
+	}
 	if (!pickerHandoff && [SPPostgresDateTimePicker kindOfTypeName:[column typeName]] != SPPostgresTemporalNone) {
 		[self _editInDatePickerTableColumn:tableColumn row:rowIndex];
 		return NO;
@@ -1773,6 +1785,106 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	}] autorelease];
 	NSInteger columnIndex = [tableView columnWithIdentifier:[tableColumn identifier]];
 	[picker showRelativeToRect:[tableView frameOfCellAtColumn:columnIndex row:rowIndex] ofView:tableView];
+}
+
+#pragma mark - Foreign key picker
+
+/// column's foreign key when the picker opens for it (the preference on, a single-column key, not bytea), else nil.
+- (NSDictionary *)_pickerReferenceForColumn:(SPPostgresColumn *)column
+{
+	if (!column) return nil;
+	NSDictionary *reference = [foreignKeys objectForKey:[column name]];
+	if (!reference || [[reference objectForKey:@"columns"] integerValue] != 1 || [[reference objectForKey:@"binary"] boolValue]) return nil;
+	SPForeignKeyPickerSettings *settings = [[[SPForeignKeyPickerSettings alloc] initWithDefaults:defaults] autorelease];
+	return [settings pickerEnabled] ? reference : nil;
+}
+
+- (SPForeignKeyPicker *)_pickerForReference:(NSDictionary *)reference value:(id)value allowNull:(BOOL)allowNull
+								 completion:(void (^)(SPForeignKeyPickerOutcome outcome, NSString *chosen))completion
+{
+	NSString *refSchema = [reference objectForKey:@"schema"];
+	NSString *refTable = [reference objectForKey:@"table"];
+	NSString *refColumn = [reference objectForKey:@"column"];
+	SPPostgresForeignKeyPickerSource *source = [[[SPPostgresForeignKeyPickerSource alloc] initWithTaskRunner:taskRunner schema:refSchema table:refTable keyColumn:refColumn] autorelease];
+	SPForeignKeyPickerSettings *settings = [[[SPForeignKeyPickerSettings alloc] initWithDefaults:defaults] autorelease];
+	NSString *server = [connection useSocket] ? [connection socketPath] : [connection host];
+	NSString *tableKey = [SPForeignKeyPickerSettings tableKeyWithKind:@"postgres" host:server port:(NSInteger)[connection port]
+															  database:[connection database] schema:refSchema table:refTable];
+	NSString *title = [NSString stringWithFormat:@"%@.%@ · %@.%@", refTable, refColumn, refSchema, refTable];
+	return [[[SPForeignKeyPicker alloc] initWithDataSource:source settings:settings tableKey:tableKey title:title
+											  currentValue:value allowNull:allowNull completion:completion] autorelease];
+}
+
+- (void)_presentForeignKeyPicker:(SPForeignKeyPicker *)picker rect:(NSRect)rect ofView:(NSView *)aView
+{
+	if (foreignKeyPickerPresenter) foreignKeyPickerPresenter(picker, aView, rect);
+	else [picker showRelativeToRect:rect ofView:aView];
+}
+
+/// Runs block once the runner is idle (the picker's own reads may still be queued when it answers); not at all once
+/// the runner is invalidated.
+- (void)_whenTaskRunnerIdle:(void (^)(void))block
+{
+	if ([taskRunner isInvalidated]) return;
+	if (![taskRunner isBusy]) {
+		block();
+		return;
+	}
+	void (^copied)(void) = [[block copy] autorelease];
+	[taskRunner runTaskWithDescription:NSLocalizedString(@"Loading rows…", @"foreign key picker: loading the referenced table's rows") cancelTitle:nil
+								  work:^id(PGPostgresConnection *theConnection, NSError **error) { return @YES; }
+							completion:^(id result, NSError *error, BOOL cancelled) {
+		dispatch_async(dispatch_get_main_queue(), ^{
+			[self _whenTaskRunnerIdle:copied];
+		});
+	}];
+}
+
+/**
+ * Opens the foreign key picker as a popover on a foreign key cell (unless a picker or the field editor sheet is
+ * open). Its value is not saved: Choose (or NULL, as the NULL placeholder) puts it into the cell's in-place editor,
+ * and Type a value… opens that editor on the cell's value, on this table only and on the row it was opened on where
+ * that row now is; the cell stays being edited until Return saves it (or Escape drops it). Cancel leaves the cell as
+ * it was, not being edited.
+ */
+- (void)_editInForeignKeyPickerTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex reference:(NSDictionary *)reference
+{
+	if (invalidated || fieldEditorPending || [taskRunner isBusy]) return;
+	if (rowIndex < 0 || (NSUInteger)rowIndex >= [rows count]) return;
+	SPPostgresColumn *column = [self _columnForTableColumn:tableColumn];
+	if (!column) return;
+
+	NSArray *row = [rows objectAtIndex:(NSUInteger)rowIndex];
+	id value = [row objectAtIndex:(NSUInteger)[[tableColumn identifier] integerValue]];
+	SPPostgresTableData *data = tableData;
+	fieldEditorPending = YES;
+	[self retain]; // until the picker answers
+
+	SPForeignKeyPicker *picker = [self _pickerForReference:reference value:value allowNull:[column nullable] completion:^(SPForeignKeyPickerOutcome outcome, NSString *chosen) {
+		fieldEditorPending = NO;
+		if (!invalidated) [[tableView window] makeFirstResponder:tableView];
+		if (outcome != SPForeignKeyPickerCancelled && !invalidated && data == tableData) {
+			// nil: Type a value… (the editor keeps the cell's value)
+			NSString *text = (outcome == SPForeignKeyPickerChose) ? chosen : (outcome == SPForeignKeyPickerChoseNull) ? [self _nullPlaceholder] : nil;
+			[self _whenTaskRunnerIdle:^{
+				if (invalidated || data != tableData || [taskRunner isBusy]) return;
+				NSUInteger index = (NSUInteger)rowIndex;
+				if (index >= [rows count] || ![[rows objectAtIndex:index] isEqual:row]) index = [rows indexOfObject:row];
+				NSInteger gridColumn = [tableView columnWithIdentifier:[tableColumn identifier]];
+				if (index == NSNotFound || gridColumn < 0) return;
+				pickerHandoff = YES;
+				[tableView editColumn:gridColumn row:(NSInteger)index withEvent:nil select:YES];
+				pickerHandoff = NO;
+				if (!text) return;
+				NSText *editor = [tableView currentEditor];
+				[editor setString:text];
+				[editor setSelectedRange:NSMakeRange([text length], 0)];
+			}];
+		}
+		[self autorelease];
+	}];
+	NSInteger columnIndex = [tableView columnWithIdentifier:[tableColumn identifier]];
+	[self _presentForeignKeyPicker:picker rect:[tableView frameOfCellAtColumn:columnIndex row:rowIndex] ofView:tableView];
 }
 
 /// Whether the cell can be edited now (never opens the sheet).
@@ -1825,8 +1937,22 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	if (fieldEditorPresenter) fieldEditorPresenter(text, [column name], [column typeName], canEdit, [column nullable], once);
 	else {
 		// MySQL's field editor as a sheet on the view's window (cancelled at once when there is none, or a sheet is up)
+		// A foreign key cell's sheet gets Choose…, which opens the picker on the button; its value replaces the text
+		NSDictionary *reference = canEdit ? [self _pickerReferenceForColumn:column] : nil;
+		void (^chooser)(NSString *, NSView *, void (^)(NSString *)) = nil;
+		if (reference) {
+			chooser = [[^(NSString *currentText, NSView *anchor, void (^setText)(NSString *)) {
+				if (invalidated) return;
+				void (^replace)(NSString *) = [[setText copy] autorelease];
+				SPForeignKeyPicker *picker = [self _pickerForReference:reference value:currentText allowNull:[column nullable] completion:^(SPForeignKeyPickerOutcome outcome, NSString *chosen) {
+					if (outcome == SPForeignKeyPickerChose) replace(chosen);
+					else if (outcome == SPForeignKeyPickerChoseNull) replace([self _nullPlaceholder]);
+				}];
+				[self _presentForeignKeyPicker:picker rect:[anchor bounds] ofView:anchor];
+			} copy] autorelease]; // off the stack: it outlives this scope
+		}
 		[SPPostgresFieldEditorSheet editValue:text columnName:[column name] typeName:[column typeName] editable:canEdit
-									allowNull:[column nullable] window:[view window] completion:^(id newValue) {
+									allowNull:[column nullable] window:[view window] chooser:chooser completion:^(id newValue) {
 			if (!invalidated) [[tableView window] makeFirstResponder:tableView];
 			once(newValue);
 		}];
@@ -1854,7 +1980,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 
 #pragma mark - Foreign key links
 
-- (NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *)foreignKeyReferences
+- (NSDictionary<NSString *, NSDictionary<NSString *, id> *> *)foreignKeyReferences
 {
 	return [[foreignKeys retain] autorelease];
 }

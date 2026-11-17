@@ -4,6 +4,7 @@
 @class SPPostgresTaskRunner;
 @class SPPostgresPaginationView;
 @class SPPostgresFilter;
+@class SPForeignKeyPicker;
 
 /**
  * The Content view of a PostgreSQL tab, laid out as MySQL's Content tab: a filter bar on top (column,
@@ -146,7 +147,18 @@ __attribute__((visibility("default")))
 @property (copy) void (^foreignKeyFollower)(NSString *schema, NSString *table, NSString *column, NSString *value);
 /// The shown table's foreign keys (see SPPostgresTableData -foreignKeyReferences:), loaded with its columns (empty
 /// when they can't be read).
-@property (readonly) NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *foreignKeyReferences;
+@property (readonly) NSDictionary<NSString *, NSDictionary<NSString *, id> *> *foreignKeyReferences;
+
+/**
+ * The foreign key value picker (SPForeignKeyPicker): with the "Open the value picker when editing a foreign key"
+ * preference on (ForeignKeyPickerEnabled in defaults), editing a cell of a single-column, non-bytea foreign key opens
+ * it on the cell instead of the in-cell editor; Choose (or NULL) puts the value into the cell's in-place editor and Type
+ * a value… opens the editor on the current value, on this table only and on the row it was opened on, once the runner
+ * is idle (Return then saves it as any edit). In edit mode the field editor sheet of such a cell gets a Choose…
+ * button that opens it, its result replacing the sheet's text. The picker reads the referenced table through
+ * taskRunner. For tests: when set, called instead of showing the picker (view and rect: where it would show).
+ */
+@property (copy) void (^foreignKeyPickerPresenter)(SPForeignKeyPicker *picker, NSView *view, NSRect rect);
 /// As clicking the link arrow of a cell (row, and the column's index in the table).
 - (void)followForeignKeyAtRow:(NSInteger)row column:(NSUInteger)columnIndex;
 
