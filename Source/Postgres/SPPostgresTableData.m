@@ -337,11 +337,12 @@ BOOL SPPostgresRunGuardedRead(PGPostgresConnection *connection, NSString *savepo
 	return YES;
 }
 
-- (NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *)foreignKeyReferences:(NSError **)error
+- (NSDictionary<NSString *, NSDictionary<NSString *, id> *> *)foreignKeyReferences:(NSError **)error
 {
 	// conkey and confkey are int2[] (1-based subscripts): their first entries pair the first column with the one it references
 	PGPostgresResult *result = [self run:
-		@"SELECT a.attname::text AS col, rn.nspname::text AS refschema, rc.relname::text AS reftable, ra.attname::text AS refcol "
+		@"SELECT a.attname::text AS col, rn.nspname::text AS refschema, rc.relname::text AS reftable, ra.attname::text AS refcol, "
+		 "array_length(con.conkey, 1)::text AS ncols, (format_type(a.atttypid, NULL) = 'bytea')::text AS isbinary "
 		 "FROM pg_constraint con "
 		 "JOIN pg_class c ON c.oid = con.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace "
 		 "JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = con.conkey[1] "
@@ -361,7 +362,10 @@ BOOL SPPostgresRunGuardedRead(PGPostgresConnection *connection, NSString *savepo
 		if (![column isKindOfClass:[NSString class]] || ![refSchema isKindOfClass:[NSString class]]
 			|| ![refTable isKindOfClass:[NSString class]] || ![refColumn isKindOfClass:[NSString class]]) continue;
 		if ([references objectForKey:column]) continue;
-		[references setObject:@{@"schema" : refSchema, @"table" : refTable, @"column" : refColumn} forKey:column];
+		NSString *count = [row objectForKey:@"ncols"];
+		NSNumber *columnCount = @([count isKindOfClass:[NSString class]] ? [count integerValue] : 1);
+		NSNumber *binary = @([[row objectForKey:@"isbinary"] isEqual:@"true"]);
+		[references setObject:@{@"schema" : refSchema, @"table" : refTable, @"column" : refColumn, @"columns" : columnCount, @"binary" : binary} forKey:column];
 	}
 	return references;
 }

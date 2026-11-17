@@ -202,6 +202,8 @@ typedef enum {
 	if ( tmpDirPath )    SPClear(tmpDirPath);
 	if ( esUndoManager ) SPClear(esUndoManager);
 	if ( contextInfo )   SPClear(contextInfo);
+	[editSheetChooseButton release];
+	[chooser release];
 	
 	[super dealloc];
 }
@@ -348,6 +350,8 @@ typedef enum {
 			[editSheetIsNotEditableCancelButton setHidden:NO];
 			[editSheetOpenButton setEnabled:NO];
 		}
+
+		[self _updateChooseButtonForData:data blob:isFieldBlob];
 
 		editSheetWillBeInitialized = YES;
 
@@ -791,6 +795,57 @@ typedef enum {
 
 		[editSheetProgressBar stopAnimation:self];
 	}
+}
+
+#pragma mark -
+#pragma mark Foreign key value picker
+
+@synthesize chooser;
+
+/**
+ * Shows the "Choose…" button, right of the Open… button, when a chooser is set and the value is editable text; hides
+ * it otherwise.
+ */
+- (void)_updateChooseButtonForData:(id)data blob:(BOOL)isFieldBlob
+{
+	BOOL wanted = chooser && _isEditable && !isFieldBlob && ![data isKindOfClass:[NSData class]];
+	if (wanted && !editSheetChooseButton && editSheetOpenButton) {
+		NSButton *open = editSheetOpenButton;
+		editSheetChooseButton = [[NSButton alloc] initWithFrame:[open frame]];
+		[editSheetChooseButton setBezelStyle:[open bezelStyle]];
+		[editSheetChooseButton setControlSize:[[open cell] controlSize]];
+		[editSheetChooseButton setFont:[open font]];
+		[editSheetChooseButton setTitle:NSLocalizedString(@"Choose…", @"field editor sheet: opens the foreign key value picker")];
+		[editSheetChooseButton setTarget:self];
+		[editSheetChooseButton setAction:@selector(chooseValue:)];
+		[editSheetChooseButton sizeToFit];
+		NSRect frame = [editSheetChooseButton frame];
+		frame.origin = NSMakePoint(NSMaxX([open frame]) + 4, NSMinY([open frame]));
+		frame.size.height = NSHeight([open frame]);
+		[editSheetChooseButton setFrame:frame];
+		[editSheetChooseButton setAutoresizingMask:[open autoresizingMask]];
+		[[open superview] addSubview:editSheetChooseButton];
+	}
+	[editSheetChooseButton setHidden:!wanted];
+}
+
+- (IBAction)chooseValue:(id)sender
+{
+	if (!chooser || !_isEditable) return;
+	NSTextView *textView = editTextView;
+	chooser([[[textView string] copy] autorelease], editSheetChooseButton, ^(NSString *text) {
+		NSRange all = NSMakeRange(0, [[textView string] length]);
+		if ([textView shouldChangeTextInRange:all replacementString:text]) {
+			[[textView textStorage] replaceCharactersInRange:all withString:text];
+			[textView didChangeText];
+		}
+		[textView setSelectedRange:NSMakeRange([text length], 0)];
+		// What OK returns (typing updates it from the selection change; a replacement made here doesn't)
+		[editImage setImage:nil];
+		[hexTextView setString:@""];
+		[sheetEditData release];
+		sheetEditData = [[NSString stringWithString:[textView string]] retain];
+	});
 }
 
 #pragma mark -

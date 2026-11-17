@@ -214,16 +214,16 @@ static const NSUInteger SPLinkTestPort = 55418;
 	NSError *error = nil;
 	NSDictionary *references = [orders foreignKeyReferences:&error];
 	XCTAssertNotNil(references, @"%@", error);
-	NSDictionary *expected = @{@"customer_id": @{@"schema": @"sp_fk_a", @"table": @"customer", @"column": @"id"},
-							   @"parent_id": @{@"schema": @"sp_fk_a", @"table": @"orders", @"column": @"id"}};
+	NSDictionary *expected = @{@"customer_id": @{@"schema": @"sp_fk_a", @"table": @"customer", @"column": @"id", @"columns": @1, @"binary": @NO},
+							   @"parent_id": @{@"schema": @"sp_fk_a", @"table": @"orders", @"column": @"id", @"columns": @1, @"binary": @NO}};
 	XCTAssertEqualObjects(references, expected);
 
-	// Another schema; a two-column key links its first column
+	// Another schema; a two-column key links its first column (its column count says so)
 	SPPostgresTableData *customer = [[SPPostgresTableData alloc] initWithConnection:self.other schema:@"sp_fk_a" table:@"customer"];
-	NSDictionary *expectedCustomer = @{@"region": @{@"schema": @"sp_fk_b", @"table": @"region", @"column": @"code"}};
+	NSDictionary *expectedCustomer = @{@"region": @{@"schema": @"sp_fk_b", @"table": @"region", @"column": @"code", @"columns": @1, @"binary": @NO}};
 	XCTAssertEqualObjects([customer foreignKeyReferences:NULL], expectedCustomer);
 	SPPostgresTableData *line = [[SPPostgresTableData alloc] initWithConnection:self.other schema:@"sp_fk_a" table:@"line"];
-	NSDictionary *expectedLine = @{@"order_id": @{@"schema": @"sp_fk_a", @"table": @"orders", @"column": @"id"}};
+	NSDictionary *expectedLine = @{@"order_id": @{@"schema": @"sp_fk_a", @"table": @"orders", @"column": @"id", @"columns": @2, @"binary": @NO}};
 	XCTAssertEqualObjects([line foreignKeyReferences:NULL], expectedLine);
 
 	// None

@@ -13,6 +13,13 @@ __attribute__((visibility("default")))
 + (void)editValue:(NSString *)value columnName:(NSString *)columnName typeName:(NSString *)typeName
 		 editable:(BOOL)editable allowNull:(BOOL)allowNull window:(NSWindow *)window completion:(void (^)(id newValue))completion;
 
+/// As above; a non-nil chooser gives an editable text value's sheet a "Choose…" button (SPFieldEditorController's
+/// chooser: the current text, the button, and a block replacing the sheet's text).
++ (void)editValue:(NSString *)value columnName:(NSString *)columnName typeName:(NSString *)typeName
+		 editable:(BOOL)editable allowNull:(BOOL)allowNull window:(NSWindow *)window
+		  chooser:(void (^)(NSString *currentText, NSView *anchor, void (^setText)(NSString *text)))chooser
+	   completion:(void (^)(id newValue))completion;
+
 /// The type passed to SPFieldEditorController: @"" for the MySQL-only types (BIT, JSON, GEOMETRY, BINARY, VARBINARY,
 /// FLOAT, case-insensitive) and nil, else typeName.
 + (NSString *)fieldEditorTypeForTypeName:(NSString *)typeName;
