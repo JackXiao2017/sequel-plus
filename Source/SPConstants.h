@@ -378,6 +378,8 @@ extern NSString *SPConsoleShowDatabases;
 extern NSString *SPConsoleShowSelectsAndShows;
 extern NSString *SPConsoleShowHelps;
 extern NSString *SPEditInSheetEnabled;
+extern NSString *SPForeignKeyPickerEnabled;
+extern NSString *SPForeignKeyPickerShownColumns;
 extern NSString *SPTableInformationPanelCollapsed;
 extern NSString *SPTableColumnWidths;
 extern NSString *SPProcessListTableColumnWidths;
