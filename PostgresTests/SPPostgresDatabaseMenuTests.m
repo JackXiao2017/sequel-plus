@@ -11,6 +11,7 @@
 #import "../Source/Postgres/SPPostgresNameSheet.h"
 #import "../Source/Postgres/SPPostgresSchemaSheet.h"
 #import "../Source/Postgres/SPPostgresServerListSheet.h"
+#import "../Source/SPConnectionSummary.h"
 #import "../Source/Postgres/SPPostgresAlterDatabaseSheet.h"
 #import "../Source/Postgres/SPPostgresTaskRunner.h"
 
@@ -29,6 +30,8 @@ static const NSUInteger SPDatabaseMenuTestPort = 55418;
 - (IBAction)showServerProcesses:(id)sender;
 - (IBAction)openDatabaseInNewTab:(id)sender;
 - (IBAction)alterDatabase:(id)sender;
+- (SPPostgresServerListSheet *)serverProcessesWindow;
+- (void)_tearDown;
 @end
 
 /**
@@ -262,6 +265,34 @@ static const NSUInteger SPDatabaseMenuTestPort = 55418;
 	}
 }
 
+- (void)testCatalogConnectionSummary
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		NSUInteger thePort = port.unsignedIntegerValue;
+		PGPostgresConnection *connection = [SPPostgresTestServers connectedConnectionOnPort:thePort database:@"pgkit_test"];
+		SPPostgresCatalog *catalog = [[SPPostgresCatalog alloc] initWithConnection:connection];
+		NSString *max = nil, *reserved = nil;
+		for (NSDictionary *row in [connection execute:@"SELECT current_setting('max_connections') AS m, current_setting('superuser_reserved_connections') AS r"]) {
+			max = row[@"m"];
+			reserved = row[@"r"];
+		}
+		NSError *error = nil;
+		SPConnectionSummary *before = [catalog connectionSummary:&error];
+		XCTAssertNotNil(before, @"%@", error);
+		XCTAssertEqual(before.max, (NSUInteger)max.integerValue);
+		XCTAssertEqual(before.reserved, (NSUInteger)reserved.integerValue);
+		// Client connections only: background workers (checkpointer, autovacuum…) don't count against the limit
+		NSArray *clients = [[catalog serverProcesses:&error] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"type == 'client backend'"]];
+		XCTAssertEqual(before.current, clients.count);
+
+		PGPostgresConnection *other = [SPPostgresTestServers connectedConnectionOnPort:thePort database:@"pgkit_test"];
+		XCTAssertNotNil(other);
+		SPConnectionSummary *after = [catalog connectionSummary:&error];
+		XCTAssertGreaterThanOrEqual(after.current, before.current + 1, @"the other connection is counted");
+		[other disconnect];
+	}
+}
+
 #pragma mark - Sheets
 
 - (void)testNameSheetEnablesItsButton
@@ -298,6 +329,28 @@ static const NSUInteger SPDatabaseMenuTestPort = 55418;
 	XCTAssertNil([SPPostgresNameSheet currentSheet]);
 }
 
+- (void)testServerListSheetShowsASummary
+{
+	NSArray *columns = @[@{@"key": @"pid", @"title": @"PID"}];
+	SPPostgresServerListSheet *list = [SPPostgresServerListSheet beginOnWindow:[self sheetWindow] title:@"Server Processes" columns:columns rows:@[]
+																		refresh:nil processAction:nil completion:nil];
+	XCTAssertTrue(list.summaryLabel.isHidden, @"nothing to say yet");
+	[list setSummary:@"5 of 100 connections" warning:NO];
+	XCTAssertFalse(list.summaryLabel.isHidden);
+	XCTAssertEqualObjects(list.summaryLabel.stringValue, @"5 of 100 connections");
+	XCTAssertEqualObjects(list.summaryLabel.textColor, [NSColor secondaryLabelColor]);
+	[list setSummary:@"97 of 100 connections" warning:YES];
+	XCTAssertEqualObjects(list.summaryLabel.textColor, [NSColor systemRedColor]);
+	// Clear of the title and the filter field
+	for (NSView *view in list.summaryLabel.superview.subviews) {
+		if (view == list.summaryLabel || view.isHidden || ![view isKindOfClass:[NSControl class]]) continue;
+		XCTAssertFalse(NSIntersectsRect(view.frame, list.summaryLabel.frame), @"overlaps %@", view);
+	}
+	[list setSummary:nil warning:NO];
+	XCTAssertTrue(list.summaryLabel.isHidden);
+	[list close:nil];
+}
+
 - (void)testServerListSheetFiltersCopiesAndSignals
 {
 	NSArray *rows = @[@{@"pid": @"10", @"user": @"alice", @"query": @"SELECT 1\nFROM t", @"own": @"false"},
@@ -308,7 +361,7 @@ static const NSUInteger SPDatabaseMenuTestPort = 55418;
 	__block BOOL closed = NO;
 	NSArray *columns = @[@{@"key": @"pid", @"title": @"PID"}, @{@"key": @"user", @"title": @"User"}, @{@"key": @"query", @"title": @"Query"}];
 	SPPostgresServerListSheet *list = [SPPostgresServerListSheet beginOnWindow:[self sheetWindow] title:@"Server Processes" columns:columns rows:rows
-																		refresh:^{ refreshes++; }
+																		refresh:^(void (^done)(void)) { refreshes++; done(); }
 																  processAction:^(NSDictionary *row, BOOL terminate) { [signals addObject:@[row[@"pid"], @(terminate)]]; }
 																	 completion:^{ closed = YES; }];
 	XCTAssertNotNil(list);
@@ -316,6 +369,18 @@ static const NSUInteger SPDatabaseMenuTestPort = 55418;
 	XCTAssertEqualObjects(list.countLabel.stringValue, @"3 rows");
 	XCTAssertEqualObjects([list tableView:list.tableView objectValueForTableColumn:list.tableView.tableColumns[2] row:0], @"SELECT 1 FROM t", @"one line");
 	XCTAssertFalse(list.cancelQueryButton.isEnabled);
+
+	// The buttons, left to right, with room between them
+	NSArray *buttons = @[list.refreshButton, list.cancelQueryButton, list.killButton, list.closeButton];
+	for (NSUInteger i = 1; i < buttons.count; i++) {
+		CGFloat gap = NSMinX([buttons[i] frame]) - NSMaxX([buttons[i - 1] frame]);
+		XCTAssertGreaterThanOrEqual(gap, 12.0, @"between %@ and %@", [buttons[i - 1] title], [buttons[i] title]);
+	}
+	XCTAssertLessThanOrEqual(NSMaxX(list.closeButton.frame), NSWidth(list.closeButton.superview.bounds) - 14);
+	XCTAssertGreaterThan(NSMinX(list.refreshButton.frame), NSMaxX(list.countLabel.frame), @"clear of the row count");
+	// Still clear at the sheet's narrowest
+	CGFloat buttonsWidth = NSMaxX(list.closeButton.frame) - NSMinX(list.refreshButton.frame);
+	XCTAssertGreaterThanOrEqual(list.sheet.contentMinSize.width, NSMaxX(list.countLabel.frame) + 12 + buttonsWidth + 14);
 
 	// The tab's own session can't be signalled
 	[list.tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:1] byExtendingSelection:NO];
@@ -863,24 +928,56 @@ static const NSUInteger SPDatabaseMenuTestPort = 55418;
 	[self openDocument];
 	SPPostgresDocument *document = self.document;
 	[document showServerProcesses:nil];
-	XCTAssertTrue([self spinUntil:^BOOL{ return [SPPostgresServerListSheet currentSheet] != nil; } timeout:30]);
-	SPPostgresServerListSheet *list = [SPPostgresServerListSheet currentSheet];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [document serverProcessesWindow] != nil; } timeout:30]);
+	SPPostgresServerListSheet *list = [document serverProcessesWindow];
+	// A window of its own, beside the tab's (not a sheet on it)
+	XCTAssertTrue(list.isOpen);
+	XCTAssertNil(list.sheet.sheetParent);
+	XCTAssertNil([[self.controller window] attachedSheet]);
+	XCTAssertNil([SPPostgresServerListSheet currentSheet]);
+	XCTAssertTrue([list.sheet.title hasPrefix:@"Server Processes on "], @"%@", list.sheet.title);
+	XCTAssertNotNil(list.autoRefreshCheckbox);
 	NSArray *own = [list.rows filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"own == 'true'"]];
 	XCTAssertEqual(own.count, 1u, @"%@", list.rows);
 	XCTAssertEqualObjects(own.firstObject[@"database"], @"pgkit_test");
 	XCTAssertNotNil(list.killButton);
+	XCTAssertNotNil([list.tableView tableColumnWithIdentifier:@"type"], @"client connections tell apart from background workers");
+	XCTAssertTrue([list.summaryLabel.stringValue rangeOfString:@" connections ("].location != NSNotFound, @"%@", list.summaryLabel.stringValue);
+	XCTAssertFalse(list.summaryLabel.isHidden);
+	[list setSummary:nil warning:NO];
 	[list refresh:nil];
 	XCTAssertTrue([self waitIdle]);
 	XCTAssertTrue(list.rows.count > 0);
-	[list close:nil];
+	XCTAssertTrue([list.summaryLabel.stringValue rangeOfString:@" connections ("].location != NSNotFound, @"Refresh reads it again");
 
+	// Asked again: the same window, to the front
+	[document showServerProcesses:nil];
+	XCTAssertTrue([self waitIdle]);
+	XCTAssertEqual([document serverProcessesWindow], list);
+
+	// Server Variables is still a sheet, and opens while the window is up
 	[document showServerVariables:nil];
 	XCTAssertTrue([self spinUntil:^BOOL{ return [SPPostgresServerListSheet currentSheet] != nil; } timeout:30]);
-	list = [SPPostgresServerListSheet currentSheet];
-	XCTAssertTrue([[list.rows valueForKey:@"name"] containsObject:@"server_version"]);
-	XCTAssertNil(list.killButton);
-	[list close:nil];
+	SPPostgresServerListSheet *variables = [SPPostgresServerListSheet currentSheet];
+	XCTAssertEqual(variables.sheet.sheetParent, [self.controller window]);
+	XCTAssertTrue([[variables.rows valueForKey:@"name"] containsObject:@"server_version"]);
+	XCTAssertNil(variables.killButton);
+	XCTAssertNil(variables.autoRefreshCheckbox);
+	[variables close:nil];
 	XCTAssertTrue([self waitIdle]);
+
+	// Closing it lets the document open a new one
+	[list close:nil];
+	XCTAssertNil([document serverProcessesWindow]);
+	[document showServerProcesses:nil];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [document serverProcessesWindow] != nil; } timeout:30]);
+	list = [document serverProcessesWindow];
+	XCTAssertTrue(list.isOpen);
+
+	// The tab closing closes it
+	[document _tearDown];
+	XCTAssertFalse(list.isOpen);
+	XCTAssertNil([document serverProcessesWindow]);
 }
 
 - (void)testRefreshTablesAndOpenDatabaseInNewTab

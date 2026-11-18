@@ -48,6 +48,7 @@
 #import "SPToolbarTransferItem.h"
 #import "SPMainToolbar.h"
 #import "SPConstants.h"
+#import "SPConnectionSummary.h"
 #import <PostgresKit/PostgresKit.h>
 
 // MySQL's left pane name (DBView.xib): one left pane width for both engines, so the database pickers match
@@ -314,6 +315,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	NSArray *pendingCreateSyntax;
 
 	BOOL tornDown;
+	SPPostgresServerListSheet *serverProcessesWindow; // Show Server Processes…'s window while it is open (it retains itself)
 }
 
 @synthesize sidebar;
@@ -1950,6 +1952,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	if ([[[SPPostgresAlterDatabaseSheet currentSheet] sheet] sheetParent] == parentWindow) [[SPPostgresAlterDatabaseSheet currentSheet] cancel:nil];
 	if ([[[SPPostgresSchemaSheet currentSheet] sheet] sheetParent] == parentWindow) [[SPPostgresSchemaSheet currentSheet] cancel:nil];
 	if ([[[SPPostgresServerListSheet currentSheet] sheet] sheetParent] == parentWindow) [[SPPostgresServerListSheet currentSheet] close:nil];
+	[serverProcessesWindow close:nil]; // its completion forgets it
 
 	// A pending database switch completes (cancelled) and lets go of its block, which retains self
 	SPPostgresConnector *pending = pendingConnector;
@@ -4785,16 +4788,40 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	}];
 }
 
-/// Reads pg_stat_activity on the tab's runner into the open process list.
-- (void)_reloadServerProcesses:(SPPostgresServerListSheet *)list
+/// pg_stat_activity as @"rows", with the connection summary as @"summary" when it could be read; nil with *error.
++ (NSDictionary *)_serverProcessesOn:(PGPostgresConnection *)connection error:(NSError **)error
 {
-	if (tornDown || !list) return;
+	SPPostgresCatalog *catalog = [[[SPPostgresCatalog alloc] initWithConnection:connection] autorelease];
+	NSArray *rows = [catalog serverProcesses:error];
+	if (!rows) return nil;
+	SPConnectionSummary *summary = [catalog connectionSummary:NULL];
+	return summary ? @{@"rows": rows, @"summary": summary} : @{@"rows": rows};
+}
+
+/// Shows what +_serverProcessesOn:error: read in the process list: its rows and its connections against the limit.
+- (void)_showServerProcesses:(NSDictionary *)processes inList:(SPPostgresServerListSheet *)list
+{
+	[list setRows:[processes objectForKey:@"rows"]];
+	SPConnectionSummary *summary = [processes objectForKey:@"summary"];
+	[list setSummary:[summary text] warning:[summary isFull]];
+}
+
+/// Reads pg_stat_activity on the tab's runner into the open process list, then calls done (whatever happened).
+- (void)_reloadServerProcesses:(SPPostgresServerListSheet *)list done:(void (^)(void))done
+{
+	void (^finished)(void) = [[done copy] autorelease];
+	if (tornDown || !list) {
+		if (finished) finished();
+		return;
+	}
 	[taskRunner runTaskWithDescription:nil cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
-		return [[[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease] serverProcesses:error];
-	} completion:^(id rows, NSError *error, BOOL cancelled) {
-		if (tornDown || cancelled || [SPPostgresServerListSheet currentSheet] != list) return;
-		if (rows) [list setRows:rows];
-		else NSBeep();
+		return [[self class] _serverProcessesOn:theConnection error:error];
+	} completion:^(id processes, NSError *error, BOOL cancelled) {
+		if (!tornDown && !cancelled && [list isOpen]) {
+			if (processes) [self _showServerProcesses:processes inList:list];
+			else NSBeep();
+		}
+		if (finished) finished();
 	}];
 }
 
@@ -4815,7 +4842,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	[alert addButtonWithTitle:terminate ? NSLocalizedString(@"Kill Connection", @"Postgres process list: kill connection button") : NSLocalizedString(@"Cancel Query", @"Postgres process list: cancel query button")];
 	[alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"cancel button")];
 	[alert beginSheetModalForWindow:[list sheet] completionHandler:^(NSModalResponse response) {
-		if (response != NSAlertFirstButtonReturn || tornDown || [SPPostgresServerListSheet currentSheet] != list) return;
+		if (response != NSAlertFirstButtonReturn || tornDown || ![list isOpen]) return;
 		[self _signalProcess:pid terminate:terminate list:list];
 	}];
 }
@@ -4827,7 +4854,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	[taskRunner runTaskWithDescription:nil cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
 		return [[[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease] signalProcess:pid terminate:terminate error:error] ? @YES : nil;
 	} completion:^(id result, NSError *error, BOOL cancelled) {
-		if (tornDown || cancelled || [SPPostgresServerListSheet currentSheet] != list) return;
+		if (tornDown || cancelled || ![list isOpen]) return;
 		if (!result) {
 			NSAlert *failure = [[[NSAlert alloc] init] autorelease];
 			[failure setAlertStyle:NSAlertStyleWarning];
@@ -4836,40 +4863,54 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 			if (alertPresenter) alertPresenter(failure);
 			else [failure beginSheetModalForWindow:[list sheet] completionHandler:nil];
 		}
-		[self _reloadServerProcesses:list];
+		[self _reloadServerProcesses:list done:nil]; // even while an auto refresh is reading: this one sees the signal
 	}];
 }
 
-/// Database ▸ Show Server Processes… (⌥⌘P): pg_stat_activity, with Refresh, Cancel Query and Kill Connection.
+- (SPPostgresServerListSheet *)serverProcessesWindow
+{
+	return serverProcessesWindow;
+}
+
+/// Database ▸ Show Server Processes… (⌥⌘P): pg_stat_activity in a window of its own, with Refresh, Auto Refresh,
+/// Cancel Query and Kill Connection. Asked again while it is open, it comes to the front, read again.
 - (IBAction)showServerProcesses:(id)sender
 {
+	if ([serverProcessesWindow isOpen]) {
+		[[serverProcessesWindow sheet] makeKeyAndOrderFront:nil];
+		[serverProcessesWindow refresh:nil];
+		return;
+	}
 	if (![self _canRunDatabaseAction] || ![self _endPaneEditing]) return;
 	[taskRunner runTaskWithDescription:NSLocalizedString(@"Loading...", @"Postgres server processes: loading task") cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
-		return [[[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease] serverProcesses:error];
-	} completion:^(id rows, NSError *error, BOOL cancelled) {
+		return [[self class] _serverProcessesOn:theConnection error:error];
+	} completion:^(id processes, NSError *error, BOOL cancelled) {
 		if (tornDown || cancelled) return;
-		if (!rows) {
+		if (!processes) {
 			[self _alertTitle:NSLocalizedString(@"Could not read the server processes", @"Postgres server processes failed") error:error];
 			return;
 		}
 		[self _whenIdle:^{
-			if (!parentWindow || [parentWindow attachedSheet]) return;
-			// The sheet is set once it exists (its blocks only run while it is up)
+			if (tornDown || [serverProcessesWindow isOpen]) return;
+			// The window is set once it exists (its blocks only run while it is open)
 			__block SPPostgresServerListSheet *list = nil;
-			list = [SPPostgresServerListSheet beginOnWindow:parentWindow
-													  title:NSLocalizedString(@"Server Processes", @"Postgres server processes sheet title")
+			list = [SPPostgresServerListSheet openWindowWithTitle:[NSString stringWithFormat:NSLocalizedString(@"Server Processes on %@", @"Postgres server processes window title (connection name)"), [self _connectionName]]
 													columns:@[@{@"key": @"pid", @"title": NSLocalizedString(@"PID", @"Postgres server processes: pid column"), @"width": @60},
 															  @{@"key": @"user", @"title": NSLocalizedString(@"User", @"Postgres server processes: user column"), @"width": @90},
 															  @{@"key": @"database", @"title": NSLocalizedString(@"Database", @"Postgres server processes: database column"), @"width": @100},
 															  @{@"key": @"client", @"title": NSLocalizedString(@"Client", @"Postgres server processes: client column"), @"width": @90},
 															  @{@"key": @"application", @"title": NSLocalizedString(@"Application", @"Postgres server processes: application column"), @"width": @110},
+															  @{@"key": @"type", @"title": NSLocalizedString(@"Type", @"Postgres server processes: backend type column (client backend, autovacuum worker…)"), @"width": @110},
 															  @{@"key": @"state", @"title": NSLocalizedString(@"State", @"Postgres server processes: state column"), @"width": @80},
 															  @{@"key": @"started", @"title": NSLocalizedString(@"Query Start", @"Postgres server processes: query start column"), @"width": @130},
 															  @{@"key": @"query", @"title": NSLocalizedString(@"Query", @"Postgres server processes: query column"), @"width": @300}]
-													   rows:rows
-													refresh:^{ [self _reloadServerProcesses:list]; }
+													   rows:[processes objectForKey:@"rows"]
+													refresh:^(void (^done)(void)) { [self _reloadServerProcesses:list done:done]; }
 											  processAction:^(NSDictionary *row, BOOL terminate) { [self _signalServerProcess:row terminate:terminate list:list]; }
-												 completion:nil];
+												   defaults:[NSUserDefaults standardUserDefaults]
+												 completion:^{ serverProcessesWindow = nil; }];
+			serverProcessesWindow = list;
+			[self _showServerProcesses:processes inList:list];
 		}];
 	}];
 }

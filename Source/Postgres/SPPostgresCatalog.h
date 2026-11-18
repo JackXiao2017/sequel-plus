@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 
 @class PGPostgresConnection;
+@class SPConnectionSummary;
 
 /// Catalog queries that feed the Postgres window's database/schema/table lists, and the Database menu's (read-only,
 /// except the database changes and -signalProcess:terminate:error:).
@@ -125,6 +126,9 @@ __attribute__((visibility("default")))
 /// pg_stat_activity, by pid: dictionaries of strings "pid", "user", "database", "client" ("local" for a socket),
 /// "application", "state", "started" (query_start), "type" (backend_type), "query", "own" ("true" for this session).
 - (NSArray<NSDictionary *> *)serverProcesses:(NSError **)error;
+
+/// Client connections (pg_stat_activity's client backends) against max_connections, with superuser_reserved_connections.
+- (SPConnectionSummary *)connectionSummary:(NSError **)error;
 
 /// pg_cancel_backend (terminate NO: the running query) or pg_terminate_backend (YES: the connection) on pid. NO with
 /// *error when the server refuses or the process wasn't signalled.

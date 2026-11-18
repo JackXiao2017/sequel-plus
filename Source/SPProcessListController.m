@@ -34,6 +34,7 @@
 #import "SPAppController.h"
 #import "SPDataCellFormatter.h"
 #import "SPThreadAdditions.h"
+#import "SPConnectionSummary.h"
 
 #import <SPMySQL/SPMySQL.h>
 
@@ -48,6 +49,10 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 @interface SPProcessListController ()
 
 - (void)_processListRefreshed;
+- (void)_setConnectionSummary:(SPConnectionSummary *)summary;
+- (void)_updateProcessCountText;
+- (void)_layOutLikePostgresServerProcesses;
+- (void)_updateKillButtons;
 - (void)_startAutoRefreshTimer;
 - (void)_killAutoRefreshTimer;
 - (void)_fireAutoRefresh:(NSTimer *)timer;
@@ -79,6 +84,7 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 		showFullProcessList = [prefs boolForKey:SPProcessListShowFullProcessList];
 		
 		processes = [[NSMutableArray alloc] init];
+		processesFiltered = processes; // weak: the list shows every process until a filter is typed
 		
 		prefs = [NSUserDefaults standardUserDefaults];
 		
@@ -92,7 +98,7 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 {	
 	[[self window] setTitle:[NSString stringWithFormat:NSLocalizedString(@"Server Processes on %@", @"server processes window title (var = hostname)"),[[SPAppDelegate frontDocument] name]]];
 	
-	[self setWindowFrameAutosaveName:@"ProcessList"];
+	// (The frame is remembered from -displayProcessListWindow on, once it is shown)
 	
 	// Show/hide table columns
 	[[processListTableView tableColumnWithIdentifier:SPTableViewIDColumnIdentifier] setHidden:![prefs boolForKey:SPProcessListShowProcessID]];
@@ -117,7 +123,185 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 		if (columnWidth) [column setWidth:[columnWidth floatValue]];
 	}
 
+	[self _layOutLikePostgresServerProcesses];
+	[self _updateProcessCountText];
+	[self _updateKillButtons];
+
 	[self _addPreferenceObservers];
+}
+
+#pragma mark -
+#pragma mark Layout
+
+/**
+ * Returns button, sized to its title (at least 90 points wide, as PostgreSQL's Server Processes buttons).
+ */
+- (NSButton *)_sizedButton:(NSButton *)button forTitles:(NSArray *)titles
+{
+	CGFloat width = 90;
+	for (NSString *title in titles) {
+		[button setTitle:title];
+		[button sizeToFit];
+		width = MAX(width, NSWidth([button frame]) + 12);
+	}
+	[button setTitle:[titles firstObject]];
+	NSRect frame = [button frame];
+	frame.size.width = width;
+	[button setFrame:frame];
+	return button;
+}
+
+- (NSButton *)_newButtonWithTitle:(NSString *)title action:(SEL)action target:(id)target
+{
+	NSButton *button = [[NSButton buttonWithTitle:title target:target action:action] retain];
+	return [self _sizedButton:button forTitles:@[title]];
+}
+
+/**
+ * Lays the window out as PostgreSQL's Server Processes window: the connections against the limit at the top left, the
+ * filter at the top right, the list between; along the bottom the row count, Auto Refresh with how often, the ⚙︎ menu,
+ * then Save As..., Refresh, Kill Query, Kill Connection and Close, 12 points apart.
+ */
+- (void)_layOutLikePostgresServerProcesses
+{
+	NSWindow *window = [self window];
+	NSView *content = [window contentView];
+	NSFont *smallFont = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
+	NSFont *font = [NSFont systemFontOfSize:[NSFont systemFontSize]];
+	[window setContentSize:NSMakeSize(900, 460)];
+	CGFloat width = NSWidth([content bounds]);
+	CGFloat height = NSHeight([content bounds]);
+
+	// The old button bar along the bottom goes
+	for (NSView *view in [content subviews]) {
+		if ([view isKindOfClass:NSClassFromString(@"SPButtonBar")]) [view setHidden:YES];
+	}
+
+	// Top: the summary, the progress indicator, the filter
+	[[filterProcessesSearchField cell] setControlSize:NSControlSizeRegular];
+	[filterProcessesSearchField setFont:font];
+	[filterProcessesSearchField setFrame:NSMakeRect(width - 240, height - 38, 220, 22)];
+	[filterProcessesSearchField setAutoresizingMask:NSViewMinXMargin | NSViewMinYMargin];
+	[refreshProgressIndicator setFrame:NSMakeRect(width - 262, height - 35, 16, 16)];
+	[refreshProgressIndicator setAutoresizingMask:NSViewMinXMargin | NSViewMinYMargin];
+
+	summaryLabel = [[NSTextField labelWithString:@""] retain];
+	[summaryLabel setFont:smallFont];
+	[summaryLabel setTextColor:[NSColor secondaryLabelColor]];
+	[summaryLabel setLineBreakMode:NSLineBreakByTruncatingTail];
+	[summaryLabel setFrame:NSMakeRect(20, height - 32, width - 292, 14)];
+	[summaryLabel setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+	[summaryLabel setHidden:YES];
+	[content addSubview:summaryLabel];
+
+	// The list
+	NSScrollView *scrollView = [processListTableView enclosingScrollView];
+	[scrollView setFrame:NSMakeRect(20, 52, width - 40, height - 100)];
+	[scrollView setBorderType:NSBezelBorder];
+	[scrollView setAutoresizingMask:NSViewWidthSizable | NSViewHeightSizable];
+
+	// Bottom left: the row count, Auto Refresh, how often, ⚙︎
+	[processesCountTextField setFrame:NSMakeRect(20, 20, 110, 14)];
+	[processesCountTextField setAlignment:NSTextAlignmentLeft];
+	[processesCountTextField setTextColor:[NSColor secondaryLabelColor]];
+	[[processesCountTextField cell] setLineBreakMode:NSLineBreakByTruncatingTail];
+	[processesCountTextField setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
+	[processesCountTextField setHidden:NO];
+
+	[autoRefreshButton setTitle:NSLocalizedString(@"Auto Refresh", @"server processes: auto refresh checkbox")];
+	[autoRefreshButton sizeToFit];
+	[autoRefreshButton setFrameOrigin:NSMakePoint(NSMaxX([processesCountTextField frame]) + 12, 18)];
+	[autoRefreshButton setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
+
+	autoRefreshIntervalPopUp = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+	[[autoRefreshIntervalPopUp cell] setControlSize:NSControlSizeSmall];
+	[autoRefreshIntervalPopUp setFont:smallFont];
+	for (NSNumber *seconds in @[@1, @2, @5, @10, @30, @60]) {
+		NSString *title = [seconds integerValue] == 1
+			? NSLocalizedString(@"Every second", @"server processes: auto refresh interval of one second")
+			: [NSString stringWithFormat:NSLocalizedString(@"Every %ld seconds", @"server processes: auto refresh interval in seconds"), (long)[seconds integerValue]];
+		[autoRefreshIntervalPopUp addItemWithTitle:title];
+		NSMenuItem *item = [autoRefreshIntervalPopUp lastItem];
+		[item setTag:[seconds integerValue]];
+		[item setTarget:self];
+		[item setAction:@selector(setAutoRefreshInterval:)];
+	}
+	[[autoRefreshIntervalPopUp menu] addItem:[NSMenuItem separatorItem]];
+	[autoRefreshIntervalPopUp addItemWithTitle:NSLocalizedString(@"Custom…", @"server processes: custom auto refresh interval")];
+	[[autoRefreshIntervalPopUp lastItem] setTag:-1];
+	[[autoRefreshIntervalPopUp lastItem] setTarget:self];
+	[[autoRefreshIntervalPopUp lastItem] setAction:@selector(setCustomAutoRefreshInterval:)];
+	[autoRefreshIntervalPopUp sizeToFit];
+	[autoRefreshIntervalPopUp setFrameOrigin:NSMakePoint(NSMaxX([autoRefreshButton frame]) + 6, 14)];
+	[autoRefreshIntervalPopUp setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
+	[content addSubview:autoRefreshIntervalPopUp];
+
+	// ⚙︎ keeps Show Process ID and Show FULL Process List; the interval has its own menu now
+	BOOL afterFullList = NO;
+	for (NSMenuItem *item in [actionsPopUp itemArray]) {
+		if ([item submenu] || (afterFullList && [item isSeparatorItem])) [item setHidden:YES];
+		if ([item action] == @selector(toggeleShowFullProcessList:)) afterFullList = YES;
+	}
+	[actionsPopUp setFrame:NSMakeRect(NSMaxX([autoRefreshIntervalPopUp frame]) + 12, 14, 36, 22)];
+	[actionsPopUp setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
+	CGFloat leftEdge = NSMaxX([actionsPopUp frame]);
+
+	// Bottom right, right to left: Close, Kill Connection, Kill Query, Refresh, Save As...
+	closeButton = [self _newButtonWithTitle:NSLocalizedString(@"Close", @"close button") action:@selector(performClose:) target:window];
+	[closeButton setKeyEquivalent:@"\033"];
+	killConnectionButton = [self _newButtonWithTitle:NSLocalizedString(@"Kill Connection", @"server processes: kill connection button") action:@selector(killProcessConnection:) target:self];
+	killQueryButton = [self _newButtonWithTitle:NSLocalizedString(@"Kill Query", @"server processes: kill query button") action:@selector(killProcessQuery:) target:self];
+
+	// The same push button as the ones made here (and PostgreSQL's)
+	NSBezelStyle bezel = [closeButton bezelStyle];
+	[refreshProcessesButton setButtonType:NSButtonTypeMomentaryPushIn];
+	[refreshProcessesButton setBezelStyle:bezel];
+	[refreshProcessesButton setImage:nil];
+	[refreshProcessesButton setAlternateImage:nil];
+	[refreshProcessesButton setImagePosition:NSNoImage];
+	[[refreshProcessesButton cell] setControlSize:NSControlSizeRegular];
+	[refreshProcessesButton setFont:font];
+	[self _sizedButton:refreshProcessesButton forTitles:@[NSLocalizedString(@"Refresh", @"refresh button")]];
+
+	[saveProcessesButton setButtonType:NSButtonTypeMomentaryPushIn];
+	[saveProcessesButton setBezelStyle:bezel];
+	[[saveProcessesButton cell] setControlSize:NSControlSizeRegular];
+	[saveProcessesButton setFont:font];
+	// Wide enough for the filtered list's title too
+	[self _sizedButton:saveProcessesButton forTitles:@[NSLocalizedString(@"Save As...", @"save as button title"), NSLocalizedString(@"Save View As...", @"save view as button title")]];
+
+	CGFloat x = width - 14;
+	for (NSButton *button in @[closeButton, killConnectionButton, killQueryButton, refreshProcessesButton, saveProcessesButton]) {
+		NSRect frame = [button frame];
+		x -= NSWidth(frame);
+		frame.origin = NSMakePoint(x, 12);
+		[button setFrame:frame];
+		[button setAutoresizingMask:NSViewMinXMargin | NSViewMaxYMargin];
+		if ([button superview] != content) [content addSubview:button];
+		x -= 12;
+	}
+
+	// Narrowest: the buttons still clear of the controls on the left
+	CGFloat buttonsWidth = width - 14 - (x + 12);
+	NSSize minSize = NSMakeSize(MAX(640, leftEdge + 12 + buttonsWidth + 14), 300);
+	[window setContentMinSize:minSize];
+	// Opens wide enough for all of it (everything above keeps its place as the window resizes)
+	if (width < minSize.width) [window setContentSize:NSMakeSize(minSize.width, height)];
+}
+
+/**
+ * Kill Query and Kill Connection act on one selected process.
+ */
+- (void)_updateKillButtons
+{
+	BOOL one = [processListTableView numberOfSelectedRows] == 1;
+	[killQueryButton setEnabled:one];
+	[killConnectionButton setEnabled:one];
+}
+
+- (void)tableViewSelectionDidChange:(NSNotification *)notification
+{
+	[self _updateKillButtons];
 }
 
 /**
@@ -358,6 +542,7 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 	
 	// Enable/Disable the refresh button
 	[refreshProcessesButton setEnabled:(!enable)];
+	[autoRefreshIntervalPopUp setEnabled:enable];
 	
 	(enable) ? [self _startAutoRefreshTimer] : [self _killAutoRefreshTimer];
 }
@@ -392,6 +577,9 @@ static NSString * const SPKillIdKey   = @"SPKillId";
  */
 - (void)displayProcessListWindow
 {
+	// Remember the window's frame (from now on: set when it is shown, not when it loads)
+	[self setWindowFrameAutosaveName:@"ProcessList"];
+
 	// Weak reference
 	processesFiltered = processes;
 	
@@ -415,6 +603,7 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 
 	if (sheet == customIntervalWindow) {
 		if (returnCode == NSAlertDefaultReturn) [self _startAutoRefreshTimerWithInterval:[customIntervalTextField integerValue]];
+		else [self _updateSelectedAutoRefreshIntervalInterface]; // the interval menu shows the interval again, not Custom…
 	}
 	else {
 		NSDictionary *userInfo = [(NSDictionary *)contextInfo autorelease]; //we retained it during the beginSheet… call because Cocoa does not do memory management on void *.
@@ -457,13 +646,6 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 	return YES;
 }
 
-/**
- * NSWindow autosave name
- */
-- (NSString *)windowFrameAutosaveName
-{
-	return @"ProcessList";
-}
 
 /**
  * This method is called as part of Key Value Observing which is used to watch for prefernce changes which effect the interface.
@@ -530,6 +712,30 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 /**
  * Called by the background thread on the main thread once it has completed getting the list of processes.
  */
+- (void)_setConnectionSummary:(SPConnectionSummary *)summary
+{
+	[connectionSummary release];
+	connectionSummary = [summary retain];
+}
+
+/**
+ * The count line: the server's connections against its limit (red once only superusers could connect), after
+ * "Showing N of M" while the list is filtered.
+ */
+- (void)_updateProcessCountText
+{
+	BOOL filtered = processesFiltered && processesFiltered != processes;
+	[processesCountTextField setStringValue:filtered
+		? [NSString stringWithFormat:NSLocalizedString(@"%lu of %lu rows", @"server processes: filtered row count"), (unsigned long)[processesFiltered count], (unsigned long)[processes count]]
+		: [NSString stringWithFormat:NSLocalizedString(@"%lu rows", @"server processes: row count"), (unsigned long)[processes count]]];
+	[processesCountTextField setHidden:NO];
+
+	NSString *summary = [connectionSummary text];
+	[summaryLabel setStringValue:summary ?: @""];
+	[summaryLabel setTextColor:[connectionSummary isFull] ? [NSColor systemRedColor] : [NSColor secondaryLabelColor]];
+	[summaryLabel setHidden:![summary length]];
+}
+
 - (void)_processListRefreshed
 {
 	processListThreadRunning = NO;
@@ -544,6 +750,8 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 	
 	// Reload data
 	[processListTableView reloadData];
+	[self _updateProcessCountText];
+	[self _updateKillButtons];
 	
 	// Enable controls
 	[filterProcessesSearchField setEnabled:YES];
@@ -611,6 +819,21 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 	
 	// If a match wasn't found then a custom value is set
 	if (!found) [(NSMenuItem*)[items objectAtIndex:([items count] - 1)] setState:NSOnState];
+
+	// The interval menu: a custom interval gets an item of its own (before the separator), chosen
+	for (NSMenuItem *item in [[[autoRefreshIntervalPopUp itemArray] copy] autorelease]) {
+		if ([[item representedObject] isEqual:@"custom"]) [[autoRefreshIntervalPopUp menu] removeItem:item];
+	}
+	if (interval > 0 && ![autoRefreshIntervalPopUp selectItemWithTag:interval]) {
+		NSInteger separator = [[autoRefreshIntervalPopUp menu] indexOfItem:[[[autoRefreshIntervalPopUp itemArray] filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"separatorItem == YES"]] firstObject]];
+		NSMenuItem *custom = [[[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:NSLocalizedString(@"Every %ld seconds", @"server processes: auto refresh interval in seconds"), (long)interval] action:@selector(setAutoRefreshInterval:) keyEquivalent:@""] autorelease];
+		[custom setTag:interval];
+		[custom setTarget:self];
+		[custom setRepresentedObject:@"custom"];
+		[[autoRefreshIntervalPopUp menu] insertItem:custom atIndex:(separator >= 0 ? separator : [autoRefreshIntervalPopUp numberOfItems])];
+		[autoRefreshIntervalPopUp selectItem:custom];
+	}
+	[autoRefreshIntervalPopUp setEnabled:[prefs boolForKey:SPProcessListEnableAutoRefresh]];
 }
 
 /**
@@ -674,6 +897,10 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 				[rowsFixed release];
 			}
 		}
+
+		// The connections against the limit (nil when they can't be read)
+		SPConnectionSummary *summary = [connection isConnected] ? [SPConnectionSummary summaryForMySQLConnection:connection] : nil;
+		[self performSelectorOnMainThread:@selector(_setConnectionSummary:) withObject:summary waitUntilDone:NO];
 
 		// Update the UI on the main thread
 		[self performSelectorOnMainThread:@selector(_processListRefreshed) withObject:nil waitUntilDone:NO];
@@ -745,7 +972,7 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 		
 		[saveProcessesButton setEnabled:YES];
 		[saveProcessesButton setTitle:NSLocalizedString(@"Save As...", @"save as button title")];
-		[processesCountTextField setStringValue:@""];
+		[self _updateProcessCountText];
 		
 		[processListTableView reloadData];
 		
@@ -770,8 +997,7 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 	
 	[processListTableView reloadData];
 	
-	[processesCountTextField setStringValue:[NSString stringWithFormat:NSLocalizedString(@"Showing %lu of %lu processes", "filtered item count"), (unsigned long)[processesFiltered count], (unsigned long)[processes count]]];
-	[processesCountTextField setHidden:NO];
+	[self _updateProcessCountText];
 	
 	if ([processesFiltered count] == 0) return;
 	
@@ -847,6 +1073,10 @@ static NSString * const SPKillIdKey   = @"SPKillId";
  */
 - (void)tableViewColumnDidResize:(NSNotification *)notification
 {
+	// Only widths the user drags in the header are remembered: not the table's own resizing (the window's layout,
+	// a window resize, the last column filling the width)
+	if ([[processListTableView headerView] resizedColumn] < 0) return;
+
 	NSTableColumn *column = [[notification userInfo] objectForKey:@"NSTableColumn"];
 
 	// Get the existing table column widths dictionary if it exists
@@ -873,6 +1103,12 @@ static NSString * const SPKillIdKey   = @"SPKillId";
 	[self _removePreferenceObservers];
 
 	SPClear(processes);
+	SPClear(connectionSummary);
+	SPClear(summaryLabel);
+	SPClear(autoRefreshIntervalPopUp);
+	SPClear(killQueryButton);
+	SPClear(killConnectionButton);
+	SPClear(closeButton);
 	
 	if (autoRefreshTimer) SPClear(autoRefreshTimer);
 	
