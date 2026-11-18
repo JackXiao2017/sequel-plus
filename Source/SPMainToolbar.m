@@ -124,7 +124,7 @@ NSToolbarItem *SPCreateMainToolbarItem(NSString *identifier)
 	}
 	else if ([identifier isEqualToString:SPMainToolbarShowConsole]) {
 		[item setPaletteLabel:NSLocalizedString(@"Show Console", @"show console")];
-		[item setToolTip:NSLocalizedString(@"Show the console which shows all MySQL commands performed by Sequel Pro", @"tooltip for toolbar item for show console")];
+		[item setToolTip:NSLocalizedString(@"Show the console which shows all MySQL commands performed by Sequel Plus", @"tooltip for toolbar item for show console")];
 		[item setLabel:NSLocalizedString(@"Console", @"Console")];
 		// The original artwork, drawn as Table Info or Query are (not in a grey capsule)
 		[item setBordered:NO];
@@ -133,7 +133,7 @@ NSToolbarItem *SPCreateMainToolbarItem(NSString *identifier)
 	else if ([identifier isEqualToString:SPMainToolbarClearConsole]) {
 		[item setLabel:NSLocalizedString(@"Clear Console", @"toolbar item for clear console")];
 		[item setPaletteLabel:NSLocalizedString(@"Clear Console", @"toolbar item for clear console")];
-		[item setToolTip:NSLocalizedString(@"Clear the console which shows all MySQL commands performed by Sequel Pro", @"tooltip for toolbar item for clear console")];
+		[item setToolTip:NSLocalizedString(@"Clear the console which shows all MySQL commands performed by Sequel Plus", @"tooltip for toolbar item for clear console")];
 		image = [NSImage imageNamed:@"clearconsole"];
 	}
 	else if ([identifier isEqualToString:SPMainToolbarTableStructure]) {

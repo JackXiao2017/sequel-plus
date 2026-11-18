@@ -228,8 +228,8 @@ static NSData *SPImageData(NSImage *image)
 
 	// identifier: label, palette label, tooltip, image name, action
 	NSDictionary *expected = @{
-		SPParityShowConsole: @[@"Console", @"Show Console", @"Show the console which shows all MySQL commands performed by Sequel Pro", @"hideconsole", @"showConsole:"],
-		SPParityClearConsole: @[@"Clear Console", @"Clear Console", @"Clear the console which shows all MySQL commands performed by Sequel Pro", @"clearconsole", @"clearConsole:"],
+		SPParityShowConsole: @[@"Console", @"Show Console", @"Show the console which shows all MySQL commands performed by Sequel Plus", @"hideconsole", @"showConsole:"],
+		SPParityClearConsole: @[@"Clear Console", @"Clear Console", @"Clear the console which shows all MySQL commands performed by Sequel Plus", @"clearconsole", @"clearConsole:"],
 		SPParityStructure: @[@"Structure", @"Edit Table Structure", @"Switch to the Table Structure tab", @"toolbar-switch-to-structure", @"viewStructure:"],
 		SPParityContent: @[@"Content", @"Browse & Edit Table Content", @"Switch to the Table Content tab", @"toolbar-switch-to-browse", @"viewContent:"],
 		SPParityQuery: @[@"Query", @"Run Custom Query", @"Switch to the Run Query tab", @"toolbar-switch-to-sql", @"viewQuery:"],
