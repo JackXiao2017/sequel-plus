@@ -24,9 +24,10 @@ Upgrading from 2.0.4.
 - PostgreSQL's Server Processes was a sheet over the tab; now you can keep it open beside the tab, move, resize or minimize it, and still use the tab and its other sheets. Choosing the menu item again brings it to the front, read again. Each tab has its own, and closing the tab closes it. Its Auto Refresh setting and interval are remembered, and a refresh that is still reading (say, behind a long query on the tab's connection) is never started again on top of itself.
 - Kill Connection still closes the selected connection, and Cancel Query (PostgreSQL) or Kill Query (MySQL) stops only its statement. Both ask first.
 
-### PostgreSQL: connections, exports and tooltips say Sequel Plus
+### PostgreSQL and MySQL: connections, exports and tooltips say Sequel Plus
 - PostgreSQL connections now name themselves **Sequel Plus** (`application_name`), so Server Processes and the server's own `pg_stat_activity` show them as Sequel Plus instead of Sequel Pro.
 - A PostgreSQL export's header reads "PostgreSQL database dump written by Sequel Plus", and the PostgreSQL tab's Show Console and Clear Console tooltips say Sequel Plus.
+- The MySQL tab's Show Console and Clear Console tooltips say Sequel Plus too.
 
 ## Sequel Plus 2.0.4
 
