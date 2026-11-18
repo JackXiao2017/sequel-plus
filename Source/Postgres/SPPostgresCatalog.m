@@ -1,5 +1,6 @@
 #import "SPPostgresCatalog.h"
 #import "SPPostgresErrors.h"
+#import "SPConnectionSummary.h"
 #import "SPPostgresTableData.h"
 #import "SPPostgresTableStructure.h"
 #import <PostgresKit/PostgresKit.h>
@@ -409,6 +410,19 @@ static const NSTimeInterval SPPostgresOwnerChangeLockTimeout = 5;
 						 "(pid = pg_backend_pid())::text AS own "
 						 "FROM pg_catalog.pg_stat_activity ORDER BY pid"
 				   keys:@[@"pid", @"user", @"database", @"client", @"application", @"state", @"started", @"type", @"query", @"own"] error:error];
+}
+
+- (SPConnectionSummary *)connectionSummary:(NSError **)error
+{
+	NSArray<NSDictionary *> *rows = [self rowsOf:@"SELECT current_setting('max_connections') AS max, "
+						 "current_setting('superuser_reserved_connections') AS reserved, "
+						 "(SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE backend_type = 'client backend')::text AS current"
+										   keys:@[@"max", @"reserved", @"current"] error:error];
+	if (!rows) return nil;
+	NSDictionary *row = [rows firstObject];
+	return [SPConnectionSummary summaryWithCurrent:(NSUInteger)MAX([[row objectForKey:@"current"] longLongValue], 0)
+											   max:(NSUInteger)MAX([[row objectForKey:@"max"] longLongValue], 0)
+										  reserved:(NSUInteger)MAX([[row objectForKey:@"reserved"] longLongValue], 0)];
 }
 
 - (BOOL)signalProcess:(NSInteger)pid terminate:(BOOL)terminate error:(NSError **)error
