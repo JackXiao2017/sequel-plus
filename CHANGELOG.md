@@ -29,6 +29,9 @@ Upgrading from 2.0.4.
 - A PostgreSQL export's header reads "PostgreSQL database dump written by Sequel Plus", and the PostgreSQL tab's Show Console and Clear Console tooltips say Sequel Plus.
 - The MySQL tab's Show Console and Clear Console tooltips say Sequel Plus too.
 
+### MySQL: the Content filter's rows show again
+- In a MySQL tab's **Content** view, once the filter had been hidden (by the **Filter** toggle, or by opening a table with it off), showing it again put its rows under the bar holding **Reset**, **Add Filter** and **Filter**, so you couldn't see or edit them. The rows now sit above that bar every time, however often the filter is hidden and shown.
+
 ## Sequel Plus 2.0.4
 
 Upgrading from 2.0.3.

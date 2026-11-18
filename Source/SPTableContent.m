@@ -3489,7 +3489,9 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 	topContainerRect.size.height = topContainerGivenHeight;
 
 	// this one should be inferable from the IB layout IMHO, but the OS gets it wrong
-	ruleEditorRect.size.height = topContainerGivenHeight - ruleEditorRect.origin.y;
+	// Never negative: hidden, the container is 0 high, and AppKit turns a negative-height frame into one starting
+	// that much lower (origin 31 → 0), which the next show reads as the gap above the button bar, leaving the rows under it
+	ruleEditorRect.size.height = MAX(0, topContainerGivenHeight - ruleEditorRect.origin.y);
 
 	if(animate) {
 		[NSAnimationContext beginGrouping];

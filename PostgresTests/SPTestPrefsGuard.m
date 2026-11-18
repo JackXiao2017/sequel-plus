@@ -32,6 +32,12 @@ static const void *SPRequestedAutosaveNameKey = &SPRequestedAutosaveNameKey;
  *   name is kept on the split view for assertions, see -sp_requestedAutosaveName). With no name,
  *   neither AppKit ("NSSplitView Subview Frames <name>") nor SPSplitView ("SPSplitView Lengths
  *   <name>") saves or restores divider positions, so split views in tests use their built layout.
+ * - Windows never save their frame (-[NSWindow saveFrameUsingName:] does nothing), and the standard defaults drop
+ *   writes of "NSTableView ..." keys (column widths, order, hidden columns, sort). Loading a MySQL tab's nibs
+ *   otherwise saves "NSWindow Frame MYSQL_HELP_WINDOW" / "SPExportWindow" as those windows are placed, and
+ *   "NSTableView Columns v3 SPTableStructureSource" as the Structure view lays out its columns. Both are set in the
+ *   nibs, not through the public setters, so the writes themselves are what's stopped. Saved frames and columns are
+ *   still read.
  * - SPToolbarTransferItemAdded reads YES from the volatile argument domain, so documents created by
  *   tests never try the one-time Transfer insertion, which records itself in the given defaults.
  *   SPToolbarTransferItemMovedAfterQuery reads YES too, so they never try the one-time move either, nor (with
@@ -97,6 +103,25 @@ static const void *SPRequestedAutosaveNameKey = &SPRequestedAutosaveNameKey;
 
 @end
 
+@implementation NSWindow (SPTestPrefsGuard)
+
+- (void)sp_test_saveFrameUsingName:(NSString *)name
+{
+	// Not saved (see the comment above)
+}
+
+@end
+
+@implementation NSUserDefaults (SPTestPrefsGuard)
+
+- (void)sp_test_setObject:(id)value forKey:(NSString *)key
+{
+	if (self == [NSUserDefaults standardUserDefaults] && [key hasPrefix:@"NSTableView "]) return; // see the comment above
+	[self sp_test_setObject:value forKey:key]; // the original implementation (swapped)
+}
+
+@end
+
 @interface SPTestPrefsGuard : NSObject <XCTestObservation>
 @end
 
@@ -117,6 +142,11 @@ static NSString *SPTestQueryStoreDirectory = nil;
 	Method originalSplit = class_getInstanceMethod([NSSplitView class], @selector(setAutosaveName:));
 	Method replacementSplit = class_getInstanceMethod([NSSplitView class], @selector(sp_test_setAutosaveName:));
 	method_exchangeImplementations(originalSplit, replacementSplit);
+
+	method_exchangeImplementations(class_getInstanceMethod([NSWindow class], @selector(saveFrameUsingName:)),
+								   class_getInstanceMethod([NSWindow class], @selector(sp_test_saveFrameUsingName:)));
+	method_exchangeImplementations(class_getInstanceMethod([NSUserDefaults class], @selector(setObject:forKey:)),
+								   class_getInstanceMethod([NSUserDefaults class], @selector(sp_test_setObject:forKey:)));
 
 	// The Postgres Query tab's shared stores: on a temporary directory of this run
 	NSString *storeDirectory = [NSTemporaryDirectory() stringByAppendingPathComponent:
