@@ -7,7 +7,7 @@
 #import <objc/runtime.h>
 
 static const NSUInteger SPPostgresConnectTimeout = 10;
-static NSString * const SPPostgresApplicationName = @"Sequel Pro";
+static NSString * const SPPostgresApplicationName = @"Sequel Plus";
 static NSString * const SPPostgresDefaultDatabase = @"postgres";
 static const NSUInteger SPPostgresDefaultPort = 5432;
 static char SPPostgresConnectorProxyKey;

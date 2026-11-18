@@ -111,7 +111,7 @@
 		XCTAssertTrue(outcome.connection.isConnected, @"port %@", port);
 
 		PGPostgresResult *result = [outcome.connection execute:@"SELECT current_setting('application_name')"];
-		XCTAssertEqualObjects([[result.rowAsArray firstObject] description], @"Sequel Pro", @"port %@", port);
+		XCTAssertEqualObjects([[result.rowAsArray firstObject] description], @"Sequel Plus", @"port %@", port);
 
 		[connector disconnect];
 		XCTAssertFalse(outcome.connection.isConnected, @"port %@: still connected after -disconnect", port);

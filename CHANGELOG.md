@@ -17,6 +17,10 @@ Upgrading from 2.0.4.
 - Keys over more than one column, and binary keys (MySQL BINARY, VARBINARY and BLOB; PostgreSQL bytea), keep the normal in-cell editor. So does every cell that isn't a foreign key.
 - To turn it off, clear **Preferences ▸ Tables ▸ Open the value picker when editing a foreign key** (on by default). Foreign key cells then edit exactly as before, and the sheet has no Choose….
 
+### PostgreSQL: connections, exports and tooltips say Sequel Plus
+- PostgreSQL connections now name themselves **Sequel Plus** (`application_name`), so Server Processes and the server's own `pg_stat_activity` show them as Sequel Plus instead of Sequel Pro.
+- A PostgreSQL export's header reads "PostgreSQL database dump written by Sequel Plus", and the PostgreSQL tab's Show Console and Clear Console tooltips say Sequel Plus.
+
 ## Sequel Plus 2.0.4
 
 Upgrading from 2.0.3.

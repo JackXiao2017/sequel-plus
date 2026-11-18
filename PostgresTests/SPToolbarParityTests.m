@@ -348,6 +348,10 @@ static NSData *SPImageData(NSImage *image)
 		if (![identifier isEqualToString:SPParityShowConsole] && ![identifier isEqualToString:SPParityClearConsole]) {
 			XCTAssertEqualObjects([theirs toolTip], [mine toolTip], @"%@", identifier);
 		}
+		else {
+			NSString *verb = [identifier isEqualToString:SPParityShowConsole] ? @"Show" : @"Clear";
+			XCTAssertEqualObjects([theirs toolTip], ([NSString stringWithFormat:@"%@ the console which shows all PostgreSQL commands performed by Sequel Plus", verb]));
+		}
 	}
 
 	// The Console image follows the console window on both

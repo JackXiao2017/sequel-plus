@@ -4321,7 +4321,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 		action = NULL;
 	}
 	else if ([identifier isEqualToString:SPMainToolbarShowConsole]) {
-		[item setToolTip:NSLocalizedString(@"Show the console which shows all PostgreSQL commands performed by Sequel Pro", @"PostgreSQL toolbar: console tooltip")];
+		[item setToolTip:NSLocalizedString(@"Show the console which shows all PostgreSQL commands performed by Sequel Plus", @"PostgreSQL toolbar: console tooltip")];
 		action = @selector(toggleConsole:);
 	}
 	else if ([identifier isEqualToString:SPMainToolbarTableStructure]) {
@@ -4346,7 +4346,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 		action = @selector(showUserManager:);
 	}
 	else if ([identifier isEqualToString:SPMainToolbarClearConsole]) {
-		[item setToolTip:NSLocalizedString(@"Clear the console which shows all PostgreSQL commands performed by Sequel Pro", @"PostgreSQL toolbar: clear console tooltip")];
+		[item setToolTip:NSLocalizedString(@"Clear the console which shows all PostgreSQL commands performed by Sequel Plus", @"PostgreSQL toolbar: clear console tooltip")];
 	}
 
 	if (action) {
