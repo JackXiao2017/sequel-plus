@@ -8,6 +8,7 @@
 #import "../Source/Postgres/SPPostgresFavorite.h"
 #import "../Source/Postgres/SPPostgresContentController.h"
 #import "../Source/Postgres/SPPostgresTableData.h"
+#import "../Source/Postgres/SPPostgresFilterRowsController.h"
 #import "../Source/Postgres/SPPostgresTaskRunner.h"
 
 static const NSUInteger SPContentTestPort = 55418;
@@ -335,16 +336,12 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	[self selectTable:@"items"];
 	SPPostgresContentController *content = self.content;
 
-	NSPopUpButton *columnPopup = [content valueForKey:@"filterColumnPopup"];
-	NSPopUpButton *comparisonPopup = [content valueForKey:@"filterComparisonPopup"];
-	NSTextField *valueField = [content valueForKey:@"filterValueField"];
-	NSButton *filterButton = [content valueForKey:@"filterButton"];
-	XCTAssertEqualObjects([columnPopup itemTitles], ([[[self grid] tableColumns] valueForKeyPath:@"headerCell.stringValue"]));
-	XCTAssertTrue([[comparisonPopup itemTitles] containsObject:@"LIKE"]);
+	SPPostgresFilterRowsController *filterRows = content.filterRows;
+	NSButton *filterButton = filterRows.filterButton;
+	XCTAssertEqualObjects(filterRows.columnNames, ([[[self grid] tableColumns] valueForKeyPath:@"headerCell.stringValue"]));
+	XCTAssertTrue([[SPPostgresFilterRowsController comparisons] containsObject:@"LIKE"]);
 
-	[columnPopup selectItemWithTitle:@"name"];
-	[comparisonPopup selectItemWithTitle:@"LIKE"];
-	[valueField setStringValue:@"item 1%"];
+	[filterRows setFilters:@[[SPPostgresFilter filterWithColumn:@"name" comparison:@"LIKE" value:@"item 1%"]]];
 	[filterButton performClick:nil];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self waitForContent];
@@ -352,21 +349,16 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	XCTAssertEqualObjects([self idsInGrid], (@[@"1", @"10", @"11", @"12", @"13", @"14", @"15", @"16", @"17", @"18", @"19"]));
 	XCTAssertEqualObjects(content.countText, @"11 rows of 30 match filter");
 
-	// IS NULL needs no value
-	[columnPopup selectItemWithTitle:@"note"];
-	[comparisonPopup selectItemWithTitle:@"IS NULL"];
-	[comparisonPopup sendAction:[comparisonPopup action] to:[comparisonPopup target]];
-	XCTAssertFalse([valueField isEnabled]);
+	// IS NULL needs no value (its row has no value field)
+	[filterRows setFilters:@[[SPPostgresFilter filterWithColumn:@"note" comparison:@"IS NULL" value:nil]]];
+	XCTAssertNil([filterRows valueFieldInRow:0]);
 	[filterButton performClick:nil];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self waitForContent];
 	XCTAssertEqualObjects([self idsInGrid], (@[@"1"]));
 
 	// A filter the server rejects: the alert is shown and the rows stay
-	[columnPopup selectItemWithTitle:@"tags"];
-	[comparisonPopup selectItemWithTitle:@"="];
-	[comparisonPopup sendAction:[comparisonPopup action] to:[comparisonPopup target]];
-	[valueField setStringValue:@"not an array"];
+	[filterRows setFilters:@[[SPPostgresFilter filterWithColumn:@"tags" comparison:@"=" value:@"not an array"]]];
 	[filterButton performClick:nil];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self waitForContent];
@@ -375,9 +367,7 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	XCTAssertEqualObjects([self idsInGrid], (@[@"1"]));
 
 	// An empty value clears the filter
-	[columnPopup selectItemWithTitle:@"name"];
-	[comparisonPopup selectItemWithTitle:@"="];
-	[valueField setStringValue:@""];
+	[filterRows setFilters:@[[SPPostgresFilter filterWithColumn:@"name" comparison:@"=" value:@""]]];
 	[filterButton performClick:nil];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
 	[self waitForContent];
@@ -947,9 +937,7 @@ static NSString * const SPContentTestToolbarContent = @"SwitchToTableContentTool
 	XCTAssertEqualObjects(runner.currentDescription, @"Loading page 1...");
 	[self waitForContent];
 
-	NSTextField *valueField = [content valueForKey:@"filterValueField"];
-	[(NSPopUpButton *)[content valueForKey:@"filterColumnPopup"] selectItemWithTitle:@"name"];
-	[valueField setStringValue:@"item 1"];
+	[content.filterRows setFilters:@[[SPPostgresFilter filterWithColumn:@"name" comparison:@"=" value:@"item 1"]]];
 	[content applyFilter:nil];
 	XCTAssertEqualObjects(runner.currentDescription, @"Filtering table...");
 	[self waitForContent];

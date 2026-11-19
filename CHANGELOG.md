@@ -29,6 +29,14 @@ Upgrading from 2.0.4.
 - A PostgreSQL export's header reads "PostgreSQL database dump written by Sequel Plus", and the PostgreSQL tab's Show Console and Clear Console tooltips say Sequel Plus.
 - The MySQL tab's Show Console and Clear Console tooltips say Sequel Plus too.
 
+### PostgreSQL: filter on several columns at once, as in MySQL
+- The **Content** view's filter is now made of rows, as a MySQL tab's: each row has a column, a comparison and a value, with **−** to remove it and **+** to add one under it. Under the rows, **Reset** (⌘⎋) clears them and **Filter** applies them (so does ↩ in a value).
+- As in MySQL, with no rows the bar shows only **Add Filter**; it adds a row, and **Filter** then takes its place. A table opens with no rows; showing the filter with its toggle starts you with one empty row.
+- Every row must match (they're joined with AND). A row with no value is left out, except **IS NULL** and **IS NOT NULL**, which take none; with no complete row the table shows unfiltered. Values are still sent to the server as parameters, never written into the SQL.
+- The rows take as much room as they need, up to a third of the view; past that they scroll. Removing the last row, or Reset, empties the rows (only Add Filter shows) and shows the table unfiltered again.
+- What you type applies only when you press Filter or ↩: paging, sorting and refreshing keep the filter last applied. Hiding the filter shows the table unfiltered but keeps your rows; showing it again brings them back without running them.
+- The foreign key arrow, and opening the rows a key points to, fill the filter with that one condition, as before.
+
 ### MySQL: the Content filter's rows show again
 - In a MySQL tab's **Content** view, once the filter had been hidden (by the **Filter** toggle, or by opening a table with it off), showing it again put its rows under the bar holding **Reset**, **Add Filter** and **Filter**, so you couldn't see or edit them. The rows now sit above that bar every time, however often the filter is hidden and shown.
 

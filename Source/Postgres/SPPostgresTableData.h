@@ -160,8 +160,15 @@ __attribute__((visibility("default")))
 - (NSArray *)rowsWithFilter:(SPPostgresFilter *)filter sortColumn:(NSString *)column ascending:(BOOL)ascending
 					 offset:(NSUInteger)offset limit:(NSUInteger)limit error:(NSError **)error;
 
+/// As -rowsWithFilter:…, with every filter in filters (nil or empty for none) joined by AND, in order. Any invalid
+/// filter fails the whole load.
+- (NSArray *)rowsWithFilters:(NSArray<SPPostgresFilter *> *)filters sortColumn:(NSString *)column ascending:(BOOL)ascending
+					  offset:(NSUInteger)offset limit:(NSUInteger)limit error:(NSError **)error;
+
 /// Exact count(*) of the rows matching filter (nil for all), or -1 on failure.
 - (NSInteger)countRowsWithFilter:(SPPostgresFilter *)filter error:(NSError **)error;
+/// Exact count(*) of the rows matching every filter in filters (nil or empty for all), or -1 on failure.
+- (NSInteger)countRowsWithFilters:(NSArray<SPPostgresFilter *> *)filters error:(NSError **)error;
 
 /// Sets one column of the row identified by originalRow's primary-key values. value is an NSString or NSNull.
 /// Fails with SPPostgresErrorRowChanged when no row matched.

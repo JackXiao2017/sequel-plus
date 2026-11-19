@@ -3476,9 +3476,10 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 	//the rule editor can ask for about one-third of the available space before we have it use it's scrollbar
 	CGFloat topContainerGivenHeight = MIN(containerRequestedHeight,(availableHeight / 3));
 
-	// abort if the size didn't really change
+	// abort if the size didn't really change (the rules' scroll view included, should anything have left it off)
 	NSRect topContainerRect = [filterRuleEditorContainer frame];
-	if(topContainerGivenHeight == topContainerRect.size.height) return;
+	if(topContainerGivenHeight == topContainerRect.size.height
+	   && NSHeight(ruleEditorRect) == MAX(0, topContainerGivenHeight - ruleEditorRect.origin.y)) return;
 
 	CGFloat newBottomContainerHeight = availableHeight - topContainerGivenHeight;
 
@@ -3493,11 +3494,16 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 	// that much lower (origin 31 → 0), which the next show reads as the gap above the button bar, leaving the rows under it
 	ruleEditorRect.size.height = MAX(0, topContainerGivenHeight - ruleEditorRect.origin.y);
 
+	// The rules' scroll view keeps its height while its container resizes (no autoresizing of its height) and takes its
+	// final frame at once: animated, the container's resize also autoresized it while it animated, and whichever landed
+	// last won, which could leave the rows 0 high. Only the containers animate.
+	NSScrollView *ruleEditorScrollView = [[ruleFilterController view] enclosingScrollView];
+	[ruleEditorScrollView setAutoresizingMask:NSViewWidthSizable | NSViewMaxYMargin];
 	if(animate) {
+		[ruleEditorScrollView setFrame:ruleEditorRect];
 		[NSAnimationContext beginGrouping];
 		[[tableContentContainer animator] setFrame:bottomContainerRect];
 		[[filterRuleEditorContainer animator] setFrame:topContainerRect];
-		[[[[ruleFilterController view] enclosingScrollView] animator] setFrame:ruleEditorRect];
 		[NSAnimationContext endGrouping];
 	}
 	else {
