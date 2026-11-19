@@ -33,7 +33,8 @@ static const void *SPRequestedAutosaveNameKey = &SPRequestedAutosaveNameKey;
  *   neither AppKit ("NSSplitView Subview Frames <name>") nor SPSplitView ("SPSplitView Lengths
  *   <name>") saves or restores divider positions, so split views in tests use their built layout.
  * - Windows never save their frame (-[NSWindow saveFrameUsingName:] does nothing), and the standard defaults drop
- *   writes of "NSTableView ..." keys (column widths, order, hidden columns, sort). Loading a MySQL tab's nibs
+ *   writes of "NSTableView ..." keys (column widths, order, hidden columns, sort) and of SPLastFavoriteID (a new MySQL
+ *   tab selecting Quick Connect records 0 there, replacing the owner's last-used favorite). Loading a MySQL tab's nibs
  *   otherwise saves "NSWindow Frame MYSQL_HELP_WINDOW" / "SPExportWindow" as those windows are placed, and
  *   "NSTableView Columns v3 SPTableStructureSource" as the Structure view lays out its columns. Both are set in the
  *   nibs, not through the public setters, so the writes themselves are what's stopped. Saved frames and columns are
@@ -112,12 +113,25 @@ static const void *SPRequestedAutosaveNameKey = &SPRequestedAutosaveNameKey;
 
 @end
 
+/// Keys the standard defaults never write during tests: table column layouts, and the MySQL connection view's last
+/// favorite (a new MySQL tab selects Quick Connect, which it records as SPLastFavoriteID 0).
+static BOOL SPTestDropsWriteOfKey(NSString *key)
+{
+	return [key hasPrefix:@"NSTableView "] || [key isEqualToString:@"SPLastFavoriteID"];
+}
+
 @implementation NSUserDefaults (SPTestPrefsGuard)
 
 - (void)sp_test_setObject:(id)value forKey:(NSString *)key
 {
-	if (self == [NSUserDefaults standardUserDefaults] && [key hasPrefix:@"NSTableView "]) return; // see the comment above
+	if (self == [NSUserDefaults standardUserDefaults] && SPTestDropsWriteOfKey(key)) return; // see the comment above
 	[self sp_test_setObject:value forKey:key]; // the original implementation (swapped)
+}
+
+- (void)sp_test_setInteger:(NSInteger)value forKey:(NSString *)key
+{
+	if (self == [NSUserDefaults standardUserDefaults] && SPTestDropsWriteOfKey(key)) return;
+	[self sp_test_setInteger:value forKey:key]; // the original implementation (swapped)
 }
 
 @end
@@ -147,6 +161,8 @@ static NSString *SPTestQueryStoreDirectory = nil;
 								   class_getInstanceMethod([NSWindow class], @selector(sp_test_saveFrameUsingName:)));
 	method_exchangeImplementations(class_getInstanceMethod([NSUserDefaults class], @selector(setObject:forKey:)),
 								   class_getInstanceMethod([NSUserDefaults class], @selector(sp_test_setObject:forKey:)));
+	method_exchangeImplementations(class_getInstanceMethod([NSUserDefaults class], @selector(setInteger:forKey:)),
+								   class_getInstanceMethod([NSUserDefaults class], @selector(sp_test_setInteger:forKey:)));
 
 	// The Postgres Query tab's shared stores: on a temporary directory of this run
 	NSString *storeDirectory = [NSTemporaryDirectory() stringByAppendingPathComponent:

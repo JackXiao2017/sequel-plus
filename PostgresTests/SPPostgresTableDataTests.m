@@ -237,6 +237,84 @@
 	}
 }
 
+#pragma mark - Several conditions (AND)
+
+/// The ids (as numbers, in id order) of the rows matching every filter.
+- (NSArray *)idsOf:(SPPostgresTableData *)data filters:(NSArray *)filters
+{
+	NSError *error = nil;
+	NSArray *rows = [data rowsWithFilters:filters sortColumn:@"id" ascending:YES offset:0 limit:1000 error:&error];
+	XCTAssertNotNil(rows, @"%@", error);
+	NSMutableArray *ids = [NSMutableArray array];
+	for (NSArray *row in rows) [ids addObject:@([row[0] integerValue])];
+	return ids;
+}
+
+- (void)testTwoConditionsAreAnded
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresTableData *data = [self dataOnPort:port table:@"items"];
+		NSArray *filters = @[[SPPostgresFilter filterWithColumn:@"flags" comparison:@"=" value:@"true"],
+							 [SPPostgresFilter filterWithColumn:@"id" comparison:@">" value:@"20"]];
+		XCTAssertEqualObjects([self idsOf:data filters:filters], (@[@22, @24, @26, @28, @30]));
+		NSError *error = nil;
+		XCTAssertEqual([data countRowsWithFilters:filters error:&error], 5, @"%@", error);
+	}
+}
+
+- (void)testInBeforeEqualsNumbersParametersInOrder
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresTableData *data = [self dataOnPort:port table:@"items"];
+		// $1..$3 for the IN items, then $4 for flags: a misnumbered parameter would compare flags with "item 5"
+		NSArray *filters = @[[SPPostgresFilter filterWithColumn:@"name" comparison:@"IN" value:@"item 5, item 6, item 7"],
+							 [SPPostgresFilter filterWithColumn:@"flags" comparison:@"=" value:@"true"]];
+		XCTAssertEqualObjects([self idsOf:data filters:filters], (@[@6]));
+		NSError *error = nil;
+		XCTAssertEqual([data countRowsWithFilters:filters error:&error], 1, @"%@", error);
+	}
+}
+
+- (void)testIsNullWithAnotherCondition
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresTableData *data = [self dataOnPort:port table:@"items"];
+		XCTAssertEqualObjects(([self idsOf:data filters:@[[SPPostgresFilter filterWithColumn:@"note" comparison:@"IS NULL" value:nil],
+														   [SPPostgresFilter filterWithColumn:@"id" comparison:@"=" value:@"1"]]]), (@[@1]));
+		XCTAssertEqualObjects(([self idsOf:data filters:@[[SPPostgresFilter filterWithColumn:@"id" comparison:@"=" value:@"2"],
+														   [SPPostgresFilter filterWithColumn:@"note" comparison:@"IS NULL" value:nil]]]), (@[]));
+	}
+}
+
+- (void)testEmptyOrNilFiltersReturnAllRows
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresTableData *data = [self dataOnPort:port table:@"items"];
+		NSArray *all = [self allRowsOf:data];
+		NSError *error = nil;
+		XCTAssertEqualObjects([data rowsWithFilters:@[] sortColumn:@"id" ascending:YES offset:0 limit:1000 error:&error], all, @"%@", error);
+		XCTAssertEqualObjects([data rowsWithFilters:nil sortColumn:@"id" ascending:YES offset:0 limit:1000 error:&error], all, @"%@", error);
+		XCTAssertEqual([data countRowsWithFilters:@[] error:&error], 30, @"%@", error);
+		XCTAssertEqual([data countRowsWithFilters:nil error:&error], 30, @"%@", error);
+	}
+}
+
+- (void)testInvalidConditionFailsTheWholeLoad
+{
+	for (NSNumber *port in [SPPostgresTestServers ports]) {
+		SPPostgresTableData *data = [self dataOnPort:port table:@"items"];
+		NSArray *filters = @[[SPPostgresFilter filterWithColumn:@"id" comparison:@"=" value:@"1"],
+							 [SPPostgresFilter filterWithColumn:@"nope" comparison:@"=" value:@"1"]];
+		NSError *error = nil;
+		XCTAssertNil([data rowsWithFilters:filters sortColumn:nil ascending:YES offset:0 limit:5 error:&error]);
+		XCTAssertNotNil(error);
+		XCTAssertEqualObjects(error.domain, SPPostgresErrorDomain);
+		error = nil;
+		XCTAssertEqual([data countRowsWithFilters:filters error:&error], -1);
+		XCTAssertNotNil(error);
+	}
+}
+
 - (void)testCompositeKeyUpdateTouchesOneRow
 {
 	for (NSNumber *port in [SPPostgresTestServers ports]) {

@@ -7,6 +7,7 @@
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
 #import "../Source/Postgres/SPPostgresContentController.h"
+#import "../Source/Postgres/SPPostgresFilterRowsController.h"
 #import "../Source/Postgres/SPPostgresTableData.h"
 #import "../Source/Postgres/SPPostgresTaskRunner.h"
 #import "../Source/Postgres/SPPostgresHistory.h"
@@ -200,10 +201,12 @@ static const NSUInteger SPLinkTestPort = 55418;
 
 - (NSString *)filterBarText
 {
-	NSPopUpButton *column = [self.content valueForKey:@"filterColumnPopup"];
-	NSPopUpButton *comparison = [self.content valueForKey:@"filterComparisonPopup"];
-	NSTextField *value = [self.content valueForKey:@"filterValueField"];
-	return [NSString stringWithFormat:@"%@ %@ %@", [column titleOfSelectedItem], [comparison titleOfSelectedItem], [value stringValue]];
+	// One row per condition, "column comparison value", joined by " AND "
+	NSMutableArray *rows = [NSMutableArray array];
+	for (SPPostgresFilter *filter in [self.content.filterRows typedFilters]) {
+		[rows addObject:[NSString stringWithFormat:@"%@ %@ %@", filter.column, filter.comparison, filter.value]];
+	}
+	return [rows componentsJoinedByString:@" AND "];
 }
 
 #pragma mark - Data layer
@@ -286,8 +289,7 @@ static const NSUInteger SPLinkTestPort = 55418;
 	XCTAssertEqual([self.alerts count], 0u);
 
 	// Clearing the filter shows every row again
-	NSTextField *value = [self.content valueForKey:@"filterValueField"];
-	[value setStringValue:@""];
+	[[self.content.filterRows valueFieldInRow:0] setStringValue:@""];
 	[self.content applyFilter:nil];
 	[self waitForTab];
 	XCTAssertEqual([[self valuesOfColumn:@"id"] count], 4u);
