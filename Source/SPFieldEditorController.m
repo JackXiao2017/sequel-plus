@@ -1506,6 +1506,15 @@ typedef enum {
 
 	[self performSelector:@selector(setAllowedUndo) withObject:nil afterDelay:0.09];
 
+	// Every change the user makes is what OK saves. -textViewDidChangeSelection: only takes the text when
+	// editTextViewWasChanged is set (only with a maximum text length, which PostgreSQL's sheet doesn't set) or while the
+	// text storage still reports the edit, which it no longer does by then: typing was dropped on OK.
+	if ([aNotification object] == editTextView) {
+		[editImage setImage:nil];
+		[hexTextView setString:@""];
+		if (sheetEditData != nil) [sheetEditData release];
+		sheetEditData = [[NSString stringWithString:[editTextView string]] retain];
+	}
 }
 
 #pragma mark -
