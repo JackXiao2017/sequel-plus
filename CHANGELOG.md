@@ -37,6 +37,10 @@ Upgrading from 2.0.4.
 - What you type applies only when you press Filter or ↩: paging, sorting and refreshing keep the filter last applied. Hiding the filter shows the table unfiltered but keeps your rows; showing it again brings them back without running them.
 - The foreign key arrow, and opening the rows a key points to, fill the filter with that one condition, as before.
 
+### PostgreSQL: editing a very large value no longer hangs the app
+- In the **Content** view, starting to edit a cell holding a very large value (a few MB of text) left the app not responding: the in-cell editor lays the whole value out as one line. A value over 10,000 characters now opens in the field editor sheet instead, as in the Query results; shorter values still edit in the cell.
+- What you type in the PostgreSQL field editor sheet is now always what **OK** saves. Before, the sheet could return the value as it was opened, dropping your edit.
+
 ### MySQL: the Content filter's rows show again
 - In a MySQL tab's **Content** view, once the filter had been hidden (by the **Filter** toggle, or by opening a table with it off), showing it again put its rows under the bar holding **Reset**, **Add Filter** and **Filter**, so you couldn't see or edit them. The rows now sit above that bar every time, however often the filter is hidden and shown.
 

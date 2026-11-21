@@ -24,6 +24,8 @@ static const CGFloat SPPostgresContentButtonWidth = 32;
 static const CGFloat SPPostgresContentMinColumnWidth = 40;
 static const CGFloat SPPostgresContentMaxColumnWidth = 300;
 static const NSUInteger SPPostgresContentWidthSampleRows = 100;
+/// Longer string values open in the field editor sheet rather than the in-cell editor (SPPostgresQueryDisplayLimit too).
+static const NSUInteger SPPostgresContentInCellEditLimit = 10000;
 
 static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContext;
@@ -533,6 +535,19 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 - (BOOL)_editsInSheet
 {
 	return [defaults boolForKey:SPEditInSheetEnabled];
+}
+
+/// A value too long for the in-cell editor (over SPPostgresContentInCellEditLimit characters, as the Query results'
+/// grid): that editor lays the whole value out as one line, and a few MB of it hangs the app. It opens in the field
+/// editor sheet instead.
+- (BOOL)_isLongValueInTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
+{
+	if (rowIndex < 0 || (NSUInteger)rowIndex >= [rows count]) return NO;
+	NSInteger index = [[tableColumn identifier] integerValue];
+	NSArray *row = [rows objectAtIndex:(NSUInteger)rowIndex];
+	if (index < 0 || (NSUInteger)index >= [row count]) return NO;
+	id value = [row objectAtIndex:(NSUInteger)index];
+	return [value isKindOfClass:[NSString class]] && [(NSString *)value length] > SPPostgresContentInCellEditLimit;
 }
 
 - (NSString *)_nullPlaceholder
@@ -1695,7 +1710,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 - (BOOL)tableView:(NSTableView *)theTableView shouldEditTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
 {
 	if (invalidated || [taskRunner isBusy]) return NO;
-	if ([self _editsInSheet]) {
+	if ([self _editsInSheet] || [self _isLongValueInTableColumn:tableColumn row:rowIndex]) {
 		[self _editInSheetTableColumn:tableColumn row:rowIndex];
 		return NO;
 	}

@@ -46,6 +46,18 @@ static NSString * const SPDateTimePickerSuiteName = @"SPPostgresDateTimePickerTe
 {
 	self.continueAfterFailure = NO;
 	self.alerts = [NSMutableArray array];
+	// In-place editing (the pickers' path) whatever the saved "edit in sheet" choice: pinned in the volatile argument
+	// domain, never written to the real preferences
+	NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+	NSDictionary *original = [prefs volatileDomainForName:NSArgumentDomain] ?: @{};
+	NSMutableDictionary *domain = [original mutableCopy];
+	domain[@"EditInSheetEnabled"] = @NO;
+	[prefs removeVolatileDomainForName:NSArgumentDomain];
+	[prefs setVolatileDomain:domain forName:NSArgumentDomain];
+	[self addTeardownBlock:^{
+		[prefs removeVolatileDomainForName:NSArgumentDomain];
+		[prefs setVolatileDomain:original forName:NSArgumentDomain];
+	}];
 	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPDateTimePickerTestPort];
 	[admin execute:@"DROP TABLE IF EXISTS public.sp_dtp_dates"];
 	XCTAssertNotNil([admin execute:@"CREATE TABLE public.sp_dtp_dates (id integer PRIMARY KEY, d date, t time, ttz timetz, ts timestamp(3), tstz timestamptz NOT NULL)"], @"%@", admin.lastError.errorPrimaryMessage);

@@ -837,6 +837,37 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 	XCTAssertEqual(calls.count, 0u);
 }
 
+/// A value over 10,000 characters opens the field editor sheet even with sheet mode off, as the Query results' grid:
+/// the in-cell editor lays the whole value out as one line, and a few MB of it hung the app for minutes.
+- (void)testLongValueOpensSheetWhenSheetModeOff
+{
+	XCTAssertNotNil([self.other execute:@"UPDATE content_test.items SET note = repeat('x', 3000000) WHERE id = 1"]);
+	XCTAssertNotNil([self.other execute:@"UPDATE content_test.items SET note = repeat('y', 10000) WHERE id = 2"]);
+	XCTAssertNotNil([self.other execute:@"UPDATE content_test.items SET note = repeat('z', 10001) WHERE id = 3"]);
+	SPContentBarStatementRecorder *recorder = [[SPContentBarStatementRecorder alloc] init];
+	SPPostgresContentController *content = [self recordedContentShowing:@"items" recorder:recorder sheetMode:NO];
+	NSMutableArray<SPContentBarSheetCall *> *calls = [self recordSheetsOf:content];
+
+	XCTAssertTrue([self content:content shouldEditRow:1 column:@"note"], @"10,000 characters: still in the cell");
+	XCTAssertEqual(calls.count, 0u);
+
+	XCTAssertFalse([self content:content shouldEditRow:2 column:@"note"]);
+	XCTAssertEqual(calls.count, 1u);
+	XCTAssertEqual(calls[0].value.length, 10001u);
+	calls[0].completion(nil);
+
+	XCTAssertFalse([self content:content shouldEditRow:0 column:@"note"]);
+	XCTAssertEqual(calls.count, 2u);
+	XCTAssertEqual(calls[1].value.length, 3000000u, @"the whole value, not a cut one");
+	XCTAssertTrue(calls[1].editable);
+	calls[1].completion([calls[1].value stringByAppendingString:@"!"]);
+	XCTAssertEqualObjects([self serverValue:@"SELECT length(note) FROM content_test.items WHERE id = 1"], @3000001);
+
+	// Short values still edit in the cell
+	XCTAssertTrue([self content:content shouldEditRow:0 column:@"name"]);
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
 #pragma mark - Filter bar show/hide
 
 /// Scratch preferences (never the saved ones) with the filter bar visibility unset; removed in tearDown.
