@@ -3812,4 +3812,83 @@ static NSString * const SPDocumentTestToolbarQuery = @"SwitchToRunQueryToolbarIt
 	XCTAssertEqual(alerts.count, 0u, @"%@", alerts.firstObject.informativeText);
 }
 
+#pragma mark - Reconnecting
+
+/// Ends the tab connection's server session from another connection (a server restart or an idle timeout).
+- (void)dropTabConnection
+{
+	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPPostgresDocumentTestPort];
+	NSString *sql = [NSString stringWithFormat:@"SELECT pg_terminate_backend(%lu)", (unsigned long)[self.connection serverProcessId]];
+	XCTAssertNotNil([admin execute:sql]);
+	[NSThread sleepForTimeInterval:0.2];
+}
+
+- (void)testDocumentIsTheRunnersConnectionDelegate
+{
+	XCTAssertEqual((id)self.document.taskRunner.connectionDelegate, self.document);
+}
+
+- (void)testDroppedConnectionReconnectsOnNextLoad
+{
+	NSMutableArray<NSAlert *> *alerts = [NSMutableArray array];
+	self.document.alertPresenter = ^(NSAlert *alert) { [alerts addObject:alert]; };
+	__block NSUInteger asked = 0;
+	self.document.connectionLostPresenter = ^(NSAlert *alert, void (^completion)(BOOL)) { asked++; completion(NO); };
+	self.document.taskRunner.idleCheckInterval = 0;
+	NSUInteger oldProcess = [self.connection serverProcessId];
+	[self dropTabConnection];
+
+	[self.document.sidebar refreshTables:nil];
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertTrue([self.connection isConnected]);
+	XCTAssertNotEqual([self.connection serverProcessId], oldProcess);
+	XCTAssertEqual(asked, 0u, @"reconnected silently");
+	XCTAssertEqual(alerts.count, 0u, @"%@", [alerts.firstObject informativeText]);
+}
+
+- (void)testLostSheetReconnect
+{
+	__block NSAlert *shown = nil;
+	__block void (^answer)(BOOL) = nil;
+	self.document.connectionLostPresenter = ^(NSAlert *alert, void (^completion)(BOOL)) { shown = alert; answer = completion; };
+	self.document.taskRunner.idleCheckInterval = 0;
+	NSUInteger port = self.connection.port;
+	[self dropTabConnection];
+	self.connection.port = 1; // nothing listens there: the silent attempt fails
+
+	[self.document.sidebar refreshTables:nil];
+	NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:20];
+	while (!shown && [deadline timeIntervalSinceNow] > 0) [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+	XCTAssertNotNil(shown);
+	XCTAssertEqualObjects(shown.messageText, @"The connection to the PostgreSQL server was lost");
+	XCTAssertGreaterThan(shown.informativeText.length, 0u);
+	XCTAssertEqualObjects([shown.buttons valueForKey:@"title"], (@[@"Reconnect", @"Disconnect"]));
+
+	self.connection.port = port;
+	answer(YES);
+	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
+	XCTAssertTrue([self.connection isConnected]);
+	XCTAssertNotNil([self.connection execute:@"SELECT 1"]);
+}
+
+- (void)testLostSheetDisconnectClosesTheTab
+{
+	SPPostgresDocument *other = [self addNamesakeOnDatabase:@"pgkit_test" select:NO];
+	__block NSUInteger asked = 0;
+	self.document.connectionLostPresenter = ^(NSAlert *alert, void (^completion)(BOOL)) { asked++; completion(NO); };
+	self.document.taskRunner.idleCheckInterval = 0;
+	[self dropTabConnection];
+	self.connection.port = 1;
+
+	[self.document.sidebar refreshTables:nil];
+	NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:20];
+	while ([[self tabView] numberOfTabViewItems] > 1 && [deadline timeIntervalSinceNow] > 0) {
+		[[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+	}
+	XCTAssertEqual(asked, 1u);
+	XCTAssertEqual([[self tabView] numberOfTabViewItems], 1);
+	XCTAssertEqual([[[self tabView] tabViewItems].firstObject identifier], other);
+	XCTAssertTrue(self.document.taskRunner.isInvalidated, @"the closed tab's runner runs nothing more");
+}
+
 @end

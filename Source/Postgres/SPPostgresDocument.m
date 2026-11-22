@@ -74,7 +74,7 @@ NSString * const SPPostgresPaneQuery = @"query";
 NSString * const SPPostgresPaneSequence = @"sequence";
 NSString * const SPPostgresPaneExtension = @"extension";
 
-@interface SPPostgresDocument () <SPPostgresSidebarControllerDelegate, SPPostgresExtensionControllerDelegate>
+@interface SPPostgresDocument () <SPPostgresSidebarControllerDelegate, SPPostgresExtensionControllerDelegate, SPPostgresTaskRunnerConnectionDelegate>
 
 @property (readwrite) BOOL isProcessing;
 @property (readwrite, assign) SPWindowController *parentWindowController;
@@ -333,6 +333,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 @synthesize favorite;
 @synthesize alertPresenter;
 @synthesize confirmationPresenter;
+@synthesize connectionLostPresenter;
 @synthesize connectionProvider;
 @synthesize openRelationConnectorFactory;
 @synthesize usersController;
@@ -505,6 +506,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 		[taskRunner removeObserver:self forKeyPath:@"busy" context:SPPostgresDocumentRunnerContext];
 		observingRunner = NO;
 	}
+	if ([taskRunner connectionDelegate] == self) [taskRunner setConnectionDelegate:nil];
 	[taskDisplay invalidate];
 	[taskDisplay release];
 	taskDisplay = nil;
@@ -513,6 +515,9 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[self _dropPendingCreateSyntax];
 	[taskRunner release];
 	taskRunner = [runner retain];
+
+	// A connection found dead before a load is reconnected (see the SPPostgresTaskRunnerConnectionDelegate methods)
+	[taskRunner setConnectionDelegate:self];
 
 	if (taskRunner) {
 		[taskRunner addObserver:self forKeyPath:@"busy" options:0 context:SPPostgresDocumentRunnerContext];
@@ -1904,7 +1909,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 
 /**
  * A catalog query failed (the lists keep what they showed). Shown once per failed reload; when the
- * connection is gone, says so (reconnecting is not offered in this version).
+ * connection is gone, says so (the tab's runner reconnects before its next load).
  */
 - (void)_reportCatalogError:(NSError *)error
 {
@@ -1916,7 +1921,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	NSString *advice;
 	if (![connection isConnected]) {
 		[alert setMessageText:NSLocalizedString(@"The connection to the PostgreSQL server was lost", @"PostgreSQL window: connection lost title")];
-		advice = NSLocalizedString(@"The lists show what was loaded before the connection was lost. Close this tab and connect again.", @"PostgreSQL tab: connection lost advice");
+		advice = NSLocalizedString(@"The lists show what was loaded before the connection was lost. Sequel Plus reconnects when you next use this tab.", @"PostgreSQL tab: connection lost advice");
 	}
 	else {
 		[alert setMessageText:NSLocalizedString(@"Could not load the database objects", @"PostgreSQL window: catalog query failed title")];
@@ -1925,6 +1930,93 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	[alert setInformativeText:[detail length] ? [NSString stringWithFormat:@"%@\n\n%@", detail, advice] : advice];
 
 	[self _presentAlert:alert];
+}
+
+#pragma mark - Reconnecting (SPPostgresTaskRunnerConnectionDelegate)
+
+- (void)taskRunner:(SPPostgresTaskRunner *)runner prepareReconnectForcing:(BOOL)force completion:(void (^)(NSError *error))completion
+{
+	if (tornDown || runner != taskRunner || !connector) {
+		void (^copied)(NSError *) = [[completion copy] autorelease];
+		dispatch_async(dispatch_get_main_queue(), ^{ copied(nil); });
+		return;
+	}
+	// An SSH favorite's tunnel died with the connection: reopened (its sheets on this window) before reconnecting
+	[connector reopenTunnelOnWindow:parentWindow force:force completion:completion];
+}
+
+- (void)taskRunner:(SPPostgresTaskRunner *)runner connectionLost:(NSString *)reason transactionLost:(BOOL)transactionLost
+		  decision:(void (^)(BOOL reconnect))decision
+{
+	// A heap copy that runs once (a presenter may keep it), as -_confirm:completion:'s
+	void (^original)(BOOL) = [[decision copy] autorelease];
+	BOOL ownRunner = runner == taskRunner; // only this tab's own runner's Disconnect closes it
+	__block BOOL done = NO;
+	__block void (^once)(BOOL) = nil;
+	once = Block_copy(^(BOOL reconnect) {
+		if (done) return;
+		done = YES;
+		original(reconnect);
+		// As MySQL's Disconnect: the tab closes (the runner gives up the waiting loads first)
+		if (!reconnect && ownRunner && !tornDown) {
+			dispatch_async(dispatch_get_main_queue(), ^{
+				[self _closeOwnTab];
+			});
+		}
+		[(id)once autorelease];
+	});
+
+	if (tornDown || runner != taskRunner) {
+		once(NO);
+		return;
+	}
+
+	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+	[alert setAlertStyle:NSAlertStyleWarning];
+	[alert setMessageText:NSLocalizedString(@"The connection to the PostgreSQL server was lost", @"PostgreSQL window: connection lost title")];
+	NSString *text = [reason stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] ?: @"";
+	if (transactionLost) {
+		NSString *lost = NSLocalizedString(@"The open transaction was rolled back: its changes were not saved.", @"PostgreSQL tab: connection lost with an open transaction");
+		text = [text length] ? [NSString stringWithFormat:@"%@\n\n%@", text, lost] : lost;
+	}
+	[alert setInformativeText:text];
+	[alert addButtonWithTitle:NSLocalizedString(@"Reconnect", @"PostgreSQL tab: connection lost, reconnect button")];
+	[alert addButtonWithTitle:NSLocalizedString(@"Disconnect", @"PostgreSQL tab: connection lost, disconnect button")];
+
+	if (connectionLostPresenter) {
+		connectionLostPresenter(alert, once);
+		return;
+	}
+	if (!parentWindow) {
+		once([alert runModal] == NSAlertFirstButtonReturn);
+		return;
+	}
+	// The tab in front, as MySQL brings its tab forward for its connection error sheet
+	if (parentTabViewItem && [[parentTabViewItem tabView] selectedTabViewItem] != parentTabViewItem) {
+		[[parentTabViewItem tabView] selectTabViewItem:parentTabViewItem];
+	}
+	[alert beginSheetModalForWindow:parentWindow completionHandler:^(NSModalResponse response) {
+		once(response == NSAlertFirstButtonReturn);
+	}];
+}
+
+- (void)taskRunnerDidReconnect:(SPPostgresTaskRunner *)runner
+{
+	if (tornDown || runner != taskRunner) return;
+	[logger logNote:NSLocalizedString(@"Reconnected to the server", @"PostgreSQL console: the tab's connection was re-established")];
+}
+
+/// Closes this tab as File ▸ Close Tab does (the window, when it is the last tab).
+- (void)_closeOwnTab
+{
+	if (tornDown) return;
+	NSTabView *tabView = [parentTabViewItem tabView];
+	if (!tabView || !parentWindowController) {
+		[self _tearDown];
+		return;
+	}
+	if ([tabView selectedTabViewItem] != parentTabViewItem) [tabView selectTabViewItem:parentTabViewItem];
+	[parentWindowController closeTab:nil];
 }
 
 #pragma mark - Teardown
@@ -1997,6 +2089,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 		observingRunner = NO;
 	}
 	SPPostgresConnector *theConnector = connector;
+	[taskRunner setConnectionDelegate:nil];
 	[taskRunner invalidateWithCompletion:^{
 		[theConnector disconnect];
 	}];
@@ -2040,6 +2133,8 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	alertPresenter = nil;
 	[confirmationPresenter release];
 	confirmationPresenter = nil;
+	[connectionLostPresenter release];
+	connectionLostPresenter = nil;
 	[pendingAlert release];
 	pendingAlert = nil;
 	// A question waiting for the tab to be idle (it retains self)

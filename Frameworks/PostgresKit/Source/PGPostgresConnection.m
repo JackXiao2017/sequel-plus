@@ -116,6 +116,7 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 @synthesize timeout = _timeout;
 @synthesize useKeepAlive = _useKeepAlive;
 @synthesize keepAliveInterval = _keepAliveInterval;
+@synthesize lastKnownTransactionStatus = _lastKnownTransactionStatus;
 @synthesize lastQueryWasCancelled = _lastQueryWasCancelled;
 @synthesize lastError = _lastError;
 @synthesize encoding = _encoding;
@@ -246,39 +247,49 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 - (BOOL)isConnected 
 {
 	// Not connected until the background poll has applied the session settings, so callers never
-	// query the PGconn concurrently with the poller.
+	// query the PGconn concurrently with the poller. The lock: the thread using the connection may close a dead
+	// session at any moment (-pingWithTimeout:, -reestablishConnection), which frees the PGconn.
 	@synchronized (self) {
 		if (_sessionPending) return NO;
+		
+		if (!_connection) return NO;
+		
+		return PQstatus(_connection) == CONNECTION_OK;
 	}
-	
-	if (!_connection) return NO;
-	
-	return PQstatus(_connection) == CONNECTION_OK;
 }
 
 - (PGPostgresTransactionStatus)transactionStatus
 {
-	if (![self isConnected]) return PGPostgresTransactionUnknown;
-	
-	switch (PQtransactionStatus(_connection))
-	{
-		case PQTRANS_IDLE:    return PGPostgresTransactionIdle;
-		case PQTRANS_ACTIVE:  return PGPostgresTransactionActive;
-		case PQTRANS_INTRANS: return PGPostgresTransactionInTransaction;
-		case PQTRANS_INERROR: return PGPostgresTransactionInError;
-		default:              return PGPostgresTransactionUnknown;
+	@synchronized (self) {
+		if (![self isConnected]) return PGPostgresTransactionUnknown;
+		
+		switch (PQtransactionStatus(_connection))
+		{
+			case PQTRANS_IDLE:    return PGPostgresTransactionIdle;
+			case PQTRANS_ACTIVE:  return PGPostgresTransactionActive;
+			case PQTRANS_INTRANS: return PGPostgresTransactionInTransaction;
+			case PQTRANS_INERROR: return PGPostgresTransactionInError;
+			default:              return PGPostgresTransactionUnknown;
+		}
 	}
 }
 
 - (NSString *)libpqErrorMessage
 {
-	if (!_connection) return nil;
+	NSString *string = nil;
 	
-	const char *message = PQerrorMessage(_connection);
+	// Copied under the lock: the message lives in the PGconn, which a dead session's close frees
+	@synchronized (self) {
+		if (!_connection) return nil;
+		
+		const char *message = PQerrorMessage(_connection);
+		
+		if (!message || !*message) return nil;
+		
+		string = [NSString stringWithUTF8String:message];
+	}
 	
-	if (!message || !*message) return nil;
-	
-	NSString *string = [[NSString stringWithUTF8String:message] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	string = [string stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 	
 	return [string length] ? string : nil;
 }
@@ -311,9 +322,11 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 	
 	[self cancelCurrentQuery:nil];
 	
-	PQfinish(_connection);
-	
-	_connection = nil;
+	@synchronized (self) {
+		PQfinish(_connection);
+		
+		_connection = nil;
+	}
 	
 	if (_delegate && [_delegate respondsToSelector:@selector(connectionDisconnected:)]) {
 		[_delegate connectionDisconnected:self];
@@ -411,6 +424,234 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 	[self performSelectorInBackground:@selector(_pollConnection:) withObject:[NSNumber numberWithBool:YES]];
 	
 	return YES;
+}
+
+- (void)_noteTransactionStatus
+{
+	PGPostgresTransactionStatus status = [self transactionStatus];
+	
+	// Unknown: the session is gone (the last known state stays); active: mid-statement
+	if (status == PGPostgresTransactionUnknown || status == PGPostgresTransactionActive) return;
+	
+	self.lastKnownTransactionStatus = status;
+}
+
+- (BOOL)pingWithTimeout:(NSTimeInterval)timeout
+{
+	@synchronized (self) {
+		if (_connecting) return NO;
+	}
+	if (!_connection) return NO;
+	
+	NSString *failure = nil;
+	
+	if (PQstatus(_connection) != CONNECTION_OK || !PQsendQuery(_connection, "")) {
+		failure = [self libpqErrorMessage];
+	}
+	else {
+		NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
+		BOOL answered = NO;
+		
+		while (!failure)
+		{
+			if (!PQconsumeInput(_connection)) {
+				failure = [self libpqErrorMessage];
+				break;
+			}
+			
+			if (!PQisBusy(_connection)) {
+				answered = YES;
+				break;
+			}
+			
+			NSTimeInterval remaining = [deadline timeIntervalSinceNow];
+			
+			if (remaining <= 0) {
+				failure = [NSString stringWithFormat:@"The server did not answer within %.0f seconds.", timeout];
+				break;
+			}
+			
+			int sock = PQsocket(_connection);
+			
+			if (sock == -1) {
+				failure = [self libpqErrorMessage];
+				break;
+			}
+			
+			struct pollfd fdinfo[1];
+			
+			fdinfo[0].fd = sock;
+			fdinfo[0].events = POLLIN;
+			
+			int ready = poll(fdinfo, 1, (int)ceil(MIN(remaining, 1.0) * 1000));
+			
+			if (ready < 0 && errno != EINTR) failure = [NSString stringWithUTF8String:strerror(errno)];
+		}
+		
+		if (answered) {
+			// Every PQgetResult waits until libpq has the whole next message, so each one is only called once
+			// PQisBusy says it won't block: the final ReadyForQuery is waited for within the same deadline
+			BOOL empty = NO;
+			
+			while (!failure)
+			{
+				if (!PQconsumeInput(_connection)) {
+					failure = [self libpqErrorMessage];
+					break;
+				}
+				
+				if (!PQisBusy(_connection)) {
+					PGresult *result = PQgetResult(_connection);
+					
+					if (!result) break;
+					
+					if (PQresultStatus(result) == PGRES_EMPTY_QUERY) empty = YES;
+					
+					PQclear(result);
+					
+					continue;
+				}
+				
+				NSTimeInterval remaining = [deadline timeIntervalSinceNow];
+				
+				if (remaining <= 0) {
+					failure = [NSString stringWithFormat:@"The server did not answer within %.0f seconds.", timeout];
+					break;
+				}
+				
+				struct pollfd fdinfo[1];
+				
+				fdinfo[0].fd = PQsocket(_connection);
+				fdinfo[0].events = POLLIN;
+				
+				if (fdinfo[0].fd == -1) {
+					failure = [self libpqErrorMessage];
+					break;
+				}
+				
+				int ready = poll(fdinfo, 1, (int)ceil(MIN(remaining, 1.0) * 1000));
+				
+				if (ready < 0 && errno != EINTR) failure = [NSString stringWithUTF8String:strerror(errno)];
+			}
+			
+			if (!failure && (!empty || PQstatus(_connection) != CONNECTION_OK)) failure = [self libpqErrorMessage];
+		}
+	}
+	
+	if (!failure && PQstatus(_connection) == CONNECTION_OK) return YES;
+	
+	// The session is dead: close it now, keeping why. Left open, a later -disconnect would first send a cancel
+	// request (PQcancel, a new connection to the server), which blocks while the network is silent.
+	[self _setConnectionError:[failure length] ? failure : @"The connection to the server was lost."];
+	
+	@synchronized (self) {
+		PQfinish(_connection);
+		
+		_connection = NULL;
+	}
+	
+	return NO;
+}
+
+- (BOOL)reestablishConnection
+{
+	@synchronized (self) {
+		if (_connecting) return NO;
+		
+		_connecting = YES;
+		_sessionPending = YES;
+	}
+	
+	@synchronized (self) {
+		if (_connection) PQfinish(_connection);
+		
+		_connection = NULL;
+	}
+	
+	[self _setConnectionError:nil];
+	[self _createConnectionParameters];
+	
+	PGconn *conn = PQconnectdbParams(_connectionParamNames, _connectionParamValues, 0);
+	NSString *error = nil;
+	
+	if (!conn || PQstatus(conn) != CONNECTION_OK) {
+		const char *message = conn ? PQerrorMessage(conn) : NULL;
+		
+		error = (message && *message) ? [NSString stringWithUTF8String:message] : @"Connection failed";
+		
+		if (conn) PQfinish(conn);
+		
+		conn = NULL;
+	}
+	
+	if (conn) {
+		@synchronized (self) {
+			_connection = conn;
+		}
+		
+		// As -_pollConnection: does after a connect
+		PQsetErrorVerbosity(_connection, PQERRORS_VERBOSE);
+		PQsetNoticeProcessor(_connection, _PGPostgresConnectionNoticeProcessor, self);
+		
+		error = [self _applySessionSettings];
+		
+		if (error) {
+			@synchronized (self) {
+				PQfinish(_connection);
+				
+				_connection = NULL;
+			}
+		}
+	}
+	
+	if (error) {
+		[self _setConnectionError:[error stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]];
+		
+		@synchronized (self) {
+			_connecting = NO;
+			_sessionPending = NO;
+		}
+		
+		return NO;
+	}
+	
+	@synchronized (self) {
+		_sessionPending = NO;
+	}
+	
+	[self _loadDatabaseParameters];
+	
+	self.lastKnownTransactionStatus = PGPostgresTransactionIdle;
+	
+	@synchronized (self) {
+		_connecting = NO;
+	}
+	
+	return [self isConnected];
+}
+
+- (NSString *)libpqOption:(NSString *)keyword
+{
+	if (![self isConnected] || !keyword) return nil;
+	
+	PQconninfoOption *options = PQconninfo(_connection);
+	
+	if (!options) return nil;
+	
+	NSString *value = nil;
+	
+	for (PQconninfoOption *option = options; option->keyword; option++)
+	{
+		if (strcmp(option->keyword, [keyword UTF8String]) == 0) {
+			if (option->val) value = [NSString stringWithUTF8String:option->val];
+			
+			break;
+		}
+	}
+	
+	PQconninfoFree(options);
+	
+	return value;
 }
 
 /**
@@ -671,7 +912,9 @@ static NSString *_PGCopyErrorMessage(const PGresult *result)
 	}
 	
 	// The extended protocol (no parameters) runs a single statement
+	[self _noteTransactionStatus];
 	PGresult *result = PQexecParams(_connection, [sql UTF8String], 0, NULL, NULL, NULL, NULL, 0);
+	[self _noteTransactionStatus];
 	
 	if (!result) {
 		if (error) *error = _PGConnectionError(PGConnectionErrorServer, [self libpqErrorMessage]);
@@ -1033,8 +1276,8 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 	if (_connectionParamNames) free(_connectionParamNames);
 	if (_connectionParamValues) free(_connectionParamValues);
 	
-	// Application name, port, client encoding, keep alive and keep alive interval are always set
-	int paramCount = 5;
+	// Application name, port, client encoding, keep alive, its interval, idle time and probe count are always set
+	int paramCount = 7;
 	
 	if (_user && [_user length]) paramCount++, hasUser = YES;
 	if (_host && [_host length]) paramCount++, hasHost = YES;
@@ -1073,8 +1316,16 @@ static void _PGPostgresConnectionNoticeProcessor(void *arg, const char *message)
 	_connectionParamNames[4] = PGPostgresKeepAliveIntervalParam;
 	_connectionParamValues[4] = [[[NSNumber numberWithUnsignedInteger:_keepAliveInterval] stringValue] UTF8String];
 	
+	// The first probe after this long idle (libpq's default is the system's, 2 hours on macOS: long enough for a
+	// router, firewall or load balancer to drop an idle connection unnoticed)
+	_connectionParamNames[5] = PGPostgresKeepAliveIdleParam;
+	_connectionParamValues[5] = [[[NSNumber numberWithUnsignedInteger:_keepAliveInterval] stringValue] UTF8String];
+	
+	_connectionParamNames[6] = PGPostgresKeepAliveCountParam;
+	_connectionParamValues[6] = [[[NSNumber numberWithUnsignedInteger:PGPostgresConnectionKeepAliveCount] stringValue] UTF8String];
+	
 	// The session settings the type handlers need are applied after connecting (see -_applySessionSettings)
-	NSUInteger i = 5;
+	NSUInteger i = 7;
 	
 	if (hasUser) {
 		_connectionParamNames[i] = PGPostgresUserParam;

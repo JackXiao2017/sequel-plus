@@ -37,6 +37,12 @@ Upgrading from 2.0.4.
 - What you type applies only when you press Filter or ↩: paging, sorting and refreshing keep the filter last applied. Hiding the filter shows the table unfiltered but keeps your rows; showing it again brings them back without running them.
 - The foreign key arrow, and opening the rows a key points to, fill the filter with that one condition, as before.
 
+### PostgreSQL: idle connections stay up, and reconnect as MySQL's do
+- A PostgreSQL tab left alone for a while could be dropped silently by a router, firewall, VPN or cloud load balancer: the next action (say, opening Content) then waited about 2 minutes and failed with "SSL error: unexpected eof while reading". PostgreSQL connections now send TCP keep-alives as set in **Preferences ▸ Network ▸ Keep connection alive** (every 60 seconds by default), as MySQL connections do; before, the first one waited for macOS's default of 2 hours.
+- Before a load after 30 seconds unused, the tab checks its connection (giving up after 10 seconds instead of 2 minutes). A dropped connection is reconnected by itself, reopening the SSH tunnel first when it went down too, and the load then runs. The Console notes the reconnect.
+- If that fails, a sheet as MySQL's: "The connection to the PostgreSQL server was lost", with the reason, **Reconnect** (try again) and **Disconnect** (close the tab). If the lost session had a transaction open, the sheet comes first and says its changes were rolled back, so nothing is reconnected behind your back.
+- A statement that fails because the connection dropped while it ran is not run again (it might already have changed data); the next action reconnects.
+
 ### PostgreSQL: editing a very large value no longer hangs the app
 - In the **Content** view, starting to edit a cell holding a very large value (a few MB of text) left the app not responding: the in-cell editor lays the whole value out as one line. A value over 10,000 characters now opens in the field editor sheet instead, as in the Query results; shorter values still edit in the cell.
 - What you type in the PostgreSQL field editor sheet is now always what **OK** saves. Before, the sheet could return the value as it was opened, dropping your edit.

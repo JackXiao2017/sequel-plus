@@ -22,6 +22,7 @@
 extern const NSUInteger PGPostgresConnectionDefaultTimeout;
 extern const NSUInteger PGPostgresConnectionDefaultServerPort;
 extern const NSUInteger PGPostgresConnectionDefaultKeepAlive;
+extern const NSUInteger PGPostgresConnectionKeepAliveCount;
 
 extern NSString *PGPostgresConnectionDefaultEncoding;
 extern NSString *PGPostgresConnectionErrorDomain;
@@ -45,6 +46,8 @@ extern const char *PGPostgresDatabaseParam;
 extern const char *PGPostgresClientEncodingParam;
 extern const char *PGPostgresKeepAliveParam;
 extern const char *PGPostgresKeepAliveIntervalParam;
+extern const char *PGPostgresKeepAliveIdleParam;
+extern const char *PGPostgresKeepAliveCountParam;
 extern const char *PGPostgresConnectTimeoutParam;
 extern const char *PGPostgresSSLModeParam;
 extern const char *PGPostgresSSLRootCertParam;

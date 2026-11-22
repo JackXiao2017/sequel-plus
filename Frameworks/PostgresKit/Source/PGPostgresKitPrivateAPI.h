@@ -26,6 +26,11 @@
 
 - (PGconn *)postgresConnection;
 
+@property (atomic, readwrite) PGPostgresTransactionStatus lastKnownTransactionStatus;
+
+/// Records -transactionStatus in lastKnownTransactionStatus while the session is alive (around each statement).
+- (void)_noteTransactionStatus;
+
 @end
 
 @interface PGPostgresConnection (PGPostgresConnectionQueryPreparationPrivateAPI)

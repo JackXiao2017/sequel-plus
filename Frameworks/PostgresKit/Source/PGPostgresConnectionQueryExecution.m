@@ -122,7 +122,9 @@ PGQueryParamData;
 		[_delegate connection:self willExecute:sql withValues:nil];
 	}
 
+	[self _noteTransactionStatus];
 	PGresult *pgResult = PQexec(_connection, [sql UTF8String]);
+	[self _noteTransactionStatus];
 
 	BOOL discardedCopyOutput = NO;
 
@@ -242,6 +244,8 @@ PGQueryParamData;
 	// Execute the command - return data as text
 	PGresult *pgResult = nil;
 	
+	[self _noteTransactionStatus];
+	
 	if ([query isKindOfClass:[NSString class]]) {
 		
 		pgResult = PQexecParams(_connection, 
@@ -277,6 +281,8 @@ PGQueryParamData;
 	}
 	
 	[self _destroyParamDataStructure:paramData];
+	
+	[self _noteTransactionStatus];
 	
 	BOOL discardedCopyOutput = NO;
 	
