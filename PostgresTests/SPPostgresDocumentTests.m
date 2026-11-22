@@ -1303,6 +1303,8 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	XCTAssertTrue([databases containsObject:@"pgkit_nopublic"]);
 	XCTAssertEqual(alerts.count, 0u);
 
+	// The runner's reconnect check is off: this covers a drop found by the work itself, which is reported
+	[self.document.taskRunner setConnectionDelegate:nil];
 	[self.connection disconnect];
 
 	// Schema change: tables and views both fail, reported once
@@ -1358,6 +1360,8 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 - (void)testCatalogFailureShowsSheetOnWindow
 {
 	[self.controller showWindow:nil];
+	// The runner's reconnect check is off: this covers a drop found by the work itself, which is reported
+	[self.document.taskRunner setConnectionDelegate:nil];
 	[self.connection disconnect];
 	[self.document refreshDatabases:nil];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
@@ -1372,6 +1376,8 @@ static const NSUInteger SPPostgresDocumentTestPort = 55418;
 	[self.controller addNewConnection];
 	XCTAssertNotEqual([self.controller selectedDocument], self.document);
 
+	// The runner's reconnect check is off: this covers a drop found by the work itself, which is reported
+	[self.document.taskRunner setConnectionDelegate:nil];
 	[self.connection disconnect];
 	[self.document refreshDatabases:nil];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.document.taskRunner timeout:30]);
