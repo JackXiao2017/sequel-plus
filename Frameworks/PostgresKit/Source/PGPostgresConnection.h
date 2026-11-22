@@ -110,6 +110,8 @@ PGConnectionErrorCode;
 	
 	unsigned long long _lastQueryAffectedRowCount;
 	
+	PGPostgresTransactionStatus _lastKnownTransactionStatus;
+	
 	BOOL _useSocket;
 	BOOL _useKeepAlive;
 	BOOL _lastQueryWasCancelled;
@@ -192,6 +194,32 @@ PGConnectionErrorCode;
  */
 - (PGPostgresTransactionStatus)transactionStatus;
 - (BOOL)reset;
+
+/**
+ * The session's transaction state as last seen while it was alive: read just before and just after every statement.
+ * A statement cut off by a dropped connection leaves the state it started in (e.g. in transaction after BEGIN), which
+ * -transactionStatus can no longer tell. Idle after connecting or re-establishing. Readable from any thread.
+ */
+@property (atomic, readonly) PGPostgresTransactionStatus lastKnownTransactionStatus;
+
+/**
+ * Whether the server still answers: sends an empty query and waits up to timeout seconds for its answer. Call on the
+ * thread that uses the connection, never while connecting. NO when not connected, on an error (the server closed the
+ * session) or at the deadline (a network gone silent, which the kernel would only report minutes later). On NO the
+ * dead session is closed at once (-isConnected is NO, -connectionError says why): call -reestablishConnection.
+ */
+- (BOOL)pingWithTimeout:(NSTimeInterval)timeout;
+
+/**
+ * Replaces the session with a new one, synchronously, on the caller's thread (the thread that uses the connection;
+ * never while connecting): closes the current libpq session (no delegate callbacks), connects again with the current
+ * parameters (host and port may have changed, e.g. a reopened SSH tunnel's port) within the timeout, and applies the
+ * session settings, as -connect does. Returns -isConnected; on NO, -connectionError says why.
+ */
+- (BOOL)reestablishConnection;
+
+/// The value libpq uses for a connection option (PQconninfo), e.g. @"keepalives_idle"; nil when not connected or unset.
+- (NSString *)libpqOption:(NSString *)keyword;
 
 - (NSUInteger)clientVersion;
 - (NSUInteger)serverVersion;

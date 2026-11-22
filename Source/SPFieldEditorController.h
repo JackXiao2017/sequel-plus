@@ -192,6 +192,10 @@
 	NSUndoManager *esUndoManager;
 
 	NSDictionary *editedFieldInfo;
+
+	// The foreign key value picker's "Choose…" button (made when a chooser is given)
+	NSButton *editSheetChooseButton;
+	void (^chooser)(NSString *currentText, NSView *anchor, void (^setText)(NSString *text));
 }
 
 @property(readwrite, retain) NSDictionary *editedFieldInfo;
@@ -221,6 +225,14 @@
  */
 @property(nonatomic,assign) BOOL allowNULL;
 
+/**
+ * When set before -editWithObject:… on an editable text value, the sheet shows a "Choose…" button that calls it with
+ * the text being edited, the button (to anchor a popover on) and a block replacing the sheet's text (undoable). nil
+ * (the default) shows no button.
+ */
+@property(nonatomic,copy) void (^chooser)(NSString *currentText, NSView *anchor, void (^setText)(NSString *text));
+
+- (IBAction)chooseValue:(id)sender;
 - (IBAction)closeEditSheet:(id)sender;
 - (IBAction)openEditSheet:(id)sender;
 - (void)openPanelDidEnd:(NSOpenPanel *)panel returnCode:(NSInteger)returnCode  contextInfo:(void  *)contextInfo;

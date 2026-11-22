@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 
 @class PGPostgresConnection;
+@class SPPostgresTaskRunner;
 
 /// Background thread. Return the fetched data (nil is a valid result); set *error and return nil on failure.
 typedef id (^SPPostgresTaskWork)(PGPostgresConnection *connection, NSError **error);
@@ -21,6 +22,23 @@ typedef void (^SPPostgresTaskCompletion)(id result, NSError *error, BOOL cancell
  * Call everything on the main thread, except -updateDescription: and -isCancelled (any thread). The runner retains its
  * connection; work blocks and completions are copied.
  */
+/**
+ * What a background runner asks when its connection was found dead before a task (see connectionDelegate). Every
+ * method is called on the main thread; each completion or decision must be called exactly once, from any later turn.
+ */
+@protocol SPPostgresTaskRunnerConnectionDelegate <NSObject>
+/// Make the way to the server usable again (e.g. reopen an SSH tunnel); nil when it is, else why not. force: the
+/// network went silent (the check timed out) or the user chose Reconnect: reopen a tunnel even if it looks up.
+- (void)taskRunner:(SPPostgresTaskRunner *)runner prepareReconnectForcing:(BOOL)force completion:(void (^)(NSError *error))completion;
+/// Reconnecting failed (reason), or the lost session had a transaction open (transactionLost, asked before any
+/// attempt): YES tries again (asking again if that fails), NO gives up: the waiting task and every queued one complete
+/// as cancelled.
+- (void)taskRunner:(SPPostgresTaskRunner *)runner connectionLost:(NSString *)reason transactionLost:(BOOL)transactionLost
+		  decision:(void (^)(BOOL reconnect))decision;
+/// The connection was re-established; the waiting task runs next.
+- (void)taskRunnerDidReconnect:(SPPostgresTaskRunner *)runner;
+@end
+
 __attribute__((visibility("default")))
 @interface SPPostgresTaskRunner : NSObject
 
@@ -35,6 +53,17 @@ __attribute__((visibility("default")))
 @property (readonly, copy) NSString *currentDescription;
 /// KVO-observable: the running task's Cancel button title (nil: not cancellable). Set from enqueue.
 @property (readonly, copy) NSString *currentCancelTitle;
+
+/**
+ * Set it (main thread; not retained) to have the background runner check its connection before a task when it went
+ * unused for idleCheckInterval seconds or is known to be broken (by the last task, or by anyone using it since): a
+ * ping that gives up after pingTimeout seconds. Cancelling the waiting task skips the reconnect. A dead connection is re-established in place, once and silently (after the delegate's prepare), unless the
+ * lost session had a transaction open; otherwise, or when that fails, the delegate decides. A statement that fails
+ * part way is never re-run. nil (the default): no checks. The inline runner never checks.
+ */
+@property (atomic, assign) id<SPPostgresTaskRunnerConnectionDelegate> connectionDelegate;
+@property (atomic, assign) NSTimeInterval idleCheckInterval; // 30
+@property (atomic, assign) NSTimeInterval pingTimeout;       // 10
 
 - (void)runTaskWithDescription:(NSString *)description cancelTitle:(NSString *)cancelTitle
 						  work:(SPPostgresTaskWork)work completion:(SPPostgresTaskCompletion)completion;

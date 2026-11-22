@@ -1,6 +1,12 @@
 #import "SPPostgresServerListSheet.h"
 
 static SPPostgresServerListSheet *SPPostgresCurrentServerListSheet = nil;
+/// The open windows (+openWindowWithTitle:…), each retained until it closes.
+static NSMutableSet<SPPostgresServerListSheet *> *SPPostgresOpenServerListWindows = nil;
+
+static NSString * const SPPostgresProcessListAutoRefresh = @"PostgresProcessListAutoRefresh";
+static NSString * const SPPostgresProcessListAutoRefreshInterval = @"PostgresProcessListAutoRefreshInterval";
+static const NSInteger SPPostgresProcessListDefaultInterval = 10;
 
 /// The list's table: ⌘C (Edit ▸ Copy) goes to the sheet.
 @interface SPPostgresServerListTableView : NSTableView
@@ -24,8 +30,18 @@ static SPPostgresServerListSheet *SPPostgresCurrentServerListSheet = nil;
 
 @end
 
+@interface SPPostgresServerListSheet () <NSWindowDelegate>
+@end
+
 @implementation SPPostgresServerListSheet
 {
+	BOOL open;
+	BOOL isWindow;
+	BOOL refreshing;            // a refresh hasn't called its done yet
+	NSUserDefaults *defaults;   // Auto Refresh's settings (windows only)
+	NSButton *autoRefreshCheckbox;
+	NSPopUpButton *autoRefreshIntervalPopUp;
+	NSTimer *autoRefreshTimer;
 	NSWindow *sheet;
 	NSArray *columns;
 	NSArray *rows;
@@ -33,30 +49,47 @@ static SPPostgresServerListSheet *SPPostgresCurrentServerListSheet = nil;
 	SPPostgresServerListTableView *tableView;
 	NSSearchField *filterField;
 	NSTextField *countLabel;
+	NSTextField *summaryLabel;
 	NSButton *refreshButton;
 	NSButton *cancelQueryButton;
 	NSButton *killButton;
 	NSButton *closeButton;
-	void (^refreshBlock)(void);
+	void (^refreshBlock)(void (^done)(void));
 	void (^processAction)(NSDictionary *, BOOL);
 	void (^completion)(void);
 }
 
-@synthesize sheet, rows, displayedRows, tableView, filterField, countLabel, refreshButton, cancelQueryButton, killButton, closeButton;
+@synthesize sheet, rows, displayedRows, tableView, filterField, countLabel, summaryLabel, refreshButton, cancelQueryButton, killButton, closeButton;
+@synthesize open, autoRefreshCheckbox, autoRefreshIntervalPopUp;
 
 + (SPPostgresServerListSheet *)currentSheet
 {
 	return SPPostgresCurrentServerListSheet;
 }
 
-+ (SPPostgresServerListSheet *)beginOnWindow:(NSWindow *)window title:(NSString *)title columns:(NSArray *)theColumns rows:(NSArray *)theRows refresh:(void (^)(void))refresh processAction:(void (^)(NSDictionary *, BOOL))action completion:(void (^)(void))theCompletion
++ (SPPostgresServerListSheet *)beginOnWindow:(NSWindow *)window title:(NSString *)title columns:(NSArray *)theColumns rows:(NSArray *)theRows refresh:(void (^)(void (^)(void)))refresh processAction:(void (^)(NSDictionary *, BOOL))action completion:(void (^)(void))theCompletion
 {
 	if (!window || [window attachedSheet] || SPPostgresCurrentServerListSheet) return nil;
-	SPPostgresServerListSheet *list = [[self alloc] initWithTitle:title columns:theColumns refresh:refresh processAction:action completion:theCompletion];
+	SPPostgresServerListSheet *list = [[self alloc] initWithTitle:title columns:theColumns refresh:refresh processAction:action defaults:nil window:NO completion:theCompletion];
 	SPPostgresCurrentServerListSheet = list; // released when it closes
+	list->open = YES;
 	[list setRows:theRows];
 	[window beginSheet:list->sheet completionHandler:nil];
 	[list->sheet makeFirstResponder:list->filterField];
+	return list;
+}
+
++ (SPPostgresServerListSheet *)openWindowWithTitle:(NSString *)title columns:(NSArray *)theColumns rows:(NSArray *)theRows refresh:(void (^)(void (^)(void)))refresh processAction:(void (^)(NSDictionary *, BOOL))action defaults:(NSUserDefaults *)theDefaults completion:(void (^)(void))theCompletion
+{
+	SPPostgresServerListSheet *list = [[[self alloc] initWithTitle:title columns:theColumns refresh:refresh processAction:action defaults:theDefaults window:YES completion:theCompletion] autorelease];
+	if (!SPPostgresOpenServerListWindows) SPPostgresOpenServerListWindows = [[NSMutableSet alloc] init];
+	[SPPostgresOpenServerListWindows addObject:list]; // until it closes
+	list->open = YES;
+	[list setRows:theRows];
+	[list->sheet center];
+	[list->sheet makeKeyAndOrderFront:nil];
+	[list->sheet makeFirstResponder:list->filterField];
+	[list _updateAutoRefresh];
 	return list;
 }
 
@@ -70,9 +103,11 @@ static SPPostgresServerListSheet *SPPostgresCurrentServerListSheet = nil;
 	return [button retain];
 }
 
-- (instancetype)initWithTitle:(NSString *)title columns:(NSArray *)theColumns refresh:(void (^)(void))refresh processAction:(void (^)(NSDictionary *, BOOL))action completion:(void (^)(void))theCompletion
+- (instancetype)initWithTitle:(NSString *)title columns:(NSArray *)theColumns refresh:(void (^)(void (^)(void)))refresh processAction:(void (^)(NSDictionary *, BOOL))action defaults:(NSUserDefaults *)theDefaults window:(BOOL)asWindow completion:(void (^)(void))theCompletion
 {
 	if (!(self = [super init])) return nil;
+	isWindow = asWindow;
+	defaults = [(theDefaults ?: [NSUserDefaults standardUserDefaults]) retain];
 	columns = [theColumns copy];
 	refreshBlock = [refresh copy];
 	processAction = [action copy];
@@ -80,9 +115,12 @@ static SPPostgresServerListSheet *SPPostgresCurrentServerListSheet = nil;
 	rows = [@[] retain];
 	displayedRows = [@[] retain];
 
-	NSRect frame = NSMakeRect(0, 0, 760, 460);
-	sheet = [[NSWindow alloc] initWithContentRect:frame styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:YES];
+	NSRect frame = NSMakeRect(0, 0, isWindow ? 900 : 760, 460);
+	NSWindowStyleMask mask = NSWindowStyleMaskTitled | NSWindowStyleMaskResizable;
+	if (isWindow) mask |= NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable;
+	sheet = [[NSWindow alloc] initWithContentRect:frame styleMask:mask backing:NSBackingStoreBuffered defer:YES];
 	[sheet setReleasedWhenClosed:NO];
+	if (isWindow) [sheet setDelegate:self];
 	[sheet setTitle:title ?: @""];
 	[sheet setContentMinSize:NSMakeSize(520, 300)];
 	NSView *content = [sheet contentView];
@@ -90,9 +128,22 @@ static SPPostgresServerListSheet *SPPostgresCurrentServerListSheet = nil;
 
 	NSTextField *titleLabel = [NSTextField labelWithString:title ?: @""];
 	[titleLabel setFont:[NSFont boldSystemFontOfSize:[NSFont systemFontSize]]];
-	[titleLabel setFrame:NSMakeRect(20, NSHeight(frame) - 34, 400, 18)];
+	[titleLabel sizeToFit];
+	[titleLabel setFrame:NSMakeRect(20, NSHeight(frame) - 34, NSWidth([titleLabel frame]), 18)];
 	[titleLabel setAutoresizingMask:NSViewMinYMargin];
-	[content addSubview:titleLabel];
+	// A window has its title in its title bar
+	if (!isWindow) [content addSubview:titleLabel];
+
+	// Between the title and the filter field (it narrows with the sheet)
+	CGFloat summaryX = isWindow ? 20 : NSMaxX([titleLabel frame]) + 12;
+	summaryLabel = [[NSTextField labelWithString:@""] retain];
+	[summaryLabel setFont:smallFont];
+	[summaryLabel setTextColor:[NSColor secondaryLabelColor]];
+	[summaryLabel setLineBreakMode:NSLineBreakByTruncatingTail];
+	[summaryLabel setFrame:NSMakeRect(summaryX, NSHeight(frame) - 32, NSWidth(frame) - 252 - summaryX, 14)];
+	[summaryLabel setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
+	[summaryLabel setHidden:YES];
+	[content addSubview:summaryLabel];
 
 	filterField = [[NSSearchField alloc] initWithFrame:NSMakeRect(NSWidth(frame) - 240, NSHeight(frame) - 38, 220, 22)];
 	[[filterField cell] setPlaceholderString:NSLocalizedString(@"Filter", @"filter label")];
@@ -130,9 +181,43 @@ static SPPostgresServerListSheet *SPPostgresCurrentServerListSheet = nil;
 	countLabel = [[NSTextField labelWithString:@""] retain];
 	[countLabel setFont:smallFont];
 	[countLabel setTextColor:[NSColor secondaryLabelColor]];
-	[countLabel setFrame:NSMakeRect(20, 20, 200, 14)];
+	[countLabel setFrame:NSMakeRect(20, 20, (isWindow && refreshBlock) ? 110 : 200, 14)];
 	[countLabel setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
 	[content addSubview:countLabel];
+	CGFloat leftEdge = NSMaxX([countLabel frame]);
+
+	// A window's Auto Refresh: the checkbox, then how often
+	if (isWindow && refreshBlock) {
+		autoRefreshCheckbox = [[NSButton checkboxWithTitle:NSLocalizedString(@"Auto Refresh", @"Postgres process list: auto refresh checkbox") target:self action:@selector(toggleAutoRefresh:)] retain];
+		[autoRefreshCheckbox setControlSize:NSControlSizeSmall];
+		[autoRefreshCheckbox setFont:smallFont];
+		[autoRefreshCheckbox sizeToFit];
+		[autoRefreshCheckbox setFrameOrigin:NSMakePoint(leftEdge + 12, 18)];
+		[autoRefreshCheckbox setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
+		[content addSubview:autoRefreshCheckbox];
+
+		autoRefreshIntervalPopUp = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+		[autoRefreshIntervalPopUp setControlSize:NSControlSizeSmall];
+		[autoRefreshIntervalPopUp setFont:smallFont];
+		for (NSNumber *seconds in @[@1, @2, @5, @10, @30, @60]) {
+			NSString *itemTitle = [seconds integerValue] == 1
+				? NSLocalizedString(@"Every second", @"Postgres process list: auto refresh interval of one second")
+				: [NSString stringWithFormat:NSLocalizedString(@"Every %ld seconds", @"Postgres process list: auto refresh interval in seconds"), (long)[seconds integerValue]];
+			[autoRefreshIntervalPopUp addItemWithTitle:itemTitle];
+			[[autoRefreshIntervalPopUp lastItem] setTag:[seconds integerValue]];
+		}
+		[autoRefreshIntervalPopUp setTarget:self];
+		[autoRefreshIntervalPopUp setAction:@selector(setAutoRefreshInterval:)];
+		[autoRefreshIntervalPopUp sizeToFit];
+		[autoRefreshIntervalPopUp setFrameOrigin:NSMakePoint(NSMaxX([autoRefreshCheckbox frame]) + 6, 14)];
+		[autoRefreshIntervalPopUp setAutoresizingMask:NSViewMaxXMargin | NSViewMaxYMargin];
+		[content addSubview:autoRefreshIntervalPopUp];
+		leftEdge = NSMaxX([autoRefreshIntervalPopUp frame]);
+
+		NSInteger interval = [defaults integerForKey:SPPostgresProcessListAutoRefreshInterval];
+		if (![autoRefreshIntervalPopUp selectItemWithTag:interval]) [autoRefreshIntervalPopUp selectItemWithTag:SPPostgresProcessListDefaultInterval];
+		[autoRefreshCheckbox setState:[defaults boolForKey:SPPostgresProcessListAutoRefresh] ? NSControlStateValueOn : NSControlStateValueOff];
+	}
 
 	// Right to left: Close, then (processes) Kill Connection, Cancel Query, then Refresh
 	closeButton = [self _buttonWithTitle:NSLocalizedString(@"Close", @"close button") action:@selector(close:)];
@@ -158,13 +243,23 @@ static SPPostgresServerListSheet *SPPostgresCurrentServerListSheet = nil;
 		[button setFrame:buttonFrame];
 		[button setAutoresizingMask:NSViewMinXMargin | NSViewMaxYMargin];
 		[content addSubview:button];
+		x -= 12; // room before the next button
 	}
+	// Narrowest: the buttons still clear of the row count (and Auto Refresh)
+	CGFloat buttonsWidth = NSWidth(frame) - 14 - (x + 12);
+	[sheet setContentMinSize:NSMakeSize(MAX(520, leftEdge + 12 + buttonsWidth + 14), 300)];
 
 	return self;
 }
 
 - (void)dealloc
 {
+	[autoRefreshTimer invalidate];
+	[autoRefreshTimer release];
+	[autoRefreshCheckbox release];
+	[autoRefreshIntervalPopUp release];
+	[defaults release];
+	[sheet setDelegate:nil];
 	[tableView setOwner:nil];
 	[tableView setDataSource:nil];
 	[tableView setDelegate:nil];
@@ -175,6 +270,7 @@ static SPPostgresServerListSheet *SPPostgresCurrentServerListSheet = nil;
 	[tableView release];
 	[filterField release];
 	[countLabel release];
+	[summaryLabel release];
 	[refreshButton release];
 	[cancelQueryButton release];
 	[killButton release];
@@ -251,6 +347,13 @@ static SPPostgresServerListSheet *SPPostgresCurrentServerListSheet = nil;
 	[countLabel setStringValue:count];
 }
 
+- (void)setSummary:(NSString *)text warning:(BOOL)warning
+{
+	[summaryLabel setStringValue:text ?: @""];
+	[summaryLabel setTextColor:warning ? [NSColor systemRedColor] : [NSColor secondaryLabelColor]];
+	[summaryLabel setHidden:![text length]];
+}
+
 - (IBAction)updateFilter:(id)sender
 {
 	[tableView deselectAll:nil];
@@ -324,9 +427,50 @@ static SPPostgresServerListSheet *SPPostgresCurrentServerListSheet = nil;
 	[pasteboard setString:text forType:NSPasteboardTypeString];
 }
 
+/// Reads the rows again, unless the last read hasn't finished.
 - (IBAction)refresh:(id)sender
 {
-	if (refreshBlock) refreshBlock();
+	if (!open || !refreshBlock || refreshing) return;
+	refreshing = YES;
+	refreshBlock(^{ refreshing = NO; });
+}
+
+#pragma mark - Auto Refresh
+
+- (IBAction)toggleAutoRefresh:(id)sender
+{
+	[defaults setBool:[autoRefreshCheckbox state] == NSControlStateValueOn forKey:SPPostgresProcessListAutoRefresh];
+	[self _updateAutoRefresh];
+}
+
+- (IBAction)setAutoRefreshInterval:(id)sender
+{
+	[defaults setInteger:[autoRefreshIntervalPopUp selectedTag] forKey:SPPostgresProcessListAutoRefreshInterval];
+	[self _updateAutoRefresh];
+}
+
+/// Starts, restarts or stops the timer as the checkbox and interval say.
+- (void)_updateAutoRefresh
+{
+	[autoRefreshTimer invalidate];
+	[autoRefreshTimer release], autoRefreshTimer = nil;
+	BOOL on = open && autoRefreshCheckbox && [autoRefreshCheckbox state] == NSControlStateValueOn;
+	[autoRefreshIntervalPopUp setEnabled:on];
+	if (!on) return;
+	NSTimeInterval interval = (NSTimeInterval)MAX([autoRefreshIntervalPopUp selectedTag], 1);
+	autoRefreshTimer = [[NSTimer timerWithTimeInterval:interval target:self selector:@selector(_autoRefresh:) userInfo:nil repeats:YES] retain];
+	[[NSRunLoop currentRunLoop] addTimer:autoRefreshTimer forMode:NSRunLoopCommonModes];
+}
+
+- (void)_autoRefresh:(NSTimer *)timer
+{
+	[self refresh:nil];
+}
+
+/// The title bar's close button.
+- (void)windowWillClose:(NSNotification *)notification
+{
+	[self close:nil];
 }
 
 - (void)_signalTerminating:(BOOL)terminate
@@ -351,8 +495,11 @@ static SPPostgresServerListSheet *SPPostgresCurrentServerListSheet = nil;
 
 - (IBAction)close:(id)sender
 {
-	if (SPPostgresCurrentServerListSheet != self) return;
-	SPPostgresCurrentServerListSheet = nil;
+	if (!open) return;
+	open = NO;
+	[self _updateAutoRefresh]; // stops it
+	[sheet setDelegate:nil];
+	if (SPPostgresCurrentServerListSheet == self) SPPostgresCurrentServerListSheet = nil;
 	if ([sheet sheetParent]) [[sheet sheetParent] endSheet:sheet];
 	[sheet orderOut:nil];
 
@@ -361,7 +508,10 @@ static SPPostgresServerListSheet *SPPostgresCurrentServerListSheet = nil;
 	[refreshBlock release], refreshBlock = nil;
 	[processAction release], processAction = nil;
 	if (handler) handler();
-	[self autorelease];
+	// Let go of it: a sheet was retained by +beginOnWindow:…, a window by the open windows' set
+	[[self retain] autorelease];
+	if (isWindow) [SPPostgresOpenServerListWindows removeObject:self];
+	else [self release];
 }
 
 @end

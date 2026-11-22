@@ -22,6 +22,8 @@
 const NSUInteger PGPostgresConnectionDefaultTimeout    = 30;
 const NSUInteger PGPostgresConnectionDefaultServerPort = 5432;
 const NSUInteger PGPostgresConnectionDefaultKeepAlive  = 60;
+// Unanswered keep-alive probes before the kernel gives the connection up
+const NSUInteger PGPostgresConnectionKeepAliveCount    = 3;
 
 NSString *PGPostgresConnectionDefaultEncoding              = @"UNICODE";
 NSString *PGPostgresConnectionErrorDomain                  = @"PGPostgresConnectionError";
@@ -45,6 +47,8 @@ const char *PGPostgresDatabaseParam          = "dbname";
 const char *PGPostgresClientEncodingParam    = "client_encoding";
 const char *PGPostgresKeepAliveParam         = "keepalives";
 const char *PGPostgresKeepAliveIntervalParam = "keepalives_interval";
+const char *PGPostgresKeepAliveIdleParam     = "keepalives_idle";
+const char *PGPostgresKeepAliveCountParam    = "keepalives_count";
 const char *PGPostgresConnectTimeoutParam   = "connect_timeout";
 const char *PGPostgresSSLModeParam           = "sslmode";
 const char *PGPostgresSSLRootCertParam       = "sslrootcert";

@@ -150,17 +150,25 @@ __attribute__((visibility("default")))
 /**
  * The foreign keys of the relation, as MySQL's Content link arrows: column name → @{@"schema", @"table", @"column"},
  * the referenced table and column, for each column that is the first column of a FOREIGN KEY constraint (the first
- * such constraint by name, when there are several). Empty for a relation without any; nil on failure.
+ * such constraint by name, when there are several), plus @"columns" (NSNumber: how many columns the key has) and
+ * @"binary" (NSNumber BOOL: the column is bytea). Empty for a relation without any; nil on failure.
  */
-- (NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *)foreignKeyReferences:(NSError **)error;
+- (NSDictionary<NSString *, NSDictionary<NSString *, id> *> *)foreignKeyReferences:(NSError **)error;
 
 /// A page of rows; limit 0 means no limit. column may be nil for no explicit sort; rows are then in primary-key order (if any), and the
 /// primary key also breaks ties after the sort column, so paging is stable. filter may be nil.
 - (NSArray *)rowsWithFilter:(SPPostgresFilter *)filter sortColumn:(NSString *)column ascending:(BOOL)ascending
 					 offset:(NSUInteger)offset limit:(NSUInteger)limit error:(NSError **)error;
 
+/// As -rowsWithFilter:…, with every filter in filters (nil or empty for none) joined by AND, in order. Any invalid
+/// filter fails the whole load.
+- (NSArray *)rowsWithFilters:(NSArray<SPPostgresFilter *> *)filters sortColumn:(NSString *)column ascending:(BOOL)ascending
+					  offset:(NSUInteger)offset limit:(NSUInteger)limit error:(NSError **)error;
+
 /// Exact count(*) of the rows matching filter (nil for all), or -1 on failure.
 - (NSInteger)countRowsWithFilter:(SPPostgresFilter *)filter error:(NSError **)error;
+/// Exact count(*) of the rows matching every filter in filters (nil or empty for all), or -1 on failure.
+- (NSInteger)countRowsWithFilters:(NSArray<SPPostgresFilter *> *)filters error:(NSError **)error;
 
 /// Sets one column of the row identified by originalRow's primary-key values. value is an NSString or NSNull.
 /// Fails with SPPostgresErrorRowChanged when no row matched.

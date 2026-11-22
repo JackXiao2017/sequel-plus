@@ -48,6 +48,7 @@
 #import "SPToolbarTransferItem.h"
 #import "SPMainToolbar.h"
 #import "SPConstants.h"
+#import "SPConnectionSummary.h"
 #import <PostgresKit/PostgresKit.h>
 
 // MySQL's left pane name (DBView.xib): one left pane width for both engines, so the database pickers match
@@ -73,7 +74,7 @@ NSString * const SPPostgresPaneQuery = @"query";
 NSString * const SPPostgresPaneSequence = @"sequence";
 NSString * const SPPostgresPaneExtension = @"extension";
 
-@interface SPPostgresDocument () <SPPostgresSidebarControllerDelegate, SPPostgresExtensionControllerDelegate>
+@interface SPPostgresDocument () <SPPostgresSidebarControllerDelegate, SPPostgresExtensionControllerDelegate, SPPostgresTaskRunnerConnectionDelegate>
 
 @property (readwrite) BOOL isProcessing;
 @property (readwrite, assign) SPWindowController *parentWindowController;
@@ -314,6 +315,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	NSArray *pendingCreateSyntax;
 
 	BOOL tornDown;
+	SPPostgresServerListSheet *serverProcessesWindow; // Show Server Processes…'s window while it is open (it retains itself)
 }
 
 @synthesize sidebar;
@@ -331,6 +333,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 @synthesize favorite;
 @synthesize alertPresenter;
 @synthesize confirmationPresenter;
+@synthesize connectionLostPresenter;
 @synthesize connectionProvider;
 @synthesize openRelationConnectorFactory;
 @synthesize usersController;
@@ -503,6 +506,7 @@ NSString * const SPPostgresPaneExtension = @"extension";
 		[taskRunner removeObserver:self forKeyPath:@"busy" context:SPPostgresDocumentRunnerContext];
 		observingRunner = NO;
 	}
+	if ([taskRunner connectionDelegate] == self) [taskRunner setConnectionDelegate:nil];
 	[taskDisplay invalidate];
 	[taskDisplay release];
 	taskDisplay = nil;
@@ -511,6 +515,9 @@ NSString * const SPPostgresPaneExtension = @"extension";
 	[self _dropPendingCreateSyntax];
 	[taskRunner release];
 	taskRunner = [runner retain];
+
+	// A connection found dead before a load is reconnected (see the SPPostgresTaskRunnerConnectionDelegate methods)
+	[taskRunner setConnectionDelegate:self];
 
 	if (taskRunner) {
 		[taskRunner addObserver:self forKeyPath:@"busy" options:0 context:SPPostgresDocumentRunnerContext];
@@ -1902,7 +1909,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 
 /**
  * A catalog query failed (the lists keep what they showed). Shown once per failed reload; when the
- * connection is gone, says so (reconnecting is not offered in this version).
+ * connection is gone, says so (the tab's runner reconnects before its next load).
  */
 - (void)_reportCatalogError:(NSError *)error
 {
@@ -1914,7 +1921,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	NSString *advice;
 	if (![connection isConnected]) {
 		[alert setMessageText:NSLocalizedString(@"The connection to the PostgreSQL server was lost", @"PostgreSQL window: connection lost title")];
-		advice = NSLocalizedString(@"The lists show what was loaded before the connection was lost. Close this tab and connect again.", @"PostgreSQL tab: connection lost advice");
+		advice = NSLocalizedString(@"The lists show what was loaded before the connection was lost. Sequel Plus reconnects when you next use this tab.", @"PostgreSQL tab: connection lost advice");
 	}
 	else {
 		[alert setMessageText:NSLocalizedString(@"Could not load the database objects", @"PostgreSQL window: catalog query failed title")];
@@ -1923,6 +1930,93 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	[alert setInformativeText:[detail length] ? [NSString stringWithFormat:@"%@\n\n%@", detail, advice] : advice];
 
 	[self _presentAlert:alert];
+}
+
+#pragma mark - Reconnecting (SPPostgresTaskRunnerConnectionDelegate)
+
+- (void)taskRunner:(SPPostgresTaskRunner *)runner prepareReconnectForcing:(BOOL)force completion:(void (^)(NSError *error))completion
+{
+	if (tornDown || runner != taskRunner || !connector) {
+		void (^copied)(NSError *) = [[completion copy] autorelease];
+		dispatch_async(dispatch_get_main_queue(), ^{ copied(nil); });
+		return;
+	}
+	// An SSH favorite's tunnel died with the connection: reopened (its sheets on this window) before reconnecting
+	[connector reopenTunnelOnWindow:parentWindow force:force completion:completion];
+}
+
+- (void)taskRunner:(SPPostgresTaskRunner *)runner connectionLost:(NSString *)reason transactionLost:(BOOL)transactionLost
+		  decision:(void (^)(BOOL reconnect))decision
+{
+	// A heap copy that runs once (a presenter may keep it), as -_confirm:completion:'s
+	void (^original)(BOOL) = [[decision copy] autorelease];
+	BOOL ownRunner = runner == taskRunner; // only this tab's own runner's Disconnect closes it
+	__block BOOL done = NO;
+	__block void (^once)(BOOL) = nil;
+	once = Block_copy(^(BOOL reconnect) {
+		if (done) return;
+		done = YES;
+		original(reconnect);
+		// As MySQL's Disconnect: the tab closes (the runner gives up the waiting loads first)
+		if (!reconnect && ownRunner && !tornDown) {
+			dispatch_async(dispatch_get_main_queue(), ^{
+				[self _closeOwnTab];
+			});
+		}
+		[(id)once autorelease];
+	});
+
+	if (tornDown || runner != taskRunner) {
+		once(NO);
+		return;
+	}
+
+	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+	[alert setAlertStyle:NSAlertStyleWarning];
+	[alert setMessageText:NSLocalizedString(@"The connection to the PostgreSQL server was lost", @"PostgreSQL window: connection lost title")];
+	NSString *text = [reason stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] ?: @"";
+	if (transactionLost) {
+		NSString *lost = NSLocalizedString(@"The open transaction was rolled back: its changes were not saved.", @"PostgreSQL tab: connection lost with an open transaction");
+		text = [text length] ? [NSString stringWithFormat:@"%@\n\n%@", text, lost] : lost;
+	}
+	[alert setInformativeText:text];
+	[alert addButtonWithTitle:NSLocalizedString(@"Reconnect", @"PostgreSQL tab: connection lost, reconnect button")];
+	[alert addButtonWithTitle:NSLocalizedString(@"Disconnect", @"PostgreSQL tab: connection lost, disconnect button")];
+
+	if (connectionLostPresenter) {
+		connectionLostPresenter(alert, once);
+		return;
+	}
+	if (!parentWindow) {
+		once([alert runModal] == NSAlertFirstButtonReturn);
+		return;
+	}
+	// The tab in front, as MySQL brings its tab forward for its connection error sheet
+	if (parentTabViewItem && [[parentTabViewItem tabView] selectedTabViewItem] != parentTabViewItem) {
+		[[parentTabViewItem tabView] selectTabViewItem:parentTabViewItem];
+	}
+	[alert beginSheetModalForWindow:parentWindow completionHandler:^(NSModalResponse response) {
+		once(response == NSAlertFirstButtonReturn);
+	}];
+}
+
+- (void)taskRunnerDidReconnect:(SPPostgresTaskRunner *)runner
+{
+	if (tornDown || runner != taskRunner) return;
+	[logger logNote:NSLocalizedString(@"Reconnected to the server", @"PostgreSQL console: the tab's connection was re-established")];
+}
+
+/// Closes this tab as File ▸ Close Tab does (the window, when it is the last tab).
+- (void)_closeOwnTab
+{
+	if (tornDown) return;
+	NSTabView *tabView = [parentTabViewItem tabView];
+	if (!tabView || !parentWindowController) {
+		[self _tearDown];
+		return;
+	}
+	if ([tabView selectedTabViewItem] != parentTabViewItem) [tabView selectTabViewItem:parentTabViewItem];
+	[parentWindowController closeTab:nil];
 }
 
 #pragma mark - Teardown
@@ -1950,6 +2044,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	if ([[[SPPostgresAlterDatabaseSheet currentSheet] sheet] sheetParent] == parentWindow) [[SPPostgresAlterDatabaseSheet currentSheet] cancel:nil];
 	if ([[[SPPostgresSchemaSheet currentSheet] sheet] sheetParent] == parentWindow) [[SPPostgresSchemaSheet currentSheet] cancel:nil];
 	if ([[[SPPostgresServerListSheet currentSheet] sheet] sheetParent] == parentWindow) [[SPPostgresServerListSheet currentSheet] close:nil];
+	[serverProcessesWindow close:nil]; // its completion forgets it
 
 	// A pending database switch completes (cancelled) and lets go of its block, which retains self
 	SPPostgresConnector *pending = pendingConnector;
@@ -1994,6 +2089,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 		observingRunner = NO;
 	}
 	SPPostgresConnector *theConnector = connector;
+	[taskRunner setConnectionDelegate:nil];
 	[taskRunner invalidateWithCompletion:^{
 		[theConnector disconnect];
 	}];
@@ -2037,6 +2133,8 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	alertPresenter = nil;
 	[confirmationPresenter release];
 	confirmationPresenter = nil;
+	[connectionLostPresenter release];
+	connectionLostPresenter = nil;
 	[pendingAlert release];
 	pendingAlert = nil;
 	// A question waiting for the tab to be idle (it retains self)
@@ -4321,7 +4419,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 		action = NULL;
 	}
 	else if ([identifier isEqualToString:SPMainToolbarShowConsole]) {
-		[item setToolTip:NSLocalizedString(@"Show the console which shows all PostgreSQL commands performed by Sequel Pro", @"PostgreSQL toolbar: console tooltip")];
+		[item setToolTip:NSLocalizedString(@"Show the console which shows all PostgreSQL commands performed by Sequel Plus", @"PostgreSQL toolbar: console tooltip")];
 		action = @selector(toggleConsole:);
 	}
 	else if ([identifier isEqualToString:SPMainToolbarTableStructure]) {
@@ -4346,7 +4444,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 		action = @selector(showUserManager:);
 	}
 	else if ([identifier isEqualToString:SPMainToolbarClearConsole]) {
-		[item setToolTip:NSLocalizedString(@"Clear the console which shows all PostgreSQL commands performed by Sequel Pro", @"PostgreSQL toolbar: clear console tooltip")];
+		[item setToolTip:NSLocalizedString(@"Clear the console which shows all PostgreSQL commands performed by Sequel Plus", @"PostgreSQL toolbar: clear console tooltip")];
 	}
 
 	if (action) {
@@ -4785,16 +4883,40 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	}];
 }
 
-/// Reads pg_stat_activity on the tab's runner into the open process list.
-- (void)_reloadServerProcesses:(SPPostgresServerListSheet *)list
+/// pg_stat_activity as @"rows", with the connection summary as @"summary" when it could be read; nil with *error.
++ (NSDictionary *)_serverProcessesOn:(PGPostgresConnection *)connection error:(NSError **)error
 {
-	if (tornDown || !list) return;
+	SPPostgresCatalog *catalog = [[[SPPostgresCatalog alloc] initWithConnection:connection] autorelease];
+	NSArray *rows = [catalog serverProcesses:error];
+	if (!rows) return nil;
+	SPConnectionSummary *summary = [catalog connectionSummary:NULL];
+	return summary ? @{@"rows": rows, @"summary": summary} : @{@"rows": rows};
+}
+
+/// Shows what +_serverProcessesOn:error: read in the process list: its rows and its connections against the limit.
+- (void)_showServerProcesses:(NSDictionary *)processes inList:(SPPostgresServerListSheet *)list
+{
+	[list setRows:[processes objectForKey:@"rows"]];
+	SPConnectionSummary *summary = [processes objectForKey:@"summary"];
+	[list setSummary:[summary text] warning:[summary isFull]];
+}
+
+/// Reads pg_stat_activity on the tab's runner into the open process list, then calls done (whatever happened).
+- (void)_reloadServerProcesses:(SPPostgresServerListSheet *)list done:(void (^)(void))done
+{
+	void (^finished)(void) = [[done copy] autorelease];
+	if (tornDown || !list) {
+		if (finished) finished();
+		return;
+	}
 	[taskRunner runTaskWithDescription:nil cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
-		return [[[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease] serverProcesses:error];
-	} completion:^(id rows, NSError *error, BOOL cancelled) {
-		if (tornDown || cancelled || [SPPostgresServerListSheet currentSheet] != list) return;
-		if (rows) [list setRows:rows];
-		else NSBeep();
+		return [[self class] _serverProcessesOn:theConnection error:error];
+	} completion:^(id processes, NSError *error, BOOL cancelled) {
+		if (!tornDown && !cancelled && [list isOpen]) {
+			if (processes) [self _showServerProcesses:processes inList:list];
+			else NSBeep();
+		}
+		if (finished) finished();
 	}];
 }
 
@@ -4815,7 +4937,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	[alert addButtonWithTitle:terminate ? NSLocalizedString(@"Kill Connection", @"Postgres process list: kill connection button") : NSLocalizedString(@"Cancel Query", @"Postgres process list: cancel query button")];
 	[alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"cancel button")];
 	[alert beginSheetModalForWindow:[list sheet] completionHandler:^(NSModalResponse response) {
-		if (response != NSAlertFirstButtonReturn || tornDown || [SPPostgresServerListSheet currentSheet] != list) return;
+		if (response != NSAlertFirstButtonReturn || tornDown || ![list isOpen]) return;
 		[self _signalProcess:pid terminate:terminate list:list];
 	}];
 }
@@ -4827,7 +4949,7 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 	[taskRunner runTaskWithDescription:nil cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
 		return [[[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease] signalProcess:pid terminate:terminate error:error] ? @YES : nil;
 	} completion:^(id result, NSError *error, BOOL cancelled) {
-		if (tornDown || cancelled || [SPPostgresServerListSheet currentSheet] != list) return;
+		if (tornDown || cancelled || ![list isOpen]) return;
 		if (!result) {
 			NSAlert *failure = [[[NSAlert alloc] init] autorelease];
 			[failure setAlertStyle:NSAlertStyleWarning];
@@ -4836,40 +4958,54 @@ static BOOL SPPostgresPaneIsInScope(NSString *pane)
 			if (alertPresenter) alertPresenter(failure);
 			else [failure beginSheetModalForWindow:[list sheet] completionHandler:nil];
 		}
-		[self _reloadServerProcesses:list];
+		[self _reloadServerProcesses:list done:nil]; // even while an auto refresh is reading: this one sees the signal
 	}];
 }
 
-/// Database ▸ Show Server Processes… (⌥⌘P): pg_stat_activity, with Refresh, Cancel Query and Kill Connection.
+- (SPPostgresServerListSheet *)serverProcessesWindow
+{
+	return serverProcessesWindow;
+}
+
+/// Database ▸ Show Server Processes… (⌥⌘P): pg_stat_activity in a window of its own, with Refresh, Auto Refresh,
+/// Cancel Query and Kill Connection. Asked again while it is open, it comes to the front, read again.
 - (IBAction)showServerProcesses:(id)sender
 {
+	if ([serverProcessesWindow isOpen]) {
+		[[serverProcessesWindow sheet] makeKeyAndOrderFront:nil];
+		[serverProcessesWindow refresh:nil];
+		return;
+	}
 	if (![self _canRunDatabaseAction] || ![self _endPaneEditing]) return;
 	[taskRunner runTaskWithDescription:NSLocalizedString(@"Loading...", @"Postgres server processes: loading task") cancelTitle:nil work:^id(PGPostgresConnection *theConnection, NSError **error) {
-		return [[[[SPPostgresCatalog alloc] initWithConnection:theConnection] autorelease] serverProcesses:error];
-	} completion:^(id rows, NSError *error, BOOL cancelled) {
+		return [[self class] _serverProcessesOn:theConnection error:error];
+	} completion:^(id processes, NSError *error, BOOL cancelled) {
 		if (tornDown || cancelled) return;
-		if (!rows) {
+		if (!processes) {
 			[self _alertTitle:NSLocalizedString(@"Could not read the server processes", @"Postgres server processes failed") error:error];
 			return;
 		}
 		[self _whenIdle:^{
-			if (!parentWindow || [parentWindow attachedSheet]) return;
-			// The sheet is set once it exists (its blocks only run while it is up)
+			if (tornDown || [serverProcessesWindow isOpen]) return;
+			// The window is set once it exists (its blocks only run while it is open)
 			__block SPPostgresServerListSheet *list = nil;
-			list = [SPPostgresServerListSheet beginOnWindow:parentWindow
-													  title:NSLocalizedString(@"Server Processes", @"Postgres server processes sheet title")
+			list = [SPPostgresServerListSheet openWindowWithTitle:[NSString stringWithFormat:NSLocalizedString(@"Server Processes on %@", @"Postgres server processes window title (connection name)"), [self _connectionName]]
 													columns:@[@{@"key": @"pid", @"title": NSLocalizedString(@"PID", @"Postgres server processes: pid column"), @"width": @60},
 															  @{@"key": @"user", @"title": NSLocalizedString(@"User", @"Postgres server processes: user column"), @"width": @90},
 															  @{@"key": @"database", @"title": NSLocalizedString(@"Database", @"Postgres server processes: database column"), @"width": @100},
 															  @{@"key": @"client", @"title": NSLocalizedString(@"Client", @"Postgres server processes: client column"), @"width": @90},
 															  @{@"key": @"application", @"title": NSLocalizedString(@"Application", @"Postgres server processes: application column"), @"width": @110},
+															  @{@"key": @"type", @"title": NSLocalizedString(@"Type", @"Postgres server processes: backend type column (client backend, autovacuum worker…)"), @"width": @110},
 															  @{@"key": @"state", @"title": NSLocalizedString(@"State", @"Postgres server processes: state column"), @"width": @80},
 															  @{@"key": @"started", @"title": NSLocalizedString(@"Query Start", @"Postgres server processes: query start column"), @"width": @130},
 															  @{@"key": @"query", @"title": NSLocalizedString(@"Query", @"Postgres server processes: query column"), @"width": @300}]
-													   rows:rows
-													refresh:^{ [self _reloadServerProcesses:list]; }
+													   rows:[processes objectForKey:@"rows"]
+													refresh:^(void (^done)(void)) { [self _reloadServerProcesses:list done:done]; }
 											  processAction:^(NSDictionary *row, BOOL terminate) { [self _signalServerProcess:row terminate:terminate list:list]; }
-												 completion:nil];
+												   defaults:[NSUserDefaults standardUserDefaults]
+												 completion:^{ serverProcessesWindow = nil; }];
+			serverProcessesWindow = list;
+			[self _showServerProcesses:processes inList:list];
 		}];
 	}];
 }

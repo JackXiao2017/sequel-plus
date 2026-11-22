@@ -44,4 +44,7 @@ __attribute__((visibility("default")))
 /// Shows a query error in the console, labelled as the queries, when error logging is enabled (as MySQL's).
 - (void)logError:(NSString *)error;
 
+/// Shows a note about the connection (e.g. that it was re-established) as an SQL comment, when console logging is on.
+- (void)logNote:(NSString *)note;
+
 @end

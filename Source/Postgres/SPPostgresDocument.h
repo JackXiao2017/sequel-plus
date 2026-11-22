@@ -248,6 +248,14 @@ __attribute__((visibility("default")))
  */
 @property (copy) void (^confirmationPresenter)(NSAlert *alert, void (^completion)(BOOL confirmed));
 
+/**
+ * Shows "The connection to the PostgreSQL server was lost" (Reconnect / Disconnect) when the tab's runner could not
+ * reconnect by itself, or the lost session had a transaction open; the completion takes YES for Reconnect (called
+ * once; a heap block a presenter may store). Disconnect closes the tab. nil (the default) shows a sheet on the window.
+ * Replaceable, e.g. by tests.
+ */
+@property (copy) void (^connectionLostPresenter)(NSAlert *alert, void (^completion)(BOOL reconnect));
+
 @property (readonly) SPPostgresSidebarController *sidebar;
 /// The right pane: the Structure view of the table or view selected in the sidebar.
 @property (readonly) SPPostgresStructureController *structureController;

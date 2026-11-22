@@ -4,10 +4,12 @@
 @class SPPostgresTaskRunner;
 @class SPPostgresPaginationView;
 @class SPPostgresFilter;
+@class SPPostgresFilterRowsController;
+@class SPForeignKeyPicker;
 
 /**
- * The Content view of a PostgreSQL tab, laid out as MySQL's Content tab: a filter bar on top (column,
- * comparison, value, Filter; shown or hidden by filterToggleButton, see toggleFilterBar:), the rows in an SPTableView, and MySQL's bottom bar (see addButton). ⌫ or ⌦ in the
+ * The Content view of a PostgreSQL tab, laid out as MySQL's Content tab: a filter area on top (condition rows, all
+ * AND-ed, over Reset / Add Filter / Filter; see filterRows; shown or hidden by filterToggleButton, see toggleFilterBar:), the rows in an SPTableView, and MySQL's bottom bar (see addButton). ⌫ or ⌦ in the
  * grid deletes the selected rows (see removeRows:). Built in code.
  * Use on the main thread.
  *
@@ -29,7 +31,7 @@ __attribute__((visibility("default")))
 
 - (instancetype)initWithConnection:(PGPostgresConnection *)connection;
 
-/// Filter bar, grid and bottom bar. Built once; sized by the caller (autoresizes).
+/// Filter area, grid and bottom bar. Built once; sized by the caller (autoresizes).
 - (NSView *)view;
 
 /// Shows the rows of schema.table from the first page, unfiltered and unsorted. A nil table empties the grid.
@@ -62,7 +64,8 @@ __attribute__((visibility("default")))
 - (IBAction)toggleEditMode:(id)sender;
 - (IBAction)nextPage:(id)sender;
 - (IBAction)previousPage:(id)sender;
-/// Applies the filter bar (an empty value, except for IS NULL / IS NOT NULL, removes the filter).
+/// Applies the filter rows from page 1, keeping the sort: every complete row (a value, or IS NULL / IS NOT NULL), AND-ed;
+/// none complete loads unfiltered.
 - (IBAction)applyFilter:(id)sender;
 /// Shows or hides the filter bar (filterToggleButton) and writes the choice to MySQL's preference
 /// (SPRuleFilterEditorLastVisibilityChoice) in defaults. Hiding it while a filter is applied loads the first page
@@ -84,6 +87,11 @@ __attribute__((visibility("default")))
 /// Whether the filter bar is shown (the grid takes its place when it isn't). Read from defaults' "filter bar visible"
 /// preference (SPRuleFilterEditorLastVisibilityChoice, hidden when unset) at each -showTable:inSchema:.
 @property (readonly, getter=isFilterBarVisible) BOOL filterBarVisible;
+/// The filter area's rows and buttons. Typed rows apply only through Filter / Return (see applyFilter:).
+@property (readonly) SPPostgresFilterRowsController *filterRows;
+/// The conditions the shown rows were loaded with (AND-ed; empty: no filter). Paging, sorting and reloading use these,
+/// never rows typed since.
+@property (readonly, copy) NSArray<SPPostgresFilter *> *appliedFilters;
 
 @property (readonly) NSTableView *tableView;
 
@@ -146,7 +154,18 @@ __attribute__((visibility("default")))
 @property (copy) void (^foreignKeyFollower)(NSString *schema, NSString *table, NSString *column, NSString *value);
 /// The shown table's foreign keys (see SPPostgresTableData -foreignKeyReferences:), loaded with its columns (empty
 /// when they can't be read).
-@property (readonly) NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *foreignKeyReferences;
+@property (readonly) NSDictionary<NSString *, NSDictionary<NSString *, id> *> *foreignKeyReferences;
+
+/**
+ * The foreign key value picker (SPForeignKeyPicker): with the "Open the value picker when editing a foreign key"
+ * preference on (ForeignKeyPickerEnabled in defaults), editing a cell of a single-column, non-bytea foreign key opens
+ * it on the cell instead of the in-cell editor; Choose (or NULL) puts the value into the cell's in-place editor and Type
+ * a value… opens the editor on the current value, on this table only and on the row it was opened on, once the runner
+ * is idle (Return then saves it as any edit). In edit mode the field editor sheet of such a cell gets a Choose…
+ * button that opens it, its result replacing the sheet's text. The picker reads the referenced table through
+ * taskRunner. For tests: when set, called instead of showing the picker (view and rect: where it would show).
+ */
+@property (copy) void (^foreignKeyPickerPresenter)(SPForeignKeyPicker *picker, NSView *view, NSRect rect);
 /// As clicking the link arrow of a cell (row, and the column's index in the table).
 - (void)followForeignKeyAtRow:(NSInteger)row column:(NSUInteger)columnIndex;
 

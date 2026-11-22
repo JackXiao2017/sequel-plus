@@ -45,6 +45,43 @@ static void SPPostgresTaskRunnerSendCancel(PGPostgresCancelToken *token)
 
 @end
 
+/// A main-thread answer the worker waits for: set once, then signalled.
+@interface SPPostgresTaskRunnerAnswer : NSObject
+{
+@public
+	dispatch_semaphore_t semaphore;
+	id value;
+	BOOL answered;
+}
+@end
+
+@implementation SPPostgresTaskRunnerAnswer
+
+- (instancetype)init
+{
+	if ((self = [super init])) semaphore = dispatch_semaphore_create(0);
+	return self;
+}
+
+- (void)answer:(id)theValue
+{
+	@synchronized (self) {
+		if (answered) return;
+		answered = YES;
+		value = [theValue retain];
+	}
+	dispatch_semaphore_signal(semaphore);
+}
+
+- (void)dealloc
+{
+	[value release];
+	dispatch_release(semaphore);
+	[super dealloc];
+}
+
+@end
+
 @interface SPPostgresTaskRunner ()
 {
 	dispatch_queue_t queue;
@@ -58,6 +95,10 @@ static void SPPostgresTaskRunnerSendCancel(PGPostgresCancelToken *token)
 	BOOL invalidated;
 	SPPostgresTaskRecord *runningRecord; // inside its work block
 	PGPostgresCancelToken *runningToken;
+
+	// Worker only: what the last work left (see -_connectionUsableBeforeWork:)
+	CFAbsoluteTime lastWorkEnded;
+	BOOL connectionBroken;
 }
 @property (readwrite, getter=isBusy) BOOL busy;
 @property (readwrite, copy) NSString *currentDescription;
@@ -71,6 +112,9 @@ static void SPPostgresTaskRunnerSendCancel(PGPostgresCancelToken *token)
 @synthesize busy = _busy;
 @synthesize currentDescription = _currentDescription;
 @synthesize currentCancelTitle = _currentCancelTitle;
+@synthesize connectionDelegate = _connectionDelegate;
+@synthesize idleCheckInterval = _idleCheckInterval;
+@synthesize pingTimeout = _pingTimeout;
 
 - (instancetype)initWithConnection:(PGPostgresConnection *)connection
 {
@@ -78,6 +122,9 @@ static void SPPostgresTaskRunnerSendCancel(PGPostgresCancelToken *token)
 		_connection = [connection retain];
 		pending = [[NSMutableArray alloc] init];
 		queue = dispatch_queue_create("com.sequelpro.postgres.taskrunner", DISPATCH_QUEUE_SERIAL);
+		_idleCheckInterval = 30;
+		_pingTimeout = 10;
+		lastWorkEnded = CFAbsoluteTimeGetCurrent();
 	}
 	return self;
 }
@@ -156,6 +203,10 @@ static void SPPostgresTaskRunnerSendCancel(PGPostgresCancelToken *token)
 
 		id result = nil;
 		NSError *error = nil;
+
+		// A connection gone dead while idle is re-established first (or the delegate gives up, cancelling this task)
+		if (!skip && ![self _connectionUsableBeforeWork:record]) skip = YES;
+
 		if (!skip) {
 			// The cancel token is taken here, on the thread that uses the connection; -cancelAll uses it from the main
 			// thread. A cancel that came in between skips the work.
@@ -173,6 +224,8 @@ static void SPPostgresTaskRunnerSendCancel(PGPostgresCancelToken *token)
 					result = [record->work(_connection, &workError) retain];
 					error = [workError retain];
 				}
+				lastWorkEnded = CFAbsoluteTimeGetCurrent();
+				connectionBroken = ![_connection isConnected];
 				// No cancel request is sent once the work has returned (one being sent finishes first)
 				@synchronized(self) {
 					[runningRecord release];
@@ -191,6 +244,124 @@ static void SPPostgresTaskRunnerSendCancel(PGPostgresCancelToken *token)
 			[result release];
 			[error release];
 		});
+	}
+}
+
+#pragma mark - Checking the connection
+
+/// Worker: runs start on the main thread (unless invalidated) with a block that answers it, and waits for the answer.
+/// NO when the runner was invalidated before an answer came (*value is then untouched).
+- (BOOL)_waitOnMainFor:(void (^)(SPPostgresTaskRunnerAnswer *answer))start value:(id *)value
+{
+	SPPostgresTaskRunnerAnswer *answer = [[[SPPostgresTaskRunnerAnswer alloc] init] autorelease];
+	[answer retain]; // released by the main-thread block
+	dispatch_async(dispatch_get_main_queue(), ^{
+		BOOL gone;
+		@synchronized (self) {
+			gone = invalidated;
+		}
+		if (!gone) start(answer);
+		[answer release];
+	});
+
+	while (dispatch_semaphore_wait(answer->semaphore, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC)) != 0) {
+		@synchronized (self) {
+			if (invalidated) return NO;
+		}
+	}
+	@synchronized (self) {
+		if (invalidated) return NO;
+	}
+	if (value) *value = [[answer->value retain] autorelease];
+	return YES;
+}
+
+/// Worker: whether record was cancelled (or the runner invalidated) since it was enqueued.
+- (BOOL)_isCancelledRecord:(SPPostgresTaskRecord *)record
+{
+	@synchronized (self) {
+		return invalidated || record->generation != generation;
+	}
+}
+
+/// Worker, before record's work: YES to run it. Checks the connection when it went unused for idleCheckInterval or is
+/// known to be broken; a dead one is re-established (see connectionDelegate). NO when the runner was invalidated or the
+/// task cancelled meanwhile (nothing is reconnected for it: the next task checks again), or the delegate gave up
+/// (then this task and the queued ones count as cancelled).
+- (BOOL)_connectionUsableBeforeWork:(SPPostgresTaskRecord *)record
+{
+	if (!self.connectionDelegate) return YES;
+	// Broken by the last work, or found dead by a query made outside the runner
+	BOOL broken = connectionBroken || ![_connection isConnected];
+	if (!broken && CFAbsoluteTimeGetCurrent() - lastWorkEnded < self.idleCheckInterval) return YES;
+
+	NSTimeInterval timeout = self.pingTimeout;
+	CFAbsoluteTime pingStart = CFAbsoluteTimeGetCurrent();
+	if ([_connection pingWithTimeout:timeout]) return YES;
+	// No answer at all: a network gone silent, which an SSH tunnel can take minutes to notice. Reopen it regardless.
+	BOOL silent = CFAbsoluteTimeGetCurrent() - pingStart >= timeout - 0.05;
+	connectionBroken = YES;
+
+	NSString *reason = [_connection connectionError];
+	// The state before the statement the drop cut off (or after the last that finished)
+	PGPostgresTransactionStatus lastKnown = [_connection lastKnownTransactionStatus];
+	BOOL transactionLost = lastKnown == PGPostgresTransactionInTransaction || lastKnown == PGPostgresTransactionInError;
+	BOOL attempt = !transactionLost; // an open transaction is lost: say so before reconnecting
+	BOOL force = silent;
+
+	for (;;) {
+		if ([self _isCancelledRecord:record]) return NO;
+
+		if (attempt) {
+			id prepared = nil;
+			BOOL forcing = force;
+			if (![self _waitOnMainFor:^(SPPostgresTaskRunnerAnswer *answer) {
+				id<SPPostgresTaskRunnerConnectionDelegate> delegate = self.connectionDelegate;
+				if (!delegate) { [answer answer:[NSNull null]]; return; }
+				[delegate taskRunner:self prepareReconnectForcing:forcing completion:^(NSError *error) {
+					[answer answer:error ?: (id)[NSNull null]];
+				}];
+			} value:&prepared]) return NO;
+
+			if ([prepared isKindOfClass:[NSError class]]) {
+				reason = [(NSError *)prepared localizedDescription];
+			}
+			else if ([_connection reestablishConnection]) {
+				connectionBroken = NO;
+				dispatch_async(dispatch_get_main_queue(), ^{
+					@synchronized (self) {
+						if (invalidated) return;
+					}
+					[self.connectionDelegate taskRunnerDidReconnect:self];
+				});
+				return YES;
+			}
+			else {
+				reason = [_connection connectionError];
+			}
+		}
+		attempt = YES;
+
+		NSString *theReason = [reason length] ? reason : NSLocalizedString(@"The server could not be reached.", @"PostgreSQL connection lost without a reason");
+		BOOL theTransactionLost = transactionLost;
+		id decision = nil;
+		if (![self _waitOnMainFor:^(SPPostgresTaskRunnerAnswer *answer) {
+			id<SPPostgresTaskRunnerConnectionDelegate> delegate = self.connectionDelegate;
+			if (!delegate) { [answer answer:@NO]; return; }
+			[delegate taskRunner:self connectionLost:theReason transactionLost:theTransactionLost decision:^(BOOL reconnect) {
+				[answer answer:@(reconnect)];
+			}];
+		} value:&decision]) return NO;
+		transactionLost = NO; // said once
+		force = YES;          // the user's Reconnect: reopen a tunnel even if it looks up
+
+		if (![decision boolValue]) {
+			connectionBroken = YES;
+			@synchronized (self) {
+				generation++; // this task and every queued one complete as cancelled
+			}
+			return NO;
+		}
 	}
 }
 

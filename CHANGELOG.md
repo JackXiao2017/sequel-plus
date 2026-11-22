@@ -1,5 +1,60 @@
 # Changelog
 
+## Sequel Plus 2.0.5
+
+Upgrading from 2.0.4.
+
+- Version **2.0.5**.
+
+### MySQL and PostgreSQL: pick a foreign key's value from the referenced table
+- In the **Content** view, editing a cell of a foreign key opens a pop-up under the cell listing rows of the referenced table, as in DataGrip. You no longer have to look the key up. The referenced (key) column comes first, in bold, and the row holding the cell's current value is tinted.
+- Type in the **search box** to narrow the list. It matches what you type anywhere in the shown columns, ignoring case, and highlights the matches. `%`, `_` and quotes are matched as typed. **+ Condition** adds column / operator / value rows, and every condition must match along with the search. Text columns offer contains, starts with, = and ≠. Numbers, dates and times offer =, ≠, <, ≤, >, ≥ and between. Every column offers is NULL and is not NULL.
+- The **⚙︎** menu chooses which columns the list shows. Ticking or unticking takes effect at once, and the menu stays open. **Show All Columns** and **Reset to Default** are at the bottom. The choice is remembered for that table on that server and database, whichever foreign key opens it.
+- Rows load 200 at a time, in key order. **Load more**, or moving down past the last row, fetches the next 200. ↑/↓ move the selection, and Return or a double-click chooses.
+- **Choose** puts the key into the cell's editor. Return saves it, or Escape drops it, as with any edit. **NULL** (when the column allows it) puts the NULL placeholder there instead. **Type a value…** edits the cell as text. **Cancel**, Escape or a click outside leaves the cell as it was.
+- With **Edit All Fields in Pop-up Sheet** on, the field editor sheet of a foreign key cell has a **Choose…** button. It opens the same pop-up, and the chosen value replaces the sheet's text.
+- The pop-up only reads the referenced table. It runs in the background on the tab's own connection, so a big table never blocks the window. If the table can't be read, the server's message takes the list's place.
+- Keys over more than one column, and binary keys (MySQL BINARY, VARBINARY and BLOB; PostgreSQL bytea), keep the normal in-cell editor. So does every cell that isn't a foreign key.
+- To turn it off, clear **Preferences ▸ Tables ▸ Open the value picker when editing a foreign key** (on by default). Foreign key cells then edit exactly as before, and the sheet has no Choose….
+
+### MySQL and PostgreSQL: Server Processes in one layout, with connections against the limit
+- **Database ▸ Show Server Processes…** opens a window of its own, "Server Processes on <connection>", laid out the same for both databases. The top left says how many connections the server has open against its limit, for example "12 of 151 connections"; it is read again on every refresh and turns red once only superusers could still connect. The filter sits at the top right, the list between. Along the bottom: the row count ("12 rows", or "3 of 12 rows" while filtered), **Auto Refresh** and how often, then the buttons, 12 points apart.
+- **MySQL** counts `Threads_connected` against `max_connections`. Its window keeps everything it had: **Save As...**, **Refresh** (⌘R), **Kill Query** and **Kill Connection** (now buttons as well as in the list's contextual menu), **Close** (Escape), the ⚙︎ menu with Show Process ID and Show FULL Process List, column sorting and remembered column widths. The auto refresh interval moved from the ⚙︎ menu to its own menu beside Auto Refresh (every second, 2, 5, 10, 30 or 60 seconds, or **Custom…**; a custom interval is listed there too).
+- **PostgreSQL** counts client connections only, against `max_connections`, and says how many of those are reserved for superusers (`superuser_reserved_connections`). A new **Type** column tells client connections apart from the server's own background processes (autovacuum, checkpointer…), which don't count against the limit. Its buttons are Refresh, Cancel Query, Kill Connection and Close.
+- PostgreSQL's Server Processes was a sheet over the tab; now you can keep it open beside the tab, move, resize or minimize it, and still use the tab and its other sheets. Choosing the menu item again brings it to the front, read again. Each tab has its own, and closing the tab closes it. Its Auto Refresh setting and interval are remembered, and a refresh that is still reading (say, behind a long query on the tab's connection) is never started again on top of itself.
+- Kill Connection still closes the selected connection, and Cancel Query (PostgreSQL) or Kill Query (MySQL) stops only its statement. Both ask first.
+
+### PostgreSQL and MySQL: connections, exports and tooltips say Sequel Plus
+- PostgreSQL connections now name themselves **Sequel Plus** (`application_name`), so Server Processes and the server's own `pg_stat_activity` show them as Sequel Plus instead of Sequel Pro.
+- A PostgreSQL export's header reads "PostgreSQL database dump written by Sequel Plus", and the PostgreSQL tab's Show Console and Clear Console tooltips say Sequel Plus.
+- The MySQL tab's Show Console and Clear Console tooltips say Sequel Plus too.
+
+### PostgreSQL: filter on several columns at once, as in MySQL
+- The **Content** view's filter is now made of rows, as a MySQL tab's: each row has a column, a comparison and a value, with **−** to remove it and **+** to add one under it. Under the rows, **Reset** (⌘⎋) clears them and **Filter** applies them (so does ↩ in a value).
+- As in MySQL, with no rows the bar shows only **Add Filter**; it adds a row, and **Filter** then takes its place. A table opens with no rows; showing the filter with its toggle starts you with one empty row.
+- Every row must match (they're joined with AND). A row with no value is left out, except **IS NULL** and **IS NOT NULL**, which take none; with no complete row the table shows unfiltered. Values are still sent to the server as parameters, never written into the SQL.
+- The rows take as much room as they need, up to a third of the view; past that they scroll. Removing the last row, or Reset, empties the rows (only Add Filter shows) and shows the table unfiltered again.
+- What you type applies only when you press Filter or ↩: paging, sorting and refreshing keep the filter last applied. Hiding the filter shows the table unfiltered but keeps your rows; showing it again brings them back without running them.
+- The foreign key arrow, and opening the rows a key points to, fill the filter with that one condition, as before.
+
+### PostgreSQL: idle connections stay up, and reconnect as MySQL's do
+- A PostgreSQL tab left alone for a while could be dropped silently by a router, firewall, VPN or cloud load balancer: the next action (say, opening Content) then waited about 2 minutes and failed with "SSL error: unexpected eof while reading". PostgreSQL connections now send TCP keep-alives as set in **Preferences ▸ Network ▸ Keep connection alive** (every 60 seconds by default), as MySQL connections do; before, the first one waited for macOS's default of 2 hours.
+- Before a load after 30 seconds unused, the tab checks its connection (giving up after 10 seconds instead of 2 minutes). A dropped connection is reconnected by itself, reopening the SSH tunnel first when it went down too, and the load then runs. The Console notes the reconnect.
+- If that fails, a sheet as MySQL's: "The connection to the PostgreSQL server was lost", with the reason, **Reconnect** (try again) and **Disconnect** (close the tab). If the lost session had a transaction open, the sheet comes first and says its changes were rolled back, so nothing is reconnected behind your back.
+- A statement that fails because the connection dropped while it ran is not run again (it might already have changed data); the next action reconnects.
+
+### PostgreSQL: editing a very large value no longer hangs the app
+- In the **Content** view, starting to edit a cell holding a very large value (a few MB of text) left the app not responding: the in-cell editor lays the whole value out as one line. A value over 10,000 characters now opens in the field editor sheet instead, as in the Query results; shorter values still edit in the cell.
+- What you type in the PostgreSQL field editor sheet is now always what **OK** saves. Before, the sheet could return the value as it was opened, dropping your edit.
+
+### MySQL: the Content filter's rows show again
+- In a MySQL tab's **Content** view, once the filter had been hidden (by the **Filter** toggle, or by opening a table with it off), showing it again put its rows under the bar holding **Reset**, **Add Filter** and **Filter**, so you couldn't see or edit them. The rows now sit above that bar every time, however often the filter is hidden and shown.
+
+### Signing: an Apple Development certificate
+- Sequel Plus is now signed with an Apple Development certificate (team 7328H73WPC) instead of the self-signed "Sequel Plus Signing" certificate. macOS then ties saved passwords' Keychain access to the team, not to the certificate, so new builds stop asking for the login keychain password.
+- The first time 2.0.5 opens, macOS may ask once more for each saved password, because the signature changed. Choose **Always Allow**; later updates shouldn't ask again.
+- The app is still not notarized, so a downloaded copy still shows the usual warning for an app from an unidentified developer the first time it opens.
+
 ## Sequel Plus 2.0.4
 
 Upgrading from 2.0.3.
@@ -19,6 +74,12 @@ Upgrading from 2.0.3.
 - Giving a schema away means your login no longer has access to it unless it has been granted some. Grant your login access afterwards if it still needs to read the copy.
 - If the server refuses the new owner (for example, the role no longer exists, or isn't one you may give objects to), the whole transfer fails and the target is left unchanged.
 - The note under it, and the completion message, name the owner.
+
+### Signing: the Keychain stops asking after every update
+- Sequel Plus is now signed with its own certificate, "Sequel Plus Signing", instead of ad-hoc. macOS remembers an app's Keychain access by its signature. An ad-hoc signature changed with every build, so each new version had to ask again for every saved password. The new signature stays the same from version to version.
+- The first time 2.0.4 opens, macOS asks once more for each saved password, because the signature changed. Choose **Always Allow**; later updates won't ask again.
+- The certificate is self-signed, so a downloaded copy still shows the usual warning for an app from an unidentified developer.
+- The app's executable is now named `Sequel Plus` (it was `Sequel Pro`).
 
 ## Sequel Plus 2.0.3
 

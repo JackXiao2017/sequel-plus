@@ -249,6 +249,7 @@
 		}];
 
 		NSString *structure = [self contentsOf:structurePath];
+		XCTAssertTrue([structure hasPrefix:@"--\n-- PostgreSQL database dump written by Sequel Plus\n"], @"%@", [structure substringToIndex:MIN(structure.length, 80u)]);
 		XCTAssertFalse([structure containsString:@"COPY "]);
 		XCTAssertFalse([structure containsString:@"setval"]);
 		XCTAssertTrue([structure containsString:@"CREATE TABLE"]);

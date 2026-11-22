@@ -7,6 +7,7 @@
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
 #import "../Source/Postgres/SPPostgresContentController.h"
+#import "../Source/Postgres/SPPostgresFilterRowsController.h"
 #import "../Source/Postgres/SPPostgresTableData.h"
 #import "../Source/Postgres/SPPostgresTaskRunner.h"
 #import "../Source/Postgres/SPPostgresHistory.h"
@@ -200,10 +201,12 @@ static const NSUInteger SPLinkTestPort = 55418;
 
 - (NSString *)filterBarText
 {
-	NSPopUpButton *column = [self.content valueForKey:@"filterColumnPopup"];
-	NSPopUpButton *comparison = [self.content valueForKey:@"filterComparisonPopup"];
-	NSTextField *value = [self.content valueForKey:@"filterValueField"];
-	return [NSString stringWithFormat:@"%@ %@ %@", [column titleOfSelectedItem], [comparison titleOfSelectedItem], [value stringValue]];
+	// One row per condition, "column comparison value", joined by " AND "
+	NSMutableArray *rows = [NSMutableArray array];
+	for (SPPostgresFilter *filter in [self.content.filterRows typedFilters]) {
+		[rows addObject:[NSString stringWithFormat:@"%@ %@ %@", filter.column, filter.comparison, filter.value]];
+	}
+	return [rows componentsJoinedByString:@" AND "];
 }
 
 #pragma mark - Data layer
@@ -214,16 +217,16 @@ static const NSUInteger SPLinkTestPort = 55418;
 	NSError *error = nil;
 	NSDictionary *references = [orders foreignKeyReferences:&error];
 	XCTAssertNotNil(references, @"%@", error);
-	NSDictionary *expected = @{@"customer_id": @{@"schema": @"sp_fk_a", @"table": @"customer", @"column": @"id"},
-							   @"parent_id": @{@"schema": @"sp_fk_a", @"table": @"orders", @"column": @"id"}};
+	NSDictionary *expected = @{@"customer_id": @{@"schema": @"sp_fk_a", @"table": @"customer", @"column": @"id", @"columns": @1, @"binary": @NO},
+							   @"parent_id": @{@"schema": @"sp_fk_a", @"table": @"orders", @"column": @"id", @"columns": @1, @"binary": @NO}};
 	XCTAssertEqualObjects(references, expected);
 
-	// Another schema; a two-column key links its first column
+	// Another schema; a two-column key links its first column (its column count says so)
 	SPPostgresTableData *customer = [[SPPostgresTableData alloc] initWithConnection:self.other schema:@"sp_fk_a" table:@"customer"];
-	NSDictionary *expectedCustomer = @{@"region": @{@"schema": @"sp_fk_b", @"table": @"region", @"column": @"code"}};
+	NSDictionary *expectedCustomer = @{@"region": @{@"schema": @"sp_fk_b", @"table": @"region", @"column": @"code", @"columns": @1, @"binary": @NO}};
 	XCTAssertEqualObjects([customer foreignKeyReferences:NULL], expectedCustomer);
 	SPPostgresTableData *line = [[SPPostgresTableData alloc] initWithConnection:self.other schema:@"sp_fk_a" table:@"line"];
-	NSDictionary *expectedLine = @{@"order_id": @{@"schema": @"sp_fk_a", @"table": @"orders", @"column": @"id"}};
+	NSDictionary *expectedLine = @{@"order_id": @{@"schema": @"sp_fk_a", @"table": @"orders", @"column": @"id", @"columns": @2, @"binary": @NO}};
 	XCTAssertEqualObjects([line foreignKeyReferences:NULL], expectedLine);
 
 	// None
@@ -286,8 +289,7 @@ static const NSUInteger SPLinkTestPort = 55418;
 	XCTAssertEqual([self.alerts count], 0u);
 
 	// Clearing the filter shows every row again
-	NSTextField *value = [self.content valueForKey:@"filterValueField"];
-	[value setStringValue:@""];
+	[[self.content.filterRows valueFieldInRow:0] setStringValue:@""];
 	[self.content applyFilter:nil];
 	[self waitForTab];
 	XCTAssertEqual([[self valuesOfColumn:@"id"] count], 4u);

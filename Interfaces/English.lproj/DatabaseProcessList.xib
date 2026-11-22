@@ -8,6 +8,7 @@
     <objects>
         <customObject id="-2" userLabel="File's Owner" customClass="SPProcessListController">
             <connections>
+                <outlet property="actionsPopUp" destination="76" id="SPA-ct-Pop"/>
                 <outlet property="autoRefreshButton" destination="105" id="108"/>
                 <outlet property="autoRefreshIntervalMenuItem" destination="113" id="132"/>
                 <outlet property="customIntervalButton" destination="135" id="180"/>
