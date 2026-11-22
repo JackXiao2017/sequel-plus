@@ -1,5 +1,11 @@
 # Changelog
 
+## Sequel Plus 2.0.6
+
+Upgrading from 2.0.5.
+
+- Version **2.0.6**.
+
 ## Sequel Plus 2.0.5
 
 Upgrading from 2.0.4.
