@@ -269,17 +269,19 @@ static NSString *SPRepeated(NSString *unit, NSUInteger length)
 	XCTAssertFalse([self displayedCell:@"code" row:0].valueIconActive, @"a primary key value, however long");
 }
 
-- (void)testLongForeignKeyCellShowsBothButtons
+- (void)testLongForeignKeyCellShowsAllThreeButtons
 {
 	[self selectTable:@"notes"];
 	SPTextAndLinkCell *cell = [self displayedCell:@"tag" row:[self rowWithId:@"1"]];
 	XCTAssertTrue(cell.linkActive);
+	XCTAssertTrue(cell.pickerIconActive, @"a text foreign key: the picker serves it");
 	XCTAssertTrue(cell.valueIconActive);
 	NSRect frame = NSMakeRect(0, 0, 200, 17);
-	NSRect icon = SPTextValueIconRectFromCellRect(frame, YES);
-	XCTAssertEqual([cell buttonAtPoint:NSMakePoint(NSMidX(icon), 8) inCellFrame:frame], SPTextAndLinkCellValueButton);
-	NSRect arrow = SPTextLinkRectFromCellRect(frame);
+	// From the right edge: the picker icon, the arrow, the value icon
+	NSRect picker = SPTextButtonSlotRect(frame, 0), arrow = SPTextButtonSlotRect(frame, 1), value = SPTextButtonSlotRect(frame, 2);
 	XCTAssertEqual([cell buttonAtPoint:NSMakePoint(NSMidX(arrow), 8) inCellFrame:frame], SPTextAndLinkCellLinkButton);
+	XCTAssertEqual([cell buttonAtPoint:NSMakePoint(NSMidX(picker), 8) inCellFrame:frame], SPTextAndLinkCellPickerButton);
+	XCTAssertEqual([cell buttonAtPoint:NSMakePoint(NSMidX(value), 8) inCellFrame:frame], SPTextAndLinkCellValueButton);
 }
 
 - (void)testNullOpensEmptyAndSavesText

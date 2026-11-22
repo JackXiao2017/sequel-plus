@@ -584,6 +584,10 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 		} else if ([columnDefinition objectForKey:@"foreignkeyreference"]) {
 			dataCell = [[[SPTextAndLinkCell alloc] initTextCell:@""] autorelease];
 			[dataCell setTarget:self action:@selector(clickLinkArrow:)];
+			NSDictionary *reference = [columnDefinition objectForKey:@"foreignkeyreference"];
+			if ([[reference objectForKey:@"columns"] integerValue] == 1 && ![[reference objectForKey:@"binary"] boolValue]) {
+				[dataCell setPickerTarget:self action:@selector(clickPickerIcon:)];
+			}
 
 		// Otherwise instantiate a text-only cell
 		} else {
@@ -4463,6 +4467,30 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 	});
 }
 
+- (void)clickPickerIcon:(SPTextAndLinkCell *)cell
+{
+	NSInteger gridColumn = [cell getClickedColumn];
+	NSInteger row = [cell getClickedRow];
+	if (gridColumn < 0 || row < 0 || gridColumn >= (NSInteger)[[tableContentView tableColumns] count]) return;
+	NSTableColumn *tableColumn = [[tableContentView tableColumns] objectAtIndex:(NSUInteger)gridColumn];
+	[self pickValueAtRow:row column:(NSUInteger)[[tableColumn identifier] integerValue]];
+}
+
+- (void)pickValueAtRow:(NSInteger)row column:(NSUInteger)column
+{
+	if ([tableDocumentInstance isWorking] || row < 0 || (NSUInteger)row >= tableRowsCount) return;
+	NSTableColumn *tableColumn = [self _tableColumnForDataColumn:column];
+	if (!tableColumn) return;
+	// As a double-click: the row selected (a row being edited elsewhere is saved), then the cell's edit starts, which
+	// opens the picker
+	[tableContentView selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
+	if ([tableContentView selectedRow] != row) return;
+	[[tableContentView window] makeFirstResponder:tableContentView];
+	if ([self tableView:tableContentView shouldEditTableColumn:tableColumn row:row]) {
+		[tableContentView editColumn:[[tableContentView tableColumns] indexOfObject:tableColumn] row:row withEvent:nil select:YES];
+	}
+}
+
 - (void)clickValueIcon:(SPTextAndLinkCell *)cell
 {
 	NSInteger gridColumn = [cell getClickedColumn];
@@ -4774,6 +4802,7 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 			if (cellIsLinkCell) {
 				[cell setLinkActive:NO];
 				[cell setValueIconActive:NO];
+				[cell setPickerIconActive:NO];
 			}
 			return;
 		}
@@ -4824,6 +4853,14 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 
 			// The value icon: not on the row being edited
 			[cell setValueIconActive:offersValue && [tableView editedRow] != rowIndex];
+
+			// The picker icon: a foreign key the picker serves (NULL too), in a table (not a view), not while editing
+			BOOL pickerIcon = NO;
+			if ([tableView editedRow] != rowIndex && columnIndex < [dataColumns count] && [NSArrayObjectAtIndex(dataColumns, columnIndex) objectForKey:@"foreignkeyreference"]
+				&& [tablesListInstance tableType] == SPTableTypeTable) {
+				pickerIcon = [self _foreignKeyPickerReferenceForTableColumn:tableColumn] != nil;
+			}
+			[cell setPickerIconActive:pickerIcon];
 		}
 	}
 }

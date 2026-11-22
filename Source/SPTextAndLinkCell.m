@@ -34,6 +34,7 @@
 
 @synthesize linkActive;
 @synthesize valueIconActive;
+@synthesize pickerIconActive;
 @synthesize allowsExpansionToolTips;
 
 /**
@@ -46,11 +47,16 @@ NSRect SPTextLinkRectFromCellRect(NSRect inRect)
 
 static const CGFloat SPTextValueIconGap = 6; // between the text and the value icon
 
-/// The value icon sits where the arrow does (at the right edge, the same size); with the arrow, right next to it.
-NSRect SPTextValueIconRectFromCellRect(NSRect inRect, BOOL hasLinkArrow)
+/// Buttons sit where the arrow alone does (at the right edge, the same size), each next one just left of the previous.
+NSRect SPTextButtonSlotRect(NSRect inRect, NSUInteger slot)
 {
 	NSRect arrow = SPTextLinkRectFromCellRect(inRect);
-	return hasLinkArrow ? NSOffsetRect(arrow, -(NSWidth(arrow) + 2), 0) : arrow;
+	return NSOffsetRect(arrow, -(CGFloat)slot * (NSWidth(arrow) + 2), 0);
+}
+
+NSRect SPTextValueIconRectFromCellRect(NSRect inRect, BOOL hasLinkArrow)
+{
+	return SPTextButtonSlotRect(inRect, hasLinkArrow ? 1 : 0);
 }
 
 static const NSCellImagePosition SPTextValueIconImagePosition = NSImageRight; // as the arrow's image
@@ -85,6 +91,7 @@ static const NSCellImagePosition SPTextValueIconImagePosition = NSImageRight; //
 {
 	if (linkButton) SPClear(linkButton);
 	if (valueButton) SPClear(valueButton);
+	if (pickerButton) SPClear(pickerButton);
 
 	[super dealloc];
 }
@@ -109,6 +116,9 @@ static const NSCellImagePosition SPTextValueIconImagePosition = NSImageRight; //
 	copy->valueButton = valueButton ? [valueButton copyWithZone:zone] : nil;
 	copy->valueTarget = valueTarget;
 	copy->valueAction = valueAction;
+	copy->pickerButton = pickerButton ? [pickerButton copyWithZone:zone] : nil;
+	copy->pickerTarget = pickerTarget;
+	copy->pickerAction = pickerAction;
 	return copy;
 }
 
@@ -164,8 +174,59 @@ static const NSCellImagePosition SPTextValueIconImagePosition = NSImageRight; //
 	}
 }
 
+/**
+ * Set the picker icon's target and action - this also enables the icon (shown while pickerIconActive).
+ */
+- (void)setPickerTarget:(id)theTarget action:(SEL)theAction
+{
+	pickerTarget = theTarget;
+	pickerAction = theAction;
+
+	if (!hasPickerIcon) {
+		hasPickerIcon = YES;
+
+		pickerButton = [[NSButtonCell alloc] init];
+		[pickerButton setButtonType:NSButtonTypeMomentaryChange];
+		[pickerButton setImagePosition:SPTextValueIconImagePosition];
+		[pickerButton setTitle:@""];
+		[pickerButton setBordered:NO];
+		NSImage *image = [NSImage imageWithSystemSymbolName:@"list.bullet" accessibilityDescription:NSLocalizedString(@"Choose a value", @"foreign key picker icon: accessibility description")];
+		NSImageSymbolConfiguration *configuration = [NSImageSymbolConfiguration configurationWithPointSize:10 weight:NSFontWeightRegular];
+		image = [image imageWithSymbolConfiguration:configuration] ?: image;
+		[image setTemplate:YES];
+		[pickerButton setImage:image];
+		[pickerButton setImageScaling:NSImageScaleProportionallyDown];
+	}
+}
+
 #pragma mark -
 #pragma mark Drawing and interaction
+
+- (BOOL)_pickerIconShows
+{
+	return hasPickerIcon && pickerIconActive;
+}
+
+/// The slot of each shown button (the picker icon, the arrow, the value icon, in that order from the right).
+- (NSUInteger)_pickerSlot
+{
+	return 0;
+}
+
+- (NSUInteger)_linkSlot
+{
+	return [self _pickerIconShows] ? 1 : 0;
+}
+
+- (NSUInteger)_valueSlot
+{
+	return ([self _pickerIconShows] ? 1 : 0) + ([self _linkShows] ? 1 : 0);
+}
+
+- (NSUInteger)_shownButtonCount
+{
+	return ([self _linkShows] ? 1 : 0) + ([self _pickerIconShows] ? 1 : 0) + ([self _valueIconShows] ? 1 : 0);
+}
 
 - (BOOL)_linkShows
 {
@@ -185,8 +246,11 @@ static const NSCellImagePosition SPTextValueIconImagePosition = NSImageRight; //
 - (NSRect)textFrameForCellFrame:(NSRect)cellFrame
 {
 	NSRect textRect = cellFrame;
-	// The text stops short of the value icon (a gap between them, so they never touch)
-	if ([self _valueIconShows]) textRect.size.width = MAX(0, NSMinX(SPTextValueIconRectFromCellRect(cellFrame, [self _linkShows])) - SPTextValueIconGap - NSMinX(cellFrame));
+	// The text stops short of the icons (a gap, so they never touch); the arrow alone keeps its old room
+	if ([self _valueIconShows] || [self _pickerIconShows]) {
+		NSRect leftmost = SPTextButtonSlotRect(cellFrame, [self _shownButtonCount] - 1);
+		textRect.size.width = MAX(0, NSMinX(leftmost) - SPTextValueIconGap - NSMinX(cellFrame));
+	}
 	else if ([self _linkShows]) textRect.size.width = MAX(0, cellFrame.size.width - 18);
 	return textRect;
 }
@@ -194,11 +258,15 @@ static const NSCellImagePosition SPTextValueIconImagePosition = NSImageRight; //
 - (SPTextAndLinkCellButton)buttonAtPoint:(NSPoint)p inCellFrame:(NSRect)cellFrame
 {
 	if ([self _linkShows]) {
-		NSRect linkRect = SPTextLinkRectFromCellRect(cellFrame);
+		NSRect linkRect = SPTextButtonSlotRect(cellFrame, [self _linkSlot]);
 		if (p.x > linkRect.origin.x && p.x < (linkRect.origin.x + linkRect.size.width)) return SPTextAndLinkCellLinkButton;
 	}
+	if ([self _pickerIconShows]) {
+		NSRect iconRect = SPTextButtonSlotRect(cellFrame, [self _pickerSlot]);
+		if (p.x > iconRect.origin.x && p.x < NSMaxX(iconRect)) return SPTextAndLinkCellPickerButton;
+	}
 	if ([self _valueIconShows]) {
-		NSRect iconRect = SPTextValueIconRectFromCellRect(cellFrame, [self _linkShows]);
+		NSRect iconRect = SPTextButtonSlotRect(cellFrame, [self _valueSlot]);
 		if (p.x > iconRect.origin.x && p.x < NSMaxX(iconRect)) return SPTextAndLinkCellValueButton;
 	}
 	return SPTextAndLinkCellNoButton;
@@ -209,8 +277,8 @@ static const NSCellImagePosition SPTextValueIconImagePosition = NSImageRight; //
 {
 	lastLinkColumn = [tableView columnAtPoint:p];
 	lastLinkRow = [tableView rowAtPoint:p];
-	id target = (button == SPTextAndLinkCellValueButton) ? valueTarget : linkTarget;
-	SEL action = (button == SPTextAndLinkCellValueButton) ? valueAction : linkAction;
+	id target = (button == SPTextAndLinkCellValueButton) ? valueTarget : (button == SPTextAndLinkCellPickerButton) ? pickerTarget : linkTarget;
+	SEL action = (button == SPTextAndLinkCellValueButton) ? valueAction : (button == SPTextAndLinkCellPickerButton) ? pickerAction : linkAction;
 	if (target && action) [target performSelector:action withObject:self];
 }
 
@@ -222,7 +290,7 @@ static const NSCellImagePosition SPTextValueIconImagePosition = NSImageRight; //
 {
 
 	// Fast case for no buttons
-	if (![self _linkShows] && ![self _valueIconShows]) {
+	if (![self _shownButtonCount]) {
 		[super drawInteriorWithFrame:aRect inView:controlView];
 		return;
 	}
@@ -233,11 +301,15 @@ static const NSCellImagePosition SPTextValueIconImagePosition = NSImageRight; //
 	// The value icon: a template image, white on an emphasized selection as the text is
 	if ([self _valueIconShows]) {
 		[valueButton setBackgroundStyle:[self backgroundStyle]];
-		[valueButton drawInteriorWithFrame:SPTextValueIconRectFromCellRect(aRect, [self _linkShows]) inView:controlView];
+		[valueButton drawInteriorWithFrame:SPTextButtonSlotRect(aRect, [self _valueSlot]) inView:controlView];
+	}
+	if ([self _pickerIconShows]) {
+		[pickerButton setBackgroundStyle:[self backgroundStyle]];
+		[pickerButton drawInteriorWithFrame:SPTextButtonSlotRect(aRect, [self _pickerSlot]) inView:controlView];
 	}
 	if (![self _linkShows]) return;
 
-	NSRect linkRect = SPTextLinkRectFromCellRect(aRect);
+	NSRect linkRect = SPTextButtonSlotRect(aRect, [self _linkSlot]);
 
 	// Get the new link state
 	NSInteger newDrawState = ([self isHighlighted])?
@@ -275,7 +347,7 @@ static const NSCellImagePosition SPTextValueIconImagePosition = NSImageRight; //
 {
 
 	// Fast case for no buttons - make entire cell editable click area
-	if (![self _linkShows] && ![self _valueIconShows]) return NSCellHitContentArea | NSCellHitEditableTextArea;
+	if (![self _shownButtonCount]) return NSCellHitContentArea | NSCellHitEditableTextArea;
 
 	NSPoint p = [[[controlView window] contentView] convertPoint:[event locationInWindow] toView:controlView];
 
@@ -299,7 +371,7 @@ static const NSCellImagePosition SPTextValueIconImagePosition = NSImageRight; //
 {
 
 	// Fast case for no buttons
-	if (![self _linkShows] && ![self _valueIconShows]) return [super trackMouse:theEvent inRect:cellFrame ofView:controlView untilMouseUp:untilMouseUp];
+	if (![self _shownButtonCount]) return [super trackMouse:theEvent inRect:cellFrame ofView:controlView untilMouseUp:untilMouseUp];
 
 	NSPoint p = [controlView convertPoint:[theEvent locationInWindow] fromView:nil];
 
@@ -307,8 +379,9 @@ static const NSCellImagePosition SPTextValueIconImagePosition = NSImageRight; //
 	SPTextAndLinkCellButton button = [self buttonAtPoint:p inCellFrame:cellFrame];
 	if (button == SPTextAndLinkCellNoButton)
 		return [super trackMouse:theEvent inRect:cellFrame ofView:controlView untilMouseUp:untilMouseUp];
-	NSButtonCell *buttonCell = (button == SPTextAndLinkCellValueButton) ? valueButton : linkButton;
-	NSRect linkRect = (button == SPTextAndLinkCellValueButton) ? SPTextValueIconRectFromCellRect(cellFrame, [self _linkShows]) : SPTextLinkRectFromCellRect(cellFrame);
+	NSButtonCell *buttonCell = (button == SPTextAndLinkCellValueButton) ? valueButton : (button == SPTextAndLinkCellPickerButton) ? pickerButton : linkButton;
+	NSRect linkRect = (button == SPTextAndLinkCellValueButton) ? SPTextButtonSlotRect(cellFrame, [self _valueSlot])
+		: (button == SPTextAndLinkCellPickerButton) ? SPTextButtonSlotRect(cellFrame, [self _pickerSlot]) : SPTextButtonSlotRect(cellFrame, [self _linkSlot]);
 
 	// Ignore events other than mouse down.
 	if ([theEvent type] != NSLeftMouseDown) return YES;

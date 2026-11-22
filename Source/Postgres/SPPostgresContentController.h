@@ -176,6 +176,12 @@ __attribute__((visibility("default")))
  * showing the popover (view and rect: where it would show).
  */
 @property (copy) void (^valuePopoverPresenter)(SPValuePopover *popover, NSView *view, NSRect rect);
+/**
+ * The picker icon: a cell of a foreign key the value picker serves (single-column, not bytea; the picker preference
+ * on), NULL included, where the cell can be edited and not on the row being edited, shows a list icon left of the
+ * link arrow. Clicking it starts editing the cell, as a double-click would: the picker opens on it.
+ */
+- (void)pickValueAtRow:(NSInteger)row column:(NSUInteger)columnIndex;
 /// As clicking the value icon of a cell (row, and the column's index in the table).
 - (void)showValueAtRow:(NSInteger)row column:(NSUInteger)columnIndex;
 /// As clicking the link arrow of a cell (row, and the column's index in the table).

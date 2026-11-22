@@ -234,6 +234,9 @@ typedef NS_ENUM(NSInteger, SPTableContentFilterSource) {
 - (void)showValueAtRow:(NSInteger)row column:(NSUInteger)column;
 /// Closes the value popover without writing (the tab closes or stops being the active one).
 - (void)closeValuePopover;
+/// As clicking the picker icon of a foreign key cell (the list icon left of the link arrow, shown where the value
+/// picker serves the key, NULL included): starts editing the cell, as a double-click would, which opens the picker.
+- (void)pickValueAtRow:(NSInteger)row column:(NSUInteger)column;
 /// For tests: called instead of showing the value popover (view and rect: where it would show).
 - (void)setValuePopoverPresenter:(void (^)(SPValuePopover *popover, NSView *view, NSRect rect))presenter;
 - (NSString *)selectedTable;

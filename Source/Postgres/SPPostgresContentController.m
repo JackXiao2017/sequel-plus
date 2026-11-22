@@ -300,6 +300,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 		if ([cell isKindOfClass:[SPTextAndLinkCell class]]) {
 			[cell setTarget:nil action:NULL];
 			[cell setValueTarget:nil action:NULL];
+			[cell setPickerTarget:nil action:NULL];
 		}
 	}
 	// A date / time picker this view opened (its completion sees invalidated)
@@ -903,6 +904,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 		SPTextAndLinkCell *cell = [[[SPTextAndLinkCell alloc] initTextCell:@""] autorelease];
 		[cell setAllowsExpansionToolTips:YES];
 		if ([foreignKeys objectForKey:[column name]]) [cell setTarget:self action:@selector(_clickLinkArrow:)];
+		if ([self _pickerServesColumn:column]) [cell setPickerTarget:self action:@selector(_clickPickerIcon:)];
 		if ([self _showsValueIconInColumn:column]) [cell setValueTarget:self action:@selector(_clickValueIcon:)];
 		[cell setEditable:YES];
 		[cell setScrollable:YES];
@@ -938,6 +940,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 		// Room for the link arrow (as MySQL's) and the value icon
 		SPPostgresColumn *column = [self _columnForTableColumn:tableColumn];
 		CGFloat arrowWidth = [foreignKeys objectForKey:[column name] ?: @""] ? 18 : 0;
+		if ([self _pickerServesColumn:column]) arrowWidth += 14;
 		if ([self _showsValueIconInColumn:column]) arrowWidth += 20;
 		[tableColumn setWidth:MIN(MAX(ceil(width + arrowWidth), SPPostgresContentMinColumnWidth), SPPostgresContentMaxColumnWidth + arrowWidth)];
 	}
@@ -1980,6 +1983,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 		if (isLinkCell) {
 			[cell setLinkActive:NO];
 			[cell setValueIconActive:NO];
+			[cell setPickerIconActive:NO];
 		}
 		return;
 	}
@@ -1993,6 +1997,12 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	// As MySQL's: no link arrow on NULL, on the row being edited, or on a new row not inserted yet
 	BOOL settled = [theTableView editedRow] != rowIndex && rowIndex != [self _pendingRowIndex];
 	if (isLinkCell) [cell setLinkActive:!isNull && settled];
+	// The picker icon: a foreign key the picker serves (NULL too), where the cell can be edited
+	if (isLinkCell) {
+		SPPostgresColumn *column = [self _columnForTableColumn:tableColumn];
+		[cell setPickerIconActive:settled && editable && loaded && ![column isGenerated] && [self _pickerReferenceForColumn:column] != nil];
+	}
+
 	// The value icon: any value of a text column (NULL too), not a primary key
 	if (isLinkCell) [cell setValueIconActive:settled && SPValuePopoverOffersValue(value, [self _showsValueIconInColumn:[self _columnForTableColumn:tableColumn]])];
 }
@@ -2010,6 +2020,39 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 		if ([type hasPrefix:prefix]) return YES;
 	}
 	return NO;
+}
+
+/// A single-column, non-bytea foreign key: the value picker can serve it (whether it's on is the preference's).
+- (BOOL)_pickerServesColumn:(SPPostgresColumn *)column
+{
+	NSDictionary *reference = column ? [foreignKeys objectForKey:[column name]] : nil;
+	return reference && [[reference objectForKey:@"columns"] integerValue] == 1 && ![[reference objectForKey:@"binary"] boolValue];
+}
+
+- (void)_clickPickerIcon:(SPTextAndLinkCell *)cell
+{
+	NSInteger columnIndex = [cell getClickedColumn];
+	NSInteger row = [cell getClickedRow];
+	if (columnIndex < 0 || row < 0 || columnIndex >= (NSInteger)[[tableView tableColumns] count]) return;
+	NSTableColumn *tableColumn = [[tableView tableColumns] objectAtIndex:(NSUInteger)columnIndex];
+	[self pickValueAtRow:row column:(NSUInteger)[[tableColumn identifier] integerValue]];
+}
+
+- (void)pickValueAtRow:(NSInteger)row column:(NSUInteger)columnIndex
+{
+	if (invalidated || row < 0 || (NSUInteger)row >= [rows count] || columnIndex >= [columns count]) return;
+	NSInteger gridColumn = -1;
+	NSArray *tableColumns = [tableView tableColumns];
+	for (NSUInteger i = 0; i < [tableColumns count]; i++) {
+		if ((NSUInteger)[[[tableColumns objectAtIndex:i] identifier] integerValue] == columnIndex) gridColumn = (NSInteger)i;
+	}
+	if (gridColumn < 0) return;
+	// As a double-click: the row selected, then the cell's edit asked for (which opens the picker on it, or the sheet in
+	// edit mode); an in-place edit only when that says so
+	[tableView selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
+	[[tableView window] makeFirstResponder:tableView];
+	NSTableColumn *tableColumn = [tableColumns objectAtIndex:(NSUInteger)gridColumn];
+	if ([self tableView:tableView shouldEditTableColumn:tableColumn row:row]) [tableView editColumn:gridColumn row:row withEvent:nil select:YES];
 }
 
 - (void)_clickValueIcon:(SPTextAndLinkCell *)cell

@@ -22,6 +22,7 @@
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView { return 1; }
 - (id)tableView:(NSTableView *)tableView objectValueForTableColumn:(NSTableColumn *)column row:(NSInteger)row { return @"x"; }
 - (void)linkClicked:(SPTextAndLinkCell *)cell { [_clicks addObject:[NSString stringWithFormat:@"link %ld,%ld", (long)[cell getClickedRow], (long)[cell getClickedColumn]]]; }
+- (void)pickerClicked:(SPTextAndLinkCell *)cell { [_clicks addObject:[NSString stringWithFormat:@"picker %ld,%ld", (long)[cell getClickedRow], (long)[cell getClickedColumn]]]; }
 - (void)valueClicked:(SPTextAndLinkCell *)cell { [_clicks addObject:[NSString stringWithFormat:@"value %ld,%ld", (long)[cell getClickedRow], (long)[cell getClickedColumn]]]; }
 @end
 
@@ -135,6 +136,58 @@ static NSString *SPRepeat(NSUInteger count)
 	[cell _followButton:SPTextAndLinkCellLinkButton atPoint:NSMakePoint(5, 5) inTableView:table];
 	NSString *where = [NSString stringWithFormat:@"%ld,%ld", (long)[table rowAtPoint:NSMakePoint(5, 5)], (long)[table columnAtPoint:NSMakePoint(5, 5)]];
 	XCTAssertEqualObjects(recorder.clicks, (@[[@"value " stringByAppendingString:where], [@"link " stringByAppendingString:where]]));
+}
+
+#pragma mark - Picker icon
+
+- (void)testPickerIconSitsAtTheEdgeRightOfTheArrow
+{
+	SPCellClickRecorder *recorder = [[SPCellClickRecorder alloc] init];
+	SPTextAndLinkCell *cell = [[SPTextAndLinkCell alloc] initTextCell:@""];
+	[cell setTarget:recorder action:@selector(linkClicked:)];
+	[cell setValueTarget:recorder action:@selector(valueClicked:)];
+	[cell setPickerTarget:recorder action:@selector(pickerClicked:)];
+	NSRect frame = NSMakeRect(0, 0, 200, 17);
+	NSPoint (^mid)(NSUInteger) = ^NSPoint(NSUInteger slot) { NSRect r = SPTextButtonSlotRect(frame, slot); return NSMakePoint(NSMidX(r), NSMidY(r)); };
+	XCTAssertTrue(NSEqualRects(SPTextButtonSlotRect(frame, 0), SPTextLinkRectFromCellRect(frame)), @"slot 0 is the arrow's place");
+	XCTAssertLessThan(NSMaxX(SPTextButtonSlotRect(frame, 1)), NSMinX(SPTextButtonSlotRect(frame, 0)));
+
+	// All three: the picker at the edge, the arrow next, the value icon furthest left
+	cell.linkActive = YES;
+	cell.pickerIconActive = YES;
+	cell.valueIconActive = YES;
+	XCTAssertEqual([cell buttonAtPoint:mid(0) inCellFrame:frame], SPTextAndLinkCellPickerButton);
+	XCTAssertEqual([cell buttonAtPoint:mid(1) inCellFrame:frame], SPTextAndLinkCellLinkButton);
+	XCTAssertEqual([cell buttonAtPoint:mid(2) inCellFrame:frame], SPTextAndLinkCellValueButton);
+	XCTAssertLessThanOrEqual(NSWidth([cell textFrameForCellFrame:frame]), NSMinX(SPTextButtonSlotRect(frame, 2)) - 6);
+
+	// Picker and arrow (an integer key: no value icon)
+	cell.valueIconActive = NO;
+	XCTAssertEqual([cell buttonAtPoint:mid(0) inCellFrame:frame], SPTextAndLinkCellPickerButton);
+	XCTAssertEqual([cell buttonAtPoint:mid(1) inCellFrame:frame], SPTextAndLinkCellLinkButton);
+	XCTAssertEqual([cell buttonAtPoint:mid(2) inCellFrame:frame], SPTextAndLinkCellNoButton);
+	XCTAssertLessThanOrEqual(NSWidth([cell textFrameForCellFrame:frame]), NSMinX(SPTextButtonSlotRect(frame, 1)) - 6);
+
+	// NULL: no arrow, the picker at the edge
+	cell.linkActive = NO;
+	XCTAssertEqual([cell buttonAtPoint:mid(0) inCellFrame:frame], SPTextAndLinkCellPickerButton);
+
+	// Not active: nothing there
+	cell.pickerIconActive = NO;
+	XCTAssertEqual([cell buttonAtPoint:mid(0) inCellFrame:frame], SPTextAndLinkCellNoButton);
+}
+
+- (void)testPickerIconFiresItsOwnAction
+{
+	SPCellClickRecorder *recorder = [[SPCellClickRecorder alloc] init];
+	SPTextAndLinkCell *cell = [[SPTextAndLinkCell alloc] initTextCell:@""];
+	[cell setTarget:recorder action:@selector(linkClicked:)];
+	[cell setPickerTarget:recorder action:@selector(pickerClicked:)];
+	cell.pickerIconActive = YES;
+	NSTableView *table = [[NSTableView alloc] initWithFrame:NSMakeRect(0, 0, 300, 100)];
+	[cell _followButton:SPTextAndLinkCellPickerButton atPoint:NSMakePoint(5, 5) inTableView:table];
+	XCTAssertEqual(recorder.clicks.count, 1u);
+	XCTAssertTrue([recorder.clicks.firstObject hasPrefix:@"picker"]);
 }
 
 @end

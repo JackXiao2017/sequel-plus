@@ -1,5 +1,6 @@
 #import <XCTest/XCTest.h>
 #import <PostgresKit/PostgresKit.h>
+#import "../Source/SPTextAndLinkCell.h"
 #import "SPPostgresTestServers.h"
 #import "../Source/SPWindowController.h"
 #import "../Source/Postgres/SPPostgresDocument.h"
@@ -388,9 +389,11 @@ static const NSUInteger SPLinkTestPort = 55418;
 	[[self grid] scrollColumnToVisible:columnIndex];
 	[[self grid] displayIfNeeded];
 
-	// The arrow is drawn in the last 18 pt of the cell
+	// The arrow: at the right edge, or just left of the picker icon when that shows (it takes the edge)
 	NSRect cellFrame = [[self grid] frameOfCellAtColumn:columnIndex row:row];
-	NSPoint inGrid = NSMakePoint(NSMaxX(cellFrame) - 9, NSMidY(cellFrame));
+	SPTextAndLinkCell *cell = (SPTextAndLinkCell *)[self preparedCellAtRow:row column:@"customer_id"];
+	NSRect arrow = SPTextButtonSlotRect(cellFrame, cell.pickerIconActive ? 1 : 0);
+	NSPoint inGrid = NSMakePoint(NSMidX(arrow), NSMidY(cellFrame));
 	NSPoint inWindow = [[self grid] convertPoint:inGrid toView:nil];
 	NSWindow *window = [self.controller window];
 
