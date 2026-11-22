@@ -47,7 +47,9 @@ my $plist_path = "$ENV{BUILT_PRODUCTS_DIR}/$ENV{INFOPLIST_PATH}";
 #
 sub _get_revision_number
 {
-	my $svn2git_migration_compensation = 480;
+	# 480 for the svn2git migration, plus 27 for the commits that held only docs/ and were removed from the history
+	# (2026-11-23), so build numbers go on from where they were (2.0.6 stays build 5451)
+	my $svn2git_migration_compensation = 507;
 
 	return `git log --oneline | wc -l` + $svn2git_migration_compensation;
 }
