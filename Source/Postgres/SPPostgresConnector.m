@@ -3,6 +3,7 @@
 #import "SPPostgresFavorite.h"
 #import "SPSSHTunnel.h"
 #import "SPKeychain.h"
+#import "SPConstants.h"
 #import <PostgresKit/PostgresKit.h>
 #import <objc/runtime.h>
 
@@ -113,6 +114,8 @@ static char SPPostgresConnectorProxyKey;
 	dispatch_queue_t connectQueue;
 
 	void (^completion)(PGPostgresConnection *, NSError *);
+	// -reopenTunnelOnWindow:force:completion: while its new tunnel comes up
+	void (^reopenCompletion)(NSError *);
 
 	BOOL started;
 	BOOL finished;
@@ -155,6 +158,15 @@ static char SPPostgresConnectorProxyKey;
 - (void)dealloc
 {
 	[proxy abandon];
+	if (reopenCompletion) {
+		void (^theReopen)(NSError *) = reopenCompletion;
+		reopenCompletion = nil;
+		NSError *cancelled = [[self class] _errorWithCode:SPPostgresErrorCancelled message:nil];
+		dispatch_async(dispatch_get_main_queue(), ^{
+			theReopen(cancelled);
+			[theReopen release];
+		});
+	}
 	[self _closeTunnel];
 	[self _closeConnectionWaiting:NO];
 	[self _releaseTunnelOwner];
@@ -294,6 +306,13 @@ static char SPPostgresConnectorProxyKey;
 	[theConnection setTimeout:SPPostgresConnectTimeout];
 	[theConnection setApplicationName:SPPostgresApplicationName];
 
+	// As MySQL connections (and the SSH tunnel's ServerAliveInterval): Preferences ▸ Network ▸ Keep connection alive
+	NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+	id useKeepAlive = [prefs objectForKey:SPUseKeepAlive];
+	double keepAliveInterval = [prefs doubleForKey:SPKeepAliveInterval];
+	[theConnection setUseKeepAlive:useKeepAlive ? [prefs boolForKey:SPUseKeepAlive] : YES];
+	[theConnection setKeepAliveInterval:keepAliveInterval >= 1 ? (NSUInteger)round(keepAliveInterval) : 60];
+
 	[theConnection setSslMode:[favorite useSSL] ? @"require" : @"prefer"];
 	if ([[favorite sslCACertPath] length]) [theConnection setSslRootCertPath:[[favorite sslCACertPath] stringByExpandingTildeInPath]];
 	if ([[favorite sslCertPath] length]) [theConnection setSslCertPath:[[favorite sslCertPath] stringByExpandingTildeInPath]];
@@ -316,6 +335,24 @@ static char SPPostgresConnectorProxyKey;
 
 - (void)_startTunnelToPort:(NSUInteger)port
 {
+	NSString *message = nil;
+	SPSSHTunnel *theTunnel = [self _newTunnelToPort:port window:parentWindow error:&message];
+
+	if (!theTunnel) {
+		[self _finishLaterWithError:[[self class] _errorWithCode:SPPostgresErrorSSHTunnelFailed message:message]];
+		return;
+	}
+
+	tunnel = theTunnel;
+
+	// Launches ssh on a background thread; progress arrives through -_sshTunnelStateChanged:
+	[tunnel connect];
+}
+
+/// A tunnel for the favorite to port on its host, set up (password or keychain, key file, sheets on window, state
+/// changes to the proxy) but not started; retained. nil, with *message, when the favorite lacks a host.
+- (SPSSHTunnel *)_newTunnelToPort:(NSUInteger)port window:(NSWindow *)window error:(NSString **)message
+{
 	SPSSHTunnel *theTunnel = nil;
 
 	if ([[favorite sshHost] length] && [[favorite host] length]) {
@@ -327,36 +364,108 @@ static char SPPostgresConnectorProxyKey;
 	}
 
 	if (!theTunnel) {
-		NSString *message = ([[favorite sshHost] length] && [[favorite host] length])
+		if (message) *message = ([[favorite sshHost] length] && [[favorite host] length])
 			? NSLocalizedString(@"The SSH tunnel could not be created.", @"PostgreSQL SSH tunnel could not be created")
 			: NSLocalizedString(@"Enter both the SSH host and the PostgreSQL host.", @"PostgreSQL SSH connection missing host");
-		[self _finishLaterWithError:[[self class] _errorWithCode:SPPostgresErrorSSHTunnelFailed message:message]];
-		return;
+		return nil;
 	}
 
-	tunnel = theTunnel;
-	objc_setAssociatedObject(tunnel, &SPPostgresConnectorProxyKey, proxy, OBJC_ASSOCIATION_RETAIN);
+	objc_setAssociatedObject(theTunnel, &SPPostgresConnectorProxyKey, proxy, OBJC_ASSOCIATION_RETAIN);
 
 	// Without a parent window the tunnel fails at once (reported through the state callback)
-	if (parentWindow) [tunnel setParentWindow:parentWindow];
+	if (window) [theTunnel setParentWindow:window];
 
 	if ([sshPassword length]) {
-		[tunnel setPassword:sshPassword];
+		[theTunnel setPassword:sshPassword];
 	}
 	else if ([[favorite favoriteID] length]) {
 		SPKeychain *keychain = [[SPKeychain alloc] init];
 		if ([keychain passwordExistsForName:[favorite sshKeychainName] account:[favorite sshKeychainAccount]]) {
-			[tunnel setPasswordKeychainName:[favorite sshKeychainName] account:[favorite sshKeychainAccount]];
+			[theTunnel setPasswordKeychainName:[favorite sshKeychainName] account:[favorite sshKeychainAccount]];
 		}
 		[keychain release];
 	}
 
-	if ([[favorite sshKeyPath] length]) [tunnel setKeyFilePath:[favorite sshKeyPath]];
+	if ([[favorite sshKeyPath] length]) [theTunnel setKeyFilePath:[favorite sshKeyPath]];
 
-	[tunnel setConnectionStateChangeSelector:@selector(sshTunnelStateChanged:) delegate:proxy];
+	[theTunnel setConnectionStateChangeSelector:@selector(sshTunnelStateChanged:) delegate:proxy];
 
-	// Launches ssh on a background thread; progress arrives through -_sshTunnelStateChanged:
+	return theTunnel;
+}
+
+#pragma mark - Reopening the tunnel
+
+- (void)reopenTunnelOnWindow:(NSWindow *)window force:(BOOL)force completion:(void (^)(NSError *error))theCompletion
+{
+	void (^later)(NSError *) = ^(NSError *error) {
+		void (^copied)(NSError *) = [theCompletion copy];
+		dispatch_async(dispatch_get_main_queue(), ^{
+			if (copied) copied(error);
+			[copied release];
+		});
+	};
+
+	if ([favorite type] != SPPostgresSSHConnection || !connection) {
+		later(nil);
+		return;
+	}
+
+	if (sharesTunnel) {
+		// Never opened from here: only follow the owner's tunnel, which may have been reopened on another port
+		SPSSHTunnel *shared = [tunnelOwner tunnel];
+		if (!shared || [shared state] != SPMySQLProxyConnected || ![shared localPort]) {
+			later([[self class] _errorWithCode:SPPostgresErrorSSHTunnelFailed message:NSLocalizedString(@"The SSH tunnel of this favorite's session is not connected.", @"PostgreSQL shared SSH tunnel is not connected")]);
+			return;
+		}
+		[connection setHost:@"127.0.0.1"];
+		[connection setPort:[shared localPort]];
+		later(nil);
+		return;
+	}
+
+	if (!force && tunnel && [tunnel state] == SPMySQLProxyConnected && [tunnel localPort]) {
+		later(nil);
+		return;
+	}
+
+	if (reopenCompletion) {
+		later([[self class] _errorWithCode:SPPostgresErrorSSHTunnelFailed message:NSLocalizedString(@"The SSH tunnel is already being reopened.", @"PostgreSQL SSH tunnel reopen already running")]);
+		return;
+	}
+
+	[self _closeTunnel];
+
+	NSString *message = nil;
+	NSUInteger port = [favorite port] ? [favorite port] : SPPostgresDefaultPort;
+	SPSSHTunnel *theTunnel = [self _newTunnelToPort:port window:window error:&message];
+	if (!theTunnel) {
+		later([[self class] _errorWithCode:SPPostgresErrorSSHTunnelFailed message:message]);
+		return;
+	}
+
+	tunnel = theTunnel;
+	reopenCompletion = [theCompletion copy];
 	[tunnel connect];
+}
+
+/// The reopened tunnel came up or failed: the connection follows its local port (nil error) or the error is reported.
+- (void)_finishReopenWithError:(NSError *)error
+{
+	void (^theCompletion)(NSError *) = reopenCompletion;
+	reopenCompletion = nil;
+	if (!theCompletion) return;
+
+	if (error) [self _closeTunnel];
+	else {
+		[connection setHost:@"127.0.0.1"];
+		[connection setPort:[tunnel localPort]];
+		// Only needed for its sheets while connecting (see -_finishWithConnection:error:)
+		[tunnel setParentWindow:nil];
+	}
+
+	[[self retain] autorelease]; // the completion may release the connector
+	theCompletion(error);
+	[theCompletion release];
 }
 
 /// Connects through the tunnel owner's tunnel, which must be up already; never opens or closes a tunnel.
@@ -377,6 +486,19 @@ static char SPPostgresConnectorProxyKey;
 
 - (void)_sshTunnelStateChanged:(SPSSHTunnel *)theTunnel
 {
+	if (reopenCompletion && theTunnel == tunnel) {
+		if ([theTunnel passwordPromptCancelled]) {
+			[self _finishReopenWithError:[[self class] _errorWithCode:SPPostgresErrorCancelled message:nil]];
+		}
+		else if ([theTunnel state] == SPMySQLProxyIdle) {
+			[self _finishReopenWithError:[[self class] _errorWithCode:SPPostgresErrorSSHTunnelFailed message:[theTunnel lastError]]];
+		}
+		else if ([theTunnel state] == SPMySQLProxyConnected) {
+			[self _finishReopenWithError:nil];
+		}
+		return;
+	}
+
 	if (finished || theTunnel != tunnel) return;
 
 	// Mirrors SPConnectionController's -sshTunnelCallback:
@@ -537,6 +659,9 @@ static char SPPostgresConnectorProxyKey;
 	[self _closeConnectionWaiting:YES];
 	[self _closeTunnel];
 	[self _releaseTunnelOwner];
+
+	// A tunnel being reopened: its completion is owed one call
+	if (reopenCompletion) [self _finishReopenWithError:[[self class] _errorWithCode:SPPostgresErrorCancelled message:nil]];
 
 	if (started && !finished) {
 		[self _finishWithConnection:nil error:[[self class] _errorWithCode:SPPostgresErrorCancelled message:nil]];

@@ -580,4 +580,155 @@
 	[a disconnect];
 }
 
+#pragma mark - Keep-alive and reopening the tunnel
+
+/// Pins preference values in the volatile argument domain (never the saved preferences) for this test.
+- (void)pinPrefs:(NSDictionary *)values
+{
+	NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+	NSDictionary *original = [defaults volatileDomainForName:NSArgumentDomain] ?: @{};
+	NSMutableDictionary *domain = [original mutableCopy];
+	[domain addEntriesFromDictionary:values];
+	[defaults removeVolatileDomainForName:NSArgumentDomain];
+	[defaults setVolatileDomain:domain forName:NSArgumentDomain];
+	[self addTeardownBlock:^{
+		[defaults removeVolatileDomainForName:NSArgumentDomain];
+		[defaults setVolatileDomain:original forName:NSArgumentDomain];
+	}];
+}
+
+/// The connector's reopen, waited for; also checks it completes once, on the main thread, after the call returned.
+- (NSError *)reopenTunnelOf:(SPPostgresConnector *)connector window:(NSWindow *)window timeout:(NSTimeInterval)timeout
+{
+	return [self reopenTunnelOf:connector window:window force:NO timeout:timeout];
+}
+
+- (NSError *)reopenTunnelOf:(SPPostgresConnector *)connector window:(NSWindow *)window force:(BOOL)force timeout:(NSTimeInterval)timeout
+{
+	__block NSUInteger calls = 0;
+	__block NSError *result = nil;
+	__block BOOL onMain = YES;
+	[connector reopenTunnelOnWindow:window force:force completion:^(NSError *error) {
+		calls++;
+		result = error;
+		if (![NSThread isMainThread]) onMain = NO;
+	}];
+	XCTAssertEqual(calls, 0u, @"the completion must not run within the call");
+	[self spinFor:timeout until:^BOOL{ return calls > 0; }];
+	[self spinFor:0.3 until:nil];
+	XCTAssertEqual(calls, 1u);
+	XCTAssertTrue(onMain);
+	return result;
+}
+
+- (void)testKeepAliveFollowsThePreferences
+{
+	NSArray *cases = @[@[@YES, @25, @YES, @25], @[@YES, @0, @YES, @60], @[@NO, @25, @NO, @25]];
+	for (NSArray *c in cases) {
+		[self pinPrefs:@{@"UseKeepAlive": c[0], @"KeepAliveInterval": c[1]}];
+		SPPostgresConnector *connector = [[SPPostgresConnector alloc] initWithFavorite:[self favoriteOnPort:55418] password:@"pgkit" sshPassword:nil parentWindow:nil];
+		SPPGConnectOutcome *outcome = [self connect:connector timeout:15];
+		XCTAssertNil(outcome.error);
+		XCTAssertEqual(outcome.connection.useKeepAlive, [c[2] boolValue], @"%@", c);
+		XCTAssertEqual(outcome.connection.keepAliveInterval, [c[3] unsignedIntegerValue], @"%@", c);
+		[connector disconnect];
+	}
+}
+
+- (void)testReopenTunnelIsANoOpWithoutSSH
+{
+	SPPostgresConnector *connector = [[SPPostgresConnector alloc] initWithFavorite:[self favoriteOnPort:55418] password:@"pgkit" sshPassword:nil parentWindow:nil];
+	SPPGConnectOutcome *outcome = [self connect:connector timeout:15];
+	XCTAssertNil([self reopenTunnelOf:connector window:nil timeout:5]);
+	XCTAssertEqual(outcome.connection.port, 55418u);
+	[connector disconnect];
+}
+
+- (void)testReopenTunnelWhileItIsUpIsANoOp
+{
+	[self useTestSSHClient];
+	NSWindow *window = [self parentWindow];
+	SPPostgresConnector *connector = [[SPPostgresConnector alloc] initWithFavorite:[self sshFavorite] password:@"pgkit" sshPassword:@"sshtest" parentWindow:window];
+	SPPGConnectOutcome *outcome = [self connect:connector timeout:30];
+	XCTAssertNil(outcome.error);
+	id tunnel = connector.tunnel;
+	NSUInteger port = outcome.connection.port;
+	XCTAssertNil([self reopenTunnelOf:connector window:window timeout:10]);
+	XCTAssertEqual(connector.tunnel, tunnel);
+	XCTAssertEqual(outcome.connection.port, port);
+	[connector disconnect];
+}
+
+- (void)testReopenTunnelAfterItDied
+{
+	[self useTestSSHClient];
+	NSWindow *window = [self parentWindow];
+	SPPostgresConnector *connector = [[SPPostgresConnector alloc] initWithFavorite:[self sshFavorite] password:@"pgkit" sshPassword:@"sshtest" parentWindow:window];
+	SPPGConnectOutcome *outcome = [self connect:connector timeout:30];
+	XCTAssertNil(outcome.error);
+	id oldTunnel = connector.tunnel;
+	NSInteger connectedState = 3; // SPMySQLProxyConnected
+
+	// The tunnel dies (laptop sleep, network change)
+	[oldTunnel disconnect];
+	[self spinFor:5 until:^BOOL{ return [[oldTunnel valueForKey:@"state"] integerValue] != connectedState; }];
+	XCTAssertFalse([outcome.connection pingWithTimeout:3]);
+
+	XCTAssertNil([self reopenTunnelOf:connector window:window timeout:30]);
+	XCTAssertNotEqual(connector.tunnel, oldTunnel);
+	XCTAssertEqual([[(id)connector.tunnel valueForKey:@"state"] integerValue], connectedState);
+	XCTAssertEqual(outcome.connection.port, (NSUInteger)[[(id)connector.tunnel valueForKey:@"localPort"] integerValue]);
+	XCTAssertEqualObjects(outcome.connection.host, @"127.0.0.1");
+	XCTAssertTrue([outcome.connection reestablishConnection], @"%@", outcome.connection.connectionError);
+	NSString *version = [[[[outcome.connection execute:@"SELECT version()"] rowAsArray] firstObject] description];
+	XCTAssertTrue([version hasPrefix:@"PostgreSQL 18"], @"%@", version);
+	[connector disconnect];
+}
+
+- (void)testReopenSharedTunnelThatIsDownFails
+{
+	[self useTestSSHClient];
+	NSWindow *window = [self parentWindow];
+	SPPostgresConnector *a = [[SPPostgresConnector alloc] initWithFavorite:[self sshFavorite] password:@"pgkit" sshPassword:@"sshtest" parentWindow:window];
+	XCTAssertNil([self connect:a timeout:30].error);
+	SPPostgresConnector *b = [[SPPostgresConnector alloc] initWithFavorite:[self sshFavorite] password:@"pgkit" sharingTunnelOf:a];
+	XCTAssertNil([self connect:b timeout:15].error);
+
+	XCTAssertNil([self reopenTunnelOf:b window:window timeout:5], @"the shared tunnel is still up");
+	[(id)a.tunnel disconnect];
+	[self spinFor:5 until:^BOOL{ return [[(id)a.tunnel valueForKey:@"state"] integerValue] != 3; }];
+	NSError *error = [self reopenTunnelOf:b window:window timeout:5];
+	XCTAssertEqual(error.code, SPPostgresErrorSSHTunnelFailed, @"%@", error);
+	[b disconnect];
+	[a disconnect];
+}
+
+/// After sleep a dead tunnel can still report connected: forced, it is replaced anyway.
+- (void)testForcedReopenReplacesATunnelThatLooksUp
+{
+	[self useTestSSHClient];
+	NSWindow *window = [self parentWindow];
+	SPPostgresConnector *connector = [[SPPostgresConnector alloc] initWithFavorite:[self sshFavorite] password:@"pgkit" sshPassword:@"sshtest" parentWindow:window];
+	SPPGConnectOutcome *outcome = [self connect:connector timeout:30];
+	XCTAssertNil(outcome.error);
+	id oldTunnel = connector.tunnel;
+
+	XCTAssertNil([self reopenTunnelOf:connector window:window force:YES timeout:30]);
+	XCTAssertNotEqual(connector.tunnel, oldTunnel);
+	XCTAssertEqual([[(id)connector.tunnel valueForKey:@"state"] integerValue], 3);
+	XCTAssertEqual(outcome.connection.port, (NSUInteger)[[(id)connector.tunnel valueForKey:@"localPort"] integerValue]);
+	XCTAssertTrue([outcome.connection reestablishConnection], @"%@", outcome.connection.connectionError);
+	XCTAssertNotNil([outcome.connection execute:@"SELECT 1"]);
+	[connector disconnect];
+}
+
+- (void)testForcedReopenWithoutSSHIsANoOp
+{
+	SPPostgresConnector *connector = [[SPPostgresConnector alloc] initWithFavorite:[self favoriteOnPort:55418] password:@"pgkit" sshPassword:nil parentWindow:nil];
+	SPPGConnectOutcome *outcome = [self connect:connector timeout:15];
+	XCTAssertNil([self reopenTunnelOf:connector window:nil force:YES timeout:5]);
+	XCTAssertEqual(outcome.connection.port, 55418u);
+	[connector disconnect];
+}
+
 @end
