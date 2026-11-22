@@ -80,6 +80,13 @@ static char SPPostgresConsoleLoggerKey;
 	}
 }
 
+- (void)logNote:(NSString *)note
+{
+	if ([note length] && [[NSUserDefaults standardUserDefaults] boolForKey:SPConsoleEnableLogging]) {
+		[self _showInConsole:[NSString stringWithFormat:@"/* %@ */", note] isError:NO];
+	}
+}
+
 #pragma mark - PGPostgresConnectionDelegate
 
 - (void)connection:(PGPostgresConnection *)connection willExecute:(NSObject *)query withValues:(NSArray *)values

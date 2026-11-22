@@ -7,6 +7,8 @@
 #import "../Source/Postgres/SPPostgresConnector.h"
 #import "../Source/Postgres/SPPostgresFavorite.h"
 #import "../Source/Postgres/SPPostgresContentController.h"
+#import "../Source/Postgres/SPPostgresFilterRowsController.h"
+#import "../Source/Postgres/SPPostgresTableData.h"
 #import "../Source/Postgres/SPPostgresTaskRunner.h"
 #import "../Source/Postgres/SPPostgresPaginationView.h"
 #import "../Source/Postgres/SPPostgresFieldEditorSheet.h"
@@ -835,6 +837,37 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 	XCTAssertEqual(calls.count, 0u);
 }
 
+/// A value over 10,000 characters opens the field editor sheet even with sheet mode off, as the Query results' grid:
+/// the in-cell editor lays the whole value out as one line, and a few MB of it hung the app for minutes.
+- (void)testLongValueOpensSheetWhenSheetModeOff
+{
+	XCTAssertNotNil([self.other execute:@"UPDATE content_test.items SET note = repeat('x', 3000000) WHERE id = 1"]);
+	XCTAssertNotNil([self.other execute:@"UPDATE content_test.items SET note = repeat('y', 10000) WHERE id = 2"]);
+	XCTAssertNotNil([self.other execute:@"UPDATE content_test.items SET note = repeat('z', 10001) WHERE id = 3"]);
+	SPContentBarStatementRecorder *recorder = [[SPContentBarStatementRecorder alloc] init];
+	SPPostgresContentController *content = [self recordedContentShowing:@"items" recorder:recorder sheetMode:NO];
+	NSMutableArray<SPContentBarSheetCall *> *calls = [self recordSheetsOf:content];
+
+	XCTAssertTrue([self content:content shouldEditRow:1 column:@"note"], @"10,000 characters: still in the cell");
+	XCTAssertEqual(calls.count, 0u);
+
+	XCTAssertFalse([self content:content shouldEditRow:2 column:@"note"]);
+	XCTAssertEqual(calls.count, 1u);
+	XCTAssertEqual(calls[0].value.length, 10001u);
+	calls[0].completion(nil);
+
+	XCTAssertFalse([self content:content shouldEditRow:0 column:@"note"]);
+	XCTAssertEqual(calls.count, 2u);
+	XCTAssertEqual(calls[1].value.length, 3000000u, @"the whole value, not a cut one");
+	XCTAssertTrue(calls[1].editable);
+	calls[1].completion([calls[1].value stringByAppendingString:@"!"]);
+	XCTAssertEqualObjects([self serverValue:@"SELECT length(note) FROM content_test.items WHERE id = 1"], @3000001);
+
+	// Short values still edit in the cell
+	XCTAssertTrue([self content:content shouldEditRow:0 column:@"name"]);
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
 #pragma mark - Filter bar show/hide
 
 /// Scratch preferences (never the saved ones) with the filter bar visibility unset; removed in tearDown.
@@ -858,7 +891,7 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 
 - (NSView *)filterBarOf:(SPPostgresContentController *)content
 {
-	return [(NSView *)[content valueForKey:@"filterValueField"] superview];
+	return content.filterRows.view;
 }
 
 /// The grid's scroll view's top, in the Content view.
@@ -876,7 +909,7 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 	XCTAssertTrue([[self filterBarOf:content] isHidden]);
 	XCTAssertFalse(content.filterBarVisible);
 	XCTAssertEqual([content.filterToggleButton state], NSControlStateValueOff);
-	XCTAssertEqual([self gridTopOf:content], NSHeight([[content view] frame]), @"the grid takes the filter bar's 30 pt");
+	XCTAssertEqual([self gridTopOf:content], NSHeight([[content view] frame]), @"the grid takes the filter area's place");
 	XCTAssertEqual(NSMinY([content.tableView.enclosingScrollView frame]), 23, @"above the bottom bar");
 	XCTAssertEqual(self.alerts.count, 0u);
 }
@@ -893,15 +926,15 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 	XCTAssertTrue(content.filterBarVisible);
 	XCTAssertFalse([filterBar isHidden]);
 	XCTAssertEqual([content.filterToggleButton state], NSControlStateValueOn);
-	XCTAssertEqual([self gridTopOf:content], NSHeight([view frame]) - 30);
+	XCTAssertEqual([self gridTopOf:content], NSHeight([view frame]) - 60);
 	XCTAssertEqual(NSMaxY([filterBar frame]), NSHeight([view frame]));
 	XCTAssertTrue([self.scratch objectForKey:SPRuleFilterEditorLastVisibilityChoice] != nil);
 	XCTAssertTrue([self.scratch boolForKey:SPRuleFilterEditorLastVisibilityChoice]);
 
 	// Shown, the grid keeps below the bar as the view resizes
 	[view setFrameSize:NSMakeSize(900, 650)];
-	XCTAssertEqual([self gridTopOf:content], 650 - 30);
-	XCTAssertEqual(NSMinY([filterBar frame]), 650 - 30);
+	XCTAssertEqual([self gridTopOf:content], 650 - 60);
+	XCTAssertEqual(NSMinY([filterBar frame]), 650 - 60);
 
 	[content toggleFilterBar:nil];
 	XCTAssertFalse(content.filterBarVisible);
@@ -920,7 +953,7 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 	[content.filterToggleButton performClick:nil];
 	XCTAssertTrue(content.filterBarVisible);
 	XCTAssertEqual([content.filterToggleButton state], NSControlStateValueOn);
-	XCTAssertEqual([self gridTopOf:content], 500 - 30);
+	XCTAssertEqual([self gridTopOf:content], 500 - 60);
 	XCTAssertTrue([self.scratch boolForKey:SPRuleFilterEditorLastVisibilityChoice]);
 	[content.filterToggleButton performClick:nil];
 	XCTAssertFalse(content.filterBarVisible);
@@ -940,7 +973,7 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 	XCTAssertTrue(content.filterBarVisible);
 	XCTAssertFalse([[self filterBarOf:content] isHidden]);
 	XCTAssertEqual([content.filterToggleButton state], NSControlStateValueOn);
-	XCTAssertEqual([self gridTopOf:content], NSHeight([[content view] frame]) - 30);
+	XCTAssertEqual([self gridTopOf:content], NSHeight([[content view] frame]) - 31, @"no rows, only Add Filter, as MySQL's");
 
 	[self.scratch setBool:NO forKey:SPRuleFilterEditorLastVisibilityChoice];
 	[content showTable:@"items" inSchema:@"content_test"];
@@ -959,14 +992,16 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 	SPPostgresTaskRunner *runner = content.taskRunner;
 	NSWindow *window = [[content view] window];
 	XCTAssertNotNil(window);
-	NSTextField *valueField = [content valueForKey:@"filterValueField"];
 	if (content.filterBarVisible) [content toggleFilterBar:nil]; // shown as the saved preferences say (read at the table load)
 	XCTAssertFalse(content.filterBarVisible);
 	XCTAssertFalse(runner.isBusy);
 
 	// Shown by a click: the value field takes the focus
+	[content.filterRows removeAllRows];
 	[content.filterToggleButton performClick:nil];
 	XCTAssertTrue(content.filterBarVisible);
+	XCTAssertEqual([content.filterRows numberOfRows], 1u, @"shown by a click with no rows: one empty row");
+	NSTextField *valueField = [content.filterRows valueFieldInRow:0];
 	id responder = [window firstResponder];
 	XCTAssertTrue(responder == valueField || ([responder respondsToSelector:@selector(isFieldEditor)] && [responder isFieldEditor] && [responder delegate] == valueField), @"%@", responder);
 
@@ -985,9 +1020,7 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 	XCTAssertEqualObjects([content tableView:[self grid] objectValueForTableColumn:[self columnNamed:@"id" of:content] row:0], @"4");
 
 	[content toggleFilterBar:nil];
-	[(NSPopUpButton *)[content valueForKey:@"filterColumnPopup"] selectItemWithTitle:@"name"];
-	[(NSPopUpButton *)[content valueForKey:@"filterComparisonPopup"] selectItemWithTitle:@"="];
-	[valueField setStringValue:@"item 1"];
+	[content.filterRows setFilters:@[[SPPostgresFilter filterWithColumn:@"name" comparison:@"=" value:@"item 1"]]];
 	[content applyFilter:nil];
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:runner timeout:30]);
 	XCTAssertEqual([[self grid] numberOfRows], 1);
@@ -1026,6 +1059,294 @@ static NSString * const SPContentBarScratchSuite = @"SPPostgresStage10Tests";
 	XCTAssertTrue([SPPostgresTestServers waitForRunner:self.content.taskRunner timeout:30]);
 	XCTAssertTrue([self.content.filterToggleButton isEnabled]);
 	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+#pragma mark - Filter rows (several conditions, AND)
+
+- (SPPostgresFilter *)f:(NSString *)column :(NSString *)comparison :(NSString *)value
+{
+	return [SPPostgresFilter filterWithColumn:column comparison:comparison value:value];
+}
+
+/// The ids shown in the grid, in order.
+- (NSArray<NSString *> *)shownIdsOf:(SPPostgresContentController *)content
+{
+	NSTableColumn *idColumn = [self columnNamed:@"id" of:content];
+	NSMutableArray *ids = [NSMutableArray array];
+	for (NSInteger row = 0; row < [content.tableView numberOfRows]; row++) {
+		[ids addObject:[content tableView:content.tableView objectValueForTableColumn:idColumn row:row]];
+	}
+	return ids;
+}
+
+- (void)assertRowsAboveTheBarIn:(SPPostgresContentController *)content
+{
+	NSScrollView *rules = [content.filterRows.ruleEditor enclosingScrollView];
+	XCTAssertGreaterThanOrEqual(NSMinY([rules frame]), NSMaxY([[content.filterRows.filterButton superview] frame]));
+	XCTAssertGreaterThanOrEqual(NSHeight([rules frame]), 0);
+	XCTAssertEqual(NSMinY([content.filterRows.view frame]), [self gridTopOf:content], @"the grid ends where the filter area starts");
+}
+
+- (void)testTwoRowsFilterWithAnd
+{
+	SPPostgresContentController *content = [self scratchContentShowing:@"items"];
+	[content toggleFilterBar:nil];
+	[content.filterRows setFilters:@[[self f:@"flags" :@"=" :@"true"], [self f:@"id" :@">" :@"20"]]];
+	[content applyFilter:nil];
+	XCTAssertEqualObjects([self shownIdsOf:content], (@[@"22", @"24", @"26", @"28", @"30"]));
+	XCTAssertEqual(content.appliedFilters.count, 2u);
+	XCTAssertEqualObjects(content.countText, @"5 rows of 30 match filter");
+
+	// An incomplete row is skipped; none complete loads unfiltered
+	[content.filterRows setFilters:@[[self f:@"id" :@"=" :@""], [self f:@"note" :@"IS NULL" :nil]]];
+	[content applyFilter:nil];
+	XCTAssertEqualObjects([self shownIdsOf:content], (@[@"1"]));
+	XCTAssertEqual(content.appliedFilters.count, 1u);
+	[content.filterRows setFilters:@[[self f:@"id" :@"=" :@""]]];
+	[content applyFilter:nil];
+	XCTAssertEqual([content.tableView numberOfRows], 30);
+	XCTAssertEqual(content.appliedFilters.count, 0u);
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testPagingUsesAppliedNotTypedRows
+{
+	SPPostgresContentController *content = [self pagedContentLimited:YES];
+	[content toggleFilterBar:nil];
+	[content.filterRows setFilters:@[[self f:@"flags" :@"=" :@"true"]]];
+	[content applyFilter:nil];
+	XCTAssertEqualObjects(content.countText, @"Rows 1 - 7 from filtered matches");
+
+	// Typed but not applied: paging, reloading and sorting keep the applied filter
+	[[content.filterRows valueFieldInRow:0] setStringValue:@"false"];
+	[content goToPage:2];
+	XCTAssertEqualObjects([self shownIdsOf:content], (@[@"16", @"18", @"20", @"22", @"24", @"26", @"28"]));
+	[content reload];
+	XCTAssertEqualObjects([self shownIdsOf:content], (@[@"16", @"18", @"20", @"22", @"24", @"26", @"28"]));
+	[[content.tableView delegate] tableView:content.tableView didClickTableColumn:[self columnNamed:@"id" of:content]];
+	XCTAssertEqualObjects([self shownIdsOf:content].firstObject, @"2");
+	XCTAssertEqual(content.appliedFilters.count, 1u);
+	XCTAssertEqualObjects(content.appliedFilters[0].value, @"true");
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testRemovingTheLastRowReloadsUnfiltered
+{
+	SPPostgresContentController *content = [self scratchContentShowing:@"items"];
+	[content toggleFilterBar:nil];
+	[content.filterRows setFilters:@[[self f:@"id" :@"=" :@"3"]]];
+	[content applyFilter:nil];
+	XCTAssertEqual([content.tableView numberOfRows], 1);
+
+	[content.filterRows.ruleEditor removeRowAtIndex:0]; // the row's −
+	XCTAssertEqual([content.tableView numberOfRows], 30);
+	XCTAssertEqual(content.appliedFilters.count, 0u);
+	XCTAssertTrue(content.filterBarVisible);
+	XCTAssertEqual([content.filterRows numberOfRows], 0u);
+	XCTAssertEqual(NSHeight([content.filterRows.view frame]), 31, @"only the button bar and its gap");
+	[self assertRowsAboveTheBarIn:content];
+	XCTAssertFalse([content.filterRows.addFilterButton isHidden]);
+	XCTAssertTrue([content.filterRows.filterButton isHidden]);
+
+	// Add Filter starts again from there
+	[content.filterRows.addFilterButton performClick:nil];
+	XCTAssertEqual([content.filterRows numberOfRows], 1u);
+	XCTAssertEqual(NSHeight([content.filterRows.view frame]), 60);
+	XCTAssertTrue([content.filterRows.addFilterButton isHidden]);
+	XCTAssertFalse([content.filterRows.filterButton isHidden]);
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testResetEmptiesRowsAndReloadsUnfiltered
+{
+	SPPostgresContentController *content = [self scratchContentShowing:@"items"];
+	[content toggleFilterBar:nil];
+	[content.filterRows setFilters:@[[self f:@"flags" :@"=" :@"true"], [self f:@"id" :@"<" :@"5"]]];
+	[content applyFilter:nil];
+	XCTAssertEqualObjects([self shownIdsOf:content], (@[@"2", @"4"]));
+
+	[content.filterRows.resetButton performClick:nil];
+	XCTAssertEqual([content.filterRows numberOfRows], 0u, @"as MySQL's: no rows, only Add Filter");
+	XCTAssertFalse([content.filterRows.addFilterButton isHidden]);
+	XCTAssertTrue([content.filterRows.filterButton isHidden]);
+	XCTAssertEqual([content.tableView numberOfRows], 30);
+	XCTAssertEqual(content.appliedFilters.count, 0u);
+	XCTAssertEqual(NSHeight([content.filterRows.view frame]), 31);
+	[self assertRowsAboveTheBarIn:content];
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testHidingKeepsRowsUnapplied
+{
+	SPContentBarStatementRecorder *recorder = [[SPContentBarStatementRecorder alloc] init];
+	SPPostgresContentController *content = [self recordedContentShowing:@"items" recorder:recorder sheetMode:NO];
+	[content.defaults removeObjectForKey:SPRuleFilterEditorLastVisibilityChoice];
+	if (!content.filterBarVisible) [content toggleFilterBar:nil];
+	[content.filterRows setFilters:@[[self f:@"id" :@"=" :@"3"]]];
+	[content applyFilter:nil];
+	XCTAssertEqual([content.tableView numberOfRows], 1);
+
+	[content toggleFilterBar:nil];
+	XCTAssertFalse(content.filterBarVisible);
+	XCTAssertEqual([content.tableView numberOfRows], 30);
+	XCTAssertEqual(content.appliedFilters.count, 0u);
+	XCTAssertEqual([content.filterRows numberOfRows], 1u, @"the rows are kept");
+	XCTAssertEqualObjects([[content.filterRows valueFieldInRow:0] stringValue], @"3");
+
+	NSUInteger sent = recorder.statements.count;
+	[content toggleFilterBar:nil];
+	XCTAssertTrue(content.filterBarVisible);
+	XCTAssertEqual(recorder.statements.count, sent, @"showing again runs no query: %@", recorder.statements);
+	XCTAssertEqual([content.filterRows numberOfRows], 1u);
+	XCTAssertEqualObjects([[content.filterRows valueFieldInRow:0] stringValue], @"3");
+	XCTAssertEqual(content.appliedFilters.count, 0u);
+	XCTAssertEqual([content.tableView numberOfRows], 30);
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testAreaHeightFollowsRows
+{
+	SPPostgresContentController *content = [self scratchContentShowing:@"items"];
+	NSView *view = [content view];
+	XCTAssertEqual(NSHeight([view frame]), 500);
+	[content toggleFilterBar:nil];
+	XCTAssertEqual([content.filterRows numberOfRows], 1u, @"shown with no rows: one empty row");
+	XCTAssertEqual(NSHeight([content.filterRows.view frame]), 60);
+	XCTAssertEqual([self gridTopOf:content], 440);
+	XCTAssertEqual(NSMaxY([content.filterRows.view frame]), 500);
+	[self assertRowsAboveTheBarIn:content];
+
+	[content.filterRows addRowAfter:-1 column:nil comparison:nil value:nil];
+	[content.filterRows addRowAfter:-1 column:nil comparison:nil value:nil];
+	XCTAssertEqual(NSHeight([content.filterRows.view frame]), 118);
+	XCTAssertEqual([self gridTopOf:content], 382);
+	[self assertRowsAboveTheBarIn:content];
+
+	// Six rows want 205: capped at a third of the 477 pt above the bottom bar, the rows scroll
+	for (NSUInteger i = 0; i < 3; i++) [content.filterRows addRowAfter:-1 column:nil comparison:nil value:nil];
+	XCTAssertEqual(NSHeight([content.filterRows.view frame]), 159);
+	XCTAssertEqual([self gridTopOf:content], 341);
+	XCTAssertEqual(NSHeight([[content.filterRows.ruleEditor enclosingScrollView] frame]), 128);
+	[self assertRowsAboveTheBarIn:content];
+
+	// The view resizes: the cap follows
+	[view setFrameSize:NSMakeSize(700, 800)];
+	XCTAssertEqual(NSHeight([content.filterRows.view frame]), 205);
+	XCTAssertEqual([self gridTopOf:content], 595);
+	[self assertRowsAboveTheBarIn:content];
+
+	// Hidden and shown again
+	[content toggleFilterBar:nil];
+	XCTAssertEqual([self gridTopOf:content], 800);
+	XCTAssertTrue([content.filterRows.view isHidden]);
+	[content toggleFilterBar:nil];
+	XCTAssertEqual(NSHeight([content.filterRows.view frame]), 205);
+	XCTAssertEqual([content.filterRows numberOfRows], 6u);
+	[self assertRowsAboveTheBarIn:content];
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+/// As MySQL's: a table opened with the area shown (the saved choice) starts with no rows, only Add Filter; showing it
+/// with the toggle adds one empty row.
+- (void)testOpenedShownStartsWithOnlyAddFilter
+{
+	SPPostgresContentController *content = [self standaloneContent];
+	content.defaults = [self scratchDefaultsWithFilterBarChoiceUnset];
+	[content.defaults setBool:YES forKey:SPRuleFilterEditorLastVisibilityChoice];
+	NSMutableArray *alerts = self.alerts;
+	content.alertPresenter = ^(NSAlert *alert) { [alerts addObject:alert]; };
+	[content showTable:@"items" inSchema:@"content_test"];
+	XCTAssertTrue(content.filterBarVisible);
+	XCTAssertEqual([content.filterRows numberOfRows], 0u);
+	XCTAssertFalse([content.filterRows.addFilterButton isHidden]);
+	XCTAssertTrue([content.filterRows.filterButton isHidden]);
+	XCTAssertEqual(NSHeight([content.filterRows.view frame]), 31);
+	[self assertRowsAboveTheBarIn:content];
+
+	[content toggleFilterBar:nil];
+	[content toggleFilterBar:nil];
+	XCTAssertEqual([content.filterRows numberOfRows], 1u, @"shown by the toggle: one empty row");
+	XCTAssertFalse([content.filterRows.filterButton isHidden]);
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testSwitchingTablesEmptiesTheRows
+{
+	SPPostgresContentController *content = [self scratchContentShowing:@"items"];
+	[content toggleFilterBar:nil];
+	[content.filterRows setFilters:@[[self f:@"name" :@"=" :@"x"], [self f:@"id" :@"=" :@"1"]]];
+	[content showTable:@"composite_pk" inSchema:@"content_test"];
+	XCTAssertTrue(content.filterBarVisible);
+	XCTAssertEqualObjects(content.filterRows.columnNames, (@[@"a", @"b", @"v"]));
+	XCTAssertEqual([content.filterRows numberOfRows], 0u, @"as MySQL's: no rows, only Add Filter");
+	XCTAssertFalse([content.filterRows.addFilterButton isHidden]);
+	XCTAssertTrue([content.filterRows.filterButton isHidden]);
+	XCTAssertEqual(NSHeight([content.filterRows.view frame]), 31);
+	[content.filterRows.addFilterButton performClick:nil];
+	XCTAssertEqualObjects([content.filterRows typedFilters][0].column, @"a");
+	XCTAssertEqual(content.appliedFilters.count, 0u);
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testStartFilterReplacesRowsAndShowsArea
+{
+	SPPostgresContentController *content = [self scratchContentShowing:@"items"];
+	[content toggleFilterBar:nil];
+	[content.filterRows setFilters:@[[self f:@"name" :@"=" :@"x"], [self f:@"id" :@"=" :@"1"]]];
+	[content toggleFilterBar:nil];
+	XCTAssertFalse([self.scratch boolForKey:SPRuleFilterEditorLastVisibilityChoice]);
+
+	[content showTable:@"items" inSchema:@"content_test" filter:[self f:@"name" :@"=" :@"item 5"]];
+	XCTAssertTrue(content.filterBarVisible);
+	XCTAssertFalse([self.scratch boolForKey:SPRuleFilterEditorLastVisibilityChoice], @"preference unchanged");
+	XCTAssertEqual([content.filterRows numberOfRows], 1u);
+	XCTAssertEqualObjects([content.filterRows typedFilters][0].column, @"name");
+	XCTAssertEqualObjects([content.filterRows typedFilters][0].value, @"item 5");
+	XCTAssertEqual(content.appliedFilters.count, 1u);
+	XCTAssertEqualObjects([self shownIdsOf:content], (@[@"5"]));
+	XCTAssertEqual(self.alerts.count, 0u);
+}
+
+- (void)testHidingWhileEditingFocusesTheGrid
+{
+	SPPostgresContentController *content = [self scratchContentShowing:@"items"];
+	NSWindow *window = [self windowHolding:[content view]];
+	[content toggleFilterBar:nil];
+	[window makeFirstResponder:[content.filterRows valueFieldInRow:0]];
+	XCTAssertTrue([[window firstResponder] isKindOfClass:[NSText class]]);
+	[(NSText *)[window firstResponder] insertText:@"3"]; // typed, not applied
+	[content toggleFilterBar:nil];
+	XCTAssertEqual([window firstResponder], content.tableView);
+	XCTAssertEqual(content.appliedFilters.count, 0u, @"hiding must not apply what was being typed");
+	XCTAssertEqual([content.tableView numberOfRows], 30);
+}
+
+- (void)testInvalidateDropsTheFilterRowsTargets
+{
+	SPPostgresContentController *content = [self scratchContentShowing:@"items"];
+	[content toggleFilterBar:nil];
+	[content invalidate];
+	XCTAssertNil([content.filterRows.filterButton target]);
+	XCTAssertNil([content.filterRows.ruleEditor delegate]);
+}
+
+- (void)testResetKeyOnlyWhenVisible
+{
+	SPPostgresContentController *content = [self scratchContentShowing:@"items"];
+	NSWindow *window = [self windowHolding:[content view]];
+	[content toggleFilterBar:nil];
+	[[content.filterRows valueFieldInRow:0] setStringValue:@"7"];
+	NSEvent *commandEscape = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:NSEventModifierFlagCommand
+											 timestamp:0 windowNumber:[window windowNumber] context:nil characters:@"\e"
+						   charactersIgnoringModifiers:@"\e" isARepeat:NO keyCode:53];
+
+	[content toggleFilterBar:nil];
+	[window performKeyEquivalent:commandEscape];
+	XCTAssertEqualObjects([[content.filterRows valueFieldInRow:0] stringValue], @"7", @"hidden: ⌘⎋ does nothing");
+
+	[content toggleFilterBar:nil];
+	XCTAssertTrue([window performKeyEquivalent:commandEscape]);
+	XCTAssertEqual([content.filterRows numberOfRows], 0u, @"shown: ⌘⎋ resets");
 }
 
 #pragma mark - Jump to page popover

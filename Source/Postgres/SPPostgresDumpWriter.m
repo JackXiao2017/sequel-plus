@@ -564,7 +564,7 @@ enum { SPDumpPartHeader = 0, SPDumpPartStructure = 1, SPDumpPartData = 2, SPDump
 		return [[text componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]] componentsJoinedByString:@" "];
 	};
 	NSMutableString *header = [NSMutableString string];
-	[header appendString:@"--\n-- PostgreSQL database dump written by Sequel Pro\n"];
+	[header appendString:@"--\n-- PostgreSQL database dump written by Sequel Plus\n"];
 	[header appendFormat:@"-- Server version: %@\n", oneLine(serverVersion)];
 	[header appendFormat:@"-- Database: %@\n", oneLine(database)];
 	[header appendFormat:@"-- Date: %@\n", [formatter stringFromDate:[NSDate date]]];

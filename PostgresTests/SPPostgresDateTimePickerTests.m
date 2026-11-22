@@ -46,6 +46,18 @@ static NSString * const SPDateTimePickerSuiteName = @"SPPostgresDateTimePickerTe
 {
 	self.continueAfterFailure = NO;
 	self.alerts = [NSMutableArray array];
+	// In-place editing (the pickers' path) whatever the saved "edit in sheet" choice: pinned in the volatile argument
+	// domain, never written to the real preferences
+	NSUserDefaults *prefs = [NSUserDefaults standardUserDefaults];
+	NSDictionary *original = [prefs volatileDomainForName:NSArgumentDomain] ?: @{};
+	NSMutableDictionary *domain = [original mutableCopy];
+	domain[@"EditInSheetEnabled"] = @NO;
+	[prefs removeVolatileDomainForName:NSArgumentDomain];
+	[prefs setVolatileDomain:domain forName:NSArgumentDomain];
+	[self addTeardownBlock:^{
+		[prefs removeVolatileDomainForName:NSArgumentDomain];
+		[prefs setVolatileDomain:original forName:NSArgumentDomain];
+	}];
 	PGPostgresConnection *admin = [SPPostgresTestServers connectedConnectionOnPort:SPDateTimePickerTestPort];
 	[admin execute:@"DROP TABLE IF EXISTS public.sp_dtp_dates"];
 	XCTAssertNotNil([admin execute:@"CREATE TABLE public.sp_dtp_dates (id integer PRIMARY KEY, d date, t time, ttz timetz, ts timestamp(3), tstz timestamptz NOT NULL)"], @"%@", admin.lastError.errorPrimaryMessage);
@@ -244,6 +256,9 @@ static NSString * const SPDateTimePickerSuiteName = @"SPPostgresDateTimePickerTe
 	XCTAssertNotNil([grid currentEditor]);
 	[[grid window] makeFirstResponder:grid];
 	XCTAssertNil([grid currentEditor]);
+	// The reload after a grid commit is queued for the next run loop turn: let it start, so that a following
+	// -waitForRunner: waits for it (else it starts inside a later step, which then finds the runner busy)
+	[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
 }
 
 - (void)testContentOpensThePickerOnDateCells

@@ -39,6 +39,7 @@
 @class SPFieldEditorController;
 @class SPMySQLConnection;
 @class SPMySQLStreamingResultStore;
+@class SPForeignKeyPicker;
 @class SPTableData;
 @class SPDatabaseDocument;
 @class SPTablesList;
@@ -164,6 +165,8 @@ typedef NS_ENUM(NSInteger, SPTableContentFilterSource) {
 	SPFieldEditorController *fieldEditor;
 	BOOL datePickerOpen;    // the date / time picker is open on a cell
 	BOOL datePickerHandoff; // the picker's value is going into the cell's in-place editor
+	// The foreign key value picker (datePickerOpen / datePickerHandoff cover it too); for tests, shown through this
+	void (^foreignKeyPickerPresenter)(SPForeignKeyPicker *picker, NSView *view, NSRect rect);
 
 	// this represents the visible area of the whole content view at runtime.
 	// we use it as a positioning aide for the other two views below
@@ -211,6 +214,9 @@ typedef NS_ENUM(NSInteger, SPTableContentFilterSource) {
 - (IBAction)toggleRuleEditorVisible:(id)sender;
 - (void)filterTableTask;
 - (void)setUsedQuery:(NSString *)query;
+
+/// For tests: called instead of showing the foreign key picker (view and rect: where it would show).
+- (void)setForeignKeyPickerPresenter:(void (^)(SPForeignKeyPicker *picker, NSView *view, NSRect rect))presenter;
 - (NSString *)selectedTable;
 
 // Pagination

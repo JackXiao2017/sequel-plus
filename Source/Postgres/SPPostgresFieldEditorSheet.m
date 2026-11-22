@@ -40,6 +40,14 @@ static NSValue *SPPostgresWindowKey(NSWindow *window)
 + (void)editValue:(NSString *)value columnName:(NSString *)columnName typeName:(NSString *)typeName
 		 editable:(BOOL)editable allowNull:(BOOL)allowNull window:(NSWindow *)aWindow completion:(void (^)(id newValue))aCompletion
 {
+	[self editValue:value columnName:columnName typeName:typeName editable:editable allowNull:allowNull window:aWindow chooser:nil completion:aCompletion];
+}
+
++ (void)editValue:(NSString *)value columnName:(NSString *)columnName typeName:(NSString *)typeName
+		 editable:(BOOL)editable allowNull:(BOOL)allowNull window:(NSWindow *)aWindow
+		  chooser:(void (^)(NSString *, NSView *, void (^)(NSString *)))aChooser
+	   completion:(void (^)(id newValue))aCompletion
+{
 	if (!aWindow || [aWindow attachedSheet] || [self openSheetOnWindow:aWindow]) {
 		if (aCompletion) aCompletion(nil);
 		return;
@@ -54,6 +62,7 @@ static NSValue *SPPostgresWindowKey(NSWindow *window)
 	[sheet->fieldEditor setTextMaxLength:0];
 	[sheet->fieldEditor setFieldType:sheet->fieldEditorType];
 	[sheet->fieldEditor setAllowNULL:allowNull];
+	[sheet->fieldEditor setChooser:aChooser];
 	[sheet->fieldEditor editWithObject:value fieldName:columnName usingEncoding:NSUTF8StringEncoding isObjectBlob:NO
 							isEditable:editable withWindow:aWindow sender:sheet contextInfo:nil];
 }
@@ -87,7 +96,8 @@ static NSValue *SPPostgresWindowKey(NSWindow *window)
 		data = text;
 	}
 
-	// Called by the field editor: released once it has returned (as MySQL's)
+	// Called by the field editor: released once it has returned (as MySQL's); its chooser let go of now
+	[fieldEditor setChooser:nil];
 	[fieldEditor autorelease];
 	fieldEditor = nil;
 	[fieldEditorType autorelease];

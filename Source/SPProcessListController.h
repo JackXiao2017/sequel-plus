@@ -29,7 +29,9 @@
 //  More info at <https://github.com/sequelpro/sequelpro>
 
 @class SPMySQLConnection;
+@class SPConnectionSummary;
 
+__attribute__((visibility("default")))
 @interface SPProcessListController : NSWindowController 
 {
 	SPMySQLConnection *connection;
@@ -40,6 +42,14 @@
 	
 	NSUserDefaults *prefs;
 	NSMutableArray *processes, *processesFiltered;
+	IBOutlet NSPopUpButton       *actionsPopUp;            // ⚙︎: Show Process ID, Show FULL Process List
+	// Built in code, laid out as PostgreSQL's Server Processes window
+	NSTextField                  *summaryLabel;            // top left: the connections against the limit
+	NSPopUpButton                *autoRefreshIntervalPopUp; // beside Auto Refresh: how often
+	NSButton                     *killQueryButton;
+	NSButton                     *killConnectionButton;
+	NSButton                     *closeButton;
+	SPConnectionSummary *connectionSummary; // the server's connections against max_connections, as of the last refresh
 	
 	IBOutlet NSWindow            *customIntervalWindow;
 	IBOutlet NSTextField         *customIntervalTextField;

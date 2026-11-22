@@ -60,6 +60,9 @@
 #import "SPFilterTableController.h"
 
 #import "SPPostgresDateTimePicker.h"
+#import "SPForeignKeyPicker.h"
+#import "SPForeignKeyPickerSettings.h"
+#import "SPMySQLForeignKeyPickerSource.h"
 #import <pthread.h>
 #import <SPMySQL/SPMySQL.h>
 #include <stdlib.h>
@@ -515,10 +518,17 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 		NSUInteger columnIndex   = [columnNames indexOfObject:firstColumn];
 
 		if (columnIndex != NSNotFound && ![[dataColumns objectAtIndex:columnIndex] objectForKey:@"foreignkeyreference"]) {
-			NSDictionary *refDictionary = [NSDictionary dictionaryWithObjectsAndKeys:
+			// Also how many columns the key has, whether the column is binary (the value picker skips both), and
+			// the referenced database when the key names one
+			NSString *typeGrouping = [[dataColumns objectAtIndex:columnIndex] objectForKey:@"typegrouping"];
+			BOOL isBinary = [typeGrouping isEqualToString:@"binary"] || [typeGrouping isEqualToString:@"blobdata"];
+			NSMutableDictionary *refDictionary = [NSMutableDictionary dictionaryWithObjectsAndKeys:
 											[constraint objectForKey:@"ref_table"], @"table",
 											firstRefColumn, @"column",
+											@([[constraint objectForKey:@"columns"] count]), @"columns",
+											@(isBinary), @"binary",
 											nil];
+			if ([constraint objectForKey:@"ref_database"]) [refDictionary setObject:[constraint objectForKey:@"ref_database"] forKey:@"database"];
 			NSMutableDictionary *rowDictionary = [NSMutableDictionary dictionaryWithDictionary:[dataColumns objectAtIndex:columnIndex]];
 			[rowDictionary setObject:refDictionary forKey:@"foreignkeyreference"];
 			[dataColumns replaceObjectAtIndex:columnIndex withObject:rowDictionary];
@@ -3059,6 +3069,7 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 	
 	// this is a delegate method of the field editor controller. calling release
 	// now would risk a dealloc while it is still our parent on the stack:
+	[fieldEditor setChooser:nil]; // it holds this controller
 	[fieldEditor autorelease], fieldEditor = nil;
 
 	[[tableContentView window] makeFirstResponder:tableContentView];
@@ -3465,9 +3476,10 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 	//the rule editor can ask for about one-third of the available space before we have it use it's scrollbar
 	CGFloat topContainerGivenHeight = MIN(containerRequestedHeight,(availableHeight / 3));
 
-	// abort if the size didn't really change
+	// abort if the size didn't really change (the rules' scroll view included, should anything have left it off)
 	NSRect topContainerRect = [filterRuleEditorContainer frame];
-	if(topContainerGivenHeight == topContainerRect.size.height) return;
+	if(topContainerGivenHeight == topContainerRect.size.height
+	   && NSHeight(ruleEditorRect) == MAX(0, topContainerGivenHeight - ruleEditorRect.origin.y)) return;
 
 	CGFloat newBottomContainerHeight = availableHeight - topContainerGivenHeight;
 
@@ -3478,13 +3490,20 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 	topContainerRect.size.height = topContainerGivenHeight;
 
 	// this one should be inferable from the IB layout IMHO, but the OS gets it wrong
-	ruleEditorRect.size.height = topContainerGivenHeight - ruleEditorRect.origin.y;
+	// Never negative: hidden, the container is 0 high, and AppKit turns a negative-height frame into one starting
+	// that much lower (origin 31 → 0), which the next show reads as the gap above the button bar, leaving the rows under it
+	ruleEditorRect.size.height = MAX(0, topContainerGivenHeight - ruleEditorRect.origin.y);
 
+	// The rules' scroll view keeps its height while its container resizes (no autoresizing of its height) and takes its
+	// final frame at once: animated, the container's resize also autoresized it while it animated, and whichever landed
+	// last won, which could leave the rows 0 high. Only the containers animate.
+	NSScrollView *ruleEditorScrollView = [[ruleFilterController view] enclosingScrollView];
+	[ruleEditorScrollView setAutoresizingMask:NSViewWidthSizable | NSViewMaxYMargin];
 	if(animate) {
+		[ruleEditorScrollView setFrame:ruleEditorRect];
 		[NSAnimationContext beginGrouping];
 		[[tableContentContainer animator] setFrame:bottomContainerRect];
 		[[filterRuleEditorContainer animator] setFrame:topContainerRect];
-		[[[[ruleFilterController view] enclosingScrollView] animator] setFrame:ruleEditorRect];
 		[NSAnimationContext endGrouping];
 	}
 	else {
@@ -4222,6 +4241,20 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 			[fieldEditor setFieldEncoding:fieldEncoding == nil ? @"" : fieldEncoding];
 			[fieldEditor setAllowNULL:allowNULL];
 
+			// A foreign key cell's sheet gets Choose…, which opens the value picker on the button
+			NSDictionary *pickerReference = isFieldEditable ? [self _foreignKeyPickerReferenceForTableColumn:tableColumn] : nil;
+			if (pickerReference) {
+				BOOL pickerAllowsNull = allowNULL;
+				[fieldEditor setChooser:^(NSString *currentText, NSView *anchor, void (^setText)(NSString *)) {
+					void (^replace)(NSString *) = [[setText copy] autorelease];
+					SPForeignKeyPicker *picker = [self _foreignKeyPickerForReference:pickerReference value:currentText allowNull:pickerAllowsNull completion:^(SPForeignKeyPickerOutcome outcome, NSString *chosen) {
+						if (outcome == SPForeignKeyPickerChose) replace(chosen);
+						else if (outcome == SPForeignKeyPickerChoseNull) replace([prefs objectForKey:SPNullValue]);
+					}];
+					[self _presentForeignKeyPicker:picker rect:[anchor bounds] ofView:anchor];
+				}];
+			}
+
 			id cellValue = [tableValues cellDataAtRow:rowIndex column:[[tableColumn identifier] integerValue]];
 
 			if ([cellValue isNSNull]) {
@@ -4254,6 +4287,14 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 			                                                                       [NSNumber numberWithBool:isFieldEditable], @"isFieldEditable",
 			                                                                       nil]];
 
+			return NO;
+		}
+
+		// A single-column, non-binary foreign key cell: the value picker on the cell instead of the in-cell editor
+		NSDictionary *pickerReference = datePickerHandoff ? nil : [self _foreignKeyPickerReferenceForTableColumn:tableColumn];
+		if (pickerReference && [self _canEditInDatePickerTableColumn:tableColumn row:rowIndex]) {
+			BOOL allowNULL = [columnDefinition objectForKey:@"null"] ? ![[columnDefinition objectForKey:@"null"] integerValue] : YES;
+			[self _editInForeignKeyPickerTableColumn:tableColumn row:rowIndex reference:pickerReference allowNull:allowNULL];
 			return NO;
 		}
 
@@ -4317,6 +4358,90 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 	}] autorelease];
 	NSInteger gridColumn = [tableContentView columnWithIdentifier:[tableColumn identifier]];
 	[picker showRelativeToRect:[tableContentView frameOfCellAtColumn:gridColumn row:rowIndex] ofView:tableContentView];
+}
+
+#pragma mark -
+#pragma mark Foreign key value picker
+
+- (void)setForeignKeyPickerPresenter:(void (^)(SPForeignKeyPicker *, NSView *, NSRect))presenter
+{
+	if (presenter == foreignKeyPickerPresenter) return;
+	[foreignKeyPickerPresenter release];
+	foreignKeyPickerPresenter = [presenter copy];
+}
+
+/// The column's foreign key when the value picker opens for it (the preference on, a single-column key, not binary),
+/// else nil.
+- (NSDictionary *)_foreignKeyPickerReferenceForTableColumn:(NSTableColumn *)tableColumn
+{
+	NSUInteger dataColumnIndex = (NSUInteger)[[tableColumn identifier] integerValue];
+	if (dataColumnIndex >= [dataColumns count]) return nil;
+	NSDictionary *reference = [[dataColumns objectAtIndex:dataColumnIndex] objectForKey:@"foreignkeyreference"];
+	if (!reference || [[reference objectForKey:@"columns"] integerValue] != 1 || [[reference objectForKey:@"binary"] boolValue]) return nil;
+	SPForeignKeyPickerSettings *settings = [[[SPForeignKeyPickerSettings alloc] initWithDefaults:prefs] autorelease];
+	return [settings pickerEnabled] ? reference : nil;
+}
+
+- (SPForeignKeyPicker *)_foreignKeyPickerForReference:(NSDictionary *)reference value:(id)value allowNull:(BOOL)allowNull
+										   completion:(void (^)(SPForeignKeyPickerOutcome outcome, NSString *chosen))completion
+{
+	NSString *refDatabase = [reference objectForKey:@"database"] ?: [tableDocumentInstance database];
+	NSString *refTable = [reference objectForKey:@"table"];
+	NSString *refColumn = [reference objectForKey:@"column"];
+	SPMySQLForeignKeyPickerSource *source = [[[SPMySQLForeignKeyPickerSource alloc] initWithConnection:mySQLConnection database:refDatabase table:refTable keyColumn:refColumn] autorelease];
+	SPForeignKeyPickerSettings *settings = [[[SPForeignKeyPickerSettings alloc] initWithDefaults:prefs] autorelease];
+	NSString *server = [mySQLConnection useSocket] ? [mySQLConnection socketPath] : [mySQLConnection host];
+	NSString *tableKey = [SPForeignKeyPickerSettings tableKeyWithKind:@"mysql" host:server port:(NSInteger)[mySQLConnection port] database:refDatabase schema:nil table:refTable];
+	NSString *title = [NSString stringWithFormat:@"%@.%@ · %@.%@", refTable, refColumn, refDatabase, refTable];
+	id current = [value isKindOfClass:[NSString class]] ? value : nil;
+	return [[[SPForeignKeyPicker alloc] initWithDataSource:source settings:settings tableKey:tableKey title:title
+											  currentValue:current allowNull:allowNull completion:completion] autorelease];
+}
+
+- (void)_presentForeignKeyPicker:(SPForeignKeyPicker *)picker rect:(NSRect)rect ofView:(NSView *)aView
+{
+	if (foreignKeyPickerPresenter) foreignKeyPickerPresenter(picker, aView, rect);
+	else [picker showRelativeToRect:rect ofView:aView];
+}
+
+/**
+ * Opens the foreign key value picker as a popover on a foreign key cell. Its value is not saved: Choose (or NULL, as
+ * the NULL placeholder) puts it into the cell's in-place editor, and Type a value… opens that editor on the cell's
+ * value, on the same table, row and value it was opened on (as the date / time picker); the cell stays being edited
+ * until it is saved or cancelled as any in-cell edit. Cancel leaves the cell as it was.
+ */
+- (void)_editInForeignKeyPickerTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex reference:(NSDictionary *)reference allowNull:(BOOL)allowNull
+{
+	NSUInteger dataColumn = (NSUInteger)[[tableColumn identifier] integerValue];
+	id value = [tableValues cellDataAtRow:(NSUInteger)rowIndex column:dataColumn];
+	// The whole row, so a reload that puts another row with the same key here is caught
+	NSArray *rowContents = [[[tableValues rowContentsAtIndex:(NSUInteger)rowIndex] copy] autorelease];
+	NSString *table = [[selectedTable copy] autorelease];
+	datePickerOpen = YES;
+	[self retain]; // until the picker answers
+
+	SPForeignKeyPicker *picker = [self _foreignKeyPickerForReference:reference value:value allowNull:allowNull completion:^(SPForeignKeyPickerOutcome outcome, NSString *chosen) {
+		datePickerOpen = NO;
+		[[tableContentView window] makeFirstResponder:tableContentView];
+		BOOL unchanged = outcome != SPForeignKeyPickerCancelled && ![tableDocumentInstance isWorking] && [selectedTable isEqualToString:table]
+			&& (NSUInteger)rowIndex < [tableValues count] && dataColumn < [tableValues columnCount]
+			&& [[tableValues rowContentsAtIndex:(NSUInteger)rowIndex] isEqualToArray:rowContents];
+		if (unchanged) {
+			NSInteger gridColumn = [tableContentView columnWithIdentifier:[tableColumn identifier]];
+			datePickerHandoff = YES;
+			if (outcome == SPForeignKeyPickerTypeValue) {
+				[tableContentView editColumn:gridColumn row:rowIndex withEvent:nil select:YES];
+			}
+			else {
+				NSString *text = (outcome == SPForeignKeyPickerChose) ? chosen : [prefs objectForKey:SPNullValue];
+				[SPPostgresDateTimePicker continueEditingColumn:gridColumn row:rowIndex ofTableView:tableContentView withText:text];
+			}
+			datePickerHandoff = NO;
+		}
+		[self autorelease];
+	}];
+	NSInteger gridColumn = [tableContentView columnWithIdentifier:[tableColumn identifier]];
+	[self _presentForeignKeyPicker:picker rect:[tableContentView frameOfCellAtColumn:gridColumn row:rowIndex] ofView:tableContentView];
 }
 
 /**
@@ -4723,6 +4848,7 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 	[NSObject cancelPreviousPerformRequestsWithTarget:tableContentView];
 
 	if(fieldEditor) SPClear(fieldEditor);
+	if(foreignKeyPickerPresenter) SPClear(foreignKeyPickerPresenter);
 
 	[self clearTableLoadTimer];
 	SPClear(tableValues);

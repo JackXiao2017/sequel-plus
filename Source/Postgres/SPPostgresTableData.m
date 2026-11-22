@@ -337,11 +337,12 @@ BOOL SPPostgresRunGuardedRead(PGPostgresConnection *connection, NSString *savepo
 	return YES;
 }
 
-- (NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *)foreignKeyReferences:(NSError **)error
+- (NSDictionary<NSString *, NSDictionary<NSString *, id> *> *)foreignKeyReferences:(NSError **)error
 {
 	// conkey and confkey are int2[] (1-based subscripts): their first entries pair the first column with the one it references
 	PGPostgresResult *result = [self run:
-		@"SELECT a.attname::text AS col, rn.nspname::text AS refschema, rc.relname::text AS reftable, ra.attname::text AS refcol "
+		@"SELECT a.attname::text AS col, rn.nspname::text AS refschema, rc.relname::text AS reftable, ra.attname::text AS refcol, "
+		 "array_length(con.conkey, 1)::text AS ncols, (format_type(a.atttypid, NULL) = 'bytea')::text AS isbinary "
 		 "FROM pg_constraint con "
 		 "JOIN pg_class c ON c.oid = con.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace "
 		 "JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = con.conkey[1] "
@@ -361,7 +362,10 @@ BOOL SPPostgresRunGuardedRead(PGPostgresConnection *connection, NSString *savepo
 		if (![column isKindOfClass:[NSString class]] || ![refSchema isKindOfClass:[NSString class]]
 			|| ![refTable isKindOfClass:[NSString class]] || ![refColumn isKindOfClass:[NSString class]]) continue;
 		if ([references objectForKey:column]) continue;
-		[references setObject:@{@"schema" : refSchema, @"table" : refTable, @"column" : refColumn} forKey:column];
+		NSString *count = [row objectForKey:@"ncols"];
+		NSNumber *columnCount = @([count isKindOfClass:[NSString class]] ? [count integerValue] : 1);
+		NSNumber *binary = @([[row objectForKey:@"isbinary"] isEqual:@"true"]);
+		[references setObject:@{@"schema" : refSchema, @"table" : refTable, @"column" : refColumn, @"columns" : columnCount, @"binary" : binary} forKey:column];
 	}
 	return references;
 }
@@ -410,11 +414,23 @@ BOOL SPPostgresRunGuardedRead(PGPostgresConnection *connection, NSString *savepo
 	return rows;
 }
 
-/// " WHERE …" for the filter (or @"" for none), appending its parameters to values. Nil with *error if invalid.
-- (NSString *)whereClauseForFilter:(SPPostgresFilter *)filter values:(NSMutableArray *)values error:(NSError **)error
+/// " WHERE …" joining every filter's predicate with AND (or @"" for none), appending their parameters to values in
+/// order. Nil with *error if any filter is invalid.
+- (NSString *)whereClauseForFilters:(NSArray<SPPostgresFilter *> *)filters values:(NSMutableArray *)values error:(NSError **)error
 {
-	if (!filter) return @"";
+	if (![filters count]) return @"";
+	NSMutableArray *predicates = [NSMutableArray arrayWithCapacity:[filters count]];
+	for (SPPostgresFilter *filter in filters) {
+		NSString *predicate = [self predicateForFilter:filter values:values error:error];
+		if (!predicate) return nil;
+		[predicates addObject:predicate];
+	}
+	return [@" WHERE " stringByAppendingString:[predicates componentsJoinedByString:@" AND "]];
+}
 
+/// The condition for one filter (no " WHERE "), appending its parameters to values. Nil with *error if invalid.
+- (NSString *)predicateForFilter:(SPPostgresFilter *)filter values:(NSMutableArray *)values error:(NSError **)error
+{
 	SPPostgresColumn *column = [self columnNamed:[filter column] error:error];
 	if (!column) return nil;
 
@@ -427,12 +443,12 @@ BOOL SPPostgresRunGuardedRead(PGPostgresConnection *connection, NSString *savepo
 	NSString *value = [filter value] ?: @"";
 
 	if ([op isEqualToString:@"IS NULL"] || [op isEqualToString:@"IS NOT NULL"]) {
-		return [NSString stringWithFormat:@" WHERE %@ %@", quoted, op];
+		return [NSString stringWithFormat:@"%@ %@", quoted, op];
 	}
 
 	if ([op isEqualToString:@"LIKE"] || [op isEqualToString:@"NOT LIKE"] || [op isEqualToString:@"ILIKE"]) {
 		[values addObject:value];
-		return [NSString stringWithFormat:@" WHERE %@::text %@ $%lu::text", quoted, op, (unsigned long)[values count]];
+		return [NSString stringWithFormat:@"%@::text %@ $%lu::text", quoted, op, (unsigned long)[values count]];
 	}
 
 	if ([op isEqualToString:@"IN"]) {
@@ -448,7 +464,7 @@ BOOL SPPostgresRunGuardedRead(PGPostgresConnection *connection, NSString *savepo
 			if (error) *error = SPPostgresMakeError(SPPostgresErrorQueryFailed, NSLocalizedString(@"Enter at least one value for IN, separated by commas.", @"Postgres content: empty IN list"), nil);
 			return nil;
 		}
-		return [NSString stringWithFormat:@" WHERE %@ IN (%@)", quoted, [placeholders componentsJoinedByString:@", "]];
+		return [NSString stringWithFormat:@"%@ IN (%@)", quoted, [placeholders componentsJoinedByString:@", "]];
 	}
 
 	// Only these fixed operators are ever placed in the SQL; ≠ is sent as <>.
@@ -462,7 +478,7 @@ BOOL SPPostgresRunGuardedRead(PGPostgresConnection *connection, NSString *savepo
 		return nil;
 	}
 	[values addObject:value];
-	return [NSString stringWithFormat:@" WHERE %@ %@ $%lu::%@", quoted, sqlOperator, (unsigned long)[values count], [column castTypeName]];
+	return [NSString stringWithFormat:@"%@ %@ $%lu::%@", quoted, sqlOperator, (unsigned long)[values count], [column castTypeName]];
 }
 
 /// "pk1" = $n::type AND … (without a leading WHERE): identifies row by its full primary key.
@@ -532,10 +548,16 @@ BOOL SPPostgresRunGuardedRead(PGPostgresConnection *connection, NSString *savepo
 - (NSArray *)rowsWithFilter:(SPPostgresFilter *)filter sortColumn:(NSString *)column ascending:(BOOL)ascending
 					 offset:(NSUInteger)offset limit:(NSUInteger)limit error:(NSError **)error
 {
+	return [self rowsWithFilters:filter ? @[filter] : @[] sortColumn:column ascending:ascending offset:offset limit:limit error:error];
+}
+
+- (NSArray *)rowsWithFilters:(NSArray<SPPostgresFilter *> *)filters sortColumn:(NSString *)column ascending:(BOOL)ascending
+					  offset:(NSUInteger)offset limit:(NSUInteger)limit error:(NSError **)error
+{
 	if (![self loadMetadata:error]) return nil;
 
 	NSMutableArray *values = [NSMutableArray array];
-	NSString *where = [self whereClauseForFilter:filter values:values error:error];
+	NSString *where = [self whereClauseForFilters:filters values:values error:error];
 	if (!where) return nil;
 
 	// Order by the sort column, then the primary key, so pages are stable. The names are qualified: a bare
@@ -571,10 +593,15 @@ BOOL SPPostgresRunGuardedRead(PGPostgresConnection *connection, NSString *savepo
 
 - (NSInteger)countRowsWithFilter:(SPPostgresFilter *)filter error:(NSError **)error
 {
+	return [self countRowsWithFilters:filter ? @[filter] : @[] error:error];
+}
+
+- (NSInteger)countRowsWithFilters:(NSArray<SPPostgresFilter *> *)filters error:(NSError **)error
+{
 	if (![self loadMetadata:error]) return -1;
 
 	NSMutableArray *values = [NSMutableArray array];
-	NSString *where = [self whereClauseForFilter:filter values:values error:error];
+	NSString *where = [self whereClauseForFilters:filters values:values error:error];
 	if (!where) return -1;
 
 	NSString *sql = [NSString stringWithFormat:@"SELECT count(*)::text AS n FROM %@%@", [self qualifiedName], where];

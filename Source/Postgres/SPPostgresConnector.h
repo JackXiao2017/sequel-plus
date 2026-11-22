@@ -58,6 +58,21 @@ __attribute__((visibility("default")))
 /// Closes the connection and the tunnel. A pending attempt is cancelled first (see -cancel).
 - (void)disconnect;
 
+/**
+ * After the connection was found dead: makes sure the way to the server is open again before the connection is
+ * re-established in place (PGPostgresConnection -reestablishConnection). Main thread; the completion is called once,
+ * on the main thread, from a later run loop turn.
+ *
+ * Not an SSH favorite, or its tunnel is still connected (and not force): nil. force replaces its own tunnel even when it
+ * reports connected (after sleep or a network change ssh can take minutes to notice its link is gone). A connector sharing another's tunnel never opens one: nil
+ * when that tunnel is connected (the connection follows its local port), else SPPostgresErrorSSHTunnelFailed. Its own
+ * tunnel down: a new tunnel is opened as the first connect opened it (password or keychain, key file; its sheets on
+ * window), and once it is connected the connection's host and port become 127.0.0.1 and the new local port, then nil.
+ * A failed tunnel completes with SPPostgresErrorSSHTunnelFailed, a cancelled password prompt (or -disconnect)
+ * with SPPostgresErrorCancelled.
+ */
+- (void)reopenTunnelOnWindow:(NSWindow *)window force:(BOOL)force completion:(void (^)(NSError *error))completion;
+
 @property (readonly) SPSSHTunnel *tunnel;
 
 /// The window the SSH tunnel's sheets are shown on while connecting (nil once the attempt is over).

@@ -1,5 +1,6 @@
 #import "SPPostgresContentController.h"
 #import "SPPostgresTableData.h"
+#import "SPPostgresFilterRowsController.h"
 #import "SPPostgresErrors.h"
 #import "SPPostgresTaskRunner.h"
 #import "SPTableView.h"
@@ -10,23 +11,28 @@
 #import "SPPostgresPaginationView.h"
 #import "SPPostgresRowsGrid.h"
 #import "SPTextAndLinkCell.h"
+#import "SPForeignKeyPicker.h"
+#import "SPForeignKeyPickerSettings.h"
+#import "SPPostgresForeignKeyPickerSource.h"
+#import <PostgresKit/PostgresKit.h>
 
 // MySQL's Content tab (DBView.xib): 23 pt button bar, 32 x 25 textured buttons
 static const CGFloat SPPostgresContentBottomBarHeight = 23;
-static const CGFloat SPPostgresContentFilterBarHeight = 30;
 static const CGFloat SPPostgresContentButtonWidth = 32;
 
 // Column widths fitted to the header and the first rows, as MySQL's
 static const CGFloat SPPostgresContentMinColumnWidth = 40;
 static const CGFloat SPPostgresContentMaxColumnWidth = 300;
 static const NSUInteger SPPostgresContentWidthSampleRows = 100;
+/// Longer string values open in the field editor sheet rather than the in-cell editor (SPPostgresQueryDisplayLimit too).
+static const NSUInteger SPPostgresContentInCellEditLimit = 10000;
 
 static void *SPPostgresContentRunnerContext = &SPPostgresContentRunnerContext;
 static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContext;
 
 /// One page as a load fetched it (on the runner's thread), with the state it was asked for; applied on the main thread.
 @interface SPPostgresContentPage : NSObject
-@property (retain) SPPostgresFilter *filter;
+@property (copy) NSArray<SPPostgresFilter *> *filters;
 @property (copy) NSString *sortColumn;
 @property BOOL ascending;
 @property NSUInteger page;
@@ -41,7 +47,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 
 - (void)dealloc
 {
-	[_filter release];
+	[_filters release];
 	[_sortColumn release];
 	[_rows release];
 	[super dealloc];
@@ -98,7 +104,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	BOOL hasPendingRow;             // the last row is a new row not yet on the server (see -addRow:)
 	NSMutableIndexSet *pendingEditedColumns; // the pending row's columns given a value (sent with the insert)
 
-	SPPostgresFilter *filter;       // nil: no filter
+	NSArray *filters;               // the applied conditions (AND); empty: no filter
 	NSString *sortColumn;           // nil: primary-key order
 	BOOL sortAscending;
 	NSUInteger currentPage;
@@ -111,12 +117,8 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	SPPostgresContentGrid *tableView;
 	NSScrollView *scrollView;
 
-	NSView *filterBar;
+	SPPostgresFilterRowsController *filterRows; // the filter area (rows and their button bar)
 	BOOL filterBarVisible;
-	NSPopUpButton *filterColumnPopup;
-	NSPopUpButton *filterComparisonPopup;
-	NSTextField *filterValueField;
-	NSButton *filterButton;
 
 	NSButton *addButton;
 	NSButton *removeButton;
@@ -150,6 +152,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 @synthesize confirmationPresenter;
 @synthesize fieldEditorPresenter;
 @synthesize foreignKeyFollower;
+@synthesize foreignKeyPickerPresenter;
 @synthesize taskRunner;
 @synthesize pasteboard;
 @synthesize stale;
@@ -159,7 +162,12 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 @synthesize refreshButton;
 @synthesize editModeButton;
 @synthesize filterToggleButton;
-@synthesize filterBarVisible;
+@synthesize filterBarVisible, filterRows;
+
+- (NSArray<SPPostgresFilter *> *)appliedFilters
+{
+	return [[(filters ?: @[]) copy] autorelease];
+}
 @synthesize previousPageButton;
 @synthesize paginationButton;
 @synthesize nextPageButton;
@@ -212,7 +220,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	[foreignKeys release];
 	[rows release];
 	[pendingEditedColumns release];
-	[filter release];
+	[filters release];
 	[sortColumn release];
 	[schema release];
 	[table release];
@@ -222,11 +230,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	[view release];
 	[tableView release];
 	[scrollView release];
-	[filterBar release];
-	[filterColumnPopup release];
-	[filterComparisonPopup release];
-	[filterValueField release];
-	[filterButton release];
+	[filterRows release];
 	[addButton release];
 	[removeButton release];
 	[duplicateButton release];
@@ -257,8 +261,10 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	[tableView setDataSource:nil];
 	[tableView setDelegate:nil];
 
-	for (NSControl *control in @[filterColumnPopup, filterComparisonPopup, filterValueField, filterButton,
-								 addButton, removeButton, duplicateButton, refreshButton, editModeButton, filterToggleButton,
+	// The filter rows must not call back
+	[[NSNotificationCenter defaultCenter] removeObserver:self name:NSViewFrameDidChangeNotification object:view];
+	[filterRows invalidate];
+	for (NSControl *control in @[addButton, removeButton, duplicateButton, refreshButton, editModeButton, filterToggleButton,
 								 previousPageButton, paginationButton, nextPageButton]) {
 		[control setTarget:nil];
 	}
@@ -278,6 +284,8 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	fieldEditorPresenter = nil;
 	[foreignKeyFollower release];
 	foreignKeyFollower = nil;
+	[foreignKeyPickerPresenter release];
+	foreignKeyPickerPresenter = nil;
 	// The link arrows' cells keep a plain pointer to this controller
 	for (NSTableColumn *tableColumn in [tableView tableColumns]) {
 		id cell = [tableColumn dataCell];
@@ -417,51 +425,21 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	CGFloat width = NSWidth(frame);
 	CGFloat height = NSHeight(frame);
 
-	// Filter bar: column, comparison, value, Filter
-	filterBar = [[NSView alloc] initWithFrame:NSMakeRect(0, height - SPPostgresContentFilterBarHeight, width, SPPostgresContentFilterBarHeight)];
-	[filterBar setAutoresizingMask:NSViewWidthSizable | NSViewMinYMargin];
-
-	NSFont *smallFont = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
-
-	filterColumnPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(8, 4, 150, 22) pullsDown:NO];
-	[[filterColumnPopup cell] setControlSize:NSControlSizeSmall];
-	[filterColumnPopup setFont:smallFont];
-	[filterColumnPopup setToolTip:NSLocalizedString(@"The column to filter on", @"Postgres content: filter column tooltip")];
-	[filterBar addSubview:filterColumnPopup];
-
-	filterComparisonPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(162, 4, 110, 22) pullsDown:NO];
-	[[filterComparisonPopup cell] setControlSize:NSControlSizeSmall];
-	[filterComparisonPopup setFont:smallFont];
-	[filterComparisonPopup addItemsWithTitles:@[@"=", @"≠", @">", @"<", @">=", @"<=", @"LIKE", @"NOT LIKE", @"ILIKE", @"IS NULL", @"IS NOT NULL", @"IN"]];
-	[filterComparisonPopup setTarget:self];
-	[filterComparisonPopup setAction:@selector(_filterComparisonChanged:)];
-	[filterBar addSubview:filterComparisonPopup];
-
-	filterButton = [[NSButton alloc] initWithFrame:NSMakeRect(width - 63, 6, 55, 19)];
-	[filterButton setBezelStyle:NSBezelStyleRoundRect];
-	[[filterButton cell] setControlSize:NSControlSizeSmall];
-	[filterButton setFont:smallFont];
-	[filterButton setTitle:NSLocalizedString(@"Filter", @"filter button title")];
-	[filterButton setToolTip:NSLocalizedString(@"Query the current table using the filter conditions defined above", @"Postgres content: filter button tooltip")];
-	[filterButton setAutoresizingMask:NSViewMinXMargin];
-	[filterButton setTarget:self];
-	[filterButton setAction:@selector(applyFilter:)];
-	[filterBar addSubview:filterButton];
-
-	filterValueField = [[NSTextField alloc] initWithFrame:NSMakeRect(278, 6, width - 63 - 8 - 278, 19)];
-	[[filterValueField cell] setControlSize:NSControlSizeSmall];
-	[filterValueField setFont:smallFont];
-	[[filterValueField cell] setScrollable:YES];
-	[[filterValueField cell] setPlaceholderString:NSLocalizedString(@"Value", @"Postgres content: filter value placeholder")];
-	[filterValueField setAutoresizingMask:NSViewWidthSizable];
-	[filterValueField setTarget:self];
-	[filterValueField setAction:@selector(applyFilter:)];
-	[filterBar addSubview:filterValueField];
-
-	[view addSubview:filterBar];
+	// Filter area, as MySQL's: condition rows over Reset / Add Filter / Filter (laid out by -_layOutFilterArea)
+	filterRows = [[SPPostgresFilterRowsController alloc] init];
+	[[filterRows view] setFrame:NSMakeRect(0, height, width, 0)];
+	[[filterRows view] setHidden:YES];
+	[view addSubview:[filterRows view]];
+	__block SPPostgresContentController *me = self; // not retained (MRC): the callbacks are cleared in -invalidate
+	filterRows.onApply = ^{ [me applyFilter:nil]; };
+	filterRows.onReset = ^{ [me _clearAppliedFilters]; };
+	filterRows.onLastRowRemoved = ^{ [me _clearAppliedFilters]; };
+	filterRows.onHeightChanged = ^{ [me _layOutFilterArea]; };
+	[view setPostsFrameChangedNotifications:YES];
+	[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_viewFrameChanged:) name:NSViewFrameDidChangeNotification object:view];
 
 	// Grid
-	scrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, SPPostgresContentBottomBarHeight, width, height - SPPostgresContentBottomBarHeight - SPPostgresContentFilterBarHeight)];
+	scrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, SPPostgresContentBottomBarHeight, width, height - SPPostgresContentBottomBarHeight)];
 	[scrollView setHasVerticalScroller:YES];
 	[scrollView setHasHorizontalScroller:YES];
 	[scrollView setAutohidesScrollers:YES];
@@ -530,7 +508,6 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	}
 	[view addSubview:bottomBar];
 
-	[self _filterComparisonChanged:nil];
 	[self _setFilterBarVisible:[defaults boolForKey:SPRuleFilterEditorLastVisibilityChoice]];
 }
 
@@ -558,6 +535,19 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 - (BOOL)_editsInSheet
 {
 	return [defaults boolForKey:SPEditInSheetEnabled];
+}
+
+/// A value too long for the in-cell editor (over SPPostgresContentInCellEditLimit characters, as the Query results'
+/// grid): that editor lays the whole value out as one line, and a few MB of it hangs the app. It opens in the field
+/// editor sheet instead.
+- (BOOL)_isLongValueInTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
+{
+	if (rowIndex < 0 || (NSUInteger)rowIndex >= [rows count]) return NO;
+	NSInteger index = [[tableColumn identifier] integerValue];
+	NSArray *row = [rows objectAtIndex:(NSUInteger)rowIndex];
+	if (index < 0 || (NSUInteger)index >= [row count]) return NO;
+	id value = [row objectAtIndex:(NSUInteger)index];
+	return [value isKindOfClass:[NSString class]] && [(NSString *)value length] > SPPostgresContentInCellEditLimit;
 }
 
 - (NSString *)_nullPlaceholder
@@ -678,8 +668,8 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	foreignKeys = [@{} retain];
 	[rows removeAllObjects];
 	[self _clearPendingRow];
-	[filter release];
-	filter = nil;
+	[filters release];
+	filters = [@[] retain];
 	[sortColumn release];
 	sortColumn = nil;
 	sortAscending = YES;
@@ -743,7 +733,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 		[self _updateBottomBar];
 		SPPostgresFilter *firstFilter = [[self columnNames] containsObject:[theStartFilter column] ?: @""] ? theStartFilter : nil;
 		if (firstFilter) [self _showFilterInBar:firstFilter];
-		[self _loadWithFilter:firstFilter sortColumn:nil ascending:YES page:1 description:description];
+		[self _loadWithFilters:firstFilter ? @[firstFilter] : @[] sortColumn:nil ascending:YES page:1 description:description];
 	}];
 }
 
@@ -755,8 +745,8 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 		return;
 	}
 	if (![columns count]) return;
-	[self _loadWithFilter:filter sortColumn:sortColumn ascending:sortAscending page:currentPage
-			  description:NSLocalizedString(@"Reloading data...", @"Reloading data task description")];
+	[self _loadWithFilters:filters sortColumn:sortColumn ascending:sortAscending page:currentPage
+			   description:NSLocalizedString(@"Reloading data...", @"Reloading data task description")];
 }
 
 /// The current columns in the grid, the filter bar and the notice.
@@ -776,8 +766,8 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
  * the error is shown and the grid keeps its rows (and the previous filter, sort and page); cancelled, it keeps them
  * without an alert.
  */
-- (void)_loadWithFilter:(SPPostgresFilter *)theFilter sortColumn:(NSString *)theSortColumn ascending:(BOOL)ascending page:(NSUInteger)page
-			description:(NSString *)description
+- (void)_loadWithFilters:(NSArray<SPPostgresFilter *> *)theFilters sortColumn:(NSString *)theSortColumn ascending:(BOOL)ascending page:(NSUInteger)page
+			 description:(NSString *)description
 {
 	if (!tableData || ![columns count]) return;
 	if (!committingInGrid) [self _endEditing];
@@ -785,19 +775,20 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	stale = NO;
 	NSUInteger generation = ++loadGeneration;
 
-	// Everything the work needs, so it never reads this controller (the filter is never changed once made)
+	// Everything the work needs, so it never reads this controller (the filters are never changed once made)
 	SPPostgresTableData *data = tableData;
+	NSArray *workFilters = [[(theFilters ?: @[]) copy] autorelease];
 	NSString *theSort = [[theSortColumn copy] autorelease];
 	NSUInteger pageSize = [self _pageSize];
 	NSString *title = [NSString stringWithFormat:NSLocalizedString(@"Could not load the rows of “%@”", @"Postgres content: load failed"), table];
 
 	[taskRunner runTaskWithDescription:description cancelTitle:NSLocalizedString(@"Stop", @"stop button") work:^id(PGPostgresConnection *theConnection, NSError **error) {
-		NSInteger matching = [data countRowsWithFilter:theFilter error:error];
+		NSInteger matching = [data countRowsWithFilters:workFilters error:error];
 		if (matching < 0) return nil;
 
 		NSInteger total = matching;
-		if (theFilter) {
-			total = [data countRowsWithFilter:nil error:error];
+		if ([workFilters count]) {
+			total = [data countRowsWithFilters:@[] error:error];
 			if (total < 0) return nil;
 		}
 
@@ -805,12 +796,12 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 		if (pageSize && matching > 0) pages = ((NSUInteger)matching + pageSize - 1) / pageSize;
 		NSUInteger shownPage = MAX(1u, MIN(page, pages));
 
-		NSArray *pageRows = [data rowsWithFilter:theFilter sortColumn:theSort ascending:ascending
-										  offset:(shownPage - 1) * pageSize limit:pageSize error:error];
+		NSArray *pageRows = [data rowsWithFilters:workFilters sortColumn:theSort ascending:ascending
+										   offset:(shownPage - 1) * pageSize limit:pageSize error:error];
 		if (!pageRows) return nil;
 
 		SPPostgresContentPage *result = [[[SPPostgresContentPage alloc] init] autorelease];
-		result.filter = theFilter;
+		result.filters = workFilters;
 		result.sortColumn = theSort;
 		result.ascending = ascending;
 		result.page = shownPage;
@@ -838,9 +829,9 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 /// Makes a loaded page the current one.
 - (void)_showPage:(SPPostgresContentPage *)page
 {
-	if ([page filter] != filter) {
-		[filter release];
-		filter = [[page filter] retain];
+	if ([page filters] != filters) {
+		[filters release];
+		filters = [[page filters] retain];
 	}
 	if ([page sortColumn] != sortColumn) {
 		[sortColumn release];
@@ -954,31 +945,39 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 
 - (void)_rebuildFilterBar
 {
-	NSString *previous = [filterColumnPopup titleOfSelectedItem];
-	[filterColumnPopup removeAllItems];
-	for (SPPostgresColumn *column in columns) [filterColumnPopup addItemWithTitle:[column name]];
-	if (previous && [filterColumnPopup indexOfItemWithTitle:previous] >= 0) [filterColumnPopup selectItemWithTitle:previous];
-
-	[filterValueField setStringValue:@""];
-	BOOL hasColumns = [columns count] > 0;
-	[filterColumnPopup setEnabled:hasColumns];
-	[filterComparisonPopup setEnabled:hasColumns];
-	[filterButton setEnabled:hasColumns];
-	[self _filterComparisonChanged:nil];
+	NSMutableArray *names = [NSMutableArray arrayWithCapacity:[columns count]];
+	for (SPPostgresColumn *column in columns) [names addObject:[column name]];
+	[filterRows setColumnNames:names]; // empties the rows: as MySQL's, a table starts with only Add Filter
 }
 
-- (BOOL)_comparisonTakesValue:(NSString *)comparison
+/// The filter area as tall as its rows (capped at a third of the view above the bottom bar, the rows then scroll) at
+/// the top, the grid below it; hidden, the grid takes its place. The rows always start above the area's button bar.
+- (void)_layOutFilterArea
 {
-	return ![comparison isEqualToString:@"IS NULL"] && ![comparison isEqualToString:@"IS NOT NULL"];
+	NSRect bounds = [view bounds];
+	CGFloat available = MAX(0, NSHeight(bounds) - SPPostgresContentBottomBarHeight);
+	CGFloat areaHeight = filterBarVisible ? MIN([filterRows preferredHeight], floor(available / 3)) : 0;
+
+	NSView *area = [filterRows view];
+	[area setFrame:NSMakeRect(0, NSHeight(bounds) - areaHeight, NSWidth(bounds), areaHeight)];
+	NSScrollView *rulesScroll = [[filterRows ruleEditor] enclosingScrollView];
+	CGFloat rowsBottom = NSMinY([rulesScroll frame]);
+	[rulesScroll setFrame:NSMakeRect(0, rowsBottom, NSWidth(bounds), MAX(0, areaHeight - rowsBottom))];
+
+	NSRect gridFrame = [scrollView frame];
+	gridFrame.origin.y = SPPostgresContentBottomBarHeight;
+	gridFrame.size.width = NSWidth(bounds);
+	gridFrame.size.height = MAX(0, NSHeight(bounds) - SPPostgresContentBottomBarHeight - areaHeight);
+	[scrollView setFrame:gridFrame];
 }
 
-- (void)_filterComparisonChanged:(id)sender
+- (void)_viewFrameChanged:(NSNotification *)notification
 {
-	[filterValueField setEnabled:[columns count] && [self _comparisonTakesValue:[filterComparisonPopup titleOfSelectedItem]]];
+	[self _layOutFilterArea];
 }
 
-/// Shows or hides the filter bar (the grid takes its 30 pt when it is hidden) and sets the toggle to match. Hiding
-/// it moves the focus out of it, to the grid.
+/// Shows or hides the filter area (the grid takes its place when it is hidden) and sets the toggle to match. Hiding it
+/// moves the focus out of it, to the grid.
 - (void)_setFilterBarVisible:(BOOL)visible
 {
 	filterBarVisible = visible;
@@ -989,13 +988,10 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 		id responder = [window firstResponder];
 		// A text field being edited has the window's field editor as first responder, with the field as its delegate
 		if ([responder isKindOfClass:[NSText class]] && [responder isFieldEditor]) responder = [(NSText *)responder delegate];
-		if ([responder isKindOfClass:[NSView class]] && [responder isDescendantOf:filterBar]) [window makeFirstResponder:tableView];
+		if ([responder isKindOfClass:[NSView class]] && [responder isDescendantOf:[filterRows view]]) [window makeFirstResponder:tableView];
 	}
-	[filterBar setHidden:!visible];
-
-	NSRect frame = [scrollView frame];
-	frame.size.height = NSHeight([view bounds]) - NSMinY(frame) - (visible ? SPPostgresContentFilterBarHeight : 0);
-	[scrollView setFrame:frame];
+	[[filterRows view] setHidden:!visible];
+	[self _layOutFilterArea];
 }
 
 - (IBAction)toggleFilterBar:(id)sender
@@ -1006,26 +1002,31 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	[self _setFilterBarVisible:show];
 
 	if (show) {
-		// Shown by a click: ready to type a value
-		if (sender && [view window] && [filterValueField isEnabled]) [[view window] makeFirstResponder:filterValueField];
+		// Shown by the user with no rows: one empty row, as MySQL's (-setRuleEditorVisible:animate:)
+		if (![filterRows numberOfRows]) [filterRows addRowAfter:-1 column:nil comparison:nil value:nil];
+		// Shown by a click: ready to type a value (the rows are shown as typed, not applied)
+		if (sender && [view window] && [filterRows numberOfRows]) [filterRows focusValueInRow:0];
 		return;
 	}
 
-	// Hidden, the filter can't be seen or changed: it no longer applies (as MySQL's)
-	if (filter) {
-		[self _loadWithFilter:nil sortColumn:sortColumn ascending:sortAscending page:1
-				  description:NSLocalizedString(@"Filtering table...", @"Filtering table task description")];
-	}
+	// Hidden, the filter can't be seen or changed: it no longer applies (as MySQL's); the rows stay as typed
+	[self _clearAppliedFilters];
 }
 
-/// The filter bar shown (its preference unchanged) holding filter, as if typed.
+/// With a filter applied, loads the first page unfiltered (keeping the sort).
+- (void)_clearAppliedFilters
+{
+	if (invalidated || ![filters count]) return;
+	[self _loadWithFilters:@[] sortColumn:sortColumn ascending:sortAscending page:1
+			   description:NSLocalizedString(@"Filtering table...", @"Filtering table task description")];
+}
+
+/// The filter area shown (its preference unchanged) holding just theFilter, as if typed.
 - (void)_showFilterInBar:(SPPostgresFilter *)theFilter
 {
+	[filterRows setFilters:@[theFilter]];
 	if (!filterBarVisible) [self _setFilterBarVisible:YES];
-	if ([filterColumnPopup indexOfItemWithTitle:[theFilter column]] >= 0) [filterColumnPopup selectItemWithTitle:[theFilter column]];
-	if ([filterComparisonPopup indexOfItemWithTitle:[theFilter comparison]] >= 0) [filterComparisonPopup selectItemWithTitle:[theFilter comparison]];
-	[filterValueField setStringValue:[theFilter value] ?: @""];
-	[self _filterComparisonChanged:nil];
+	else [self _layOutFilterArea];
 }
 
 - (IBAction)applyFilter:(id)sender
@@ -1033,18 +1034,9 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	if (invalidated || ![columns count]) return;
 	[self _endEditing];
 
-	NSString *column = [filterColumnPopup titleOfSelectedItem];
-	NSString *comparison = [filterComparisonPopup titleOfSelectedItem];
-	NSString *value = [filterValueField stringValue] ?: @"";
-
-	// As MySQL's filter: an empty value means no filter
-	SPPostgresFilter *newFilter = nil;
-	if ([column length] && [comparison length] && (![self _comparisonTakesValue:comparison] || [value length])) {
-		newFilter = [SPPostgresFilter filterWithColumn:column comparison:comparison value:value];
-	}
-
-	[self _loadWithFilter:newFilter sortColumn:sortColumn ascending:sortAscending page:1
-			  description:NSLocalizedString(@"Filtering table...", @"Filtering table task description")];
+	// As MySQL's filter: a row with an empty value is no condition; with none, the table loads unfiltered
+	[self _loadWithFilters:[filterRows completeFilters] sortColumn:sortColumn ascending:sortAscending page:1
+			   description:NSLocalizedString(@"Filtering table...", @"Filtering table task description")];
 }
 
 #pragma mark - Bottom bar
@@ -1066,10 +1058,10 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 		NSInteger first = (NSInteger)((currentPage - 1) * pageSize) + 1;
 
 		// MySQL's wording (-[SPTableContent updateCountText])
-		if (!filter && !isLimited) {
+		if (![filters count] && !isLimited) {
 			[text appendFormat:(shown == 1) ? NSLocalizedString(@"%@ row in table", @"text showing a single row in the result") : NSLocalizedString(@"%@ rows in table", @"text showing how many rows are in the result"), format(shown)];
 		}
-		else if (!filter) {
+		else if (![filters count]) {
 			[text appendFormat:NSLocalizedString(@"Rows %@ - %@ of %@%@ from table", @"text showing how many rows are in the limited result"), format(first), format(first + shown - 1), @"", format(tableRowCount)];
 		}
 		else if (!isLimited) {
@@ -1223,8 +1215,8 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 
 - (void)_loadPage:(NSUInteger)page
 {
-	[self _loadWithFilter:filter sortColumn:sortColumn ascending:sortAscending page:page
-			  description:[NSString stringWithFormat:NSLocalizedString(@"Loading page %lu...", @"Loading table page task string"), (unsigned long)page]];
+	[self _loadWithFilters:filters sortColumn:sortColumn ascending:sortAscending page:page
+			   description:[NSString stringWithFormat:NSLocalizedString(@"Loading page %lu...", @"Loading table page task string"), (unsigned long)page]];
 }
 
 #pragma mark - Rows
@@ -1718,12 +1710,17 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 - (BOOL)tableView:(NSTableView *)theTableView shouldEditTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
 {
 	if (invalidated || [taskRunner isBusy]) return NO;
-	if ([self _editsInSheet]) {
+	if ([self _editsInSheet] || [self _isLongValueInTableColumn:tableColumn row:rowIndex]) {
 		[self _editInSheetTableColumn:tableColumn row:rowIndex];
 		return NO;
 	}
 	if (![self _canEditTableColumn:tableColumn row:rowIndex]) return NO;
 	SPPostgresColumn *column = [self _columnForTableColumn:tableColumn];
+	NSDictionary *reference = pickerHandoff ? nil : [self _pickerReferenceForColumn:column];
+	if (reference) {
+		[self _editInForeignKeyPickerTableColumn:tableColumn row:rowIndex reference:reference];
+		return NO;
+	}
 	if (!pickerHandoff && [SPPostgresDateTimePicker kindOfTypeName:[column typeName]] != SPPostgresTemporalNone) {
 		[self _editInDatePickerTableColumn:tableColumn row:rowIndex];
 		return NO;
@@ -1773,6 +1770,106 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	}] autorelease];
 	NSInteger columnIndex = [tableView columnWithIdentifier:[tableColumn identifier]];
 	[picker showRelativeToRect:[tableView frameOfCellAtColumn:columnIndex row:rowIndex] ofView:tableView];
+}
+
+#pragma mark - Foreign key picker
+
+/// column's foreign key when the picker opens for it (the preference on, a single-column key, not bytea), else nil.
+- (NSDictionary *)_pickerReferenceForColumn:(SPPostgresColumn *)column
+{
+	if (!column) return nil;
+	NSDictionary *reference = [foreignKeys objectForKey:[column name]];
+	if (!reference || [[reference objectForKey:@"columns"] integerValue] != 1 || [[reference objectForKey:@"binary"] boolValue]) return nil;
+	SPForeignKeyPickerSettings *settings = [[[SPForeignKeyPickerSettings alloc] initWithDefaults:defaults] autorelease];
+	return [settings pickerEnabled] ? reference : nil;
+}
+
+- (SPForeignKeyPicker *)_pickerForReference:(NSDictionary *)reference value:(id)value allowNull:(BOOL)allowNull
+								 completion:(void (^)(SPForeignKeyPickerOutcome outcome, NSString *chosen))completion
+{
+	NSString *refSchema = [reference objectForKey:@"schema"];
+	NSString *refTable = [reference objectForKey:@"table"];
+	NSString *refColumn = [reference objectForKey:@"column"];
+	SPPostgresForeignKeyPickerSource *source = [[[SPPostgresForeignKeyPickerSource alloc] initWithTaskRunner:taskRunner schema:refSchema table:refTable keyColumn:refColumn] autorelease];
+	SPForeignKeyPickerSettings *settings = [[[SPForeignKeyPickerSettings alloc] initWithDefaults:defaults] autorelease];
+	NSString *server = [connection useSocket] ? [connection socketPath] : [connection host];
+	NSString *tableKey = [SPForeignKeyPickerSettings tableKeyWithKind:@"postgres" host:server port:(NSInteger)[connection port]
+															  database:[connection database] schema:refSchema table:refTable];
+	NSString *title = [NSString stringWithFormat:@"%@.%@ · %@.%@", refTable, refColumn, refSchema, refTable];
+	return [[[SPForeignKeyPicker alloc] initWithDataSource:source settings:settings tableKey:tableKey title:title
+											  currentValue:value allowNull:allowNull completion:completion] autorelease];
+}
+
+- (void)_presentForeignKeyPicker:(SPForeignKeyPicker *)picker rect:(NSRect)rect ofView:(NSView *)aView
+{
+	if (foreignKeyPickerPresenter) foreignKeyPickerPresenter(picker, aView, rect);
+	else [picker showRelativeToRect:rect ofView:aView];
+}
+
+/// Runs block once the runner is idle (the picker's own reads may still be queued when it answers); not at all once
+/// the runner is invalidated.
+- (void)_whenTaskRunnerIdle:(void (^)(void))block
+{
+	if ([taskRunner isInvalidated]) return;
+	if (![taskRunner isBusy]) {
+		block();
+		return;
+	}
+	void (^copied)(void) = [[block copy] autorelease];
+	[taskRunner runTaskWithDescription:NSLocalizedString(@"Loading rows…", @"foreign key picker: loading the referenced table's rows") cancelTitle:nil
+								  work:^id(PGPostgresConnection *theConnection, NSError **error) { return @YES; }
+							completion:^(id result, NSError *error, BOOL cancelled) {
+		dispatch_async(dispatch_get_main_queue(), ^{
+			[self _whenTaskRunnerIdle:copied];
+		});
+	}];
+}
+
+/**
+ * Opens the foreign key picker as a popover on a foreign key cell (unless a picker or the field editor sheet is
+ * open). Its value is not saved: Choose (or NULL, as the NULL placeholder) puts it into the cell's in-place editor,
+ * and Type a value… opens that editor on the cell's value, on this table only and on the row it was opened on where
+ * that row now is; the cell stays being edited until Return saves it (or Escape drops it). Cancel leaves the cell as
+ * it was, not being edited.
+ */
+- (void)_editInForeignKeyPickerTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex reference:(NSDictionary *)reference
+{
+	if (invalidated || fieldEditorPending || [taskRunner isBusy]) return;
+	if (rowIndex < 0 || (NSUInteger)rowIndex >= [rows count]) return;
+	SPPostgresColumn *column = [self _columnForTableColumn:tableColumn];
+	if (!column) return;
+
+	NSArray *row = [rows objectAtIndex:(NSUInteger)rowIndex];
+	id value = [row objectAtIndex:(NSUInteger)[[tableColumn identifier] integerValue]];
+	SPPostgresTableData *data = tableData;
+	fieldEditorPending = YES;
+	[self retain]; // until the picker answers
+
+	SPForeignKeyPicker *picker = [self _pickerForReference:reference value:value allowNull:[column nullable] completion:^(SPForeignKeyPickerOutcome outcome, NSString *chosen) {
+		fieldEditorPending = NO;
+		if (!invalidated) [[tableView window] makeFirstResponder:tableView];
+		if (outcome != SPForeignKeyPickerCancelled && !invalidated && data == tableData) {
+			// nil: Type a value… (the editor keeps the cell's value)
+			NSString *text = (outcome == SPForeignKeyPickerChose) ? chosen : (outcome == SPForeignKeyPickerChoseNull) ? [self _nullPlaceholder] : nil;
+			[self _whenTaskRunnerIdle:^{
+				if (invalidated || data != tableData || [taskRunner isBusy]) return;
+				NSUInteger index = (NSUInteger)rowIndex;
+				if (index >= [rows count] || ![[rows objectAtIndex:index] isEqual:row]) index = [rows indexOfObject:row];
+				NSInteger gridColumn = [tableView columnWithIdentifier:[tableColumn identifier]];
+				if (index == NSNotFound || gridColumn < 0) return;
+				pickerHandoff = YES;
+				[tableView editColumn:gridColumn row:(NSInteger)index withEvent:nil select:YES];
+				pickerHandoff = NO;
+				if (!text) return;
+				NSText *editor = [tableView currentEditor];
+				[editor setString:text];
+				[editor setSelectedRange:NSMakeRange([text length], 0)];
+			}];
+		}
+		[self autorelease];
+	}];
+	NSInteger columnIndex = [tableView columnWithIdentifier:[tableColumn identifier]];
+	[self _presentForeignKeyPicker:picker rect:[tableView frameOfCellAtColumn:columnIndex row:rowIndex] ofView:tableView];
 }
 
 /// Whether the cell can be edited now (never opens the sheet).
@@ -1825,8 +1922,22 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	if (fieldEditorPresenter) fieldEditorPresenter(text, [column name], [column typeName], canEdit, [column nullable], once);
 	else {
 		// MySQL's field editor as a sheet on the view's window (cancelled at once when there is none, or a sheet is up)
+		// A foreign key cell's sheet gets Choose…, which opens the picker on the button; its value replaces the text
+		NSDictionary *reference = canEdit ? [self _pickerReferenceForColumn:column] : nil;
+		void (^chooser)(NSString *, NSView *, void (^)(NSString *)) = nil;
+		if (reference) {
+			chooser = [[^(NSString *currentText, NSView *anchor, void (^setText)(NSString *)) {
+				if (invalidated) return;
+				void (^replace)(NSString *) = [[setText copy] autorelease];
+				SPForeignKeyPicker *picker = [self _pickerForReference:reference value:currentText allowNull:[column nullable] completion:^(SPForeignKeyPickerOutcome outcome, NSString *chosen) {
+					if (outcome == SPForeignKeyPickerChose) replace(chosen);
+					else if (outcome == SPForeignKeyPickerChoseNull) replace([self _nullPlaceholder]);
+				}];
+				[self _presentForeignKeyPicker:picker rect:[anchor bounds] ofView:anchor];
+			} copy] autorelease]; // off the stack: it outlives this scope
+		}
 		[SPPostgresFieldEditorSheet editValue:text columnName:[column name] typeName:[column typeName] editable:canEdit
-									allowNull:[column nullable] window:[view window] completion:^(id newValue) {
+									allowNull:[column nullable] window:[view window] chooser:chooser completion:^(id newValue) {
 			if (!invalidated) [[tableView window] makeFirstResponder:tableView];
 			once(newValue);
 		}];
@@ -1854,7 +1965,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 
 #pragma mark - Foreign key links
 
-- (NSDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *)foreignKeyReferences
+- (NSDictionary<NSString *, NSDictionary<NSString *, id> *> *)foreignKeyReferences
 {
 	return [[foreignKeys retain] autorelease];
 }
@@ -1886,8 +1997,8 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	// A key into this table: filtered here
 	if ([[reference objectForKey:@"schema"] isEqualToString:schema] && [[reference objectForKey:@"table"] isEqualToString:table]) {
 		[self _showFilterInBar:linkFilter];
-		[self _loadWithFilter:linkFilter sortColumn:sortColumn ascending:sortAscending page:1
-				  description:NSLocalizedString(@"Filtering table...", @"Filtering table task description")];
+		[self _loadWithFilters:@[linkFilter] sortColumn:sortColumn ascending:sortAscending page:1
+				   description:NSLocalizedString(@"Filtering table...", @"Filtering table task description")];
 		return;
 	}
 
@@ -1909,8 +2020,8 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 
 	// From the first page (MySQL keeps the page; the first rows of the new order are what's wanted)
 	BOOL ascending = [name isEqualToString:sortColumn] ? !sortAscending : YES;
-	[self _loadWithFilter:filter sortColumn:name ascending:ascending page:1
-			  description:NSLocalizedString(@"Sorting table...", @"Sorting table task description")];
+	[self _loadWithFilters:filters sortColumn:name ascending:ascending page:1
+			   description:NSLocalizedString(@"Sorting table...", @"Sorting table task description")];
 }
 
 - (void)tableViewSelectionDidChange:(NSNotification *)notification
