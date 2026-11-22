@@ -67,6 +67,8 @@
 #import <pthread.h>
 #import <SPMySQL/SPMySQL.h>
 #import "SPPostgresDateTimePicker.h"
+#import "SPValuePopover.h"
+#import "SPValueFormatter.h"
 
 #include <libkern/OSAtomic.h>
 
@@ -615,6 +617,9 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
 	
 	//ensure there is no pending edit, which could be messed up (#2113)
 	[[tableDocumentInstance parentWindow] endEditingFor:nil];
+
+	// The shown result is replaced: a value popover on it closes (not when its own Save reloads it)
+	if (!valuePopoverSaving) [self _closeValuePopover];
 	
 	if ([queries count] > 1) {
 		taskString = [NSString stringWithFormat:NSLocalizedString(@"Running query %i of %lu...", @"Running multiple queries string"), 1, (unsigned long)[queries count]];
@@ -1729,6 +1734,7 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
 		SPTextAndLinkCell *dataCell = [[[SPTextAndLinkCell alloc] initTextCell:@""] autorelease];
 		[dataCell setEditable:YES];
 		[dataCell setFont:tableFont];
+		if ([self _showsValueIconForColumn:columnDefinition]) [dataCell setValueTarget:self action:@selector(clickValueIcon:)];
 
 		[dataCell setLineBreakMode:NSLineBreakByTruncatingTail];
 		[dataCell setFormatter:[[SPDataCellFormatter new] autorelease]];
@@ -2016,6 +2022,10 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
 	NSString *tableForColumn = [columnDefinition objectForKey:@"org_table"];
 
 	if(!tableForColumn || ![tableForColumn length]) {
+		if (valuePopoverSaving) {
+			valuePopoverSaveError = [[NSString stringWithFormat:NSLocalizedString(@"Couldn't identify field origin unambiguously. The column '%@' contains data from more than one table.", @"Custom Query result editing error - could not identify a corresponding column"), [columnDefinition objectForKey:@"name"]] retain];
+			return;
+		}
 		[errorTextTitle setStringValue:NSLocalizedString(@"Last Error Message", @"Last Error Message")];
 		[errorText setString:[NSString stringWithFormat:NSLocalizedString(@"Couldn't identify field origin unambiguously. The column '%@' contains data from more than one table.", @"Custom Query result editing error - could not identify a corresponding column"), [columnDefinition objectForKey:@"name"]]];
 		NSBeep();
@@ -2066,7 +2076,11 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
 				[[columnDefinition objectForKey:@"db"] backtickQuotedString], [[columnDefinition objectForKey:@"org_table"] backtickQuotedString],
 				[[columnDefinition objectForKey:@"db"] backtickQuotedString], [[columnDefinition objectForKey:@"org_table"] backtickQuotedString], [columnName backtickQuotedString], newObject, fieldIDQueryString]];
 
-		// Check for errors while UPDATE
+		// Check for errors while UPDATE (a value popover's Save shows the error itself)
+		if ([mySQLConnection queryErrored] && valuePopoverSaving) {
+			valuePopoverSaveError = [[mySQLConnection lastErrorMessage] copy];
+			return;
+		}
 		if ([mySQLConnection queryErrored]) {
 			SPOnewayAlertSheet(
 				NSLocalizedString(@"Error", @"error"),
@@ -2079,7 +2093,10 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
 		// This shouldn't happen – for safety reasons
 		if ( ![mySQLConnection rowsAffectedByLastQuery] ) {
 #ifndef SP_CODA
-			if ( [prefs boolForKey:SPShowNoAffectedRowsError] ) {
+			if (valuePopoverSaving) {
+				valuePopoverSaveError = [NSLocalizedString(@"No row was changed. The row may have been changed or deleted by someone else, or the server stores this value the same as before.", @"value popover: the UPDATE changed no row") retain];
+			}
+			else if ( [prefs boolForKey:SPShowNoAffectedRowsError] ) {
 				SPOnewayAlertSheet(
 					NSLocalizedString(@"Warning", @"warning"),
 					[tableDocumentInstance parentWindow],
@@ -2105,6 +2122,8 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
 #ifndef SP_CODA
 		}
 #endif
+	} else if (valuePopoverSaving) {
+		valuePopoverSaveError = [[NSString stringWithFormat:NSLocalizedString(@"Updating field content failed. Couldn't identify field origin unambiguously (%1$ld matches). It's very likely that while editing this field of table `%2$@` was changed.", @"message of panel when error while updating field to db after enabling it"), (numberOfPossibleUpdateRows<1)?0:numberOfPossibleUpdateRows, [columnDefinition objectForKey:@"org_table"]] retain];
 	} else {
 		SPOnewayAlertSheet(
 			NSLocalizedString(@"Error", @"error"),
@@ -2112,6 +2131,99 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
 			[NSString stringWithFormat:NSLocalizedString(@"Updating field content failed. Couldn't identify field origin unambiguously (%1$ld matches). It's very likely that while editing this field of table `%2$@` was changed.", @"message of panel when error while updating field to db after enabling it"), (numberOfPossibleUpdateRows<1)?0:numberOfPossibleUpdateRows, [columnDefinition objectForKey:@"org_table"]]
 		);
 	}
+}
+
+#pragma mark - Value popover
+
+- (void)setValuePopoverPresenter:(void (^)(SPValuePopover *, NSView *, NSRect))presenter
+{
+	if (presenter == valuePopoverPresenter) return;
+	[valuePopoverPresenter release];
+	valuePopoverPresenter = [presenter copy];
+}
+
+/// CHAR / VARCHAR / TEXT / JSON, not part of a primary key: their values are offered in the value popover.
+- (BOOL)_showsValueIconForColumn:(NSDictionary *)columnDefinition
+{
+	if ([[columnDefinition objectForKey:@"PRI_KEY_FLAG"] boolValue]) return NO;
+	NSString *grouping = [columnDefinition objectForKey:@"typegrouping"];
+	return [grouping isEqualToString:@"string"] || [grouping isEqualToString:@"textdata"];
+}
+
+- (void)closeValuePopover
+{
+	[self _closeValuePopover];
+}
+
+- (void)_closeValuePopover
+{
+	SPValuePopover *popover = valuePopover;
+	valuePopover = nil;
+	[popover closeDiscarding];
+	[popover release];
+}
+
+- (void)clickValueIcon:(SPTextAndLinkCell *)cell
+{
+	NSInteger gridColumn = [cell getClickedColumn];
+	NSInteger row = [cell getClickedRow];
+	if (gridColumn < 0 || row < 0 || gridColumn >= (NSInteger)[[customQueryView tableColumns] count]) return;
+	NSTableColumn *tableColumn = [[customQueryView tableColumns] objectAtIndex:(NSUInteger)gridColumn];
+	[self showValueAtRow:row column:(NSUInteger)[[tableColumn identifier] integerValue]];
+}
+
+- (void)showValueAtRow:(NSInteger)row column:(NSUInteger)column
+{
+	if ([tableDocumentInstance isWorking] || fieldEditor || !resultData) return;
+	if (row < 0 || (NSUInteger)row >= [resultData count] || column >= [cqColumnDefinition count]) return;
+	NSDictionary *columnDefinition = [cqColumnDefinition objectAtIndex:column];
+	id stored = [[[resultData cellDataAtRow:(NSUInteger)row column:column] copy] autorelease];
+	if (!SPValuePopoverOffersValue(stored, [self _showsValueIconForColumn:columnDefinition])) return;
+	BOOL isNull = ![stored isKindOfClass:[NSString class]];
+	NSString *value = isNull ? @"" : stored;
+
+	NSTableColumn *tableColumn = nil;
+	for (NSTableColumn *candidate in [customQueryView tableColumns]) {
+		if ((NSUInteger)[[candidate identifier] integerValue] == column) tableColumn = candidate;
+	}
+	if (!tableColumn) return;
+
+	// As clicking another cell: an in-cell edit ends first
+	[[tableDocumentInstance parentWindow] endEditingFor:nil];
+
+	// Editable where the field editor sheet would be: the field identifies one row of its table
+	NSInteger gridColumn = [customQueryView columnWithIdentifier:[tableColumn identifier]];
+	BOOL canEdit = [[[self fieldEditStatusForRow:row andColumn:gridColumn] objectAtIndex:0] integerValue] == 1;
+
+	void (^saver)(NSString *, void (^)(NSString *)) = nil;
+	if (canEdit) {
+		SPDataStorage *dataAtOpen = resultData;
+		saver = ^(NSString *text, void (^done)(NSString *)) {
+			if ([tableDocumentInstance isWorking] || resultData != dataAtOpen || (NSUInteger)row >= [resultData count]) {
+				done(NSLocalizedString(@"The result was replaced. Close and open the value again.", @"value popover: the query result is gone"));
+				return;
+			}
+			valuePopoverSaving = YES;
+			if (valuePopoverSaveError) SPClear(valuePopoverSaveError);
+			[self saveCellValue:text forTableColumn:tableColumn row:(NSUInteger)row];
+			valuePopoverSaving = NO;
+			done(valuePopoverSaveError);
+		};
+	}
+
+	[self _closeValuePopover];
+	SPValuePopover *popover = [[SPValuePopover alloc] initWithValue:value columnName:[[tableColumn headerCell] stringValue] defaults:prefs saver:saver];
+	[popover setValueIsNull:isNull];
+	valuePopover = popover;
+	[popover setClosed:^{
+		if (valuePopover == popover) {
+			valuePopover = nil;
+			[popover autorelease];
+		}
+	}];
+	NSRect rect = [customQueryView frameOfCellAtColumn:gridColumn row:row];
+	if (valuePopoverPresenter) valuePopoverPresenter(popover, customQueryView, rect);
+	else if (![popover showRelativeToRect:rect ofView:customQueryView]) [self _closeValuePopover];
 }
 
 #pragma mark -
@@ -2144,11 +2256,15 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
 		// While the table is being loaded, additional validation is required - data
 		// locks must be used to avoid crashes, and indexes higher than the available
 		// rows or columns may be requested.  Use gray to show loading in these cases.
+		// The value icon: any value of a text column (not a primary key), NULL too
+		BOOL checkValue = [cell isKindOfClass:[SPTextAndLinkCell class]] && columnIndex < [cqColumnDefinition count] && [self _showsValueIconForColumn:[cqColumnDefinition objectAtIndex:columnIndex]];
+		BOOL offersValue = NO;
 		if (isWorking) {
 			pthread_mutex_lock(&resultDataLock);
 				
 			if (SPIntS2U(rowIndex) < [resultData count] && columnIndex < [resultData columnCount]) {
 				showCellAsGray = [resultData cellIsNullOrUnloadedAtRow:rowIndex column:columnIndex];
+				offersValue = checkValue;
 			} else {
 				showCellAsGray = YES;
 			}
@@ -2157,9 +2273,15 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
 		}
 		else {
 			showCellAsGray = [resultData cellIsNullOrUnloadedAtRow:rowIndex column:columnIndex];
+			offersValue = checkValue;
 		}
 
 		[cell setTextColor:showCellAsGray ? [NSColor lightGrayColor] : [NSColor controlTextColor]];
+
+		// The value icon: a long text outside binary columns, not in the cell being edited
+		if ([cell isKindOfClass:[SPTextAndLinkCell class]]) {
+			[cell setValueIconActive:offersValue && [aTableView editedRow] != rowIndex];
+		}
 	}
 }
 
@@ -3684,6 +3806,9 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
 	[NSObject cancelPreviousPerformRequestsWithTarget:customQueryView];
 
 	[self clearQueryLoadTimer];
+	[self _closeValuePopover];
+	if (valuePopoverPresenter) [valuePopoverPresenter release], valuePopoverPresenter = nil;
+	if (valuePopoverSaveError) SPClear(valuePopoverSaveError);
 	SPClear(usedQuery);
 	SPClear(lastExecutedQuery);
 	SPClear(resultData);

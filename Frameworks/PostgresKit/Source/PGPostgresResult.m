@@ -223,6 +223,13 @@
 	return PQftable(_result, (int)field);
 }
 
+- (unsigned int)typeOIDForField:(NSUInteger)field
+{
+	if (!_result || field >= _numberOfFields) return 0;
+
+	return PQftype(_result, (int)field);
+}
+
 - (NSInteger)tableColumnForField:(NSUInteger)field
 {
 	if (!_result || field >= _numberOfFields) return 0;

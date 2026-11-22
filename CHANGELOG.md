@@ -6,6 +6,16 @@ Upgrading from 2.0.5.
 
 - Version **2.0.6**.
 
+### MySQL and PostgreSQL: read and format long text values in a popover
+- In the **Content** view and in **Query** results, every value of a text column (CHAR, VARCHAR, TEXT, JSON, and in PostgreSQL also XML), whatever its length, shows a small document icon at the right of its cell, a little apart from the text (left of the foreign key arrow when the cell has one). NULL shows it too: the popover opens empty, titled NULL, so you can type a value into it, and nothing changes until you do. Numbers, dates, binary values (BLOB, VARBINARY, bytea) and primary key columns don't show it (in PostgreSQL Query results primary keys aren't told apart).
+- Clicking the icon opens the whole value in a popover under the cell, exactly as it is stored. Nothing is formatted until you click **JSON**, **XML** or **HTML**, which lays the text out once: only whitespace between parts of the value changes. JSON keeps its key order and number text; XML and HTML keep entities, comments and the contents of `<pre>`, `<script>` and `<style>`, and HTML only breaks lines around block elements, so it renders the same.
+- Once formatted, the text is in color: JSON keys purple, strings red, numbers blue, `true` / `false` / `null` orange; XML and HTML tag names blue, attribute names orange, attribute values red, comments and declarations grey, entities purple. The colors follow light and dark mode, stay while you compact or type, and go with Revert. They are only drawn: the value saved, copied or undone is plain text. Values over 512 KB stay uncolored.
+- Line numbers run down the left side. Once formatted, lines that start a block spanning several lines (a JSON object or array, an XML or HTML element or comment) get a ▾: click it to fold the block to `⋯` (▸ unfolds), ⌥-click to fold or unfold every block at that level. Folded lines keep their real numbers. Clicking the `⋯`, or moving the cursor into it, unfolds it; typing, Format, Compact and Revert unfold everything. Folding only hides: Save, copy and undo still work on the whole value. Values over 512 KB get line numbers but no folding.
+- **Compact** removes that formatting again (so a value saved compacted takes less space), **Revert** puts the stored value back, and ⌘Z undoes either, like typing.
+- Formatting never changes the field. Only **Save** (⌘↩) writes, saving the text exactly as shown, the same way an edit in the cell is saved. If the server refuses it, the popover stays open with the server's message and your text. Where the cell can't be edited (a read-only query result, for example), the popover only has **Close**.
+- Closing after typing asks before discarding your changes; formatting alone never asks. Reloading, paging, filtering, another table or a new query closes the popover without writing. It remembers its size.
+- A MySQL text value not loaded yet (**Load BLOB/TEXT fields only when needed**) shows the icon too; clicking it loads the value first.
+
 ## Sequel Plus 2.0.5
 
 Upgrading from 2.0.4.

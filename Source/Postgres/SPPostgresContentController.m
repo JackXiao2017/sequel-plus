@@ -11,6 +11,8 @@
 #import "SPPostgresPaginationView.h"
 #import "SPPostgresRowsGrid.h"
 #import "SPTextAndLinkCell.h"
+#import "SPValuePopover.h"
+#import "SPValueFormatter.h"
 #import "SPForeignKeyPicker.h"
 #import "SPForeignKeyPickerSettings.h"
 #import "SPPostgresForeignKeyPickerSource.h"
@@ -140,6 +142,8 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	BOOL fieldEditorPending;        // a field editor sheet is open (one at a time)
 	BOOL pickerHandoff;             // the picker's value is going into the cell's in-place editor
 	BOOL invalidated;
+	SPValuePopover *valuePopover;   // the value popover this view opened (closed by loads and -invalidate)
+	BOOL valuePopoverSaving;        // the value popover's Save is committing (its reload keeps the popover)
 }
 
 @synthesize schema;
@@ -153,6 +157,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 @synthesize fieldEditorPresenter;
 @synthesize foreignKeyFollower;
 @synthesize foreignKeyPickerPresenter;
+@synthesize valuePopoverPresenter;
 @synthesize taskRunner;
 @synthesize pasteboard;
 @synthesize stale;
@@ -286,10 +291,16 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	foreignKeyFollower = nil;
 	[foreignKeyPickerPresenter release];
 	foreignKeyPickerPresenter = nil;
-	// The link arrows' cells keep a plain pointer to this controller
+	[self _closeValuePopover];
+	[valuePopoverPresenter release];
+	valuePopoverPresenter = nil;
+	// The link arrows' and value icons' cells keep a plain pointer to this controller
 	for (NSTableColumn *tableColumn in [tableView tableColumns]) {
 		id cell = [tableColumn dataCell];
-		if ([cell isKindOfClass:[SPTextAndLinkCell class]]) [cell setTarget:nil action:NULL];
+		if ([cell isKindOfClass:[SPTextAndLinkCell class]]) {
+			[cell setTarget:nil action:NULL];
+			[cell setValueTarget:nil action:NULL];
+		}
 	}
 	// A date / time picker this view opened (its completion sees invalidated)
 	if (fieldEditorPending) [[SPPostgresDateTimePicker currentPicker] cancel:nil];
@@ -656,6 +667,7 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 {
 	if (invalidated) return;
 	if ([tableView currentEditor]) [tableView abortEditing];
+	[self _closeValuePopover];
 
 	[self setTable:theTable];
 	[self setSchema:theSchema];
@@ -769,6 +781,8 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 - (void)_loadWithFilters:(NSArray<SPPostgresFilter *> *)theFilters sortColumn:(NSString *)theSortColumn ascending:(BOOL)ascending page:(NSUInteger)page
 			 description:(NSString *)description
 {
+	// The rows it shows are going: a value popover open on one closes (not its own Save's reload)
+	if (!valuePopoverSaving) [self _closeValuePopover];
 	if (!tableData || ![columns count]) return;
 	if (!committingInGrid) [self _endEditing];
 	reloadPending = NO; // this load shows the rows as they are now
@@ -885,14 +899,11 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 		[tableColumn setResizingMask:NSTableColumnUserResizingMask];
 		[tableColumn setMinWidth:SPPostgresContentMinColumnWidth];
 
-		NSTextFieldCell *cell;
-		if ([foreignKeys objectForKey:[column name]]) {
-			// As MySQL's grid: an arrow after the value, to the referenced row
-			SPTextAndLinkCell *linkCell = [[[SPTextAndLinkCell alloc] initTextCell:@""] autorelease];
-			[linkCell setTarget:self action:@selector(_clickLinkArrow:)];
-			cell = linkCell;
-		}
-		else cell = [[[NSTextFieldCell alloc] initTextCell:@""] autorelease];
+		// As MySQL's grid: an arrow after a foreign key's value, to the referenced row; the value icon on a long text
+		SPTextAndLinkCell *cell = [[[SPTextAndLinkCell alloc] initTextCell:@""] autorelease];
+		[cell setAllowsExpansionToolTips:YES];
+		if ([foreignKeys objectForKey:[column name]]) [cell setTarget:self action:@selector(_clickLinkArrow:)];
+		if ([self _showsValueIconInColumn:column]) [cell setValueTarget:self action:@selector(_clickValueIcon:)];
 		[cell setEditable:YES];
 		[cell setScrollable:YES];
 		[cell setLineBreakMode:NSLineBreakByClipping];
@@ -924,8 +935,10 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 			width = MAX(width, [string sizeWithAttributes:attributes].width + 8);
 		}
 
-		// Room for the link arrow (as MySQL's)
-		CGFloat arrowWidth = [foreignKeys objectForKey:[[self _columnForTableColumn:tableColumn] name] ?: @""] ? 18 : 0;
+		// Room for the link arrow (as MySQL's) and the value icon
+		SPPostgresColumn *column = [self _columnForTableColumn:tableColumn];
+		CGFloat arrowWidth = [foreignKeys objectForKey:[column name] ?: @""] ? 18 : 0;
+		if ([self _showsValueIconInColumn:column]) arrowWidth += 20;
 		[tableColumn setWidth:MIN(MAX(ceil(width + arrowWidth), SPPostgresContentMinColumnWidth), SPPostgresContentMaxColumnWidth + arrowWidth)];
 	}
 }
@@ -1607,11 +1620,19 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 /// shows the row as the server has it.
 - (void)_commitValue:(id)object forColumn:(SPPostgresColumn *)column row:(NSInteger)rowIndex
 {
-	if (invalidated || !tableData || !editable || !loaded) return;
-	if (rowIndex < 0 || (NSUInteger)rowIndex >= [rows count]) return;
-	if (!column || [column isGenerated]) return;
+	[self _commitValue:object forColumn:column row:rowIndex errorMessage:NULL];
+}
+
+/// As -_commitValue:forColumn:row:; with errorMessage, a failure is given back there (the value popover shows it)
+/// instead of as an alert, and a commit that can't run says why.
+- (void)_commitValue:(id)object forColumn:(SPPostgresColumn *)column row:(NSInteger)rowIndex errorMessage:(NSString **)errorMessage
+{
+	NSString *cannot = NSLocalizedString(@"The value can't be saved now.", @"value popover: the commit can't run");
+	if (invalidated || !tableData || !editable || !loaded) { if (errorMessage) *errorMessage = cannot; return; }
+	if (rowIndex < 0 || (NSUInteger)rowIndex >= [rows count]) { if (errorMessage) *errorMessage = cannot; return; }
+	if (!column || [column isGenerated]) { if (errorMessage) *errorMessage = cannot; return; }
 	NSUInteger columnIndex = [columns indexOfObjectIdenticalTo:column];
-	if (columnIndex == NSNotFound) return;
+	if (columnIndex == NSNotFound) { if (errorMessage) *errorMessage = cannot; return; }
 
 	NSArray *originalRow = [[[rows objectAtIndex:(NSUInteger)rowIndex] retain] autorelease];
 	id oldValue = [originalRow objectAtIndex:columnIndex];
@@ -1638,7 +1659,10 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 
 	// An edit ending while a load runs (something outside this view started one, as edits end before every load
 	// here) is not sent: the grid goes on showing the row's loaded value
-	if ([self _refuseWriteWhileBusy]) return;
+	if ([self _refuseWriteWhileBusy]) {
+		if (errorMessage) *errorMessage = NSLocalizedString(@"Sequel Plus is busy with this tab. Save again once it's done.", @"value popover: the tab is busy");
+		return;
+	}
 
 	NSError *error = nil;
 	if ([tableData updateRow:originalRow column:[column name] value:newValue error:&error]) {
@@ -1646,6 +1670,10 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 		NSMutableArray *changedRow = [[originalRow mutableCopy] autorelease];
 		[changedRow replaceObjectAtIndex:columnIndex withObject:newValue];
 		[rows replaceObjectAtIndex:(NSUInteger)rowIndex withObject:changedRow];
+	}
+	else if (errorMessage) {
+		NSString *detail = [[error localizedDescription] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+		*errorMessage = [detail length] ? detail : NSLocalizedString(@"An unknown error occurred.", @"Postgres content: unknown error");
 	}
 	else {
 		[self _presentError:error title:[NSString stringWithFormat:NSLocalizedString(@"Could not change “%@”", @"Postgres content: update failed"), [column name]]];
@@ -1949,7 +1977,10 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	if (![cell respondsToSelector:@selector(setTextColor:)]) return;
 	BOOL isLinkCell = [cell isKindOfClass:[SPTextAndLinkCell class]];
 	if (rowIndex < 0 || (NSUInteger)rowIndex >= [rows count]) {
-		if (isLinkCell) [cell setLinkActive:NO];
+		if (isLinkCell) {
+			[cell setLinkActive:NO];
+			[cell setValueIconActive:NO];
+		}
 		return;
 	}
 
@@ -1960,7 +1991,98 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 	[cell setTextColor:(isNull && ![theTableView isRowSelected:rowIndex]) ? [NSColor lightGrayColor] : [NSColor controlTextColor]];
 
 	// As MySQL's: no link arrow on NULL, on the row being edited, or on a new row not inserted yet
-	if (isLinkCell) [cell setLinkActive:!isNull && [theTableView editedRow] != rowIndex && rowIndex != [self _pendingRowIndex]];
+	BOOL settled = [theTableView editedRow] != rowIndex && rowIndex != [self _pendingRowIndex];
+	if (isLinkCell) [cell setLinkActive:!isNull && settled];
+	// The value icon: any value of a text column (NULL too), not a primary key
+	if (isLinkCell) [cell setValueIconActive:settled && SPValuePopoverOffersValue(value, [self _showsValueIconInColumn:[self _columnForTableColumn:tableColumn]])];
+}
+
+#pragma mark - Value popover
+
+/// A text column (text, varchar, char, json, jsonb, xml, citext) that isn't part of the primary key: its values (NULL
+/// too) are offered in the value popover.
+- (BOOL)_showsValueIconInColumn:(SPPostgresColumn *)column
+{
+	if (!column || [column isPrimaryKey]) return NO;
+	NSString *type = [[column typeName] lowercaseString];
+	if (![type length] || [type hasSuffix:@"]"]) return NO; // arrays
+	for (NSString *prefix in @[@"text", @"character", @"varchar", @"char", @"bpchar", @"json", @"xml", @"citext"]) {
+		if ([type hasPrefix:prefix]) return YES;
+	}
+	return NO;
+}
+
+- (void)_clickValueIcon:(SPTextAndLinkCell *)cell
+{
+	NSInteger columnIndex = [cell getClickedColumn];
+	NSInteger row = [cell getClickedRow];
+	if (columnIndex < 0 || row < 0 || columnIndex >= (NSInteger)[[tableView tableColumns] count]) return;
+	NSTableColumn *tableColumn = [[tableView tableColumns] objectAtIndex:(NSUInteger)columnIndex];
+	[self showValueAtRow:row column:(NSUInteger)[[tableColumn identifier] integerValue]];
+}
+
+- (void)_closeValuePopover
+{
+	SPValuePopover *popover = valuePopover;
+	valuePopover = nil;
+	[popover closeDiscarding];
+	[popover release];
+}
+
+- (void)showValueAtRow:(NSInteger)row column:(NSUInteger)columnIndex
+{
+	if (invalidated || row < 0 || (NSUInteger)row >= [rows count] || columnIndex >= [columns count] || row == [self _pendingRowIndex]) return;
+	SPPostgresColumn *column = [columns objectAtIndex:columnIndex];
+	id value = [[rows objectAtIndex:(NSUInteger)row] objectAtIndex:columnIndex];
+	if (!SPValuePopoverOffersValue(value, [self _showsValueIconInColumn:column])) return;
+
+	// As clicking another row: a cell being edited is saved first (which may reload the rows: the row is found again)
+	NSArray *theRow = [[[rows objectAtIndex:(NSUInteger)row] retain] autorelease];
+	BOOL isNull = ![value isKindOfClass:[NSString class]];
+	NSString *theValue = isNull ? @"" : [[value copy] autorelease];
+	[self _endEditing];
+	if (invalidated) return;
+	NSUInteger index = [rows indexOfObject:theRow];
+	if (index == NSNotFound) return;
+
+	NSTableColumn *tableColumn = nil;
+	for (NSTableColumn *candidate in [tableView tableColumns]) {
+		if ((NSUInteger)[[candidate identifier] integerValue] == columnIndex) tableColumn = candidate;
+	}
+	if (!tableColumn) return;
+	BOOL canEdit = [self _canEditTableColumn:tableColumn row:(NSInteger)index];
+
+	// Save commits to the row it was opened on, where it now is, in this same table
+	SPPostgresTableData *data = tableData;
+	void (^saver)(NSString *, void (^)(NSString *)) = nil;
+	if (canEdit) {
+		saver = ^(NSString *text, void (^done)(NSString *)) {
+			NSString *message = nil;
+			NSUInteger now = (invalidated || data != tableData) ? NSNotFound : [rows indexOfObject:theRow];
+			if (now == NSNotFound) message = NSLocalizedString(@"This row was changed or reloaded. Close and open the value again.", @"value popover: its row is gone");
+			else {
+				valuePopoverSaving = YES;
+				[self _commitValue:text forColumn:column row:(NSInteger)now errorMessage:&message];
+				valuePopoverSaving = NO;
+			}
+			done(message);
+		};
+	}
+
+	[self _closeValuePopover];
+	SPValuePopover *popover = [[SPValuePopover alloc] initWithValue:theValue columnName:[column name] defaults:defaults saver:saver];
+	[popover setValueIsNull:isNull];
+	valuePopover = popover;
+	[popover setClosed:^{
+		if (valuePopover == popover) {
+			valuePopover = nil;
+			[popover autorelease];
+		}
+	}];
+	NSInteger gridColumn = [tableView columnWithIdentifier:[tableColumn identifier]];
+	NSRect rect = [tableView frameOfCellAtColumn:gridColumn row:(NSInteger)index];
+	if (valuePopoverPresenter) valuePopoverPresenter(popover, tableView, rect);
+	else if (![popover showRelativeToRect:rect ofView:tableView]) [self _closeValuePopover];
 }
 
 #pragma mark - Foreign key links

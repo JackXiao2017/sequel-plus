@@ -33,7 +33,7 @@ static const void *SPRequestedAutosaveNameKey = &SPRequestedAutosaveNameKey;
  *   neither AppKit ("NSSplitView Subview Frames <name>") nor SPSplitView ("SPSplitView Lengths
  *   <name>") saves or restores divider positions, so split views in tests use their built layout.
  * - Windows never save their frame (-[NSWindow saveFrameUsingName:] does nothing), and the standard defaults drop
- *   writes of "NSTableView ..." keys (column widths, order, hidden columns, sort) and of SPLastFavoriteID (a new MySQL
+ *   writes of "NSTableView ..." keys (column widths, order, hidden columns, sort), of ValuePopoverSize and of SPLastFavoriteID (a new MySQL
  *   tab selecting Quick Connect records 0 there, replacing the owner's last-used favorite). Loading a MySQL tab's nibs
  *   otherwise saves "NSWindow Frame MYSQL_HELP_WINDOW" / "SPExportWindow" as those windows are placed, and
  *   "NSTableView Columns v3 SPTableStructureSource" as the Structure view lays out its columns. Both are set in the
@@ -113,11 +113,12 @@ static const void *SPRequestedAutosaveNameKey = &SPRequestedAutosaveNameKey;
 
 @end
 
-/// Keys the standard defaults never write during tests: table column layouts, and the MySQL connection view's last
-/// favorite (a new MySQL tab selects Quick Connect, which it records as SPLastFavoriteID 0).
+/// Keys the standard defaults never write during tests: table column layouts, the MySQL connection view's last
+/// favorite (a new MySQL tab selects Quick Connect, which it records as SPLastFavoriteID 0), and the value popover's
+/// size (the MySQL grids give it the standard defaults; it saves its size as it closes).
 static BOOL SPTestDropsWriteOfKey(NSString *key)
 {
-	return [key hasPrefix:@"NSTableView "] || [key isEqualToString:@"SPLastFavoriteID"];
+	return [key hasPrefix:@"NSTableView "] || [key isEqualToString:@"SPLastFavoriteID"] || [key isEqualToString:@"ValuePopoverSize"];
 }
 
 @implementation NSUserDefaults (SPTestPrefsGuard)

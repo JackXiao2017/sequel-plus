@@ -119,4 +119,9 @@ PGPostgresResultRowType;
  */
 - (NSInteger)tableColumnForField:(NSUInteger)field;
 
+/**
+ * The OID of the field's data type (PQftype; e.g. 17 for bytea, 25 for text), or 0 when the field is out of range.
+ */
+- (unsigned int)typeOIDForField:(NSUInteger)field;
+
 @end

@@ -33,14 +33,27 @@
 @implementation SPTextAndLinkCell
 
 @synthesize linkActive;
+@synthesize valueIconActive;
+@synthesize allowsExpansionToolTips;
 
 /**
  * Provide a method to derive the link rect from a cell rect.
  */
-static inline NSRect SPTextLinkRectFromCellRect(NSRect inRect) 
+NSRect SPTextLinkRectFromCellRect(NSRect inRect)
 {
 	return NSMakeRect(inRect.origin.x + inRect.size.width - 15, inRect.origin.y - 1, 12, inRect.size.height);
 }
+
+static const CGFloat SPTextValueIconGap = 6; // between the text and the value icon
+
+/// The value icon sits where the arrow does (at the right edge, the same size); with the arrow, right next to it.
+NSRect SPTextValueIconRectFromCellRect(NSRect inRect, BOOL hasLinkArrow)
+{
+	NSRect arrow = SPTextLinkRectFromCellRect(inRect);
+	return hasLinkArrow ? NSOffsetRect(arrow, -(NSWidth(arrow) + 2), 0) : arrow;
+}
+
+static const NSCellImagePosition SPTextValueIconImagePosition = NSImageRight; // as the arrow's image
 
 
 #pragma mark -
@@ -71,6 +84,7 @@ static inline NSRect SPTextLinkRectFromCellRect(NSRect inRect)
 - (void) dealloc
 {
 	if (linkButton) SPClear(linkButton);
+	if (valueButton) SPClear(valueButton);
 
 	[super dealloc];
 }
@@ -92,6 +106,9 @@ static inline NSRect SPTextLinkRectFromCellRect(NSRect inRect)
 	if (linkButton) copy->linkButton = [linkButton copyWithZone:zone];
 	copy->linkTarget = linkTarget;
 	copy->linkAction = linkAction;
+	copy->valueButton = valueButton ? [valueButton copyWithZone:zone] : nil;
+	copy->valueTarget = valueTarget;
+	copy->valueAction = valueAction;
 	return copy;
 }
 
@@ -122,8 +139,80 @@ static inline NSRect SPTextLinkRectFromCellRect(NSRect inRect)
 	}
 }
 
+/**
+ * Set the value icon's target and action - this also enables the icon (shown while valueIconActive).
+ */
+- (void)setValueTarget:(id)theTarget action:(SEL)theAction
+{
+	valueTarget = theTarget;
+	valueAction = theAction;
+
+	if (!hasValueIcon) {
+		hasValueIcon = YES;
+
+		valueButton = [[NSButtonCell alloc] init];
+		[valueButton setButtonType:NSButtonTypeMomentaryChange];
+		[valueButton setImagePosition:SPTextValueIconImagePosition];
+		[valueButton setTitle:@""];
+		[valueButton setBordered:NO];
+		NSImage *image = [NSImage imageWithSystemSymbolName:@"doc.text.magnifyingglass" accessibilityDescription:NSLocalizedString(@"Show the whole value", @"value popover icon: accessibility description")];
+		NSImageSymbolConfiguration *configuration = [NSImageSymbolConfiguration configurationWithPointSize:10 weight:NSFontWeightRegular];
+		image = [image imageWithSymbolConfiguration:configuration] ?: image;
+		[image setTemplate:YES];
+		[valueButton setImage:image];
+		[valueButton setImageScaling:NSImageScaleProportionallyDown];
+	}
+}
+
 #pragma mark -
 #pragma mark Drawing and interaction
+
+- (BOOL)_linkShows
+{
+	return hasLink && linkActive;
+}
+
+- (BOOL)_valueIconShows
+{
+	return hasValueIcon && valueIconActive;
+}
+
+- (NSCellImagePosition)valueIconImagePosition
+{
+	return SPTextValueIconImagePosition;
+}
+
+- (NSRect)textFrameForCellFrame:(NSRect)cellFrame
+{
+	NSRect textRect = cellFrame;
+	// The text stops short of the value icon (a gap between them, so they never touch)
+	if ([self _valueIconShows]) textRect.size.width = MAX(0, NSMinX(SPTextValueIconRectFromCellRect(cellFrame, [self _linkShows])) - SPTextValueIconGap - NSMinX(cellFrame));
+	else if ([self _linkShows]) textRect.size.width = MAX(0, cellFrame.size.width - 18);
+	return textRect;
+}
+
+- (SPTextAndLinkCellButton)buttonAtPoint:(NSPoint)p inCellFrame:(NSRect)cellFrame
+{
+	if ([self _linkShows]) {
+		NSRect linkRect = SPTextLinkRectFromCellRect(cellFrame);
+		if (p.x > linkRect.origin.x && p.x < (linkRect.origin.x + linkRect.size.width)) return SPTextAndLinkCellLinkButton;
+	}
+	if ([self _valueIconShows]) {
+		NSRect iconRect = SPTextValueIconRectFromCellRect(cellFrame, [self _linkShows]);
+		if (p.x > iconRect.origin.x && p.x < NSMaxX(iconRect)) return SPTextAndLinkCellValueButton;
+	}
+	return SPTextAndLinkCellNoButton;
+}
+
+/// Records the clicked row and column (at point, in tableView) and sends the button's action.
+- (void)_followButton:(SPTextAndLinkCellButton)button atPoint:(NSPoint)p inTableView:(NSTableView *)tableView
+{
+	lastLinkColumn = [tableView columnAtPoint:p];
+	lastLinkRow = [tableView rowAtPoint:p];
+	id target = (button == SPTextAndLinkCellValueButton) ? valueTarget : linkTarget;
+	SEL action = (button == SPTextAndLinkCellValueButton) ? valueAction : linkAction;
+	if (target && action) [target performSelector:action withObject:self];
+}
 
 /**
  * Redraw the table cell, altering super draw behavior to leave space
@@ -132,18 +221,23 @@ static inline NSRect SPTextLinkRectFromCellRect(NSRect inRect)
 - (void)drawInteriorWithFrame:(NSRect)aRect inView:(NSView *)controlView
 {
 
-	// Fast case for no arrow
-	if (!hasLink || !linkActive) {
+	// Fast case for no buttons
+	if (![self _linkShows] && ![self _valueIconShows]) {
 		[super drawInteriorWithFrame:aRect inView:controlView];
 		return;
 	}
-	
-	// Set up new rects
-	NSRect textRect = NSMakeRect(aRect.origin.x, aRect.origin.y, aRect.size.width - 18, aRect.size.height);
-	NSRect linkRect = SPTextLinkRectFromCellRect(aRect);
 
 	// Draw the text
-	[super drawInteriorWithFrame:textRect inView:controlView];
+	[super drawInteriorWithFrame:[self textFrameForCellFrame:aRect] inView:controlView];
+
+	// The value icon: a template image, white on an emphasized selection as the text is
+	if ([self _valueIconShows]) {
+		[valueButton setBackgroundStyle:[self backgroundStyle]];
+		[valueButton drawInteriorWithFrame:SPTextValueIconRectFromCellRect(aRect, [self _linkShows]) inView:controlView];
+	}
+	if (![self _linkShows]) return;
+
+	NSRect linkRect = SPTextLinkRectFromCellRect(aRect);
 
 	// Get the new link state
 	NSInteger newDrawState = ([self isHighlighted])?
@@ -180,14 +274,13 @@ static inline NSRect SPTextLinkRectFromCellRect(NSRect inRect)
 - (NSCellHitResult) hitTestForEvent:(NSEvent *)event inRect:(NSRect)cellFrame ofView:(NSView *)controlView
 {
 
-	// Fast case for no link - make entire cell editable click area
-	if (!hasLink || !linkActive) return NSCellHitContentArea | NSCellHitEditableTextArea;
+	// Fast case for no buttons - make entire cell editable click area
+	if (![self _linkShows] && ![self _valueIconShows]) return NSCellHitContentArea | NSCellHitEditableTextArea;
 
 	NSPoint p = [[[controlView window] contentView] convertPoint:[event locationInWindow] toView:controlView];
-	NSRect linkRect = SPTextLinkRectFromCellRect(cellFrame);
 
-	// Hit the link if it falls within the link rectangle for this cell, set when drawing
-	if (p.x > linkRect.origin.x && p.x < (linkRect.origin.x + linkRect.size.width)) {
+	// Hit a button if it falls within its rectangle for this cell
+	if ([self buttonAtPoint:p inCellFrame:cellFrame] != SPTextAndLinkCellNoButton) {
 
 		// Return a trackable hit
 		return NSCellHitContentArea | NSCellHitTrackableArea;
@@ -205,15 +298,17 @@ static inline NSRect SPTextLinkRectFromCellRect(NSRect inRect)
 - (BOOL)trackMouse:(NSEvent *)theEvent inRect:(NSRect)cellFrame ofView:(NSView *)controlView untilMouseUp:(BOOL)untilMouseUp
 {
 
-	// Fast case for no link
-	if (!hasLink || !linkActive) return [super trackMouse:theEvent inRect:cellFrame ofView:controlView untilMouseUp:untilMouseUp];
+	// Fast case for no buttons
+	if (![self _linkShows] && ![self _valueIconShows]) return [super trackMouse:theEvent inRect:cellFrame ofView:controlView untilMouseUp:untilMouseUp];
 
 	NSPoint p = [controlView convertPoint:[theEvent locationInWindow] fromView:nil];
-	NSRect linkRect = SPTextLinkRectFromCellRect(cellFrame);
 
-	// Fast path for if not in button rect - just pass to super
-	if (!NSMouseInRect(p, linkRect, [controlView isFlipped]))
+	// Fast path for if not in a button rect - just pass to super
+	SPTextAndLinkCellButton button = [self buttonAtPoint:p inCellFrame:cellFrame];
+	if (button == SPTextAndLinkCellNoButton)
 		return [super trackMouse:theEvent inRect:cellFrame ofView:controlView untilMouseUp:untilMouseUp];
+	NSButtonCell *buttonCell = (button == SPTextAndLinkCellValueButton) ? valueButton : linkButton;
+	NSRect linkRect = (button == SPTextAndLinkCellValueButton) ? SPTextValueIconRectFromCellRect(cellFrame, [self _linkShows]) : SPTextLinkRectFromCellRect(cellFrame);
 
 	// Ignore events other than mouse down.
 	if ([theEvent type] != NSLeftMouseDown) return YES;
@@ -225,27 +320,23 @@ static inline NSRect SPTextLinkRectFromCellRect(NSRect inRect)
 		if (mouseInButton) {
 
 			// Highlight the button
-			[linkButton highlight:YES withFrame:linkRect inView:controlView];
+			[buttonCell highlight:YES withFrame:linkRect inView:controlView];
 
 			// Continue to track until mouse completes a click or exits the cell while still down
-			BOOL mouseClicked = [linkButton trackMouse:theEvent inRect:linkRect ofView:controlView untilMouseUp:NO];
+			BOOL mouseClicked = [buttonCell trackMouse:theEvent inRect:linkRect ofView:controlView untilMouseUp:NO];
 			if (mouseClicked) {
 
-				// Capture the clicked row and cell
+				// Remove highlight, capture the clicked row and cell, and follow the button
+				[buttonCell highlight:NO withFrame:linkRect inView:controlView];
 				NSTableView *tableView = (NSTableView *)[self controlView];
 				p = [[[tableView window] contentView] convertPoint:[theEvent locationInWindow] toView:tableView];
-				lastLinkColumn = [tableView columnAtPoint:p];
-				lastLinkRow = [tableView rowAtPoint:p];
-
-				// Remove highlight, and follow the link
-				[linkButton highlight:NO withFrame:linkRect inView:controlView];
-				[linkTarget performSelector:linkAction withObject:self];
+				[self _followButton:button atPoint:p inTableView:tableView];
 				return YES;
 			}
 
 			// Mouse has exited the cell.  Remove highlight.
 			mouseInButton = NO;
-			[linkButton highlight:NO withFrame:linkRect inView:controlView];
+			[buttonCell highlight:NO withFrame:linkRect inView:controlView];
 		}
 
 		// Keep tracking the mouse outside the button, until the mouse button is released or it reenters the button
@@ -284,6 +375,7 @@ static inline NSRect SPTextLinkRectFromCellRect(NSRect inRect)
  */
 - (NSRect)expansionFrameWithFrame:(NSRect)cellFrame inView:(NSView *)view
 {
+	if (allowsExpansionToolTips) return [super expansionFrameWithFrame:cellFrame inView:view];
 	return NSZeroRect;
 }
 
