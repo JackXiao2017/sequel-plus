@@ -50,6 +50,11 @@ Upgrading from 2.0.4.
 ### MySQL: the Content filter's rows show again
 - In a MySQL tab's **Content** view, once the filter had been hidden (by the **Filter** toggle, or by opening a table with it off), showing it again put its rows under the bar holding **Reset**, **Add Filter** and **Filter**, so you couldn't see or edit them. The rows now sit above that bar every time, however often the filter is hidden and shown.
 
+### Signing: an Apple Development certificate
+- Sequel Plus is now signed with an Apple Development certificate (team 7328H73WPC) instead of the self-signed "Sequel Plus Signing" certificate. macOS then ties saved passwords' Keychain access to the team, not to the certificate, so new builds stop asking for the login keychain password.
+- The first time 2.0.5 opens, macOS may ask once more for each saved password, because the signature changed. Choose **Always Allow**; later updates shouldn't ask again.
+- The app is still not notarized, so a downloaded copy still shows the usual warning for an app from an unidentified developer the first time it opens.
+
 ## Sequel Plus 2.0.4
 
 Upgrading from 2.0.3.
