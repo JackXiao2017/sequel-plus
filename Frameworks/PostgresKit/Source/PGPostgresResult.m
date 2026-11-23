@@ -230,6 +230,7 @@
 	return PQftype(_result, (int)field);
 }
 
+
 - (NSInteger)tableColumnForField:(NSUInteger)field
 {
 	if (!_result || field >= _numberOfFields) return 0;

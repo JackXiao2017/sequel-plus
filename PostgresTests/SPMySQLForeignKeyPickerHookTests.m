@@ -2,7 +2,9 @@
 #import <XCTest/XCTest.h>
 #import "../Source/SPWindowController.h"
 #import "../Source/SPForeignKeyPicker.h"
+
 #import "../Source/SPTextAndLinkCell.h"
+
 
 @interface NSObject (SPMySQLForeignKeyPickerHookTests)
 - (id)connectionController;
@@ -23,8 +25,10 @@
 - (BOOL)tableView:(NSTableView *)tableView shouldEditTableColumn:(NSTableColumn *)column row:(NSInteger)row;
 - (id)tableView:(NSTableView *)tableView objectValueForTableColumn:(NSTableColumn *)column row:(NSInteger)row;
 - (void)setForeignKeyPickerPresenter:(void (^)(SPForeignKeyPicker *picker, NSView *view, NSRect rect))presenter;
+
 - (void)tableView:(NSTableView *)tableView willDisplayCell:(id)cell forTableColumn:(NSTableColumn *)column row:(NSInteger)row;
 - (void)pickValueAtRow:(NSInteger)row column:(NSUInteger)column;
+
 @end
 
 /**
@@ -249,6 +253,7 @@
 	XCTAssertEqual(self.presented.count, 1u);
 }
 
+
 - (SPTextAndLinkCell *)drawnCell:(NSString *)name row:(NSInteger)row
 {
 	NSTableColumn *column = [self column:name];
@@ -293,6 +298,7 @@
 	XCTAssertEqualObjects([[self.grid currentEditor] string], @"3", @"the key is in the cell's editor, Return saves it");
 	[self.grid abortEditing];
 }
+
 
 - (void)testNonForeignKeyCellEditsInPlace
 {
