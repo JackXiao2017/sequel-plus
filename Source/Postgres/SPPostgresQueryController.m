@@ -12,6 +12,9 @@
 #import "SPPostgresErrors.h"
 #import "SPPostgresFieldEditorSheet.h"
 #import "SPPostgresDateTimePicker.h"
+#import "SPTextAndLinkCell.h"
+#import "SPValuePopover.h"
+#import "SPValueFormatter.h"
 // MySQL's tooltip (its header declares WebKit's deprecated WebView)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -336,6 +339,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	void (^fieldEditorPresenter)(NSString *value, NSString *columnName, NSString *typeName, BOOL editable, BOOL allowNull, void (^completion)(id newValue));
 	BOOL fieldEditorPending;                   // a field editor sheet is open (one at a time)
 	BOOL pickerHandoff;                        // the picker's value is going into the cell's in-place editor
+	void (^valuePopoverPresenter)(SPValuePopover *popover, NSView *view, NSRect rect);
+	SPValuePopover *valuePopover;              // the value popover this view opened (closed by runs and -invalidate)
+	BOOL valuePopoverSaving;                   // the value popover's Save is committing (its reload keeps it)
 }
 
 @synthesize editor;
@@ -373,6 +379,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 @synthesize resultEditor;
 @synthesize editRefusalPresenter;
 @synthesize fieldEditorPresenter;
+@synthesize valuePopoverPresenter;
 
 #pragma mark - Setup
 
@@ -470,6 +477,7 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	[shownStatementText release];
 	[editRefusalPresenter release];
 	[fieldEditorPresenter release];
+	[valuePopoverPresenter release];
 	[approvingEditor release];
 
 	[super dealloc];
@@ -541,6 +549,13 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	editRefusalPresenter = nil;
 	[fieldEditorPresenter release];
 	fieldEditorPresenter = nil;
+	[self _closeValuePopover];
+	[valuePopoverPresenter release];
+	valuePopoverPresenter = nil;
+	for (NSTableColumn *tableColumn in [resultsView tableColumns]) {
+		id cell = [tableColumn dataCell];
+		if ([cell isKindOfClass:[SPTextAndLinkCell class]]) [cell setValueTarget:nil action:NULL];
+	}
 	// A date / time picker this view opened (its completion sees invalidated)
 	if (fieldEditorPending) [[SPPostgresDateTimePicker currentPicker] cancel:nil];
 }
@@ -2621,6 +2636,8 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	// A cell being edited belongs to the shown result, which this run replaces: its edit is dropped, so it can never
 	// be committed to the next result's row (a reload starts only once no cell is being edited)
 	if ([resultsView currentEditor]) [resultsView abortEditing];
+	// So does a value popover open on it (not its own Save's reload)
+	if (!valuePopoverSaving) [self _closeValuePopover];
 
 	// Hold on: an action may arrive from a view whose tab closes while the run's alerts or callbacks spin (the
 	// inline runner calls the completion before the blocks are copied)
@@ -2747,8 +2764,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	}
 	resultRowCount = result ? (NSUInteger)[result numberOfRows] : 0;
 
-	// An edit still open belongs to the previous result
+	// An edit still open belongs to the previous result, and so does a value popover
 	if ([resultsView currentEditor]) [resultsView abortEditing];
+	[self _closeValuePopover];
 	[approvingEditor release];
 	approvingEditor = nil;
 	[resultEditor release];
@@ -2779,7 +2797,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 		[tableColumn setResizingMask:NSTableColumnUserResizingMask];
 		[tableColumn setMinWidth:SPPostgresQueryMinColumnWidth];
 
-		NSTextFieldCell *cell = [[[NSTextFieldCell alloc] initTextCell:@""] autorelease];
+		SPTextAndLinkCell *cell = [[[SPTextAndLinkCell alloc] initTextCell:@""] autorelease];
+		[cell setAllowsExpansionToolTips:YES];
+		if ([self _isTextResultColumn:index]) [cell setValueTarget:self action:@selector(_clickValueIcon:)];
 		[cell setEditable:YES];
 		[cell setLineBreakMode:NSLineBreakByTruncatingTail];
 		[cell setFont:font];
@@ -2793,7 +2813,9 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 			if ([string length] > 200) string = [string substringToIndex:200];
 			columnWidth = MAX(columnWidth, [string sizeWithAttributes:attributes].width + 8);
 		}
-		[tableColumn setWidth:MIN(MAX(ceil(columnWidth), SPPostgresQueryMinColumnWidth), SPPostgresQueryMaxColumnWidth)];
+		// Room for the value icon in a text column
+		CGFloat iconWidth = [self _isTextResultColumn:index] ? 20 : 0;
+		[tableColumn setWidth:MIN(MAX(ceil(columnWidth + iconWidth), SPPostgresQueryMinColumnWidth), SPPostgresQueryMaxColumnWidth + iconWidth)];
 
 		[resultsView addTableColumn:tableColumn];
 	}
@@ -2972,9 +2994,23 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
  */
 - (void)_commitValue:(id)object row:(NSInteger)rowIndex column:(NSInteger)column
 {
-	if (invalidated || !resultEditor || column < 0 || rowIndex < 0 || (NSUInteger)rowIndex >= resultRowCount) return;
+	[self _commitValue:object row:rowIndex column:column errorMessage:NULL];
+}
+
+/// As -_commitValue:row:column:; with errorMessage, a failure is given back there (the value popover shows it)
+/// instead of as an alert, and a commit that can't run says why.
+- (void)_commitValue:(id)object row:(NSInteger)rowIndex column:(NSInteger)column errorMessage:(NSString **)errorMessage
+{
+	if (invalidated || !resultEditor || column < 0 || rowIndex < 0 || (NSUInteger)rowIndex >= resultRowCount) {
+		if (errorMessage) *errorMessage = NSLocalizedString(@"The value can't be saved now.", @"value popover: the commit can't run");
+		return;
+	}
 	// An edit ending while something runs is not sent (nor is the editor's check run): the grid keeps the old value
 	if ([self _runnerBusy]) {
+		if (errorMessage) {
+			*errorMessage = NSLocalizedString(@"Sequel Plus is busy with this tab. Save again once it's done.", @"value popover: the tab is busy");
+			return;
+		}
 		NSBeep();
 		[resultsView setNeedsDisplay:YES];
 		return;
@@ -2983,6 +3019,10 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	// Only into the result whose editor let the cell be edited (a value from an edit begun on an earlier result,
 	// mapped by its column's number, would go to another row)
 	if (approvingEditor != resultEditor) {
+		if (errorMessage) {
+			*errorMessage = NSLocalizedString(@"The value can't be saved now.", @"value popover: the commit can't run");
+			return;
+		}
 		NSBeep();
 		[resultsView setNeedsDisplay:YES];
 		return;
@@ -2998,11 +3038,17 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	// Unchanged: nothing to send. Also the grid's cut text of a longer value (an in-cell editor seeded from it,
 	// should one ever open): the value is unchanged, not cut
 	if ([newValue isEqual:oldValue]) return;
-	if ([oldValue isKindOfClass:[NSString class]] && [oldValue length] > SPPostgresQueryDisplayLimit && [newValue isKindOfClass:[NSString class]]
+	if (!errorMessage && [oldValue isKindOfClass:[NSString class]] && [oldValue length] > SPPostgresQueryDisplayLimit && [newValue isKindOfClass:[NSString class]]
 		&& [newValue isEqualToString:[oldValue substringToIndex:SPPostgresQueryDisplayLimit]]) return;
 
 	NSError *error = nil;
 	id saved = [cellEditor saveValue:newValue row:row column:(NSUInteger)column matchCount:NULL error:&error];
+	if (!saved && errorMessage) {
+		NSString *detail = [[error localizedDescription] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+		*errorMessage = [detail length] ? detail : NSLocalizedString(@"An unknown error occurred.", @"Postgres content: unknown error");
+		if (!invalidated) [resultsView setNeedsDisplay:YES];
+		return;
+	}
 	if (!saved) {
 		NSAlert *alert = [[[NSAlert alloc] init] autorelease];
 		[alert setMessageText:NSLocalizedString(@"Error", @"error")];
@@ -3226,6 +3272,101 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 	id value = [self _valueAtRow:rowIndex tableColumn:tableColumn];
 	BOOL isNull = value && ![value isKindOfClass:[NSString class]];
 	[cell setTextColor:(isNull && ![theTableView isRowSelected:rowIndex]) ? [NSColor lightGrayColor] : [NSColor controlTextColor]];
+
+	// The value icon: a long text, not bytea, not the cell being edited
+	if ([cell isKindOfClass:[SPTextAndLinkCell class]]) {
+		NSInteger column = [self _resultColumnOfTableColumn:tableColumn];
+		BOOL text = column >= 0 && [self _isTextResultColumn:(NSUInteger)column];
+		[cell setValueIconActive:[theTableView editedRow] != rowIndex && SPValuePopoverOffersValue(value, text)];
+	}
+}
+
+#pragma mark - Value popover
+
+/// A text result column (by the result's type OID, no catalog lookup): text, varchar, char, "char", json, jsonb, xml.
+/// Its values (NULL too) are offered in the value popover.
+- (BOOL)_isTextResultColumn:(NSUInteger)column
+{
+	switch ([result typeOIDForField:column]) {
+		case 25: case 1043: case 1042: case 18: case 114: case 3802: case 142: return YES;
+		default: return NO;
+	}
+}
+
+- (void)_clickValueIcon:(SPTextAndLinkCell *)cell
+{
+	NSInteger gridColumn = [cell getClickedColumn];
+	NSInteger row = [cell getClickedRow];
+	if (gridColumn < 0 || row < 0 || gridColumn >= (NSInteger)[[resultsView tableColumns] count]) return;
+	NSInteger column = [self _resultColumnOfTableColumn:[[resultsView tableColumns] objectAtIndex:(NSUInteger)gridColumn]];
+	if (column >= 0) [self showValueAtRow:row column:(NSUInteger)column];
+}
+
+- (void)_closeValuePopover
+{
+	SPValuePopover *popover = valuePopover;
+	valuePopover = nil;
+	[popover closeDiscarding];
+	[popover release];
+}
+
+- (void)showValueAtRow:(NSInteger)rowIndex column:(NSUInteger)column
+{
+	if (invalidated || !resultEditor || rowIndex < 0 || (NSUInteger)rowIndex >= resultRowCount || column >= [resultEditor columnCount]) return;
+	id value = [resultEditor valueAtRow:(NSUInteger)rowIndex column:column];
+	if (!SPValuePopoverOffersValue(value, [self _isTextResultColumn:column])) return;
+
+	// As clicking another cell: an in-cell edit ends first (its value is committed as usual)
+	if ([resultsView currentEditor]) [[resultsView window] makeFirstResponder:resultsView];
+	if (invalidated || !resultEditor) return;
+
+	// Editable as the field editor sheet decides (never while the runner is busy: the check reads the catalog)
+	SPPostgresQueryResultEditor *popoverEditor = resultEditor;
+	BOOL canEdit = ![self _runnerBusy]
+		&& [popoverEditor editabilityOfRow:(NSUInteger)rowIndex column:column matchCount:NULL message:NULL] == SPPostgresCellEditable;
+	NSArray *fields = [[popoverEditor result] fields];
+	id field = column < [fields count] ? [fields objectAtIndex:column] : nil;
+	NSString *columnName = [field isKindOfClass:[NSString class]] ? field : @"";
+
+	void (^saver)(NSString *, void (^)(NSString *)) = nil;
+	if (canEdit) {
+		saver = ^(NSString *text, void (^done)(NSString *)) {
+			if (invalidated || popoverEditor != resultEditor) {
+				done(NSLocalizedString(@"The result was replaced. Close and open the value again.", @"value popover: the query result is gone"));
+				return;
+			}
+			// The editor that approved the popover is still shown, so the commit accepts it as the approving one
+			if (approvingEditor != popoverEditor) {
+				[approvingEditor release];
+				approvingEditor = [popoverEditor retain];
+			}
+			NSString *message = nil;
+			valuePopoverSaving = YES;
+			[self _commitValue:text row:rowIndex column:(NSInteger)column errorMessage:&message];
+			valuePopoverSaving = NO;
+			done(message);
+		};
+	}
+
+	[self _closeValuePopover];
+	BOOL isNull = ![value isKindOfClass:[NSString class]];
+	SPValuePopover *popover = [[SPValuePopover alloc] initWithValue:isNull ? @"" : value columnName:columnName defaults:defaults saver:saver];
+	[popover setValueIsNull:isNull];
+	valuePopover = popover;
+	[popover setClosed:^{
+		if (valuePopover == popover) {
+			valuePopover = nil;
+			[popover autorelease];
+		}
+	}];
+	NSInteger gridColumn = -1;
+	NSArray *tableColumns = [resultsView tableColumns];
+	for (NSUInteger i = 0; i < [tableColumns count]; i++) {
+		if ([self _resultColumnOfTableColumn:[tableColumns objectAtIndex:i]] == (NSInteger)column) gridColumn = (NSInteger)i;
+	}
+	NSRect rect = gridColumn >= 0 ? [resultsView frameOfCellAtColumn:gridColumn row:rowIndex] : [resultsView rectOfRow:rowIndex];
+	if (valuePopoverPresenter) valuePopoverPresenter(popover, resultsView, rect);
+	else if (![popover showRelativeToRect:rect ofView:resultsView]) [self _closeValuePopover];
 }
 
 @end

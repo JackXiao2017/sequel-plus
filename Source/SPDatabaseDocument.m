@@ -4412,6 +4412,10 @@ static BOOL isOSAtLeast10_14;
 	// An edit of the Custom Query editor not saved yet
 	[queryScriptAutosaver invalidate];
 
+	// A value popover on the tab's grids closes without writing (its Save would reach a closed tab)
+	[tableContentInstance closeValuePopover];
+	[customQueryInstance closeValuePopover];
+
 #ifndef SP_CODA
 	// Cancel autocompletion trigger
 	if([prefs boolForKey:SPCustomQueryAutoComplete]) {
@@ -4455,6 +4459,10 @@ static BOOL isOSAtLeast10_14;
 - (void)willResignActiveTabInWindow
 {
 	[self updateTitlebarStatusVisibilityForcingHide:YES];
+
+	// A value popover on the tab's grids closes without writing
+	[tableContentInstance closeValuePopover];
+	[customQueryInstance closeValuePopover];
 
 	// Remove the task progress window
 	[parentWindow removeChildWindow:taskProgressWindow];

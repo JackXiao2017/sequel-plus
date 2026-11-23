@@ -3,6 +3,7 @@
 #import "SPPostgresTestServers.h"
 #import "../Source/SPWindowController.h"
 #import "../Source/SPForeignKeyPicker.h"
+#import "../Source/SPTextAndLinkCell.h"
 #import "../Source/Postgres/SPPostgresDocument.h"
 #import "../Source/Postgres/SPPostgresSidebarController.h"
 #import "../Source/Postgres/SPPostgresConnector.h"
@@ -282,6 +283,78 @@ static NSString * const SPFKHookSuite = @"SPPostgresForeignKeyPickerHookTests";
 	XCTAssertTrue(choose == nil || choose.hidden);
 	[fieldEditor closeEditSheet:[fieldEditor valueForKey:@"editSheetCancelButton"]];
 	XCTAssertTrue([self spinUntil:^BOOL{ return [SPPostgresFieldEditorSheet openSheetOnWindow:[[self grid] window]] == nil; } timeout:5]);
+}
+
+#pragma mark - The picker icon
+
+/// The cell for column at row, as the grid would draw it.
+- (SPTextAndLinkCell *)drawnCell:(NSString *)name row:(NSInteger)row
+{
+	NSTableColumn *column = [self tableColumnNamed:name];
+	SPTextAndLinkCell *cell = [column dataCellForRow:row];
+	XCTAssertTrue([cell isKindOfClass:[SPTextAndLinkCell class]]);
+	[(id<NSTableViewDelegate>)[self grid].delegate tableView:[self grid] willDisplayCell:cell forTableColumn:column row:row];
+	return cell;
+}
+
+- (void)testPickerIconOnForeignKeyCellsNullToo
+{
+	[self selectTable:@"orders"];
+	XCTAssertTrue([self drawnCell:@"customer_id" row:[self rowWhereColumn:@"id" is:@"10"]].pickerIconActive);
+	XCTAssertTrue([self drawnCell:@"customer_id" row:[self rowWhereColumn:@"id" is:@"11"]].pickerIconActive, @"NULL: pick a value");
+	XCTAssertFalse([self drawnCell:@"note" row:0].pickerIconActive, @"not a foreign key");
+	XCTAssertFalse([self drawnCell:@"id" row:0].pickerIconActive);
+}
+
+- (void)testNoPickerIconOnCompositeOrBinaryKeysOrWithThePreferenceOff
+{
+	[self selectTable:@"pairs"];
+	XCTAssertFalse([self drawnCell:@"a" row:0].pickerIconActive, @"a key over two columns");
+	[self selectTable:@"blobrefs"];
+	XCTAssertFalse([self drawnCell:@"k" row:0].pickerIconActive, @"a bytea key");
+	[self.scratch setBool:NO forKey:@"ForeignKeyPickerEnabled"];
+	[self selectTable:@"orders"];
+	XCTAssertFalse([self drawnCell:@"customer_id" row:0].pickerIconActive, @"the picker preference off");
+}
+
+- (void)testPickerIconOpensThePickerAndChooseEditsTheCell
+{
+	[self selectTable:@"orders"];
+	NSInteger row = [self rowWhereColumn:@"id" is:@"10"];
+	[self.content pickValueAtRow:row column:(NSUInteger)[[[self tableColumnNamed:@"customer_id"] identifier] integerValue]];
+	XCTAssertEqual(self.presented.count, 1u, @"the picker opened");
+	SPForeignKeyPicker *picker = [self loadedPicker];
+	[self selectKey:@"3" inPicker:picker];
+	[picker choose];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [[self grid] currentEditor] != nil; } timeout:5]);
+	XCTAssertEqualObjects([[[self grid] currentEditor] string], @"3", @"the key is in the cell's editor, Return saves it");
+	[[self grid] abortEditing];
+}
+
+- (void)testClickingThePickerIconAtTheRightEdgeOpensThePicker
+{
+	[[self.controller window] makeKeyAndOrderFront:nil];
+	[self selectTable:@"orders"];
+	NSInteger row = [self rowWhereColumn:@"id" is:@"10"];
+	NSTableColumn *tableColumn = [self tableColumnNamed:@"customer_id"];
+	NSInteger columnIndex = [[[self grid] tableColumns] indexOfObject:tableColumn];
+	[[self grid] scrollRowToVisible:row];
+	[[self grid] scrollColumnToVisible:columnIndex];
+	[[self grid] displayIfNeeded];
+
+	// ☰ at the very right edge of the cell, ➜ left of it
+	NSRect cellFrame = [[self grid] frameOfCellAtColumn:columnIndex row:row];
+	NSRect picker = SPTextButtonSlotRect(cellFrame, 0);
+	NSPoint inWindow = [[self grid] convertPoint:NSMakePoint(NSMidX(picker), NSMidY(cellFrame)) toView:nil];
+	NSWindow *window = [self.controller window];
+	NSEvent *down = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown location:inWindow modifierFlags:0 timestamp:[NSProcessInfo processInfo].systemUptime
+								   windowNumber:[window windowNumber] context:nil eventNumber:1 clickCount:1 pressure:1];
+	NSEvent *up = [NSEvent mouseEventWithType:NSEventTypeLeftMouseUp location:inWindow modifierFlags:0 timestamp:[NSProcessInfo processInfo].systemUptime
+								 windowNumber:[window windowNumber] context:nil eventNumber:2 clickCount:1 pressure:0];
+	[NSApp postEvent:up atStart:NO];
+	[[self grid] mouseDown:down];
+	XCTAssertTrue([self spinUntil:^BOOL{ return self.presented.count == 1; } timeout:5], @"the picker opened");
+	XCTAssertEqualObjects(self.content.table, @"orders", @"the link was not followed");
 }
 
 #pragma mark - Outcomes

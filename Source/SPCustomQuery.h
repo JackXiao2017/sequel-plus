@@ -39,6 +39,7 @@
 #define SP_HISTORY_CLEAR_MENUITEM_TAG            300002
 
 @class SPCopyTable;
+@class SPValuePopover;
 @class SPQueryFavoriteManager;
 @class SPDataStorage;
 @class SPSplitView;
@@ -118,6 +119,11 @@
 	IBOutlet SPSplitView *queryEditorSplitView;
 
 	SPFieldEditorController *fieldEditor;
+	// The value popover on a long text result cell (closed by runs); for tests, shown through this
+	void (^valuePopoverPresenter)(SPValuePopover *popover, NSView *view, NSRect rect);
+	SPValuePopover *valuePopover;
+	BOOL valuePopoverSaving;          // the popover's Save is writing (a failure goes to it, not to an alert)
+	NSString *valuePopoverSaveError;  // why that write failed
 	BOOL datePickerOpen;    // the date / time picker is open on a cell
 	BOOL datePickerHandoff; // the picker's value is going into the cell's in-place editor
 	SPQueryFavoriteManager *favoritesManager;
@@ -201,6 +207,18 @@
 // Query actions
 - (void)performQueries:(NSArray *)queries withCallback:(SEL)customQueryCallbackMethod;
 - (void)performQueriesTask:(NSDictionary *)taskArguments;
+
+/**
+ * The value popover (SPValuePopover): a result cell whose value is longer than 200 characters (not binary, not NULL,
+ * not being edited) shows the value icon; clicking it opens the popover on the cell, editable where the field editor
+ * sheet would be (the field identifies one row of its table). Save writes the field as a cell edit does; a failure is
+ * shown in the popover. A run closes it without writing.
+ */
+- (void)showValueAtRow:(NSInteger)row column:(NSUInteger)column;
+/// Closes the value popover without writing (the tab closes or stops being the active one).
+- (void)closeValuePopover;
+/// For tests: called instead of showing the value popover (view and rect: where it would show).
+- (void)setValuePopoverPresenter:(void (^)(SPValuePopover *popover, NSView *view, NSRect rect))presenter;
 - (NSString *)queryAtPosition:(NSUInteger)position lookBehind:(BOOL *)doLookBehind;
 - (NSRange)queryRangeAtPosition:(NSUInteger)position lookBehind:(BOOL *)doLookBehind;
 - (NSRange)queryTextRangeForQuery:(NSInteger)anIndex startPosition:(NSUInteger)position;

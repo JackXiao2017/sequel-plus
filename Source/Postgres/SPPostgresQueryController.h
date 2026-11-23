@@ -8,6 +8,7 @@
 @class SPPostgresQueryStore;
 @class SPPostgresQueryFavoriteManager;
 @class SPPostgresQueryResultEditor;
+@class SPValuePopover;
 
 /**
  * The Query view of a PostgreSQL tab, laid out as MySQL's Query tab (DBView.xib): an outer SPSplitView holding
@@ -314,6 +315,17 @@ __attribute__((visibility("default")))
 
 /// Test seam, as SPPostgresContentController's: presents the field editor instead of the sheet.
 @property (copy) void (^fieldEditorPresenter)(NSString *value, NSString *columnName, NSString *typeName, BOOL editable, BOOL allowNull, void (^completion)(id newValue));
+
+/**
+ * The value popover (SPValuePopover), as SPPostgresContentController's: a result cell whose value is longer than 200
+ * characters (not bytea, not NULL, not being edited) shows the value icon; the popover gets the whole value (not the
+ * grid's cut text), editable where the editor's check finds the cell Editable. Save goes through the same save as a
+ * cell edit and shows a failure in the popover. A run, a database switch or -invalidate closes it without writing.
+ * For tests: when set, called instead of showing the popover.
+ */
+@property (copy) void (^valuePopoverPresenter)(SPValuePopover *popover, NSView *view, NSRect rect);
+/// As clicking the value icon of a result cell (the grid's row, the result's column).
+- (void)showValueAtRow:(NSInteger)row column:(NSUInteger)column;
 
 /// The status line (see the class comment): @"" before the first run and while a run runs.
 @property (readonly, copy) NSString *statusText;

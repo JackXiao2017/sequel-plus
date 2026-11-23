@@ -63,6 +63,8 @@
 #import "SPForeignKeyPicker.h"
 #import "SPForeignKeyPickerSettings.h"
 #import "SPMySQLForeignKeyPickerSource.h"
+#import "SPValuePopover.h"
+#import "SPValueFormatter.h"
 #import <pthread.h>
 #import <SPMySQL/SPMySQL.h>
 #include <stdlib.h>
@@ -582,10 +584,19 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 		} else if ([columnDefinition objectForKey:@"foreignkeyreference"]) {
 			dataCell = [[[SPTextAndLinkCell alloc] initTextCell:@""] autorelease];
 			[dataCell setTarget:self action:@selector(clickLinkArrow:)];
+			NSDictionary *reference = [columnDefinition objectForKey:@"foreignkeyreference"];
+			if ([[reference objectForKey:@"columns"] integerValue] == 1 && ![[reference objectForKey:@"binary"] boolValue]) {
+				[dataCell setPickerTarget:self action:@selector(clickPickerIcon:)];
+			}
 
 		// Otherwise instantiate a text-only cell
 		} else {
 			dataCell = [[[SPTextAndLinkCell alloc] initTextCell:@""] autorelease];
+		}
+
+		// The value icon on the values of a text column
+		if ([dataCell isKindOfClass:[SPTextAndLinkCell class]] && [self _showsValueIconForColumn:columnDefinition]) {
+			[dataCell setValueTarget:self action:@selector(clickValueIcon:)];
 		}
 
 		// Set the column to right-aligned for numeric data types
@@ -730,6 +741,9 @@ static void *TableContentKVOContext = &TableContentKVOContext;
  */
 - (void) loadTableValues
 {
+	// The rows a value popover shows are going (not when its own Save reloads)
+	[self _closeValuePopoverForLoad];
+
 	// If no table is selected, return
 	if (!selectedTable) return;
 
@@ -2563,9 +2577,14 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 		NSString *whereArg = [self argumentForRow:-2];
 		if(![whereArg length]) {
 			SPLog(@"Did not find plausible WHERE condition for UPDATE.");
-			NSBeep();
 			[rowFieldsToSave release];
 			[rowValuesToSave release];
+			if (valuePopoverSaving) {
+				valuePopoverSaveError = [NSLocalizedString(@"The row can't be identified (the table has no primary key), so it can't be saved.", @"value popover: no WHERE for the row") retain];
+				[self _putEditedRowBack];
+				return NO;
+			}
+			NSBeep();
 			return NO;
 		}
 		[queryString appendFormat:@" WHERE %@", whereArg];
@@ -2582,7 +2601,11 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 	// If no rows have been changed, show error if appropriate.
 	if ( ![mySQLConnection rowsAffectedByLastQuery] && ![mySQLConnection queryErrored] ) {
 #ifndef SP_CODA
-		if ( [prefs boolForKey:SPShowNoAffectedRowsError] ) {
+		// The value popover: its value equals what is stored (MySQL found nothing to change), nothing to warn about
+		if (valuePopoverSaving) {
+			// nothing
+		}
+		else if ( [prefs boolForKey:SPShowNoAffectedRowsError] ) {
 			SPOnewayAlertSheet(
 				NSLocalizedString(@"Warning", @"warning"),
 				[tableDocumentInstance parentWindow],
@@ -2592,6 +2615,11 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 			NSBeep();
 		}
 #endif
+
+		// The value popover's Save: nothing written is a failure it shows (its text kept), not a success
+		if (valuePopoverSaving) {
+			valuePopoverSaveError = [NSLocalizedString(@"No row was changed. The row may have been changed or deleted by someone else, or the server stores this value the same as before.", @"value popover: the UPDATE changed no row") retain];
+		}
 
 		// If creating a new row, remove the row; otherwise revert the row contents
 		if (isEditingNewRow) {
@@ -2610,7 +2638,7 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 
 		[[SPQueryController sharedQueryController] showErrorInConsole:NSLocalizedString(@"/* WARNING: No rows have been affected */\n", @"warning shown in the console when no rows have been affected after writing to the db") connection:[tableDocumentInstance name] database:[tableDocumentInstance database]];
 
-		return YES;
+		return !valuePopoverSaving;
 
 	// On success...
 	} else if ( ![mySQLConnection queryErrored] ) {
@@ -2665,7 +2693,13 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 
 		return YES;
 	}
-	// Report errors which have occurred
+	// Report errors which have occurred: to the value popover whose Save this is (the row put back as stored), or as
+	// a sheet that offers to go on editing the row
+	else if (valuePopoverSaving) {
+		valuePopoverSaveError = [[mySQLConnection lastErrorMessage] copy];
+		[self _putEditedRowBack];
+		return NO;
+	}
 	else {
 		SPBeginAlertSheet(
 			NSLocalizedString(@"Unable to write row", @"Unable to write row error"),
@@ -2680,6 +2714,17 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 		);
 		return NO;
 	}
+}
+
+/// The row being edited shows its stored values again and is no longer being edited (a value popover's failed Save).
+- (void)_putEditedRowBack
+{
+	if (isEditingRow && currentlyEditingRow >= 0 && (NSUInteger)currentlyEditingRow < tableRowsCount && !isEditingNewRow) {
+		[tableValues replaceRowAtIndex:currentlyEditingRow withRowContents:oldRow];
+	}
+	isEditingRow = NO;
+	currentlyEditingRow = -1;
+	[tableContentView reloadData];
 }
 
 /**
@@ -3088,6 +3133,10 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 	NSString *tableForColumn = [columnDefinition objectForKey:@"org_table"];
 
 	if (!tableForColumn || ![tableForColumn length]) {
+		if (valuePopoverSaving) {
+			valuePopoverSaveError = [NSLocalizedString(@"Field is not editable. Field has no or multiple table or database origin(s).",@"field is not editable due to no table/database") retain];
+			return;
+		}
 		NSPoint pos = [NSEvent mouseLocation];
 		pos.y -= 20;
 		[SPTooltip showWithObject:NSLocalizedString(@"Field is not editable. Field has no or multiple table or database origin(s).",@"field is not editable due to no table/database")
@@ -3142,9 +3191,10 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 				[[columnDefinition objectForKey:@"db"] backtickQuotedString], [tableForColumn backtickQuotedString], [columnName backtickQuotedString], newObject, fieldIDQueryStr]];
 
 
-		// Check for errors while UPDATE
+		// Check for errors while UPDATE (a value popover's Save shows the error itself)
 		if ([mySQLConnection queryErrored]) {
-			SPOnewayAlertSheet(
+			if (valuePopoverSaving && !valuePopoverSaveError) valuePopoverSaveError = [[mySQLConnection lastErrorMessage] copy];
+			if (!valuePopoverSaving) SPOnewayAlertSheet(
 				NSLocalizedString(@"Error", @"error"),
 				[tableDocumentInstance parentWindow],
 				[NSString stringWithFormat:NSLocalizedString(@"Couldn't write field.\nMySQL said: %@", @"message of panel when error while updating field to db"), [mySQLConnection lastErrorMessage]]
@@ -3159,7 +3209,10 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 		// This shouldn't happen – for safety reasons
 		if ( ![mySQLConnection rowsAffectedByLastQuery] ) {
 #ifndef SP_CODA
-			if ( [prefs boolForKey:SPShowNoAffectedRowsError] ) {
+			if (valuePopoverSaving) {
+				if (!valuePopoverSaveError) valuePopoverSaveError = [NSLocalizedString(@"No row was changed. The row may have been changed or deleted by someone else, or the server stores this value the same as before.", @"value popover: the UPDATE changed no row") retain];
+			}
+			else if ( [prefs boolForKey:SPShowNoAffectedRowsError] ) {
 				SPOnewayAlertSheet(
 					NSLocalizedString(@"Warning", @"warning"),
 					[tableDocumentInstance parentWindow],
@@ -3175,10 +3228,12 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 		}
 
 	} else {
-		SPOnewayAlertSheet(
+		NSString *message = [NSString stringWithFormat:NSLocalizedString(@"Updating field content failed. Couldn't identify field origin unambiguously (%1$ld matches). It's very likely that while editing this field the table `%2$@` was changed by an other user.", @"message of panel when error while updating field to db after enabling it"),(long)numberOfPossibleUpdateRows, tableForColumn];
+		if (valuePopoverSaving) valuePopoverSaveError = [message copy];
+		else SPOnewayAlertSheet(
 			NSLocalizedString(@"Error", @"error"),
 			[tableDocumentInstance parentWindow],
-			[NSString stringWithFormat:NSLocalizedString(@"Updating field content failed. Couldn't identify field origin unambiguously (%1$ld matches). It's very likely that while editing this field the table `%2$@` was changed by an other user.", @"message of panel when error while updating field to db after enabling it"),(long)numberOfPossibleUpdateRows, tableForColumn]
+			message
 		);
 
 		[[NSNotificationCenter defaultCenter] postNotificationName:@"SMySQLQueryHasBeenPerformed" object:tableDocumentInstance];
@@ -4370,6 +4425,200 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 	foreignKeyPickerPresenter = [presenter copy];
 }
 
+#pragma mark - Value popover
+
+- (void)setValuePopoverPresenter:(void (^)(SPValuePopover *, NSView *, NSRect))presenter
+{
+	if (presenter == valuePopoverPresenter) return;
+	[valuePopoverPresenter release];
+	valuePopoverPresenter = [presenter copy];
+}
+
+/// CHAR / VARCHAR / TEXT / JSON, not part of the primary key: their values are offered in the value popover.
+- (BOOL)_showsValueIconForColumn:(NSDictionary *)columnDefinition
+{
+	if ([[columnDefinition objectForKey:@"isprimarykey"] boolValue]) return NO;
+	NSString *grouping = [columnDefinition objectForKey:@"typegrouping"];
+	return [grouping isEqualToString:@"string"] || [grouping isEqualToString:@"textdata"];
+}
+
+- (void)closeValuePopover
+{
+	[self _closeValuePopover];
+}
+
+- (void)_closeValuePopover
+{
+	SPValuePopover *popover = valuePopover;
+	valuePopover = nil;
+	[popover closeDiscarding];
+	[popover release];
+}
+
+/// A load is starting (on any thread): the open value popover closes, unless its own Save is reloading.
+- (void)_closeValuePopoverForLoad
+{
+	if ([NSThread isMainThread]) {
+		if (!valuePopoverSaving) [self _closeValuePopover];
+		return;
+	}
+	dispatch_async(dispatch_get_main_queue(), ^{
+		if (!valuePopoverSaving) [self _closeValuePopover];
+	});
+}
+
+- (void)clickPickerIcon:(SPTextAndLinkCell *)cell
+{
+	NSInteger gridColumn = [cell getClickedColumn];
+	NSInteger row = [cell getClickedRow];
+	if (gridColumn < 0 || row < 0 || gridColumn >= (NSInteger)[[tableContentView tableColumns] count]) return;
+	NSTableColumn *tableColumn = [[tableContentView tableColumns] objectAtIndex:(NSUInteger)gridColumn];
+	[self pickValueAtRow:row column:(NSUInteger)[[tableColumn identifier] integerValue]];
+}
+
+- (void)pickValueAtRow:(NSInteger)row column:(NSUInteger)column
+{
+	if ([tableDocumentInstance isWorking] || row < 0 || (NSUInteger)row >= tableRowsCount) return;
+	NSTableColumn *tableColumn = [self _tableColumnForDataColumn:column];
+	if (!tableColumn) return;
+	// As a double-click: the row selected (a row being edited elsewhere is saved), then the cell's edit starts, which
+	// opens the picker
+	[tableContentView selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
+	if ([tableContentView selectedRow] != row) return;
+	[[tableContentView window] makeFirstResponder:tableContentView];
+	if ([self tableView:tableContentView shouldEditTableColumn:tableColumn row:row]) {
+		[tableContentView editColumn:[[tableContentView tableColumns] indexOfObject:tableColumn] row:row withEvent:nil select:YES];
+	}
+}
+
+- (void)clickValueIcon:(SPTextAndLinkCell *)cell
+{
+	NSInteger gridColumn = [cell getClickedColumn];
+	NSInteger row = [cell getClickedRow];
+	if (gridColumn < 0 || row < 0 || gridColumn >= (NSInteger)[[tableContentView tableColumns] count]) return;
+	NSTableColumn *tableColumn = [[tableContentView tableColumns] objectAtIndex:(NSUInteger)gridColumn];
+	[self showValueAtRow:row column:(NSUInteger)[[tableColumn identifier] integerValue]];
+}
+
+/// The grid column showing data column, or nil.
+- (NSTableColumn *)_tableColumnForDataColumn:(NSUInteger)column
+{
+	for (NSTableColumn *tableColumn in [tableContentView tableColumns]) {
+		if ((NSUInteger)[[tableColumn identifier] integerValue] == column) return tableColumn;
+	}
+	return nil;
+}
+
+/// The row now holding rowContents (rows may have moved since): expected first, else a search; NSNotFound if gone.
+- (NSInteger)_rowHoldingContents:(NSArray *)rowContents expectedAt:(NSInteger)expected
+{
+	if (expected >= 0 && (NSUInteger)expected < tableRowsCount && [[tableValues rowContentsAtIndex:(NSUInteger)expected] isEqualToArray:rowContents]) return expected;
+	for (NSUInteger row = 0; row < tableRowsCount; row++) {
+		if ([[tableValues rowContentsAtIndex:row] isEqualToArray:rowContents]) return (NSInteger)row;
+	}
+	return NSNotFound;
+}
+
+- (void)showValueAtRow:(NSInteger)row column:(NSUInteger)column
+{
+	if ([tableDocumentInstance isWorking] || fieldEditor || datePickerOpen) return;
+	if (row < 0 || (NSUInteger)row >= tableRowsCount || column >= [dataColumns count]) return;
+	NSDictionary *columnDefinition = NSArrayObjectAtIndex(dataColumns, column);
+	if (![self _showsValueIconForColumn:columnDefinition]) return;
+	id current = [tableValues cellDataAtRow:(NSUInteger)row column:column];
+	if (![current isSPNotLoaded] && !SPValuePopoverOffersValue(current, YES)) return;
+
+	// As clicking another row: a row being edited is saved first (which may reload: the row is found again)
+	NSArray *rowContents = [[[tableValues rowContentsAtIndex:(NSUInteger)row] copy] autorelease];
+	if (![self saveRowOnDeselect]) return;
+	row = [self _rowHoldingContents:rowContents expectedAt:row];
+	if (row == NSNotFound) return;
+	NSTableColumn *tableColumn = [self _tableColumnForDataColumn:column];
+	if (!tableColumn) return;
+
+	// A value not loaded yet (Load BLOB/TEXT fields only when needed) is loaded first, as editing it would
+	if ([[tableValues cellDataAtRow:(NSUInteger)row column:column] isSPNotLoaded]) {
+		NSString *wherePart = [self argumentForRow:row];
+		if (![wherePart length]) { NSBeep(); return; }
+		NSString *query = [NSString stringWithFormat:@"SELECT %@ FROM %@ WHERE %@", [[[tableColumn headerCell] stringValue] backtickQuotedString], [selectedTable backtickQuotedString], wherePart];
+		SPMySQLResult *loaded = [mySQLConnection queryString:query];
+		if ([mySQLConnection queryErrored] || ![loaded numberOfRows]) { NSBeep(); return; }
+		[tableValues replaceObjectInRow:(NSUInteger)row column:column withObject:[[loaded getRowAsArray] objectAtIndex:0]];
+		[tableContentView reloadData];
+		rowContents = [[[tableValues rowContentsAtIndex:(NSUInteger)row] copy] autorelease];
+	}
+	id stored = [[[tableValues cellDataAtRow:(NSUInteger)row column:column] copy] autorelease];
+	if (!SPValuePopoverOffersValue(stored, YES)) return;
+	BOOL isNull = ![stored isKindOfClass:[NSString class]];
+	NSString *value = isNull ? @"" : stored;
+
+	// Editable where an edit could be saved: a table's row it can identify, a view's editable field (not hex)
+	BOOL isView = ([tablesListInstance tableType] == SPTableTypeView);
+	BOOL canEdit;
+	if (isView) canEdit = [[[self fieldEditStatusForRow:row andColumn:[self _gridColumnForTableColumn:tableColumn]] objectAtIndex:0] integerValue] == 1;
+	else canEdit = [[self argumentForRow:row] length] > 0;
+	if ([self cellValueIsDisplayedAsHexForColumn:column]) canEdit = NO;
+
+	NSString *columnName = [[tableColumn headerCell] stringValue];
+	void (^saver)(NSString *, void (^)(NSString *)) = nil;
+	if (canEdit) {
+		NSString *tableAtOpen = [[selectedTable copy] autorelease];
+		saver = ^(NSString *text, void (^done)(NSString *)) {
+			if ([tableDocumentInstance isWorking]) {
+				done(NSLocalizedString(@"Sequel Plus is busy with this tab. Save again once it's done.", @"value popover: the tab is busy"));
+				return;
+			}
+			if (![selectedTable isEqualToString:tableAtOpen] || ![self saveRowOnDeselect]) {
+				done(NSLocalizedString(@"The value can't be saved now.", @"value popover: the commit can't run"));
+				return;
+			}
+			NSInteger now = [self _rowHoldingContents:rowContents expectedAt:row];
+			NSTableColumn *nowColumn = [self _tableColumnForDataColumn:column];
+			if (now == NSNotFound || !nowColumn) {
+				done(NSLocalizedString(@"This row was changed or reloaded. Close and open the value again.", @"value popover: its row is gone"));
+				return;
+			}
+
+			// As the field editor sheet's value, with the NULL placeholder meaning NULL where the column takes it
+			id newValue = text;
+			if ([text isEqualToString:[prefs objectForKey:SPNullValue]] && [[columnDefinition objectForKey:@"null"] boolValue]) newValue = [NSNull null];
+
+			valuePopoverSaving = YES;
+			if (valuePopoverSaveError) SPClear(valuePopoverSaveError);
+			BOOL saved;
+			if ([tablesListInstance tableType] == SPTableTypeView) {
+				[self saveViewCellValue:newValue forTableColumn:nowColumn row:(NSUInteger)now];
+				saved = (valuePopoverSaveError == nil);
+			}
+			else {
+				[oldRow setArray:[tableValues rowContentsAtIndex:(NSUInteger)now]];
+				isEditingRow = YES;
+				currentlyEditingRow = now;
+				[tableValues replaceObjectInRow:(NSUInteger)now column:column withObject:newValue];
+				saved = [self saveRowToTable];
+			}
+			valuePopoverSaving = NO;
+			NSString *message = saved ? nil : (valuePopoverSaveError ?: NSLocalizedString(@"The row couldn't be saved.", @"value popover: the row write failed"));
+			done(message);
+		};
+	}
+
+	[self _closeValuePopover];
+	SPValuePopover *popover = [[SPValuePopover alloc] initWithValue:value columnName:columnName defaults:prefs saver:saver];
+	[popover setValueIsNull:isNull];
+	valuePopover = popover;
+	[popover setClosed:^{
+		if (valuePopover == popover) {
+			valuePopover = nil;
+			[popover autorelease];
+		}
+	}];
+	NSInteger gridColumn = [[tableContentView tableColumns] indexOfObject:tableColumn];
+	NSRect rect = [tableContentView frameOfCellAtColumn:gridColumn row:row];
+	if (valuePopoverPresenter) valuePopoverPresenter(popover, tableContentView, rect);
+	else if (![popover showRelativeToRect:rect ofView:tableContentView]) [self _closeValuePopover];
+}
+
 /// The column's foreign key when the value picker opens for it (the preference on, a single-column key, not binary),
 /// else nil.
 - (NSDictionary *)_foreignKeyPickerReferenceForTableColumn:(NSTableColumn *)tableColumn
@@ -4550,24 +4799,33 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 			&& [tableView editedRow] == rowIndex
 			&& (NSUInteger)[[NSArrayObjectAtIndex([tableView tableColumns], [tableView editedColumn]) identifier] integerValue] == columnIndex) {
 			[cell setTextColor:textForegroundColor];
-			if (cellIsLinkCell) [cell setLinkActive:NO];
+			if (cellIsLinkCell) {
+				[cell setLinkActive:NO];
+				[cell setValueIconActive:NO];
+				[cell setPickerIconActive:NO];
+			}
 			return;
 		}
 
 		// While the table is being loaded, additional validation is required - data
 		// locks must be used to avoid crashes, and indexes higher than the available
 		// rows or columns may be requested.  Use gray to indicate loading in these cases.
+		// The value icon: any value of a text column (not a primary key), NULL and not yet loaded too
+		BOOL checkValue = cellIsLinkCell && columnIndex < [dataColumns count] && [self _showsValueIconForColumn:NSArrayObjectAtIndex(dataColumns, columnIndex)];
+		BOOL offersValue = NO;
 		if (isWorking) {
 			pthread_mutex_lock(&tableValuesLock);
 
 			if (rowIndex < (NSInteger)tableRowsCount && columnIndex < [tableValues columnCount]) {
 				cellIsNullOrUnloaded = [tableValues cellIsNullOrUnloadedAtRow:rowIndex column:columnIndex];
+				offersValue = checkValue;
 			}
 
 			pthread_mutex_unlock(&tableValuesLock);
 		}
 		else {
 			cellIsNullOrUnloaded = [tableValues cellIsNullOrUnloadedAtRow:rowIndex column:columnIndex];
+			offersValue = checkValue;
 		}
 
 		if (cellIsNullOrUnloaded) {
@@ -4592,6 +4850,17 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 			else {
 				[cell setLinkActive:YES];
 			}
+
+			// The value icon: not on the row being edited
+			[cell setValueIconActive:offersValue && [tableView editedRow] != rowIndex];
+
+			// The picker icon: a foreign key the picker serves (NULL too), in a table (not a view), not while editing
+			BOOL pickerIcon = NO;
+			if ([tableView editedRow] != rowIndex && columnIndex < [dataColumns count] && [NSArrayObjectAtIndex(dataColumns, columnIndex) objectForKey:@"foreignkeyreference"]
+				&& [tablesListInstance tableType] == SPTableTypeTable) {
+				pickerIcon = [self _foreignKeyPickerReferenceForTableColumn:tableColumn] != nil;
+			}
+			[cell setPickerIconActive:pickerIcon];
 		}
 	}
 }
@@ -4849,6 +5118,9 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 
 	if(fieldEditor) SPClear(fieldEditor);
 	if(foreignKeyPickerPresenter) SPClear(foreignKeyPickerPresenter);
+	if(valuePopoverPresenter) [valuePopoverPresenter release], valuePopoverPresenter = nil;
+	[self _closeValuePopover];
+	if(valuePopoverSaveError) SPClear(valuePopoverSaveError);
 
 	[self clearTableLoadTimer];
 	SPClear(tableValues);

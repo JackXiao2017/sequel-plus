@@ -1,5 +1,6 @@
 #import <XCTest/XCTest.h>
 #import <PostgresKit/PostgresKit.h>
+#import "../Source/SPTextAndLinkCell.h"
 #import "SPPostgresTestServers.h"
 #import "../Source/SPWindowController.h"
 #import "../Source/Postgres/SPPostgresDocument.h"
@@ -243,11 +244,13 @@ static const NSUInteger SPLinkTestPort = 55418;
 
 	XCTAssertEqualObjects(NSStringFromClass([[[self tableColumnNamed:@"customer_id"] dataCell] class]), @"SPTextAndLinkCell");
 	XCTAssertEqualObjects(NSStringFromClass([[[self tableColumnNamed:@"parent_id"] dataCell] class]), @"SPTextAndLinkCell");
-	XCTAssertFalse([NSStringFromClass([[[self tableColumnNamed:@"note"] dataCell] class]) isEqualToString:@"SPTextAndLinkCell"]);
-	XCTAssertFalse([NSStringFromClass([[[self tableColumnNamed:@"id"] dataCell] class]) isEqualToString:@"SPTextAndLinkCell"]);
 
 	NSInteger withCustomer = [self rowWhereColumn:@"id" is:@"10"];
 	NSInteger withoutCustomer = [self rowWhereColumn:@"id" is:@"12"];
+	// Every column's cell is an SPTextAndLinkCell (for the value icon); only key columns show the arrow
+	XCTAssertFalse([self cellHasLink:@"note"]);
+	XCTAssertFalse([self cellHasLink:@"id"]);
+	XCTAssertTrue([self cellHasLink:@"customer_id"]);
 	XCTAssertTrue([(id)[self preparedCellAtRow:withCustomer column:@"customer_id"] linkActive]);
 	XCTAssertFalse([(id)[self preparedCellAtRow:withoutCustomer column:@"customer_id"] linkActive]);
 	XCTAssertFalse([(id)[self preparedCellAtRow:withCustomer column:@"parent_id"] linkActive]);
@@ -262,8 +265,16 @@ static const NSUInteger SPLinkTestPort = 55418;
 	[self selectTable:@"region" inSchema:@"sp_fk_b"];
 	XCTAssertEqualObjects(self.content.foreignKeyReferences, @{});
 	for (NSTableColumn *column in [[self grid] tableColumns]) {
-		XCTAssertFalse([NSStringFromClass([[column dataCell] class]) isEqualToString:@"SPTextAndLinkCell"], @"%@", [[column headerCell] stringValue]);
+		XCTAssertFalse([self cellHasLink:[[column headerCell] stringValue]], @"%@", [[column headerCell] stringValue]);
 	}
+}
+
+/// Whether the column's cell has the link arrow (a link target): only foreign key columns do.
+- (BOOL)cellHasLink:(NSString *)columnName
+{
+	id cell = [[self tableColumnNamed:columnName] dataCell];
+	if (![cell isKindOfClass:NSClassFromString(@"SPTextAndLinkCell")]) return NO;
+	return [[cell valueForKey:@"hasLink"] boolValue];
 }
 
 #pragma mark - Following
@@ -378,9 +389,11 @@ static const NSUInteger SPLinkTestPort = 55418;
 	[[self grid] scrollColumnToVisible:columnIndex];
 	[[self grid] displayIfNeeded];
 
-	// The arrow is drawn in the last 18 pt of the cell
+	// The arrow: at the right edge, or just left of the picker icon when that shows (it takes the edge)
 	NSRect cellFrame = [[self grid] frameOfCellAtColumn:columnIndex row:row];
-	NSPoint inGrid = NSMakePoint(NSMaxX(cellFrame) - 9, NSMidY(cellFrame));
+	SPTextAndLinkCell *cell = (SPTextAndLinkCell *)[self preparedCellAtRow:row column:@"customer_id"];
+	NSRect arrow = SPTextButtonSlotRect(cellFrame, cell.pickerIconActive ? 1 : 0);
+	NSPoint inGrid = NSMakePoint(NSMidX(arrow), NSMidY(cellFrame));
 	NSPoint inWindow = [[self grid] convertPoint:inGrid toView:nil];
 	NSWindow *window = [self.controller window];
 

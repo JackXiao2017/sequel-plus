@@ -40,6 +40,7 @@
 @class SPMySQLConnection;
 @class SPMySQLStreamingResultStore;
 @class SPForeignKeyPicker;
+@class SPValuePopover;
 @class SPTableData;
 @class SPDatabaseDocument;
 @class SPTablesList;
@@ -167,6 +168,11 @@ typedef NS_ENUM(NSInteger, SPTableContentFilterSource) {
 	BOOL datePickerHandoff; // the picker's value is going into the cell's in-place editor
 	// The foreign key value picker (datePickerOpen / datePickerHandoff cover it too); for tests, shown through this
 	void (^foreignKeyPickerPresenter)(SPForeignKeyPicker *picker, NSView *view, NSRect rect);
+	// The value popover on a long text cell (closed by loads); for tests, shown through this
+	void (^valuePopoverPresenter)(SPValuePopover *popover, NSView *view, NSRect rect);
+	SPValuePopover *valuePopover;
+	BOOL valuePopoverSaving;          // the popover's Save is writing the row (a failure goes to it, not to an alert)
+	NSString *valuePopoverSaveError;  // why that write failed
 
 	// this represents the visible area of the whole content view at runtime.
 	// we use it as a positioning aide for the other two views below
@@ -217,6 +223,22 @@ typedef NS_ENUM(NSInteger, SPTableContentFilterSource) {
 
 /// For tests: called instead of showing the foreign key picker (view and rect: where it would show).
 - (void)setForeignKeyPickerPresenter:(void (^)(SPForeignKeyPicker *picker, NSView *view, NSRect rect))presenter;
+
+/**
+ * The value popover (SPValuePopover): a text cell whose loaded value is longer than 200 characters (not binary, not
+ * NULL or not loaded, not on the row being edited) shows the value icon; clicking it saves a row being edited first
+ * (as clicking another row) and opens the popover on the cell, editable where the row can be identified (a view: where
+ * its field can be edited). Its Save writes the row at once, as an edit and Return; a failure is shown in the popover,
+ * with the row put back as stored. A load (reload, filter, page, another table) closes it without writing.
+ */
+- (void)showValueAtRow:(NSInteger)row column:(NSUInteger)column;
+/// Closes the value popover without writing (the tab closes or stops being the active one).
+- (void)closeValuePopover;
+/// As clicking the picker icon of a foreign key cell (the list icon left of the link arrow, shown where the value
+/// picker serves the key, NULL included): starts editing the cell, as a double-click would, which opens the picker.
+- (void)pickValueAtRow:(NSInteger)row column:(NSUInteger)column;
+/// For tests: called instead of showing the value popover (view and rect: where it would show).
+- (void)setValuePopoverPresenter:(void (^)(SPValuePopover *popover, NSView *view, NSRect rect))presenter;
 - (NSString *)selectedTable;
 
 // Pagination

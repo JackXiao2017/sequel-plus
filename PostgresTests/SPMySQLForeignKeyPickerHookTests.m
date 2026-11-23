@@ -2,6 +2,7 @@
 #import <XCTest/XCTest.h>
 #import "../Source/SPWindowController.h"
 #import "../Source/SPForeignKeyPicker.h"
+#import "../Source/SPTextAndLinkCell.h"
 
 @interface NSObject (SPMySQLForeignKeyPickerHookTests)
 - (id)connectionController;
@@ -22,6 +23,8 @@
 - (BOOL)tableView:(NSTableView *)tableView shouldEditTableColumn:(NSTableColumn *)column row:(NSInteger)row;
 - (id)tableView:(NSTableView *)tableView objectValueForTableColumn:(NSTableColumn *)column row:(NSInteger)row;
 - (void)setForeignKeyPickerPresenter:(void (^)(SPForeignKeyPicker *picker, NSView *view, NSRect rect))presenter;
+- (void)tableView:(NSTableView *)tableView willDisplayCell:(id)cell forTableColumn:(NSTableColumn *)column row:(NSInteger)row;
+- (void)pickValueAtRow:(NSInteger)row column:(NSUInteger)column;
 @end
 
 /**
@@ -244,6 +247,51 @@
 	XCTAssertFalse(picker.nullButton.hidden);
 	XCTAssertFalse([self shouldEdit:@"customer_id" row:row], @"no second picker while one is open");
 	XCTAssertEqual(self.presented.count, 1u);
+}
+
+- (SPTextAndLinkCell *)drawnCell:(NSString *)name row:(NSInteger)row
+{
+	NSTableColumn *column = [self column:name];
+	SPTextAndLinkCell *cell = [column dataCellForRow:row];
+	XCTAssertTrue([cell isKindOfClass:[SPTextAndLinkCell class]], @"%@ is a %@", name, [cell class]);
+	[self.content tableView:self.grid willDisplayCell:cell forTableColumn:column row:row];
+	return cell;
+}
+
+- (void)testPickerIconOnForeignKeyCellsNullToo
+{
+	SKIP_WITHOUT_SERVER
+	[self showTable:@"fkp_orders" rows:2];
+	XCTAssertTrue([self drawnCell:@"customer_id" row:[self rowWithId:@"10"]].pickerIconActive);
+	XCTAssertTrue([self drawnCell:@"customer_id" row:[self rowWithId:@"11"]].pickerIconActive, @"NULL: pick a value");
+	XCTAssertFalse([self drawnCell:@"note" row:0].pickerIconActive, @"not a foreign key");
+}
+
+- (void)testNoPickerIconOnCompositeOrBinaryKeysOrWithThePreferenceOff
+{
+	SKIP_WITHOUT_SERVER
+	[self showTable:@"fkp_pairs" rows:1];
+	XCTAssertFalse([self drawnCell:@"a" row:0].pickerIconActive, @"a key over two columns");
+	[self showTable:@"fkp_blobrefs" rows:1];
+	XCTAssertFalse([self drawnCell:@"k" row:0].pickerIconActive, @"a binary key");
+	[self setPreferences:@{@"ForeignKeyPickerEnabled": @NO}];
+	[self showTable:@"fkp_orders" rows:2];
+	XCTAssertFalse([self drawnCell:@"customer_id" row:0].pickerIconActive, @"the picker preference off");
+}
+
+- (void)testPickerIconOpensThePickerAndChooseEditsTheCell
+{
+	SKIP_WITHOUT_SERVER
+	[self showTable:@"fkp_orders" rows:2];
+	NSInteger row = [self rowWithId:@"10"];
+	[self.content pickValueAtRow:row column:(NSUInteger)[[[self column:@"customer_id"] identifier] integerValue]];
+	XCTAssertEqual(self.presented.count, 1u, @"the picker opened");
+	SPForeignKeyPicker *picker = [self loadedPicker];
+	[self selectKey:@"3" inPicker:picker];
+	[picker choose];
+	XCTAssertTrue([self spinUntil:^BOOL{ return [self.grid currentEditor] != nil; } timeout:5]);
+	XCTAssertEqualObjects([[self.grid currentEditor] string], @"3", @"the key is in the cell's editor, Return saves it");
+	[self.grid abortEditing];
 }
 
 - (void)testNonForeignKeyCellEditsInPlace
