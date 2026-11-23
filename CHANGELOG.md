@@ -6,11 +6,11 @@ Upgrading from 2.0.5.
 
 - Version **2.0.6**.
 
-### MySQL and PostgreSQL: a foreign key cell's value picker, one click away
+### MySQL and PostgreSQL: pick a foreign key's value in one click
 - In the **Content** view, a foreign key cell the value picker serves (a single-column key, not binary) shows a list icon (☰) at the right edge of the cell, with the arrow just left of it, NULL cells included. Clicking it is the same as starting to edit the cell: the picker opens under it, **Choose** puts the key into the cell's editor, and Return saves it (Escape drops it). With **Edit All Fields in Pop-up Sheet** on, it opens the field editor sheet, whose **Choose…** opens the picker.
 - The icon isn't shown on the row being edited, where the table can't be edited (a view, a table without a key), or with **Preferences ▸ Tables ▸ Open the value picker when editing a foreign key** off.
 
-### MySQL and PostgreSQL: read and format long text values in a popover
+### MySQL and PostgreSQL: read, format and edit text values in a popover
 - In the **Content** view and in **Query** results, every value of a text column (CHAR, VARCHAR, TEXT, JSON, and in PostgreSQL also XML), whatever its length, shows a small document icon at the right of its cell, a little apart from the text (left of the foreign key arrow when the cell has one). NULL shows it too: the popover opens empty, titled NULL, so you can type a value into it, and nothing changes until you do. Numbers, dates, binary values (BLOB, VARBINARY, bytea) and primary key columns don't show it (in PostgreSQL Query results primary keys aren't told apart).
 - Clicking the icon opens the whole value in a popover under the cell, exactly as it is stored. Nothing is formatted until you click **JSON**, **XML** or **HTML**, which lays the text out once: only whitespace between parts of the value changes. JSON keeps its key order and number text; XML and HTML keep entities, comments and the contents of `<pre>`, `<script>` and `<style>`, and HTML only breaks lines around block elements, so it renders the same.
 - Once formatted, the text is in color: JSON keys purple, strings red, numbers blue, `true` / `false` / `null` orange; XML and HTML tag names blue, attribute names orange, attribute values red, comments and declarations grey, entities purple. The colors follow light and dark mode, stay while you compact or type, and go with Revert. They are only drawn: the value saved, copied or undone is plain text. Values over 512 KB stay uncolored.
