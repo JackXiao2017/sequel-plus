@@ -6,6 +6,10 @@ Upgrading from 2.0.6.
 
 - Version **2.0.7**.
 
+### Updates are checked every time Sequel Plus starts
+- With automatic checks on (Preferences ▸ Auto Update), Sequel Plus now asks GitHub for a newer release a few seconds after every launch. Before, a launch checked only if the last check was longer ago than the interval (a day by default), so restarting the app soon after a release came out didn't find it.
+- While the app stays open, it still checks again hourly, daily or weekly, as set. A skipped version stays quiet, and with automatic checks off nothing is checked.
+
 ## Sequel Plus 2.0.6
 
 Upgrading from 2.0.5.
