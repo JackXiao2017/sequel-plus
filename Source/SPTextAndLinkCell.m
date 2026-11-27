@@ -29,6 +29,7 @@
 //  More info at <https://github.com/sequelpro/sequelpro>
 
 #import "SPTextAndLinkCell.h"
+#import "SPTableView.h"
 
 @implementation SPTextAndLinkCell
 
@@ -280,6 +281,8 @@ static const NSCellImagePosition SPTextValueIconImagePosition = NSImageRight; //
 	id target = (button == SPTextAndLinkCellValueButton) ? valueTarget : (button == SPTextAndLinkCellPickerButton) ? pickerTarget : linkTarget;
 	SEL action = (button == SPTextAndLinkCellValueButton) ? valueAction : (button == SPTextAndLinkCellPickerButton) ? pickerAction : linkAction;
 	if (target && action) [target performSelector:action withObject:self];
+	// The table then asks whether to edit the cell during this same click: it mustn't (see -[SPTableView isClickingCellButton])
+	if ([tableView isKindOfClass:[SPTableView class]]) [(SPTableView *)tableView cellDidFollowButton];
 }
 
 /**

@@ -2623,6 +2623,8 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
 {
 	// Only allow editing if a task is not active
 	if ([tableDocumentInstance isWorking]) return NO;
+	// A click on a cell's icon follows the icon, never edits (see -[SPTableView isClickingCellButton])
+	if ([aTableView isKindOfClass:[SPTableView class]] && [(SPTableView *)aTableView isClickingCellButton]) return NO;
 
 	// Check if the field can identified bijectively
 	if ( aTableView == customQueryView ) {

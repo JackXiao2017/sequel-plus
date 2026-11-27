@@ -32,10 +32,17 @@
 {
 	BOOL tabEditingDisabled;
 	SEL emptyDoubleClickAction;
+	NSEvent *cellButtonEvent;
 }
 
 @property (readwrite, assign) BOOL tabEditingDisabled;
 
 - (void)setEmptyDoubleClickAction:(SEL)aSelector;
+
+/// YES while the event being handled is a click on a cell's button (value icon, picker icon, link arrow): a left mouse
+/// down on one, or the event a cell followed its button on (-cellDidFollowButton).
+- (BOOL)isClickingCellButton;
+/// Called by a cell (SPTextAndLinkCell) once it has followed one of its buttons, during the event that did it.
+- (void)cellDidFollowButton;
 
 @end

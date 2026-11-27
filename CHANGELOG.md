@@ -10,6 +10,9 @@ Upgrading from 2.0.6.
 - With automatic checks on (Preferences ▸ Auto Update), Sequel Plus now asks GitHub for a newer release a few seconds after every launch. Before, a launch checked only if the last check was longer ago than the interval (a day by default), so restarting the app soon after a release came out didn't find it.
 - While the app stays open, it still checks again hourly, daily or weekly, as set. A skipped version stays quiet, and with automatic checks off nothing is checked.
 
+### MySQL and PostgreSQL: a cell's icons work on a selected row
+- Clicking the value icon of a TEXT or JSON cell in a row that was already selected opened the field editor sheet instead of the value popover (the first click on a row worked, so it seemed to depend on the table). The same click on the ☰ picker icon or the foreign key arrow could start editing the cell instead. A click on any of these icons now always does what the icon says, selected row or not, in the Content and Query grids of both MySQL and PostgreSQL.
+
 ## Sequel Plus 2.0.6
 
 Upgrading from 2.0.5.

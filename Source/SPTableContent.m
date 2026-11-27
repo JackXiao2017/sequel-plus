@@ -4211,6 +4211,8 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 - (BOOL)tableView:(NSTableView *)tableView shouldEditTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
 {
 	if ([tableDocumentInstance isWorking]) return NO;
+	// A click on a cell's icon follows the icon, never edits (see -[SPTableView isClickingCellButton])
+	if ([tableView isKindOfClass:[SPTableView class]] && [(SPTableView *)tableView isClickingCellButton]) return NO;
 
 	if (tableView == tableContentView) {
 
