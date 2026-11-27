@@ -27,6 +27,7 @@
 - (void)updateTables:(id)sender;
 - (BOOL)selectItemWithName:(NSString *)name;
 - (void)viewContent:(id)sender;
+- (id)addNewConnection;
 - (void)setRuleEditorVisible:(BOOL)show animate:(BOOL)animate;
 - (BOOL)isEmpty;
 - (void)addFilterExpression;
@@ -161,6 +162,35 @@ static NSString * const SPFilterBarTestTable = @"sp_filter_bar_probe";
 	[window setFrame:NSMakeRect(80, 80, 900, 420) display:YES];
 	[[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.6]];
 	[self assertRowsAboveButtonBarIn:content rows:2 label:@"small window"];
+}
+
+/// A MySQL tab closed right after it is built: its filter editor's 0.2 s delayed -_resize keeps the filter controller
+/// alive past the tab, and it (and the controller's -dealloc) still talk to the rule editor, so the editor must live as long
+/// as its controller (it used to be freed with the tab's views, and the late -_resize crashed on it).
+- (void)testClosingANewTabRightAwayKeepsTheRuleEditorForThePendingResize
+{
+	__weak id ruleFilter = nil;
+	__weak id ruleEditor = nil;
+	@autoreleasepool {
+		id<SPFilterBarTestMethods> fresh = (id<SPFilterBarTestMethods>)[self.controller addNewConnection];
+		ruleFilter = [[fresh tableContentInstance] valueForKey:@"ruleFilterController"];
+		ruleEditor = [(id<SPFilterBarTestMethods>)ruleFilter view];
+		XCTAssertNotNil(ruleFilter);
+		XCTAssertNotNil(ruleEditor);
+		[[NSNotificationCenter defaultCenter] postNotificationName:NSRuleEditorRowsDidChangeNotification object:ruleEditor]; // schedules -_resize in 0.2 s
+		NSTabView *tabView = [self.controller valueForKey:@"tabView"];
+		[tabView removeTabViewItem:[(id)fresh valueForKey:@"parentTabViewItem"]];
+		fresh = nil;
+	}
+
+	NSDate *end = [NSDate dateWithTimeIntervalSinceNow:1.0];
+	while ([end timeIntervalSinceNow] > 0) {
+		@autoreleasepool {
+			XCTAssertFalse(ruleFilter != nil && ruleEditor == nil, @"the filter controller outlived its rule editor");
+			if (!ruleFilter) break;
+			[[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+		}
+	}
 }
 
 @end

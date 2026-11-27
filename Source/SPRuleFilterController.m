@@ -331,6 +331,10 @@ static BOOL _arrayContainsInViewHierarchy(NSArray *haystack, id needle);
 	addFilterRect.size.height = filterRect.size.height;
 	[addFilterButton setFrame:addFilterRect];
 
+	// A nib outlet isn't retained, and the rule editor goes with the tab's views, but a pending -_resize (and -dealloc's
+	// -unbind:) can run after the tab closes, so keep it as long as this controller
+	[filterRuleEditor retain];
+
 	[self _doChangeToRuleEditorData:^{
 		[filterRuleEditor bind:@"rows" toObject:_modelContainer withKeyPath:@"model" options:nil];
 	}];
@@ -1050,6 +1054,7 @@ BOOL _arrayContainsInViewHierarchy(NSArray *haystack, id needle)
 {
 	//TODO find a better way to trigger resize
 	// We can't do this here, because it will cause rows to jump around when removing them (the add case works fine, though)
+	[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(_resize) object:nil];
 	[self performSelector:@selector(_resize) withObject:nil afterDelay:0.2];
 	//[self _resize];
 	[self _updateButtonStates];
@@ -1088,6 +1093,7 @@ BOOL _arrayContainsInViewHierarchy(NSArray *haystack, id needle)
 	[[NSNotificationCenter defaultCenter] removeObserver:self];
 	// WARNING: THIS MUST COME AFTER -unbind:! See the class comment on ModelContainer for the reasoning
 	SPClear(_modelContainer);
+	SPClear(filterRuleEditor);
 	SPClear(columns);
 	SPClear(contentFilters);
 	SPClear(numberOfDefaultFilters);

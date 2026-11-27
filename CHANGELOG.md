@@ -13,6 +13,9 @@ Upgrading from 2.0.6.
 ### MySQL and PostgreSQL: a cell's icons work on a selected row
 - Clicking the value icon of a TEXT or JSON cell in a row that was already selected opened the field editor sheet instead of the value popover (the first click on a row worked, so it seemed to depend on the table). The same click on the ☰ picker icon or the foreign key arrow could start editing the cell instead. A click on any of these icons now always does what the icon says, selected row or not, in the Content and Query grids of both MySQL and PostgreSQL.
 
+### MySQL: closing a tab right after its filter changed no longer crashes
+- The MySQL Content filter resizes itself a moment after its rows change. If the tab closed in that moment (for example, right after it opened), the resize could reach the filter's freed rows and crash the app. The filter now keeps its rows until it is done with them.
+
 ## Sequel Plus 2.0.6
 
 Upgrading from 2.0.5.
