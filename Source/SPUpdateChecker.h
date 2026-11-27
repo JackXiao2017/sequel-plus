@@ -34,9 +34,10 @@ __attribute__((visibility("default")))
  *
  * - A check the user asks for (-checkForUpdates:) always answers: the new version, "You're up to date", or why the
  *   check failed. It shows a skipped version too.
- * - Automatic checks (-startAutomaticChecks) run when SPUpdateAutomaticChecks is on and SPUpdateCheckInterval seconds
- *   have passed since SPUpdateLastCheckTime (a few seconds after launch, then hourly, re-evaluated each time); they
- *   say nothing unless there is a new version that isn't SPUpdateSkippedVersion.
+ * - Automatic checks (-startAutomaticChecks) run when SPUpdateAutomaticChecks is on: one a few seconds after every
+ *   launch, whenever the last check was, then while the app runs whenever SPUpdateCheckInterval seconds have passed
+ *   since SPUpdateLastCheckTime (looked at hourly); they say nothing unless there is a new version that isn't
+ *   SPUpdateSkippedVersion.
  *
  * Main thread only; one check at a time (asking while one runs makes it answer, as one the user asked for).
  */
@@ -50,6 +51,8 @@ __attribute__((visibility("default")))
 - (IBAction)checkForUpdates:(id)sender;
 /// An automatic check if one is due (see the class comment); YES if one was started.
 - (BOOL)checkInBackgroundIfDue;
+/// The automatic check at launch: runs whenever automatic checks are on, however recent the last check; YES if started.
+- (BOOL)checkAtLaunch;
 /// Starts the automatic checks (once).
 - (void)startAutomaticChecks;
 

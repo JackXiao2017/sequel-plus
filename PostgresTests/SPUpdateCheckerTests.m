@@ -288,6 +288,30 @@
 	XCTAssertEqual(self.fetched.count, 1u);
 }
 
+- (void)testEveryLaunchChecksWhateverTheLastCheck
+{
+	self.answer = [self releaseJSON:@"2.1.0" notes:@"" zip:YES];
+
+	// Checked a minute ago (say, a launch just before the release came out), daily: the launch checks anyway
+	self.defaults.values[@"SPUpdateLastCheckTime"] = [NSDate dateWithTimeIntervalSinceNow:-60];
+	XCTAssertFalse([self.checker checkInBackgroundIfDue], @"while running, the interval still holds");
+	XCTAssertTrue([self.checker checkAtLaunch]);
+	[self waitForCheck];
+	XCTAssertEqual(self.fetched.count, 1u);
+	XCTAssertEqual(self.alerts.count, 1u, @"the new version is offered");
+
+	// A skipped version stays quiet at launch too
+	self.defaults.values[@"SPUpdateSkippedVersion"] = @"2.1.0";
+	XCTAssertTrue([self.checker checkAtLaunch]);
+	[self waitForCheck];
+	XCTAssertEqual(self.alerts.count, 1u);
+
+	// Off: not at launch either
+	self.defaults.values[@"SPUpdateAutomaticChecks"] = @NO;
+	XCTAssertFalse([self.checker checkAtLaunch]);
+	XCTAssertEqual(self.fetched.count, 2u);
+}
+
 - (void)testAskingDuringAnAutomaticCheckMakesItAnswer
 {
 	self.answer = [self releaseJSON:@"2.0.3" notes:@"" zip:YES];

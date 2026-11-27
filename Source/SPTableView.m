@@ -33,6 +33,7 @@
 #import "SPDatabaseDocument.h"
 #import "SPWindowController.h"
 #import "SPFieldMapperController.h"
+#import "SPTextAndLinkCell.h"
 
 @protocol SPTableViewDelegate <NSObject>
 @optional
@@ -67,6 +68,7 @@
 
 - (void)dealloc
 {
+	[cellButtonEvent release];
 	[super dealloc];
 }
 
@@ -281,6 +283,37 @@ pass_keyDown_to_super:
 		[NSException raise:NSInternalInconsistencyException
 					format:@"%s: passing event to super failed! (issue #2445)\n\nOriginal exception:\n%@\n\nEvent:\n  %@\nDelegate:\n  %@\nself:\n  %@",__PRETTY_FUNCTION__,ex,theEvent,[self delegate],ownId];
 	}
+}
+
+/**
+ * Whether the event being handled is a click on a cell's button (the value icon, the foreign key picker icon or link
+ * arrow). When a click lands in a row that is already selected, NSTableView asks the delegate whether the cell may be
+ * edited, after the cell has followed its button (on the mouse up) or, for a mouse down, before; the data grids answer
+ * NO while this is YES, as their answer would otherwise open the field editor sheet (a TEXT or JSON value, say) or a
+ * picker over the button's own action. While the button's action runs it is NO, so a button that itself starts the
+ * cell's edit (the picker icon) still can.
+ */
+- (BOOL)isClickingCellButton
+{
+	NSEvent *event = [NSApp currentEvent];
+	if (!event) return NO;
+	if (event == cellButtonEvent) return YES;
+	if ([event type] != NSEventTypeLeftMouseDown || [event window] != [self window] || ![self window]) return NO;
+	NSPoint point = [self convertPoint:[event locationInWindow] fromView:nil];
+	NSInteger row = [self rowAtPoint:point];
+	NSInteger column = [self columnAtPoint:point];
+	if (row < 0 || column < 0) return NO;
+	NSCell *cell = [self preparedCellAtColumn:column row:row];
+	if (![cell isKindOfClass:[SPTextAndLinkCell class]]) return NO;
+	return [(SPTextAndLinkCell *)cell buttonAtPoint:point inCellFrame:[self frameOfCellAtColumn:column row:row]] != SPTextAndLinkCellNoButton;
+}
+
+- (void)cellDidFollowButton
+{
+	NSEvent *event = [NSApp currentEvent];
+	if (event == cellButtonEvent) return;
+	[cellButtonEvent release];
+	cellButtonEvent = [event retain];
 }
 
 /**

@@ -185,9 +185,14 @@ static NSArray<NSNumber *> *SPUpdateVersionNumbers(NSString *version, BOOL *prer
 
 - (BOOL)checkInBackgroundIfDue
 {
-	if (checking || ![defaults boolForKey:SPUpdateAutomaticChecks]) return NO;
 	NSDate *last = [defaults objectForKey:SPUpdateLastCheckTime];
 	if ([last isKindOfClass:[NSDate class]] && -[last timeIntervalSinceNow] < [self _interval]) return NO;
+	return [self checkAtLaunch];
+}
+
+- (BOOL)checkAtLaunch
+{
+	if (checking || ![defaults boolForKey:SPUpdateAutomaticChecks]) return NO;
 	answerThisCheck = NO;
 	[self _check];
 	return YES;
@@ -197,7 +202,7 @@ static NSArray<NSNumber *> *SPUpdateVersionNumbers(NSString *version, BOOL *prer
 {
 	if (recheckTimer) return;
 	recheckTimer = [[NSTimer scheduledTimerWithTimeInterval:SPUpdateRecheckInterval target:self selector:@selector(_recheck:) userInfo:nil repeats:YES] retain];
-	[self performSelector:@selector(checkInBackgroundIfDue) withObject:nil afterDelay:SPUpdateFirstCheckDelay];
+	[self performSelector:@selector(checkAtLaunch) withObject:nil afterDelay:SPUpdateFirstCheckDelay];
 }
 
 - (void)_recheck:(NSTimer *)timer

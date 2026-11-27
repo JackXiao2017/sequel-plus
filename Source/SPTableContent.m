@@ -4211,6 +4211,8 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 - (BOOL)tableView:(NSTableView *)tableView shouldEditTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
 {
 	if ([tableDocumentInstance isWorking]) return NO;
+	// A click on a cell's icon follows the icon, never edits (see -[SPTableView isClickingCellButton])
+	if ([tableView isKindOfClass:[SPTableView class]] && [(SPTableView *)tableView isClickingCellButton]) return NO;
 
 	if (tableView == tableContentView) {
 
@@ -4519,6 +4521,14 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 	return NSNotFound;
 }
 
+/// A text column's value for the popover: a column with a binary collation (utf8mb4_bin...) is flagged BINARY, so its
+/// values arrive as bytes, shown as the text they hold in the connection's encoding (nil if they hold none)
+- (id)_valuePopoverTextFor:(id)value
+{
+	if (![value isKindOfClass:[NSData class]]) return value;
+	return [[[NSString alloc] initWithData:value encoding:[mySQLConnection stringEncoding]] autorelease];
+}
+
 - (void)showValueAtRow:(NSInteger)row column:(NSUInteger)column
 {
 	if ([tableDocumentInstance isWorking] || fieldEditor || datePickerOpen) return;
@@ -4526,7 +4536,7 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 	NSDictionary *columnDefinition = NSArrayObjectAtIndex(dataColumns, column);
 	if (![self _showsValueIconForColumn:columnDefinition]) return;
 	id current = [tableValues cellDataAtRow:(NSUInteger)row column:column];
-	if (![current isSPNotLoaded] && !SPValuePopoverOffersValue(current, YES)) return;
+	if (![current isSPNotLoaded] && !SPValuePopoverOffersValue([self _valuePopoverTextFor:current], YES)) return;
 
 	// As clicking another row: a row being edited is saved first (which may reload: the row is found again)
 	NSArray *rowContents = [[[tableValues rowContentsAtIndex:(NSUInteger)row] copy] autorelease];
@@ -4547,7 +4557,7 @@ static void *TableContentKVOContext = &TableContentKVOContext;
 		[tableContentView reloadData];
 		rowContents = [[[tableValues rowContentsAtIndex:(NSUInteger)row] copy] autorelease];
 	}
-	id stored = [[[tableValues cellDataAtRow:(NSUInteger)row column:column] copy] autorelease];
+	id stored = [self _valuePopoverTextFor:[[[tableValues cellDataAtRow:(NSUInteger)row column:column] copy] autorelease]];
 	if (!SPValuePopoverOffersValue(stored, YES)) return;
 	BOOL isNull = ![stored isKindOfClass:[NSString class]];
 	NSString *value = isNull ? @"" : stored;

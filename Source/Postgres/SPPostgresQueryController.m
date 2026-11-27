@@ -3122,6 +3122,8 @@ static const NSUInteger SPPostgresQueryWidthSampleRows = 100;
 - (BOOL)tableView:(NSTableView *)theTableView shouldEditTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
 {
 	if (invalidated || [self _runnerBusy] || !resultEditor) return NO;
+	// A click on a cell's icon follows the icon, never edits (see -[SPTableView isClickingCellButton])
+	if ([theTableView isKindOfClass:[SPTableView class]] && [(SPTableView *)theTableView isClickingCellButton]) return NO;
 	NSInteger column = [self _resultColumnOfTableColumn:tableColumn];
 	if (column < 0 || rowIndex < 0 || (NSUInteger)rowIndex >= resultRowCount) return NO;
 

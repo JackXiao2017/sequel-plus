@@ -1741,6 +1741,8 @@ static void *SPPostgresContentDefaultsContext = &SPPostgresContentDefaultsContex
 - (BOOL)tableView:(NSTableView *)theTableView shouldEditTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)rowIndex
 {
 	if (invalidated || [taskRunner isBusy]) return NO;
+	// A click on a cell's icon follows the icon, never edits (see -[SPTableView isClickingCellButton])
+	if ([theTableView isKindOfClass:[SPTableView class]] && [(SPTableView *)theTableView isClickingCellButton]) return NO;
 	if ([self _editsInSheet] || [self _isLongValueInTableColumn:tableColumn row:rowIndex]) {
 		[self _editInSheetTableColumn:tableColumn row:rowIndex];
 		return NO;

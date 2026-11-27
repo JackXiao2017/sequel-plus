@@ -2537,7 +2537,7 @@ retry:
 #ifndef SP_CODA
 		&& [prefs boolForKey:SPCustomQueryAutoIndent]
 #endif
-		&& (!autoindentIgnoresEnter || [[NSApp currentEvent] keyCode] != 0x4C))
+		&& (!autoindentIgnoresEnter || [[NSApp currentEvent] type] != NSEventTypeKeyDown || [[NSApp currentEvent] keyCode] != 0x4C)) // keyCode only on a key event (a mouse event throws)
 	{
 		NSString *textViewString = [[self textStorage] string];
 		NSString *currentLine, *indentString = nil;

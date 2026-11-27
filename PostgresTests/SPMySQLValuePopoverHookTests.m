@@ -23,6 +23,7 @@
 - (id)queryString:(NSString *)query;
 - (NSArray *)getRowAsArray;
 - (BOOL)queryErrored;
+- (void)closeValuePopover;
 - (NSString *)lastErrorMessage;
 - (void)loadTable:(NSString *)table ofType:(NSInteger)type;
 - (void)viewContent:(id)sender;
@@ -117,7 +118,7 @@ static NSUInteger SPVPCellDataCalls = 0;
 - (void)dropFixture:(id)connection
 {
 	[connection queryString:@"DROP VIEW IF EXISTS vp_view"];
-	for (NSString *table in @[@"vp_notes", @"vp_lazy", @"vp_keys"]) {
+	for (NSString *table in @[@"vp_notes", @"vp_lazy", @"vp_keys", @"vp_indexed", @"vp_bin"]) {
 		[connection queryString:[NSString stringWithFormat:@"DROP TABLE IF EXISTS %@", table]];
 	}
 }
@@ -146,7 +147,7 @@ static NSString *SPRepeated(NSString *unit, NSUInteger length)
 	[self addTeardownBlock:^{
 		for (SPValuePopover *popover in weakSelf.presented) [popover closeDiscarding];
 		NSWindow *window = [controller window];
-		while (window.attachedSheet) [window endSheet:window.attachedSheet];
+		for (NSInteger tries = 0; window.attachedSheet && tries < 5; tries++) { [window endSheet:window.attachedSheet]; [weakSelf spin:0.1]; }
 		if ([[mysql getConnection] isConnected]) [weakSelf dropFixture:[mysql getConnection]];
 		NSTabView *tabView = [controller valueForKey:@"tabView"];
 		for (NSTabViewItem *item in [tabView tabViewItems]) [tabView removeTabViewItem:item];
@@ -178,6 +179,12 @@ static NSString *SPRepeated(NSString *unit, NSUInteger length)
 	[self run:@"CREATE VIEW vp_view AS SELECT id, body FROM vp_notes"];
 	[self run:@"CREATE TABLE vp_keys (code VARCHAR(40) PRIMARY KEY, label VARCHAR(40)) ENGINE=InnoDB"];
 	[self run:@"INSERT INTO vp_keys VALUES ('abc-123', 'Ann')"];
+	[self run:@"CREATE TABLE vp_indexed (id INT PRIMARY KEY, name VARCHAR(100), code VARCHAR(40), note TEXT, "
+			   "KEY vp_name_idx (name), UNIQUE KEY vp_code_uq (code), KEY vp_note_idx (note(20))) ENGINE=InnoDB"];
+	[self run:@"INSERT INTO vp_indexed VALUES (1, 'Ann', 'A-1', '{\"a\": 1}')"];
+	// A _bin collation: MySQL flags the column BINARY, so its values arrive as bytes, not strings
+	[self run:@"CREATE TABLE vp_bin (id BIGINT AUTO_INCREMENT PRIMARY KEY, name_cn VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL) ENGINE=InnoDB"];
+	[self run:@"INSERT INTO vp_bin VALUES (1, '黃銘'), (2, 'WONG MING')"];
 	[[mysql valueForKey:@"tablesListInstance"] updateTables:nil];
 	[[controller window] makeKeyAndOrderFront:nil];
 
@@ -299,6 +306,77 @@ static NSString *SPRepeated(NSString *unit, NSUInteger length)
 	XCTAssertTrue(labelCell.valueIconActive, @"another text column still shows it");
 }
 
+/// Clicks the value icon of a cell the way a person does (mouse down and up on the grid).
+- (void)clickValueIcon:(NSString *)name row:(NSInteger)row
+{
+	NSTableColumn *tableColumn = [self column:name];
+	NSInteger columnIndex = [[self.grid tableColumns] indexOfObject:tableColumn];
+	[self.grid scrollRowToVisible:row];
+	[self.grid scrollColumnToVisible:columnIndex];
+	[self.grid displayIfNeeded];
+	NSRect cellFrame = [self.grid frameOfCellAtColumn:columnIndex row:row];
+	NSRect icon = SPTextButtonSlotRect(cellFrame, 0);
+	NSPoint inWindow = [self.grid convertPoint:NSMakePoint(NSMidX(icon), NSMidY(cellFrame)) toView:nil];
+	NSWindow *window = [self.grid window];
+	NSEvent *down = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown location:inWindow modifierFlags:0 timestamp:[NSProcessInfo processInfo].systemUptime
+								   windowNumber:[window windowNumber] context:nil eventNumber:1 clickCount:1 pressure:1];
+	NSEvent *up = [NSEvent mouseEventWithType:NSEventTypeLeftMouseUp location:inWindow modifierFlags:0 timestamp:[NSProcessInfo processInfo].systemUptime
+								 windowNumber:[window windowNumber] context:nil eventNumber:2 clickCount:1 pressure:0];
+	// Through the event queue, as a real click comes: the mouse down is then the app's current event
+	[NSApp postEvent:down atStart:NO];
+	[NSApp postEvent:up atStart:NO];
+	NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskLeftMouseDown untilDate:[NSDate dateWithTimeIntervalSinceNow:1] inMode:NSDefaultRunLoopMode dequeue:YES];
+	XCTAssertEqual([NSApp currentEvent], event);
+	[self.grid mouseDown:event];
+}
+
+/// The texts of a sheet over the window (an alert's message), or nil when none.
+- (NSString *)sheetText
+{
+	NSWindow *sheet = [[self.grid window] attachedSheet];
+	if (!sheet) return nil;
+	NSMutableArray *texts = [NSMutableArray array];
+	NSMutableArray *views = [NSMutableArray arrayWithObject:[sheet contentView]];
+	while (views.count) {
+		NSView *view = views.lastObject; [views removeLastObject];
+		if ([view isKindOfClass:[NSTextField class]] && [[(NSTextField *)view stringValue] length]) [texts addObject:[(NSTextField *)view stringValue]];
+		[views addObjectsFromArray:view.subviews];
+	}
+	return [NSString stringWithFormat:@"%@: %@", [sheet class], [texts componentsJoinedByString:@" | "]];
+}
+
+- (void)testMySQLTextColumnOpensThePopoverOnClick
+{
+	if (![self connected]) return;
+	[self showTable:@"vp_notes" ofType:0 rows:3];
+	for (NSString *name in @[@"body", @"doc"]) {
+		NSUInteger before = self.presented.count;
+		[self clickValueIcon:name row:[self rowWithId:@"1"]];
+		XCTAssertTrue([self spinUntil:^BOOL{ return self.presented.count == before + 1; } timeout:5], @"%@: clicking the icon opens the popover", name);
+		NSString *sheet = [self sheetText];
+		XCTAssertNil(sheet, @"%@", name);
+		if (sheet) return;
+		[self.content closeValuePopover];
+	}
+}
+
+- (void)testMySQLIndexedColumnsOpenThePopoverOnClick
+{
+	if (![self connected]) return;
+	[self showTable:@"vp_indexed" ofType:0 rows:1];
+	XCTAssertNil([self sheetText]);
+	for (NSString *name in @[@"name", @"code", @"note"]) {
+		XCTAssertTrue([self cell:name row:0].valueIconActive, @"%@: an indexed text column shows the icon", name);
+		NSUInteger before = self.presented.count;
+		[self clickValueIcon:name row:0];
+		XCTAssertTrue([self spinUntil:^BOOL{ return self.presented.count == before + 1; } timeout:5], @"%@: clicking the icon opens the popover", name);
+		NSString *sheet = [self sheetText];
+		XCTAssertNil(sheet, @"%@", name);
+		if (sheet) return;
+		[self.content closeValuePopover];
+	}
+}
+
 - (void)testMySQLLoadWhenNeededShowsIconAndLoadsOnClick
 {
 	if (![self connected]) return;
@@ -330,6 +408,22 @@ static NSString *SPRepeated(NSString *unit, NSUInteger length)
 	XCTAssertEqualObjects([popover.textView string], self.longText);
 	XCTAssertTrue([popover.textView isEditable]);
 	XCTAssertEqualObjects([popover.titleField stringValue], @"body — 209 characters");
+}
+
+/// A VARCHAR with a _bin collation (utf8mb4_bin) comes back as bytes; the grid shows it as text, and so does the popover
+- (void)testMySQLBinaryCollationTextOpensAndSaves
+{
+	if (![self connected]) return;
+	[self showTable:@"vp_bin" ofType:0 rows:2];
+	NSInteger row = [self rowWithId:@"1"];
+	XCTAssertTrue([[self stored:@"name_cn" row:row] isKindOfClass:[NSData class]], @"the case this covers: the value is bytes");
+	SPValuePopover *popover = [self open:@"name_cn" row:row];
+	XCTAssertEqualObjects([popover.textView string], @"黃銘");
+	XCTAssertTrue([popover.textView isEditable]);
+	[self replaceText:@"黃銘 Wong" in:popover];
+	XCTAssertTrue([self save:popover]);
+	XCTAssertEqualObjects([self value:@"SELECT name_cn FROM vp_bin WHERE id = 1"], [@"黃銘 Wong" dataUsingEncoding:NSUTF8StringEncoding]);
+	XCTAssertNil([[self.grid window] attachedSheet]);
 }
 
 - (void)testMySQLSaveWritesRow
@@ -553,6 +647,18 @@ static NSString *SPRepeated(NSString *unit, NSUInteger length)
 	XCTAssertTrue([self save:popover]);
 	XCTAssertEqualObjects([self value:@"SELECT body FROM vp_notes WHERE id = 1"], pretty);
 	XCTAssertNil([[[self queryGrid] window] attachedSheet]);
+}
+
+- (void)testMySQLQueryBinaryCollationTextOpensAndSaves
+{
+	if (![self connected]) return;
+	[self runQuery:@"SELECT id, name_cn FROM vp_bin WHERE id = 1" rows:1];
+	SPValuePopover *popover = [self openQueryRow:0 column:1];
+	XCTAssertEqualObjects([popover.textView string], @"黃銘");
+	XCTAssertTrue([popover.textView isEditable]);
+	[self replaceText:@"周慶璋" in:popover];
+	XCTAssertTrue([self save:popover]);
+	XCTAssertEqualObjects([self value:@"SELECT name_cn FROM vp_bin WHERE id = 1"], [@"周慶璋" dataUsingEncoding:NSUTF8StringEncoding]);
 }
 
 - (void)testMySQLQuerySaveFailureKeepsPopoverOpen
