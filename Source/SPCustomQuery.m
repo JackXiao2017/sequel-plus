@@ -2178,6 +2178,8 @@ typedef void (^QueryProgressHandler)(QueryProgress *);
 	if (row < 0 || (NSUInteger)row >= [resultData count] || column >= [cqColumnDefinition count]) return;
 	NSDictionary *columnDefinition = [cqColumnDefinition objectAtIndex:column];
 	id stored = [[[resultData cellDataAtRow:(NSUInteger)row column:column] copy] autorelease];
+	// A text column with a binary collation (utf8mb4_bin...) is flagged BINARY, so its values arrive as bytes: the text the grid shows
+	if ([stored isKindOfClass:[NSData class]]) stored = [[[NSString alloc] initWithData:stored encoding:[mySQLConnection stringEncoding]] autorelease];
 	if (!SPValuePopoverOffersValue(stored, [self _showsValueIconForColumn:columnDefinition])) return;
 	BOOL isNull = ![stored isKindOfClass:[NSString class]];
 	NSString *value = isNull ? @"" : stored;

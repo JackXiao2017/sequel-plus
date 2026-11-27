@@ -118,7 +118,7 @@ static NSUInteger SPVPCellDataCalls = 0;
 - (void)dropFixture:(id)connection
 {
 	[connection queryString:@"DROP VIEW IF EXISTS vp_view"];
-	for (NSString *table in @[@"vp_notes", @"vp_lazy", @"vp_keys", @"vp_indexed"]) {
+	for (NSString *table in @[@"vp_notes", @"vp_lazy", @"vp_keys", @"vp_indexed", @"vp_bin"]) {
 		[connection queryString:[NSString stringWithFormat:@"DROP TABLE IF EXISTS %@", table]];
 	}
 }
@@ -182,6 +182,9 @@ static NSString *SPRepeated(NSString *unit, NSUInteger length)
 	[self run:@"CREATE TABLE vp_indexed (id INT PRIMARY KEY, name VARCHAR(100), code VARCHAR(40), note TEXT, "
 			   "KEY vp_name_idx (name), UNIQUE KEY vp_code_uq (code), KEY vp_note_idx (note(20))) ENGINE=InnoDB"];
 	[self run:@"INSERT INTO vp_indexed VALUES (1, 'Ann', 'A-1', '{\"a\": 1}')"];
+	// A _bin collation: MySQL flags the column BINARY, so its values arrive as bytes, not strings
+	[self run:@"CREATE TABLE vp_bin (id BIGINT AUTO_INCREMENT PRIMARY KEY, name_cn VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL) ENGINE=InnoDB"];
+	[self run:@"INSERT INTO vp_bin VALUES (1, '黃銘'), (2, 'WONG MING')"];
 	[[mysql valueForKey:@"tablesListInstance"] updateTables:nil];
 	[[controller window] makeKeyAndOrderFront:nil];
 
@@ -407,6 +410,22 @@ static NSString *SPRepeated(NSString *unit, NSUInteger length)
 	XCTAssertEqualObjects([popover.titleField stringValue], @"body — 209 characters");
 }
 
+/// A VARCHAR with a _bin collation (utf8mb4_bin) comes back as bytes; the grid shows it as text, and so does the popover
+- (void)testMySQLBinaryCollationTextOpensAndSaves
+{
+	if (![self connected]) return;
+	[self showTable:@"vp_bin" ofType:0 rows:2];
+	NSInteger row = [self rowWithId:@"1"];
+	XCTAssertTrue([[self stored:@"name_cn" row:row] isKindOfClass:[NSData class]], @"the case this covers: the value is bytes");
+	SPValuePopover *popover = [self open:@"name_cn" row:row];
+	XCTAssertEqualObjects([popover.textView string], @"黃銘");
+	XCTAssertTrue([popover.textView isEditable]);
+	[self replaceText:@"黃銘 Wong" in:popover];
+	XCTAssertTrue([self save:popover]);
+	XCTAssertEqualObjects([self value:@"SELECT name_cn FROM vp_bin WHERE id = 1"], [@"黃銘 Wong" dataUsingEncoding:NSUTF8StringEncoding]);
+	XCTAssertNil([[self.grid window] attachedSheet]);
+}
+
 - (void)testMySQLSaveWritesRow
 {
 	if (![self connected]) return;
@@ -628,6 +647,18 @@ static NSString *SPRepeated(NSString *unit, NSUInteger length)
 	XCTAssertTrue([self save:popover]);
 	XCTAssertEqualObjects([self value:@"SELECT body FROM vp_notes WHERE id = 1"], pretty);
 	XCTAssertNil([[[self queryGrid] window] attachedSheet]);
+}
+
+- (void)testMySQLQueryBinaryCollationTextOpensAndSaves
+{
+	if (![self connected]) return;
+	[self runQuery:@"SELECT id, name_cn FROM vp_bin WHERE id = 1" rows:1];
+	SPValuePopover *popover = [self openQueryRow:0 column:1];
+	XCTAssertEqualObjects([popover.textView string], @"黃銘");
+	XCTAssertTrue([popover.textView isEditable]);
+	[self replaceText:@"周慶璋" in:popover];
+	XCTAssertTrue([self save:popover]);
+	XCTAssertEqualObjects([self value:@"SELECT name_cn FROM vp_bin WHERE id = 1"], [@"周慶璋" dataUsingEncoding:NSUTF8StringEncoding]);
 }
 
 - (void)testMySQLQuerySaveFailureKeepsPopoverOpen
